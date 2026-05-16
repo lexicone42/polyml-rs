@@ -1274,17 +1274,13 @@ impl Interpreter {
                 unsafe { p.add(0).write(PolyWord::tagged(0)) };
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
-            // Mutex stub: pessimistic baseline (passes 10M step cap).
-            // Optimistic mode passes the mutex spin loop and reaches
-            // PolyBasicIOGeneral + PolyThreadForkThread +
-            // PolyGetCommandlineArguments before SIGSEGVing — the
-            // crash is in code that processes the (empty) command-line
-            // arg list returned by our stub.
-            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX => {
-                let _ = self.pop()?;
-                self.push_continue(PolyWord::tagged(0))
-            }
-            EXTINSTR_ATOMIC_RESET => {
+            // Mutex stub: pessimistic baseline. Optimistic mode
+            // (return TAGGED 1) reaches I/O setup but SIGSEGVs in
+            // a downstream LOAD_ML_BYTE because some upstream
+            // computation produced wrong-shaped data — most likely
+            // from one of the remaining RTS stubs returning
+            // TAGGED(0) where structured data is expected.
+            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX | EXTINSTR_ATOMIC_RESET => {
                 let _ = self.pop()?;
                 self.push_continue(PolyWord::tagged(0))
             }

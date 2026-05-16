@@ -391,10 +391,51 @@ fn poly_thread_max_stack_size(_: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord
 }
 
 /// `PolyGetCommandlineArguments(threadId)` — returns a list of cmd-line
-/// args. Stub: empty list.
+/// arg strings. We return `["poly"]` so the bootstrap has something to
+/// chew on (an empty list trips the bootstrap's no-args codepath which
+/// then SIGSEGVs trying to read past nil).
+///
+/// PolyML list layout (basis/General.sml etc.):
+///   nil        = TAGGED(0)
+///   cons(h, t) = 2-word ordinary object [head, tail]
+/// PolyML string layout (`PolyStringObject` in polystring.h):
+///   1-word length prefix + N bytes + zero padding to word boundary,
+///   all wrapped in a byte object.
 #[allow(clippy::needless_pass_by_value)]
-fn poly_get_commandline_arguments(_: &mut RtsContext<'_>, _tid: PolyWord) -> PolyWord {
-    PolyWord::tagged(0) // nil
+fn poly_get_commandline_arguments(ctx: &mut RtsContext<'_>, _tid: PolyWord) -> PolyWord {
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    // Allocate the string "poly": 1 length-prefix word + 1 word for 4 bytes.
+    let name = b"poly";
+    let str_words = 1 + name.len().div_ceil(std::mem::size_of::<usize>());
+    let str_obj = space.alloc(str_words);
+    // SAFETY: just allocated `str_words` words
+    unsafe {
+        crate::space::set_length_word(str_obj, str_words, crate::length_word::F_BYTE_OBJ);
+        // Length-prefix word: number of chars.
+        str_obj.add(0).write(PolyWord::from_bits(name.len()));
+        // Chars
+        let chars_ptr = str_obj.add(1).cast::<u8>();
+        std::ptr::copy_nonoverlapping(name.as_ptr(), chars_ptr, name.len());
+        // Zero-pad remaining bytes in the final word
+        let pad = str_words * std::mem::size_of::<usize>() - std::mem::size_of::<usize>() - name.len();
+        if pad > 0 {
+            std::ptr::write_bytes(chars_ptr.add(name.len()), 0, pad);
+        }
+    }
+    let str_word = PolyWord::from_ptr(str_obj.cast_const());
+
+    // Allocate cons cell [str, nil]. F_MUTABLE_BIT NOT set — this is an
+    // immutable list element.
+    let cons = space.alloc(2);
+    // SAFETY: just allocated 2 words
+    unsafe {
+        crate::space::set_length_word(cons, 2, 0); // ordinary word object
+        cons.add(0).write(str_word);
+        cons.add(1).write(PolyWord::tagged(0)); // nil tail
+    }
+    PolyWord::from_ptr(cons.cast_const())
 }
 
 #[allow(clippy::needless_pass_by_value)]
