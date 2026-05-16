@@ -94,6 +94,7 @@ fn step_bootstrap_entry_as_far_as_possible() {
     // bounded. Keep a ring buffer of the most recent ~80 steps so we
     // can dump them on failure.
     let max_steps = 10_000_000;
+    eprintln!("Stepping up to {max_steps}…");
     let mut steps = 0;
     let mut recent: VecDeque<StepInfo> = VecDeque::with_capacity(RECENT_CAP);
     let mut hit_cap = false;
@@ -104,6 +105,10 @@ fn step_bootstrap_entry_as_far_as_possible() {
         }
         let pc_before = interp.pc_offset();
         steps += 1;
+        // Periodic heartbeat so SIGSEGV/panic gives us a step floor.
+        if steps % 10_000 == 0 {
+            eprintln!("  …step {steps}");
+        }
         let stack_depth_before = interp.stack_height();
         let frames_before = interp.frames_depth();
         let outcome = interp.step();

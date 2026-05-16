@@ -311,13 +311,16 @@ fn register_builtins(t: &mut RtsTable) {
 
     // Compiler / code-object helpers
     //   PolySetCodeConstant(closure, offset, cWord, flags) → 4 (no threadId)
-    t.register("PolySetCodeConstant", RtsFn::Arity4(zero4));
+    t.register("PolySetCodeConstant", RtsFn::Arity4(poly_set_code_constant));
     //   PolyGetCodeByte(code, offset) → 2 (no threadId; rtsCallFast2)
     t.register("PolyGetCodeByte", RtsFn::Arity2(zero2));
     //   PolyCopyByteVecToClosure(threadId, byteVec, closure) → 3
-    t.register("PolyCopyByteVecToClosure", RtsFn::Arity3(zero3));
+    t.register(
+        "PolyCopyByteVecToClosure",
+        RtsFn::Arity3(poly_copy_byte_vec_to_closure),
+    );
     //   PolyLockMutableClosure(threadId, closure) → 2
-    t.register("PolyLockMutableClosure", RtsFn::Arity2(zero2));
+    t.register("PolyLockMutableClosure", RtsFn::Arity2(poly_lock_mutable_closure));
 
     // Interpreted-mode FFI
     //   PolyInterpretedCreateCIF(threadId, abi, resType, argTypes) → 4
@@ -721,6 +724,186 @@ fn poly_xor_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, ar
     if both_tagged(arg1, arg2).is_some() {
         // XOR cancels the tag bits → set it back.
         return PolyWord::from_bits((arg1.0 ^ arg2.0) | 1);
+    }
+    PolyWord::tagged(0)
+}
+
+/// `PolyCopyByteVecToClosure(threadId, byteVec, closure)` — install
+/// compiled bytecode into a closure. Mirrors
+/// `poly_specific.cpp:181-229`.
+///
+/// 1. Read `byteVec`'s length word; it must be a byte object.
+/// 2. `closure` must be a 1-word mutable closure.
+/// 3. Allocate a fresh object of the same word length in alloc space.
+/// 4. Copy the byte vector's body verbatim into the new object.
+/// 5. Set the new object's length word with `F_CODE_OBJ`.
+/// 6. Write the new code-object pointer into `closure[0]`.
+/// 7. Clear the closure's mutable bit (lock it).
+///
+/// Returns TAGGED(0). We don't have a JIT path, so the upstream's
+/// mmap-and-protect dance is unnecessary — the alloc space we use
+/// for the code is just a regular mutable region.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_copy_byte_vec_to_closure(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    byte_vec: PolyWord,
+    closure: PolyWord,
+) -> PolyWord {
+    use crate::length_word::{
+        F_CODE_OBJ, F_MUTABLE_BIT, flags_of, is_byte_object, length_of,
+    };
+    if !byte_vec.is_data_ptr() || !closure.is_data_ptr() {
+        if RTS_TRACE.load(Ordering::Relaxed) {
+            eprintln!(
+                "  PolyCopyByteVecToClosure: non-pointer arg(s)? byte_vec={byte_vec:?}, closure={closure:?}"
+            );
+        }
+        return PolyWord::tagged(0);
+    }
+    let bv_ptr = byte_vec.as_ptr::<PolyWord>();
+    let cl_ptr = closure.as_ptr::<PolyWord>().cast_mut();
+    // SAFETY: caller (compiler) is trusted on the object layouts.
+    unsafe {
+        let bv_len_word = crate::space::MemorySpace::length_word_of(bv_ptr);
+        if !is_byte_object(bv_len_word) {
+            if RTS_TRACE.load(Ordering::Relaxed) {
+                eprintln!(
+                    "  PolyCopyByteVecToClosure: byte_vec is not a byte object \
+                     (flags=0x{:02x}, length={})",
+                    flags_of(bv_len_word),
+                    length_of(bv_len_word)
+                );
+            }
+            return PolyWord::tagged(0);
+        }
+        let n_words = length_of(bv_len_word);
+
+        let cl_len_word = crate::space::MemorySpace::length_word_of(cl_ptr);
+        if length_of(cl_len_word) != 1 || (flags_of(cl_len_word) & F_MUTABLE_BIT) == 0 {
+            if RTS_TRACE.load(Ordering::Relaxed) {
+                eprintln!(
+                    "  PolyCopyByteVecToClosure: closure shape mismatch \
+                     (length={}, flags=0x{:02x})",
+                    length_of(cl_len_word),
+                    flags_of(cl_len_word)
+                );
+            }
+            return PolyWord::tagged(0);
+        }
+
+        let Some(space) = ctx.alloc_space.as_mut() else {
+            return PolyWord::tagged(0);
+        };
+        let dst = space.alloc(n_words);
+        // Copy the body words wholesale.
+        std::ptr::copy_nonoverlapping(bv_ptr, dst, n_words);
+        // New object is mutable code — SetCodeConstant will patch
+        // constants into it before LockMutableClosure clears the
+        // mutable bit. This matches upstream's `AllocCodeSpace`
+        // returning a mutable code object.
+        crate::space::set_length_word(dst, n_words, F_CODE_OBJ | F_MUTABLE_BIT);
+
+        // Patch the closure's slot 0 with the new code-object ptr.
+        cl_ptr.write(PolyWord::from_ptr(dst.cast_const()));
+
+        // Lock the *closure* now (clear its mutable bit) — the closure
+        // itself never needs further mutation; only the code object
+        // does until LockMutableClosure finalizes it.
+        let new_flags = flags_of(cl_len_word) & !F_MUTABLE_BIT;
+        crate::space::set_length_word(cl_ptr, length_of(cl_len_word), new_flags);
+    }
+    PolyWord::tagged(0)
+}
+
+/// `PolySetCodeConstant(closure, offset, cWord, flags)` — patch a
+/// constant into the code object referenced by `closure`. We only
+/// implement case 0 (absolute PolyWord-size constant — what the
+/// interpreted bytecode uses); the relative / ARM64 cases are JIT
+/// concerns we don't need.
+///
+/// Mirrors `poly_specific.cpp:272-309`.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_set_code_constant(
+    _ctx: &mut RtsContext<'_>,
+    closure: PolyWord,
+    offset: PolyWord,
+    c_word: PolyWord,
+    flags: PolyWord,
+) -> PolyWord {
+    use crate::length_word::is_code_object;
+    if !closure.is_data_ptr() {
+        return PolyWord::tagged(0);
+    }
+    // Closure may be either a code object directly or a closure whose
+    // slot 0 points at one.
+    let cl_ptr = closure.as_ptr::<PolyWord>();
+    // SAFETY: caller trusted.
+    let start_code: *mut u8 = unsafe {
+        let lw = crate::space::MemorySpace::length_word_of(cl_ptr);
+        if is_code_object(lw) {
+            cl_ptr as *mut u8
+        } else {
+            // closure[0] is the code-object pointer
+            (*cl_ptr).as_ptr::<u8>().cast_mut()
+        }
+    };
+    #[allow(clippy::cast_sign_loss)]
+    let off = offset.untag() as usize;
+    let flag_kind = flags.untag();
+    // SAFETY: code-segment write into freshly-allocated mutable space.
+    unsafe {
+        let instr_addr = start_code.add(off);
+        match flag_kind {
+            0 | 2 => {
+                // Absolute PolyWord-sized constant (case 0) or
+                // uintptr_t-sized (case 2 — same on 64-bit).
+                let bytes = c_word.0.to_le_bytes();
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    instr_addr,
+                    std::mem::size_of::<usize>(),
+                );
+            }
+            _ => {
+                // Cases 1/3/4/etc. are native-code relocations we
+                // don't need in the interpreter. Trace and skip.
+                if RTS_TRACE.load(Ordering::Relaxed) {
+                    eprintln!(
+                        "  PolySetCodeConstant: unsupported flag {flag_kind} (skipped)"
+                    );
+                }
+            }
+        }
+    }
+    PolyWord::tagged(0)
+}
+
+/// `PolyLockMutableClosure(threadId, closure)` — clear the mutable
+/// bit on the code object referenced by `closure[0]`.
+///
+/// Mirrors `poly_specific.cpp:234-263`.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_lock_mutable_closure(
+    _ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    closure: PolyWord,
+) -> PolyWord {
+    use crate::length_word::{F_CODE_OBJ, length_of};
+    if !closure.is_data_ptr() {
+        return PolyWord::tagged(0);
+    }
+    let cl_ptr = closure.as_ptr::<PolyWord>();
+    // SAFETY: caller trusted.
+    unsafe {
+        let code_word = *cl_ptr;
+        if !code_word.is_data_ptr() {
+            return PolyWord::tagged(0);
+        }
+        let code_obj = code_word.as_ptr::<PolyWord>().cast_mut();
+        let lw = crate::space::MemorySpace::length_word_of(code_obj);
+        let n = length_of(lw);
+        crate::space::set_length_word(code_obj, n, F_CODE_OBJ);
     }
     PolyWord::tagged(0)
 }
