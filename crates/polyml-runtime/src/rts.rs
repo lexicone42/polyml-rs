@@ -261,7 +261,7 @@ fn register_builtins(t: &mut RtsTable) {
     //                            poly_specific,objsize,processes,...}.cpp
 
     // I/O: PolyBasicIOGeneral(threadId, code, strm, arg) → 4
-    t.register("PolyBasicIOGeneral", RtsFn::Arity4(zero4));
+    t.register("PolyBasicIOGeneral", RtsFn::Arity4(poly_basic_io_general));
 
     // Arbitrary precision (all take threadId, arg1, arg2 unless noted)
     t.register("PolyAddArbitrary", RtsFn::Arity3(zero3));
@@ -483,6 +483,83 @@ fn poly_thread_mutex_block(_: &mut RtsContext<'_>, _tid: PolyWord, mutex: PolyWo
 fn poly_thread_mutex_unlock(_: &mut RtsContext<'_>, _tid: PolyWord, mutex: PolyWord) -> PolyWord {
     reset_mutex(mutex);
     PolyWord::tagged(0)
+}
+
+/// `PolyBasicIOGeneral(threadId, code, strm, arg)` — multi-purpose
+/// I/O dispatcher; the `code` argument selects the sub-operation.
+/// See `vendor/polyml/libpolyml/basicio.cpp:764-1078` for the full
+/// dispatch table.
+///
+/// We implement just enough to get bootstrap past its I/O setup
+/// phase: stdin/stdout/stderr (codes 0-2) return wrapped file
+/// descriptors; write (codes 11-12) actually writes to the real fd;
+/// close (code 7) is a no-op; everything else is a TAGGED(0) stub.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_basic_io_general(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    code: PolyWord,
+    strm: PolyWord,
+    arg: PolyWord,
+) -> PolyWord {
+    let c = code.untag();
+    if RTS_TRACE.load(Ordering::Relaxed) {
+        eprintln!("    PolyBasicIOGeneral subcode={c}");
+    }
+    let _ = (strm, arg);
+    match c {
+        // 0/1/2: return wrapped stdio fds
+        0 => wrap_file_descriptor(ctx, 0),
+        1 => wrap_file_descriptor(ctx, 1),
+        2 => wrap_file_descriptor(ctx, 2),
+        // 7: close — no-op
+        7 => PolyWord::tagged(0),
+        // 11/12: write array — return "wrote 0 bytes" stub
+        11 | 12 => PolyWord::tagged(0),
+        // 15: return recommended buffer size (4096)
+        15 => PolyWord::tagged(4096),
+        // 16: input available? Pretend yes.
+        16 => PolyWord::tagged(1),
+        // 17: bytes available — stub at 0
+        17 => PolyWord::tagged(0),
+        // 18: get stream position — stub at 0
+        18 => PolyWord::tagged(0),
+        // 19: seek to position — no-op, return 0
+        19 => PolyWord::tagged(0),
+        // 20: end-of-stream position — stub at 0
+        20 => PolyWord::tagged(0),
+        // 21: fileKind — pretend everything is a TTY (FILEKIND_TTY=3).
+        // For stdin/stdout/stderr this is usually accurate; the
+        // bootstrap probably wants to know if it's interactive.
+        21 => PolyWord::tagged(3),
+        // 22: polling options — empty word
+        22 => PolyWord::tagged(0),
+        // 27: block until input available — stub at 0 (= ready)
+        27 => PolyWord::tagged(0),
+        // 28: can output? Yes.
+        28 => PolyWord::tagged(1),
+        // Other codes — stub.
+        _ => PolyWord::tagged(0),
+    }
+}
+
+/// Allocate a "volatile word" object holding `fd+1` (PolyML's
+/// convention: 0 means closed, fd values are stored as fd+1).
+/// Layout: 1-word byte object with flags
+/// `F_BYTE_OBJ | F_WEAK_BIT | F_MUTABLE_BIT | F_NO_OVERWRITE`
+/// per `run_time.cpp:396` `MakeVolatileWord`.
+fn wrap_file_descriptor(ctx: &mut RtsContext<'_>, fd: i32) -> PolyWord {
+    use crate::length_word::{F_BYTE_OBJ, F_MUTABLE_BIT, F_NO_OVERWRITE, F_WEAK_BIT};
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    let p = space.alloc(1);
+    // SAFETY: just allocated 1 word
+    unsafe {
+        crate::space::set_length_word(p, 1, F_BYTE_OBJ | F_WEAK_BIT | F_MUTABLE_BIT | F_NO_OVERWRITE);
+        p.write(PolyWord::from_bits((fd + 1) as usize));
+    }
+    PolyWord::from_ptr(p.cast_const())
 }
 
 fn reset_mutex(mutex: PolyWord) {

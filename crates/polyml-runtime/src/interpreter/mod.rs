@@ -1725,9 +1725,18 @@ impl Interpreter {
             (e.name, e.func)
         };
         // Pop args (we already popped the stub).
+        //
+        // SML's rtsCallFullN emits `mkCall(f, [threadId, arg1..argN],
+        // ...)` (see INITIALISE_.ML:419). The call convention pushes
+        // args left-to-right, so threadId ends up DEEPEST and the last
+        // SML arg ends up TOP. CALL_FAST_RTS<N> pops top-first.
+        //
+        // To match the C signature `Func(threadId, code, strm, arg)`
+        // which expects threadId as args[0], we pop in REVERSE order
+        // into the args array — first pop goes to args[N-1].
         let mut args: [PolyWord; 5] = [PolyWord::ZERO; 5];
-        for slot in args.iter_mut().take(n_args) {
-            *slot = self.pop()?;
+        for i in (0..n_args).rev() {
+            args[i] = self.pop()?;
         }
         // Dispatch by arity, checking it matches the opcode's expectation.
         let fn_arity = entry_func.arity();

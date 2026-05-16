@@ -43,12 +43,11 @@ fn workspace_root() -> PathBuf {
     }
 }
 
-// Diagnostic test — segfaults from real unsafe pointer use inside
-// the bytecode interpreter are normal here and not test failures.
-// Run explicitly with `cargo test --test exec_bootstrap -- --ignored
-// --nocapture` to see how far bootstrap gets.
+// Diagnostic test. As of mutex+wordop+rts-arg-order+basicio fixes,
+// the bootstrap runs cleanly to its step cap (no crash). The cap is
+// set low enough that the test finishes in a few seconds; bump
+// max_steps when investigating deeper.
 #[allow(clippy::too_many_lines)]
-#[ignore = "diagnostic; SIGSEGV during bootstrap exec is expected"]
 #[test]
 fn step_bootstrap_entry_as_far_as_possible() {
     let path = workspace_root().join("vendor/polyml/bootstrap/bootstrap64.txt");
@@ -94,7 +93,7 @@ fn step_bootstrap_entry_as_far_as_possible() {
     // Step until something happens. Cap iterations to keep the test
     // bounded. Keep a ring buffer of the most recent ~80 steps so we
     // can dump them on failure.
-    let max_steps = 100_000;
+    let max_steps = 1_000_000;
     let mut steps = 0;
     let mut recent: VecDeque<StepInfo> = VecDeque::with_capacity(RECENT_CAP);
     let mut hit_cap = false;
