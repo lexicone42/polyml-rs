@@ -339,25 +339,49 @@ done. 2.8 is continuous from 2.3 onwards.
 
 In order. Each is a small enough chunk to be a single PR / merge unit.
 
-1. **Repo scaffolding**: cargo workspace with `polyml-runtime`,
-   `polyml-codegen-cl` (Cranelift backend), `polyml-image` (image
-   format), `polyml-interpreter` (bytecode interpreter), `polyml-bin`
-   (final binary), `polyml-bootstrap` (LGPL sidecar, bootstrap image).
-   `rust-toolchain.toml` pins stable 1.95. `Cargo.toml` pins Cranelift
-   0.131.
-2. **Vendor PolyML for the Monday demo only**: an `xtask` invokes
-   upstream `poly` to compile a fixture SML program to a pexport image
-   into `target/fixtures/hello.pexport`. **This is a temporary crutch**;
-   it goes away after Phase 2.1.
-3. **pexport reader**: parse the existing text format, build an
-   in-memory object graph. Check round-trip via a re-serializer.
-4. **Stub TaskData + MemMgr**: minimum to allocate a permanent space
-   and place the loaded objects in it.
-5. **Hello-world execution** (Monday milestone target): trampoline
-   into the root function; the single RTS callback (`writeString`) is
-   a hardcoded Rust function.
+1. **[DONE]** Repo scaffolding: cargo workspace with `polyml-runtime`,
+   `polyml-image`, `polyml-bin`. `rust-toolchain.toml` pins stable
+   1.95. `Cargo.toml` configures dual MIT/Apache-2.0 plus
+   workspace-wide clippy::pedantic+nursery.
+   *Deferred crates*: `polyml-interpreter`, `polyml-codegen-cl`,
+   `polyml-bootstrap` — created when their phases land.
+2. **[SKIPPED]** ~~Vendor PolyML for build-time use~~ — `vendor/polyml`'s
+   `bootstrap/bootstrap64.txt` is itself a complete pexport image and
+   serves as the real fixture. No upstream-poly invocation needed for
+   loader bring-up.
+3. **[DONE]** pexport reader (`polyml-image::pexport`): parses all
+   eight object variants and four modifier flags into a high-level
+   `Image` type. Single-pass over a fully-buffered file. 12 unit
+   tests + 2 integration tests against bootstrap32/bootstrap64.
+4. **[DONE]** PolyWord + length-word primitives, MemorySpace, and
+   loader (`polyml-runtime`). Loads the full 22588-object bootstrap
+   heap into three spaces (immutable / mutable / code) with correct
+   length words, packed bytes, and resolved pointer references. BFS
+   from root reaches every object — including code-object constants
+   via the trailing-offset decoder (mirrors `machine_dep.h:
+   GetConstSegmentForCode`).
+5. **[DONE-PARTIAL]** `poly` CLI in `polyml-bin` with `inspect` and
+   `load` subcommands. Demo runs against the vendored bootstrap.
+   *Not done*: actual execution. For that we need either the
+   bytecode interpreter (Phase 2.1) or a native pexport image (which
+   would require the upstream-poly xtask we deliberately skipped).
 
-That's the Monday milestone. Phase 2.1 (interpreter port) starts
-immediately after — and once Phase 2.1 is done, action item 2 (the
-upstream-poly xtask) is *deleted*, replaced by a Rust-only fixture
-build that runs the SML compiler in our interpreter.
+That's the Monday milestone, modulo execution. Phase 2.1 (interpreter
+port) is the natural next chunk.
+
+### Phase 2.1 prep notes (from briefly reading interpreter.cpp)
+
+- `vendor/polyml/libpolyml/interpreter.cpp` is the thin
+  `TaskData`/`ByteCodeInterpreter` wrapper.
+- `vendor/polyml/libpolyml/bytecode.cpp` is the real interpreter:
+  one giant switch over `pc[0]`. ~2770 lines.
+- `vendor/polyml/libpolyml/int_opcodes.h` lists ~130 base opcodes
+  plus ~100 extended (via `INSTR_escape = 0xfe`).
+- 16-bit args are little-endian via `arg1 = pc[0] + pc[1]*256`.
+- Stack grows down; `stackPointerAddress` and `stackLimitAddress` are
+  pointers into the `TaskData` so the interpreter can update them.
+- Most opcodes have small immediate args (1-byte locals / consts),
+  with `_b` / `_w` variants distinguishing 8-bit / 16-bit immediates.
+- The opcode table is sparse and non-contiguous; either a dispatch
+  table indexed by opcode byte (with `unsafe` array indexing) or a
+  rust `match` (which LLVM compiles to a similar jump table) work.
