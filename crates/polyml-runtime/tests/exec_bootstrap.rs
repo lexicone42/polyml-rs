@@ -37,7 +37,7 @@ fn step_bootstrap_entry_as_far_as_possible() {
     let mut loaded = load_image(&image).expect("load_image");
 
     // Register RTS functions and patch entry points.
-    // Toggle RTS tracing here when debugging which functions get called.
+    // Toggle to true to debug which RTS functions get called.
     // polyml_runtime::rts::set_rts_trace(true);
     let rts = Arc::new(RtsTable::new());
     let (patched, missing) = patch_entry_points(&mut loaded, &rts);
