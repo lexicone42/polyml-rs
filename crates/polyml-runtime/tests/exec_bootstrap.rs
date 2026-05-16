@@ -93,7 +93,7 @@ fn step_bootstrap_entry_as_far_as_possible() {
     // Step until something happens. Cap iterations to keep the test
     // bounded. Keep a ring buffer of the most recent ~80 steps so we
     // can dump them on failure.
-    let max_steps = 1_000_000;
+    let max_steps = 10_000_000;
     let mut steps = 0;
     let mut recent: VecDeque<StepInfo> = VecDeque::with_capacity(RECENT_CAP);
     let mut hit_cap = false;

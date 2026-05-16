@@ -82,7 +82,10 @@
 #![allow(clippy::similar_names)]
 #![allow(clippy::wildcard_imports)]
 
+pub mod diag;
 pub mod opcodes;
+
+use diag::DiagState;
 
 use std::sync::Arc;
 
@@ -180,6 +183,10 @@ pub struct Interpreter {
     /// For test-built interpreters: owns the code bytes so the PC
     /// pointer stays valid.
     _owned_code: Option<Vec<u8>>,
+    /// Optional execution-profile collector. `None` = disabled (the
+    /// hot path pays only a branch). Enable with
+    /// [`enable_diagnostics`](Self::enable_diagnostics).
+    diag: Option<DiagState>,
 }
 
 impl Interpreter {
@@ -207,6 +214,7 @@ impl Interpreter {
             exception_packet: None,
             rts: Arc::new(RtsTable::empty()),
             _owned_code: Some(code),
+            diag: None,
         }
     }
 
@@ -243,7 +251,26 @@ impl Interpreter {
             exception_packet: None,
             rts: Arc::new(RtsTable::empty()),
             _owned_code: None,
+            diag: None,
         }
+    }
+
+    /// Enable per-step execution-profile collection. After this call,
+    /// every `step()` records a visit to the current `(code_start,
+    /// pc_offset)` and every `do_call()` records the target. Use
+    /// [`take_diagnostics`](Self::take_diagnostics) to extract.
+    ///
+    /// Builder pattern; returns the interpreter for chaining.
+    #[must_use]
+    pub fn enable_diagnostics(mut self) -> Self {
+        self.diag = Some(DiagState::default());
+        self
+    }
+
+    /// Extract collected diagnostics, leaving the interpreter without
+    /// a collector. Returns `None` if diagnostics were never enabled.
+    pub fn take_diagnostics(&mut self) -> Option<DiagState> {
+        self.diag.take()
     }
 
     /// Attach an RTS table. Builder pattern.
@@ -276,6 +303,22 @@ impl Interpreter {
     #[must_use]
     pub fn stack_height(&self) -> usize {
         self.stack.len() - self.sp
+    }
+
+    /// Snapshot the top `n` stack words (or fewer if the stack is
+    /// shallower). Index 0 = current top. For debugging only.
+    #[must_use]
+    pub fn dump_stack_top(&self, n: usize) -> Vec<PolyWord> {
+        let take = n.min(self.stack.len() - self.sp);
+        (0..take).map(|i| self.stack[self.sp + i]).collect()
+    }
+
+    /// Current code-object base address (as `usize`). Useful in
+    /// combination with [`pc_offset`](Self::pc_offset) for matching
+    /// diagnostic hot-PC entries.
+    #[must_use]
+    pub fn code_start_addr(&self) -> usize {
+        self.code_start as usize
     }
 
     /// Number of saved frames on the call side-stack. Useful for
@@ -419,6 +462,13 @@ impl Interpreter {
         use opcodes::*;
 
         let opcode_pc = self.pc;
+        #[allow(clippy::cast_possible_truncation)]
+        let off = self.pc_offset() as u32;
+        let code = self.code_start as usize;
+        if let Some(d) = self.diag.as_mut() {
+            d.total_steps += 1;
+            *d.pc_visits.entry((code, off)).or_insert(0) += 1;
+        }
         let op = self.fetch_u8()?;
         if crate::rts::is_traced() {
             eprintln!(
@@ -1246,11 +1296,25 @@ impl Interpreter {
                 })
             }
 
-            // ----- Stack manipulation (slide-and-keep-top)
-            INSTR_RESET_1 | INSTR_RESET_R_1 => self.reset(1),
-            INSTR_RESET_2 | INSTR_RESET_R_2 => self.reset(2),
+            // ----- Stack manipulation
+            //
+            // RESET_N: drop top N items, NO preservation
+            //          (`bytecode.cpp:669: sp += *pc`).
+            // RESET_R_N: pop top into u, drop N items, push u back
+            //            (`bytecode.cpp:665: pop+sp+=*pc+restore`).
+            // These are NOT the same — early versions of this
+            // interpreter merged them, which silently corrupted any
+            // loop using RESET to clean up a discarded result.
+            INSTR_RESET_1 => self.drop_n(1),
+            INSTR_RESET_2 => self.drop_n(2),
+            INSTR_RESET_B => {
+                let n = self.fetch_u8()? as usize;
+                self.drop_n(n)
+            }
+            INSTR_RESET_R_1 => self.reset(1),
+            INSTR_RESET_R_2 => self.reset(2),
             INSTR_RESET_R_3 => self.reset(3),
-            INSTR_RESET_B | INSTR_RESET_R_B => {
+            INSTR_RESET_R_B => {
                 let n = self.fetch_u8()? as usize;
                 self.reset(n)
             }
@@ -1485,6 +1549,15 @@ impl Interpreter {
             self.pop()?;
         }
         self.push_continue(top)
+    }
+
+    /// Drop the top `n` items without preserving anything. The
+    /// non-preserving variant of [`reset`](Self::reset).
+    fn drop_n(&mut self, n: usize) -> Result<StepResult, InterpError> {
+        for _ in 0..n {
+            self.pop()?;
+        }
+        Ok(StepResult::Continue)
     }
 
     fn indirect(&mut self, n: usize) -> Result<StepResult, InterpError> {
@@ -1899,6 +1972,9 @@ impl Interpreter {
         self.code_start = new_code_obj.cast::<u8>();
         self.code_end = consts_start.cast::<u8>();
         self.pc = self.code_start;
+        if let Some(d) = self.diag.as_mut() {
+            *d.call_targets.entry(new_code_obj as usize).or_insert(0) += 1;
+        }
         Ok(())
     }
 
