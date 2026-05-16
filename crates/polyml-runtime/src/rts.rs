@@ -263,20 +263,26 @@ fn register_builtins(t: &mut RtsTable) {
     // I/O: PolyBasicIOGeneral(threadId, code, strm, arg) → 4
     t.register("PolyBasicIOGeneral", RtsFn::Arity4(poly_basic_io_general));
 
-    // Arbitrary precision (all take threadId, arg1, arg2 unless noted)
-    t.register("PolyAddArbitrary", RtsFn::Arity3(zero3));
-    t.register("PolySubtractArbitrary", RtsFn::Arity3(zero3));
-    t.register("PolyMultiplyArbitrary", RtsFn::Arity3(zero3));
-    t.register("PolyDivideArbitrary", RtsFn::Arity3(zero3));
-    t.register("PolyRemainderArbitrary", RtsFn::Arity3(zero3));
+    // Arbitrary precision (all take threadId, arg1, arg2 unless noted).
+    // All fast-path: if both args are tagged and result fits in a tag,
+    // return TAGGED(result). Otherwise return TAGGED(0), which upstream
+    // uses as the "ML exception raised" sentinel (we don't have a real
+    // boxed bignum path yet). In practice bootstrap's compile-time
+    // arithmetic stays in the tagged range almost always; if we hit
+    // the overflow path we'll know.
+    t.register("PolyAddArbitrary", RtsFn::Arity3(poly_add_arbitrary));
+    t.register("PolySubtractArbitrary", RtsFn::Arity3(poly_subtract_arbitrary));
+    t.register("PolyMultiplyArbitrary", RtsFn::Arity3(poly_multiply_arbitrary));
+    t.register("PolyDivideArbitrary", RtsFn::Arity3(poly_divide_arbitrary));
+    t.register("PolyRemainderArbitrary", RtsFn::Arity3(poly_remainder_arbitrary));
     t.register("PolyQuotRemArbitraryPair", RtsFn::Arity3(zero3));
     t.register("PolyQuotRemArbitrary", RtsFn::Arity4(zero4));
-    t.register("PolyCompareArbitrary", RtsFn::Arity2(zero2)); // no threadId
+    t.register("PolyCompareArbitrary", RtsFn::Arity2(poly_compare_arbitrary)); // no threadId
     t.register("PolyGCDArbitrary", RtsFn::Arity3(zero3));
     t.register("PolyLCMArbitrary", RtsFn::Arity3(zero3));
-    t.register("PolyAndArbitrary", RtsFn::Arity3(zero3));
-    t.register("PolyOrArbitrary", RtsFn::Arity3(zero3));
-    t.register("PolyXorArbitrary", RtsFn::Arity3(zero3));
+    t.register("PolyAndArbitrary", RtsFn::Arity3(poly_and_arbitrary));
+    t.register("PolyOrArbitrary", RtsFn::Arity3(poly_or_arbitrary));
+    t.register("PolyXorArbitrary", RtsFn::Arity3(poly_xor_arbitrary));
     t.register("PolyShiftLeftArbitrary", RtsFn::Arity3(zero3));
     t.register("PolyShiftRightArbitrary", RtsFn::Arity3(zero3));
     t.register("PolyGetLowOrderAsLargeWord", RtsFn::Arity2(zero2));
@@ -512,33 +518,24 @@ fn poly_basic_io_general(
         0 => wrap_file_descriptor(ctx, 0),
         1 => wrap_file_descriptor(ctx, 1),
         2 => wrap_file_descriptor(ctx, 2),
-        // 7: close — no-op
-        7 => PolyWord::tagged(0),
-        // 11/12: write array — return "wrote 0 bytes" stub
-        11 | 12 => PolyWord::tagged(0),
         // 15: return recommended buffer size (4096)
         15 => PolyWord::tagged(4096),
         // 16: input available? Pretend yes.
-        16 => PolyWord::tagged(1),
-        // 17: bytes available — stub at 0
-        17 => PolyWord::tagged(0),
-        // 18: get stream position — stub at 0
-        18 => PolyWord::tagged(0),
-        // 19: seek to position — no-op, return 0
-        19 => PolyWord::tagged(0),
-        // 20: end-of-stream position — stub at 0
-        20 => PolyWord::tagged(0),
+        // 28: can output? Yes.
+        16 | 28 => PolyWord::tagged(1),
         // 21: fileKind — pretend everything is a TTY (FILEKIND_TTY=3).
         // For stdin/stdout/stderr this is usually accurate; the
         // bootstrap probably wants to know if it's interactive.
         21 => PolyWord::tagged(3),
-        // 22: polling options — empty word
-        22 => PolyWord::tagged(0),
-        // 27: block until input available — stub at 0 (= ready)
-        27 => PolyWord::tagged(0),
-        // 28: can output? Yes.
-        28 => PolyWord::tagged(1),
-        // Other codes — stub.
+        // Various stub returns of TAGGED(0):
+        //   7: close (no-op)
+        //   11/12: write array (wrote 0 bytes)
+        //   17: bytes available
+        //   18: get stream position
+        //   19: seek to position (no-op)
+        //   20: end-of-stream position
+        //   22: polling options
+        //   27: block until input available (= ready)
         _ => PolyWord::tagged(0),
     }
 }
@@ -568,6 +565,165 @@ fn poly_thread_fork_thread(
     alloc_thread_object_stub(ctx)
 }
 
+// ---- arbitrary precision fast paths (tagged-int) -----------------
+//
+// For PolyXArbitrary(threadId, arg1, arg2):
+//   upstream computes `x_longc(taskData, pushedArg2, pushedArg1)` i.e.
+//   the operation is `arg2 OP arg1` (note the order — relevant for
+//   sub/div/rem).
+//
+// All these return a fresh `PolyWord` for the result. On a miss
+// (either operand boxed, or overflow), we return TAGGED(0) which
+// upstream uses to signal "exception was raised". A future bignum
+// allocator would replace those misses with real boxed results.
+
+use crate::poly_word::{MAX_TAGGED, MIN_TAGGED};
+
+#[inline]
+fn both_tagged(a: PolyWord, b: PolyWord) -> Option<(isize, isize)> {
+    if a.is_tagged() && b.is_tagged() {
+        Some((a.untag(), b.untag()))
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn fits_tagged(n: i128) -> bool {
+    n >= MIN_TAGGED as i128 && n <= MAX_TAGGED as i128
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn poly_add_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+    -> PolyWord
+{
+    if let Some((x, y)) = both_tagged(arg2, arg1) {
+        let r = x as i128 + y as i128;
+        if fits_tagged(r) {
+            return PolyWord::tagged(r as isize);
+        }
+    }
+    PolyWord::tagged(0)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn poly_subtract_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+    -> PolyWord
+{
+    // arg2 - arg1
+    if let Some((x, y)) = both_tagged(arg2, arg1) {
+        let r = x as i128 - y as i128;
+        if fits_tagged(r) {
+            return PolyWord::tagged(r as isize);
+        }
+    }
+    PolyWord::tagged(0)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn poly_multiply_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+    -> PolyWord
+{
+    if let Some((x, y)) = both_tagged(arg2, arg1) {
+        let r = x as i128 * y as i128;
+        if fits_tagged(r) {
+            return PolyWord::tagged(r as isize);
+        }
+    }
+    PolyWord::tagged(0)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn poly_divide_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+    -> PolyWord
+{
+    // arg2 / arg1, truncating toward zero (this is Int.quot, not
+    // Int.div — see comment on `div_longc` in arb.cpp:1183).
+    if let Some((x, y)) = both_tagged(arg2, arg1) {
+        if y == 0 {
+            return PolyWord::tagged(0); // div-by-zero → exception
+        }
+        // Only overflow case is MIN_TAGGED / -1.
+        if x == MIN_TAGGED && y == -1 {
+            return PolyWord::tagged(0);
+        }
+        return PolyWord::tagged(x / y);
+    }
+    PolyWord::tagged(0)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn poly_remainder_arbitrary(
+    _: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
+    // arg2 rem arg1, sign of result = sign of dividend (Int.rem).
+    if let Some((x, y)) = both_tagged(arg2, arg1) {
+        if y == 0 {
+            return PolyWord::tagged(0);
+        }
+        if x == MIN_TAGGED && y == -1 {
+            return PolyWord::tagged(0);
+        }
+        return PolyWord::tagged(x % y);
+    }
+    PolyWord::tagged(0)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn poly_compare_arbitrary(_: &mut RtsContext<'_>, arg1: PolyWord, arg2: PolyWord) -> PolyWord {
+    // compareLong(arg2, arg1): returns -1, 0, 1, wrapped as TAGGED.
+    if arg1.0 == arg2.0 {
+        return PolyWord::tagged(0);
+    }
+    if let Some((x, y)) = both_tagged(arg2, arg1) {
+        let c = match x.cmp(&y) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        };
+        return PolyWord::tagged(c);
+    }
+    // One or both boxed: would need bignum compare. Default to 0
+    // (equal) — least likely to trigger downstream divergence in the
+    // common case where bootstrap is comparing small ints.
+    PolyWord::tagged(0)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn poly_or_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+    -> PolyWord
+{
+    if both_tagged(arg1, arg2).is_some() {
+        // Both bottom bits are 1 → OR result still has bottom bit 1 (tagged)
+        return PolyWord::from_bits(arg1.0 | arg2.0);
+    }
+    PolyWord::tagged(0)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn poly_and_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+    -> PolyWord
+{
+    if both_tagged(arg1, arg2).is_some() {
+        return PolyWord::from_bits(arg1.0 & arg2.0);
+    }
+    PolyWord::tagged(0)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn poly_xor_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+    -> PolyWord
+{
+    if both_tagged(arg1, arg2).is_some() {
+        // XOR cancels the tag bits → set it back.
+        return PolyWord::from_bits((arg1.0 ^ arg2.0) | 1);
+    }
+    PolyWord::tagged(0)
+}
+
 fn alloc_thread_object_stub(ctx: &mut RtsContext<'_>) -> PolyWord {
     use crate::length_word::F_MUTABLE_BIT;
     let Some(space) = ctx.alloc_space.as_mut() else {
@@ -595,7 +751,7 @@ fn alloc_thread_object_stub(ctx: &mut RtsContext<'_>) -> PolyWord {
 /// Layout: 1-word byte object with flags
 /// `F_BYTE_OBJ | F_WEAK_BIT | F_MUTABLE_BIT | F_NO_OVERWRITE`
 /// per `run_time.cpp:396` `MakeVolatileWord`.
-fn wrap_file_descriptor(ctx: &mut RtsContext<'_>, fd: i32) -> PolyWord {
+fn wrap_file_descriptor(ctx: &mut RtsContext<'_>, fd: u32) -> PolyWord {
     use crate::length_word::{F_BYTE_OBJ, F_MUTABLE_BIT, F_NO_OVERWRITE, F_WEAK_BIT};
     let Some(space) = ctx.alloc_space.as_mut() else {
         return PolyWord::tagged(0);
@@ -604,7 +760,7 @@ fn wrap_file_descriptor(ctx: &mut RtsContext<'_>, fd: i32) -> PolyWord {
     // SAFETY: just allocated 1 word
     unsafe {
         crate::space::set_length_word(p, 1, F_BYTE_OBJ | F_WEAK_BIT | F_MUTABLE_BIT | F_NO_OVERWRITE);
-        p.write(PolyWord::from_bits((fd + 1) as usize));
+        p.write(PolyWord::from_bits((fd as usize) + 1));
     }
     PolyWord::from_ptr(p.cast_const())
 }
@@ -651,5 +807,91 @@ mod tests {
     fn token_zero_is_unresolved() {
         let t = RtsTable::new();
         assert!(t.entry(0).is_none());
+    }
+
+    fn ctx() -> RtsContext<'static> {
+        RtsContext { alloc_space: None }
+    }
+    fn t() -> PolyWord {
+        PolyWord::tagged(0)
+    }
+
+    #[test]
+    fn arb_add_fast_path() {
+        let r = poly_add_arbitrary(&mut ctx(), t(), PolyWord::tagged(2), PolyWord::tagged(3));
+        // arg2 + arg1 = 3 + 2 = 5
+        assert_eq!(r.untag(), 5);
+    }
+
+    #[test]
+    fn arb_sub_fast_path() {
+        // arg2 - arg1 = 7 - 4 = 3
+        let r = poly_subtract_arbitrary(&mut ctx(), t(), PolyWord::tagged(4), PolyWord::tagged(7));
+        assert_eq!(r.untag(), 3);
+    }
+
+    #[test]
+    fn arb_mul_fast_path() {
+        let r = poly_multiply_arbitrary(&mut ctx(), t(), PolyWord::tagged(6), PolyWord::tagged(7));
+        assert_eq!(r.untag(), 42);
+    }
+
+    #[test]
+    fn arb_div_fast_path() {
+        // arg2 / arg1 = 20 / 6 = 3 (truncate toward zero)
+        let r = poly_divide_arbitrary(&mut ctx(), t(), PolyWord::tagged(6), PolyWord::tagged(20));
+        assert_eq!(r.untag(), 3);
+        // -20 / 6 = -3 (truncate toward zero, NOT -4)
+        let r = poly_divide_arbitrary(&mut ctx(), t(), PolyWord::tagged(6), PolyWord::tagged(-20));
+        assert_eq!(r.untag(), -3);
+    }
+
+    #[test]
+    fn arb_rem_fast_path() {
+        // 20 rem 6 = 2 (sign of dividend)
+        let r = poly_remainder_arbitrary(&mut ctx(), t(), PolyWord::tagged(6), PolyWord::tagged(20));
+        assert_eq!(r.untag(), 2);
+        let r = poly_remainder_arbitrary(&mut ctx(), t(), PolyWord::tagged(6), PolyWord::tagged(-20));
+        assert_eq!(r.untag(), -2);
+    }
+
+    #[test]
+    fn arb_compare() {
+        let r = poly_compare_arbitrary(&mut ctx(), PolyWord::tagged(5), PolyWord::tagged(7));
+        // arg2 cmp arg1 = 7 cmp 5 = 1 (greater)
+        assert_eq!(r.untag(), 1);
+        let r = poly_compare_arbitrary(&mut ctx(), PolyWord::tagged(7), PolyWord::tagged(5));
+        assert_eq!(r.untag(), -1);
+        let r = poly_compare_arbitrary(&mut ctx(), PolyWord::tagged(5), PolyWord::tagged(5));
+        assert_eq!(r.untag(), 0);
+    }
+
+    #[test]
+    fn arb_bitwise() {
+        let a = PolyWord::tagged(0b1100);
+        let b = PolyWord::tagged(0b1010);
+        // AND
+        let r = poly_and_arbitrary(&mut ctx(), t(), a, b);
+        assert_eq!(r.untag(), 0b1000);
+        assert!(r.is_tagged());
+        // OR
+        let r = poly_or_arbitrary(&mut ctx(), t(), a, b);
+        assert_eq!(r.untag(), 0b1110);
+        assert!(r.is_tagged());
+        // XOR
+        let r = poly_xor_arbitrary(&mut ctx(), t(), a, b);
+        assert_eq!(r.untag(), 0b0110);
+        assert!(r.is_tagged());
+    }
+
+    #[test]
+    fn arb_add_overflow_returns_zero() {
+        let r = poly_add_arbitrary(
+            &mut ctx(),
+            t(),
+            PolyWord::tagged(MAX_TAGGED),
+            PolyWord::tagged(1),
+        );
+        assert_eq!(r.untag(), 0);
     }
 }

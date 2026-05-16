@@ -1189,8 +1189,8 @@ impl Interpreter {
                 y.wrapping_sub(x).wrapping_add(PolyWord::tagged(0).0)
             }),
             INSTR_WORD_MULT => self.bin_op_word(|x, y| {
-                let ax = (x >> 1) as usize;
-                let ay = (y >> 1) as usize;
+                let ax = x >> 1;
+                let ay = y >> 1;
                 ((ax.wrapping_mul(ay)) << 1) | 1
             }),
             INSTR_WORD_AND => self.bin_op_word(|x, y| y & x),
@@ -1198,23 +1198,23 @@ impl Interpreter {
             INSTR_WORD_XOR => self.bin_op_word(|x, y| (y ^ x) | PolyWord::tagged(0).0),
             INSTR_WORD_SHIFT_LEFT => self.bin_op_word(|x, y| {
                 let s = (x >> 1) & 63;
-                let v = (y >> 1) as usize;
+                let v = y >> 1;
                 ((v.wrapping_shl(s as u32)) << 1) | 1
             }),
             INSTR_WORD_SHIFT_R_LOG => self.bin_op_word(|x, y| {
                 let s = (x >> 1) & 63;
-                let v = (y >> 1) as usize;
+                let v = y >> 1;
                 ((v.wrapping_shr(s as u32)) << 1) | 1
             }),
             INSTR_WORD_DIV => self.bin_op_word_checked(|x, y| {
-                let ax = (x >> 1) as usize;
-                let ay = (y >> 1) as usize;
-                if ax == 0 { Err(()) } else { Ok(((ay / ax) << 1) | 1) }
+                let ax = x >> 1;
+                let ay = y >> 1;
+                ay.checked_div(ax).map(|q| (q << 1) | 1).ok_or(())
             }),
             INSTR_WORD_MOD => self.bin_op_word_checked(|x, y| {
-                let ax = (x >> 1) as usize;
-                let ay = (y >> 1) as usize;
-                if ax == 0 { Err(()) } else { Ok(((ay % ax) << 1) | 1) }
+                let ax = x >> 1;
+                let ay = y >> 1;
+                ay.checked_rem(ax).map(|r| (r << 1) | 1).ok_or(())
             }),
 
             // ----- Comparisons
@@ -1281,6 +1281,7 @@ impl Interpreter {
     }
 
     /// Dispatch an extended opcode (the byte after ESCAPE / 0xfe).
+    #[allow(clippy::too_many_lines)]
     fn dispatch_extended(&mut self, escape_pc: *const u8) -> Result<StepResult, InterpError> {
         use opcodes::ext::*;
         let ext = self.fetch_u8()?;
