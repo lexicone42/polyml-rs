@@ -119,19 +119,30 @@ interpreted, and can compile small SML programs into pexport images
 itself. **At this point we no longer need upstream `poly` for
 anything.**
 
-**Current status (mid-session 2026-05-16): infrastructurally complete;
-real-bootstrap-execution still pending.** Concretely:
-- Full dispatch loop (~85 opcodes) including ALU, control flow,
+**Current status (late-session 2026-05-16): infrastructurally complete;
+real-bootstrap-execution still partial.** Concretely:
+- Full dispatch loop (~100 opcodes) including ALU, control flow,
   allocation, exception handling, tail calls, all extended opcodes
-  we've hit, fused-local peephole opcodes.
+  we've hit, fused-local peephole opcodes, stack-allocated containers,
+  ML-byte/word load/store, block ops, generic alloc, stack-size prologue.
 - Real RTS dispatch infrastructure (`polyml-runtime::rts`): registry,
   loader-time entry-point patching, arity-checked dispatch.
 - All 39 entry points in `bootstrap64.txt` resolve cleanly through
   the registry (some real, most stubbed → TAGGED 0).
-- Empirical: 376 bytecode instructions execute on the real bootstrap
-  before hitting a stack-underflow caused by stubbed RTS calls
-  returning placeholder values rather than the structured data the
-  bootstrap expects.
+- Empirical: with all the above plus a tail-call bug fix
+  (`bytecode.cpp:391-407` was off-by-one in our `do_tail_call`) and a
+  JUMP_BACK off-by-one fix (compiler emits `ic - dest` and upstream's
+  `pc -= *pc + 1` lands at `dest`; ours was landing at `dest + 1`),
+  the bootstrap executes **many thousand bytecode instructions**
+  before SIGSEGVing in LOAD_ML_BYTE with an implausibly large index —
+  almost certainly a downstream effect of a stubbed RTS call
+  returning wrong-shaped data.
+
+The pattern is clear: each debugging fix uncovers the next layer of
+"some stubbed RTS function returned wrong data which then made downstream
+code do crazy things." Genuine progress to running-bootstrap requires
+real implementations of `PolyBasicIOGeneral`, the `Poly*Arbitrary`
+family, and probably `PolyGetLowOrderAsLargeWord` / `PolyGetCodeByte`.
 
 What's *left* for Phase 2.1:
 - Real implementations of the stubbed RTS functions, in particular:
