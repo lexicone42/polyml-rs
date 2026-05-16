@@ -138,8 +138,12 @@ pub enum InterpError {
 /// stored in `_owned_code` so the pointer stays valid for the
 /// interpreter's lifetime.
 pub struct Interpreter {
-    /// Backing storage for the ML stack. Grows down.
-    stack: Vec<PolyWord>,
+    /// Backing storage for the ML stack. Grows down. Boxed so it has
+    /// a stable memory address — stack-container refs (per
+    /// `bytecode.cpp`'s `stackAddr` union variant) are REAL pointers
+    /// into this slice, not indices, and need addresses that don't
+    /// move under us.
+    stack: Box<[PolyWord]>,
     /// Index of the topmost live element. `sp == stack.len()` means
     /// "empty" (the SP is just past the end, ready for the next push
     /// to decrement-then-write).
@@ -192,7 +196,7 @@ impl Interpreter {
         // start == end, which is a valid (immediately-EOF) state.
         let end: *const u8 = unsafe { start.add(code.len()) };
         Self {
-            stack: vec![PolyWord::ZERO; stack_capacity],
+            stack: vec![PolyWord::ZERO; stack_capacity].into_boxed_slice(),
             sp: stack_capacity,
             pc: start,
             code_start: start,
@@ -228,7 +232,7 @@ impl Interpreter {
         // execute, but it's harmless to allow PC there.
         let end: *const u8 = consts_start.cast::<u8>();
         Self {
-            stack: vec![PolyWord::ZERO; stack_capacity],
+            stack: vec![PolyWord::ZERO; stack_capacity].into_boxed_slice(),
             sp: stack_capacity,
             pc: start,
             code_start: start,
@@ -552,16 +556,21 @@ impl Interpreter {
             // word on top that points back into the stack at slot 0.
             // (bytecode.cpp:672-679)
             //
-            // The reference is a STACK ADDRESS, not a heap pointer; in
-            // our model it's an index into `self.stack`.
+            // The reference is a REAL POINTER (stackAddr union variant
+            // in upstream). The bootstrap then does pointer arithmetic
+            // on it — e.g. computing `ref + offset` via WORD_ADD and
+            // using that as the base for LOAD_ML_BYTE. Storing it as
+            // an index would silently break those downstream uses.
             INSTR_STACK_CONTAINER_B => {
                 let n = self.fetch_u8()? as usize;
                 for _ in 0..n {
                     self.push(PolyWord::tagged(0))?;
                 }
-                // Index of slot 0 (= the most recently pushed zero)
-                let ref_idx = self.sp;
-                self.push(PolyWord::from_bits(ref_idx))?;
+                // Address of slot 0 (= the most recently pushed zero).
+                // SAFETY: self.stack is a Box<[PolyWord]> with stable
+                // backing storage; self.sp is a valid index.
+                let ref_ptr = unsafe { self.stack.as_ptr().add(self.sp) };
+                self.push(PolyWord::from_bits(ref_ptr as usize))?;
                 Ok(StepResult::Continue)
             }
             // moveToContainerB N: pop value u, peek container ref on
@@ -570,11 +579,11 @@ impl Interpreter {
                 let n = self.fetch_u8()? as usize;
                 let u = self.pop()?;
                 let container_ref = self.peek(0)?;
-                let ref_idx = container_ref.0;
-                if ref_idx + n >= self.stack.len() {
-                    return Err(InterpError::StackUnderflow);
-                }
-                self.stack[ref_idx + n] = u;
+                let ref_ptr = container_ref.0 as *mut PolyWord;
+                // SAFETY: ref_ptr is a real stack-slot pointer we
+                // emitted in STACK_CONTAINER_B; the compiler is
+                // trusted to emit valid slot offsets.
+                unsafe { ref_ptr.add(n).write(u) };
                 Ok(StepResult::Continue)
             }
             // indirectContainerB N: replace top (container ref) with
@@ -582,11 +591,9 @@ impl Interpreter {
             INSTR_INDIRECT_CONTAINER_B => {
                 let n = self.fetch_u8()? as usize;
                 let container_ref = self.peek(0)?;
-                let ref_idx = container_ref.0;
-                if ref_idx + n >= self.stack.len() {
-                    return Err(InterpError::StackUnderflow);
-                }
-                let val = self.stack[ref_idx + n];
+                let ref_ptr = container_ref.0 as *const PolyWord;
+                // SAFETY: same as MOVE_TO_CONTAINER_B
+                let val = unsafe { *ref_ptr.add(n) };
                 self.pop()?;
                 self.push_continue(val)
             }
@@ -1267,12 +1274,15 @@ impl Interpreter {
                 unsafe { p.add(0).write(PolyWord::tagged(0)) };
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
-            // Mutex stubs: optimistic (always acquired). Combined with
-            // the tail-call fix this gets us past the SML mutex retry
-            // loop. ATOMIC_RESET stays at zero.
+            // Mutex stubs: pessimistic baseline. Bootstrap runs
+            // millions of steps in the mutex-retry spin loop.
+            // Optimistic mode (return TAGGED 1) gets past the loop
+            // but still SIGSEGVs downstream in LOAD_ML_BYTE — likely
+            // because other RTS stubs in the post-mutex path return
+            // wrong-shaped data.
             EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX => {
                 let _ = self.pop()?;
-                self.push_continue(PolyWord::tagged(1))
+                self.push_continue(PolyWord::tagged(0))
             }
             EXTINSTR_ATOMIC_RESET => {
                 let _ = self.pop()?;

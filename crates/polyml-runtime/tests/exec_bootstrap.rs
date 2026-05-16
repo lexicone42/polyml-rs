@@ -43,10 +43,7 @@ fn workspace_root() -> PathBuf {
     }
 }
 
-// SIGSEGV during bootstrap exec — diagnostic test, not a pass/fail
-// gate. Mark as #[ignore] so `cargo test` doesn't surface a crash.
 #[allow(clippy::too_many_lines)]
-#[ignore = "diagnostic — segfaults from unsafe pointer use are normal here"]
 #[test]
 fn step_bootstrap_entry_as_far_as_possible() {
     let path = workspace_root().join("vendor/polyml/bootstrap/bootstrap64.txt");
@@ -82,7 +79,9 @@ fn step_bootstrap_entry_as_far_as_possible() {
     // of compiler-internal allocation; this is a guess on the high
     // side. We'll resize once we know.
     let mut interp = unsafe { Interpreter::from_code_object(8192, code_obj_ptr) }
-        .with_default_alloc_space(512 * 1024)
+        // 64 MB of allocator space — bootstrap allocates a lot and we
+        // have no GC yet.
+        .with_default_alloc_space(8 * 1024 * 1024)
         .with_rts(rts);
     interp.test_seed_return_sentinel();
     interp.test_seed_top(root_closure_word);
@@ -93,12 +92,11 @@ fn step_bootstrap_entry_as_far_as_possible() {
     let max_steps = 100_000;
     let mut steps = 0;
     let mut recent: VecDeque<StepInfo> = VecDeque::with_capacity(RECENT_CAP);
+    let mut hit_cap = false;
     let result = loop {
         if steps >= max_steps {
-            break Ok::<_, polyml_runtime::InterpError>(StepResult::Unimplemented {
-                op: 0,
-                extended: false,
-            });
+            hit_cap = true;
+            break Ok::<_, polyml_runtime::InterpError>(StepResult::Continue);
         }
         let pc_before = interp.pc_offset();
         steps += 1;
@@ -158,8 +156,11 @@ fn step_bootstrap_entry_as_far_as_possible() {
             eprintln!("Opcode name: {}", opcode_label(op));
             dump_recent(&recent);
         }
+        Ok(StepResult::Continue) if hit_cap => {
+            eprintln!("Hit step cap of {max_steps} steps. Bootstrap is still running.");
+        }
         Ok(StepResult::Continue) => {
-            eprintln!("Hit step cap of {max_steps} without progress.");
+            eprintln!("(shouldn't happen) Unexpected Continue result.");
         }
         Err(e) => {
             eprintln!("Error after {steps} steps at pc_offset={}: {e}", interp.pc_offset());
