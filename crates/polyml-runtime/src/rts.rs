@@ -290,7 +290,9 @@ fn register_builtins(t: &mut RtsTable) {
     // TAGGED(0) (= unlocked). The caller's subsequent tryLockMutex
     // then succeeds and the SML `lock` retry loop exits.
     t.register("PolyThreadMutexBlock", RtsFn::Arity2(poly_thread_mutex_block));
-    t.register("PolyThreadMutexUnlock", RtsFn::Arity2(zero2));
+    // PolyThreadMutexUnlock(threadId, mutex): reset to unlocked.
+    // Mirrors InterpreterReleaseMutex (bytecode.cpp:2465).
+    t.register("PolyThreadMutexUnlock", RtsFn::Arity2(poly_thread_mutex_unlock));
     t.register("PolyThreadCondVarWake", RtsFn::Arity2(zero2));
     // PolyThreadForkThread takes (threadId, function, attrs, stack) — 4 args.
     t.register("PolyThreadForkThread", RtsFn::Arity4(zero4));
@@ -469,13 +471,26 @@ fn poly_get_function_name(_: &mut RtsContext<'_>, _code: PolyWord) -> PolyWord {
 /// tryLockMutex.
 #[allow(clippy::needless_pass_by_value)]
 fn poly_thread_mutex_block(_: &mut RtsContext<'_>, _tid: PolyWord, mutex: PolyWord) -> PolyWord {
+    reset_mutex(mutex);
+    PolyWord::tagged(0)
+}
+
+/// `PolyThreadMutexUnlock(threadId, mutex)` — reset mutex to
+/// TAGGED(0) (= unlocked). Mirrors `InterpreterReleaseMutex` in
+/// `bytecode.cpp:2465`. (In multi-thread mode this also wakes
+/// waiters; single-thread has none.)
+#[allow(clippy::needless_pass_by_value)]
+fn poly_thread_mutex_unlock(_: &mut RtsContext<'_>, _tid: PolyWord, mutex: PolyWord) -> PolyWord {
+    reset_mutex(mutex);
+    PolyWord::tagged(0)
+}
+
+fn reset_mutex(mutex: PolyWord) {
     if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
         let p = mutex.as_ptr::<PolyWord>().cast_mut();
-        // SAFETY: caller passes a real mutex object; we write TAGGED(0)
-        // (a tagged-int payload that's valid in any cell).
+        // SAFETY: pointer-aligned & is_data_ptr → valid mutex slot
         unsafe { p.write(PolyWord::tagged(0)) };
     }
-    PolyWord::tagged(0)
 }
 
 #[cfg(test)]

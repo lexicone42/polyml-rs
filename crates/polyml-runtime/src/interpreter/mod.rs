@@ -1172,17 +1172,50 @@ impl Interpreter {
             INSTR_FIXED_QUOT => self.bin_op_tagged(|x, y| if x == 0 { Err(()) } else { Ok(y.wrapping_div(x)) }),
             INSTR_FIXED_REM => self.bin_op_tagged(|x, y| if x == 0 { Err(()) } else { Ok(y.wrapping_rem(x)) }),
 
-            // ----- Word (untagged) arithmetic
-            INSTR_WORD_ADD => self.bin_op_word(|x, y| y.wrapping_add(x)),
-            INSTR_WORD_SUB => self.bin_op_word(|x, y| y.wrapping_sub(x)),
-            INSTR_WORD_MULT => self.bin_op_word(|x, y| y.wrapping_mul(x)),
+            // ----- Word arithmetic (TAG-AWARE, per bytecode.cpp:1001-)
+            //
+            // PolyML stores ints as `(n << 1) | 1`. WORD_ADD on two
+            // tagged ints adds the bit-patterns and SUBTRACTS one tag
+            // bit to recover the right encoding:
+            //   (2A+1) + (2B+1) - 1 = 2(A+B) + 1 = TAGGED(A+B).
+            // Similar dance for WORD_SUB (+ instead of -). MULT/DIV/MOD/
+            // SHIFT untag inputs and re-tag the result. AND/OR are bit
+            // identities that preserve the tag bit naturally; XOR
+            // clears it (1^1=0) so must reinstate via `| 1`.
+            INSTR_WORD_ADD => self.bin_op_word(|x, y| {
+                y.wrapping_add(x).wrapping_sub(PolyWord::tagged(0).0)
+            }),
+            INSTR_WORD_SUB => self.bin_op_word(|x, y| {
+                y.wrapping_sub(x).wrapping_add(PolyWord::tagged(0).0)
+            }),
+            INSTR_WORD_MULT => self.bin_op_word(|x, y| {
+                let ax = (x >> 1) as usize;
+                let ay = (y >> 1) as usize;
+                ((ax.wrapping_mul(ay)) << 1) | 1
+            }),
             INSTR_WORD_AND => self.bin_op_word(|x, y| y & x),
             INSTR_WORD_OR => self.bin_op_word(|x, y| y | x),
-            INSTR_WORD_XOR => self.bin_op_word(|x, y| y ^ x),
-            INSTR_WORD_SHIFT_LEFT => self.bin_op_word(|x, y| y << (x & 63)),
-            INSTR_WORD_SHIFT_R_LOG => self.bin_op_word(|x, y| y >> (x & 63)),
-            INSTR_WORD_DIV => self.bin_op_word_checked(|x, y| y.checked_div(x).ok_or(())),
-            INSTR_WORD_MOD => self.bin_op_word_checked(|x, y| y.checked_rem(x).ok_or(())),
+            INSTR_WORD_XOR => self.bin_op_word(|x, y| (y ^ x) | PolyWord::tagged(0).0),
+            INSTR_WORD_SHIFT_LEFT => self.bin_op_word(|x, y| {
+                let s = (x >> 1) & 63;
+                let v = (y >> 1) as usize;
+                ((v.wrapping_shl(s as u32)) << 1) | 1
+            }),
+            INSTR_WORD_SHIFT_R_LOG => self.bin_op_word(|x, y| {
+                let s = (x >> 1) & 63;
+                let v = (y >> 1) as usize;
+                ((v.wrapping_shr(s as u32)) << 1) | 1
+            }),
+            INSTR_WORD_DIV => self.bin_op_word_checked(|x, y| {
+                let ax = (x >> 1) as usize;
+                let ay = (y >> 1) as usize;
+                if ax == 0 { Err(()) } else { Ok(((ay / ax) << 1) | 1) }
+            }),
+            INSTR_WORD_MOD => self.bin_op_word_checked(|x, y| {
+                let ax = (x >> 1) as usize;
+                let ay = (y >> 1) as usize;
+                if ax == 0 { Err(()) } else { Ok(((ay % ax) << 1) | 1) }
+            }),
 
             // ----- Comparisons
             INSTR_EQUAL_WORD => self.bin_op_cmp(|x, y| x == y),
@@ -1274,14 +1307,75 @@ impl Interpreter {
                 unsafe { p.add(0).write(PolyWord::tagged(0)) };
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
-            // Mutex stub: pessimistic baseline. Optimistic mode
-            // (return TAGGED 1) reaches I/O setup but SIGSEGVs in
-            // a downstream LOAD_ML_BYTE because some upstream
-            // computation produced wrong-shaped data — most likely
-            // from one of the remaining RTS stubs returning
-            // TAGGED(0) where structured data is expected.
-            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX | EXTINSTR_ATOMIC_RESET => {
-                let _ = self.pop()?;
+            // Real mutex semantics (bytecode.cpp:1507-1532). Single-
+            // threaded so locks never actually block — but we DO track
+            // the mutex's first word so the SML retry loop terminates
+            // and other lock/unlock pairs work correctly.
+            //
+            // Defensive: bootstrap occasionally passes non-pointer
+            // values as the "mutex" (probably from stubbed RTS calls
+            // returning TAGGED(0)). For those we just return success
+            // without touching memory.
+            EXTINSTR_LOCK_MUTEX => {
+                let mutex = self.peek(0)?;
+                let acquired = if mutex.is_data_ptr()
+                    && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0
+                {
+                    let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                    // SAFETY: pointer-aligned & is_data_ptr ⇒ valid mutex slot
+                    let old = unsafe { *p };
+                    let was_unlocked = old.0 == PolyWord::tagged(0).0;
+                    // Bump counter by 2 (PolyML convention; we don't
+                    // need the count in single-thread but preserve it
+                    // for round-trips with unlockMutex).
+                    let new_bits = old.0.wrapping_add(2);
+                    // SAFETY: same
+                    unsafe { p.write(PolyWord::from_bits(new_bits)) };
+                    was_unlocked
+                } else {
+                    true
+                };
+                self.pop()?;
+                self.push_continue(if acquired {
+                    PolyWord::tagged(1)
+                } else {
+                    PolyWord::tagged(0)
+                })
+            }
+            EXTINSTR_TRY_LOCK_MUTEX => {
+                let mutex = self.peek(0)?;
+                let acquired = if mutex.is_data_ptr()
+                    && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0
+                {
+                    let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                    // SAFETY: same as above
+                    let old = unsafe { *p };
+                    let was_unlocked = old.0 == PolyWord::tagged(0).0;
+                    if was_unlocked {
+                        // SAFETY: same
+                        unsafe { p.write(PolyWord::tagged(1)) };
+                    }
+                    was_unlocked
+                } else {
+                    true
+                };
+                self.pop()?;
+                self.push_continue(if acquired {
+                    PolyWord::tagged(1)
+                } else {
+                    PolyWord::tagged(0)
+                })
+            }
+            // atomicReset: write TAGGED(0) (= unlocked) into the mutex.
+            EXTINSTR_ATOMIC_RESET => {
+                let mutex = self.pop()?;
+                if mutex.is_data_ptr()
+                    && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0
+                {
+                    let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                    // SAFETY: pointer-aligned & is_data_ptr
+                    unsafe { p.write(PolyWord::tagged(0)) };
+                }
                 self.push_continue(PolyWord::tagged(0))
             }
             EXTINSTR_ATOMIC_EXCH_ADD => {
