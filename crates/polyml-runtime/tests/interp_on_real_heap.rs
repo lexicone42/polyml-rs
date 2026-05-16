@@ -44,9 +44,12 @@ fn interpreter_reads_real_heap_via_indirect() {
     // Hand-build a tiny program that, given the closure pointer
     // pre-seeded on top of the stack, reads its first word via
     // INDIRECT_0 and returns it.
-    let code = vec![INSTR_INDIRECT_0, INSTR_RETURN_1];
-    let mut interp = Interpreter::new(64, code);
-    interp.test_seed_top(PolyWord::from_ptr(loaded.root));
+    let code = vec![INSTR_INDIRECT_0, INSTR_RETURN_B, 0];
+    let mut interp = Interpreter::from_bytes(64, code);
+    // Set up the call frame our RETURN expects: [closure, retPC=null].
+    interp.test_seed_return_sentinel();
+    interp.test_seed_top(PolyWord::ZERO); // dummy "self" closure slot
+    interp.test_seed_top(PolyWord::from_ptr(loaded.root)); // top: the value INDIRECT will read
 
     let result = interp.run().expect("run");
     let StepResult::Returned(code_word) = result else {
