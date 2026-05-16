@@ -11,9 +11,11 @@ pub mod interpreter;
 pub mod length_word;
 pub mod loader;
 pub mod poly_word;
+pub mod rts;
 pub mod space;
 
 pub use interpreter::{InterpError, Interpreter, StepResult};
 pub use loader::{load_image, LoadError, LoadedImage};
 pub use poly_word::PolyWord;
+pub use rts::{patch_entry_points, RtsFn, RtsTable};
 pub use space::{MemorySpace, SpaceKind};

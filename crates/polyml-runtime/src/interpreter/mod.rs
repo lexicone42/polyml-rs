@@ -84,7 +84,10 @@
 
 pub mod opcodes;
 
+use std::sync::Arc;
+
 use crate::poly_word::PolyWord;
+use crate::rts::{RtsContext, RtsFn, RtsTable};
 use crate::space::{MemorySpace, SpaceKind};
 use thiserror::Error;
 
@@ -118,6 +121,14 @@ pub enum InterpError {
     NoAllocator,
     #[error("unhandled exception (no handler in scope)")]
     UnhandledException,
+    #[error("CALL_FAST_RTS{n} on an unresolved entry point (token=0)")]
+    UnresolvedRts { n: usize },
+    #[error("CALL_FAST_RTS{op_arity} on RTS function {name} of arity {fn_arity}")]
+    RtsArityMismatch {
+        name: &'static str,
+        op_arity: usize,
+        fn_arity: usize,
+    },
 }
 
 /// A bytecode interpreter operating on PolyML code objects.
@@ -158,6 +169,10 @@ pub struct Interpreter {
     /// Current exception packet (set by RAISE_EX, read by LDEXC).
     /// `None` means no exception has been raised yet.
     exception_packet: Option<PolyWord>,
+    /// RTS function table — used to dispatch CALL_FAST_RTS<N> opcodes.
+    /// `Arc` so it can be shared between interpreter instances (e.g.
+    /// threads).
+    rts: Arc<RtsTable>,
     /// For test-built interpreters: owns the code bytes so the PC
     /// pointer stays valid.
     _owned_code: Option<Vec<u8>>,
@@ -186,6 +201,7 @@ impl Interpreter {
             alloc_space: None,
             handler_sp: stack_capacity, // past-the-end = no handler
             exception_packet: None,
+            rts: Arc::new(RtsTable::empty()),
             _owned_code: Some(code),
         }
     }
@@ -221,8 +237,16 @@ impl Interpreter {
             alloc_space: None,
             handler_sp: stack_capacity,
             exception_packet: None,
+            rts: Arc::new(RtsTable::empty()),
             _owned_code: None,
         }
+    }
+
+    /// Attach an RTS table. Builder pattern.
+    #[must_use]
+    pub fn with_rts(mut self, rts: Arc<RtsTable>) -> Self {
+        self.rts = rts;
+        self
     }
 
     /// Attach an allocation space. The interpreter will bump-allocate
@@ -502,12 +526,12 @@ impl Interpreter {
             // This WILL produce incorrect results when actually used.
             // It exists so we can see what opcodes come up further
             // down the bootstrap path.
-            INSTR_CALL_FAST_RTS0 => self.stub_rts_call(0),
-            INSTR_CALL_FAST_RTS1 => self.stub_rts_call(1),
-            INSTR_CALL_FAST_RTS2 => self.stub_rts_call(2),
-            INSTR_CALL_FAST_RTS3 => self.stub_rts_call(3),
-            INSTR_CALL_FAST_RTS4 => self.stub_rts_call(4),
-            INSTR_CALL_FAST_RTS5 => self.stub_rts_call(5),
+            INSTR_CALL_FAST_RTS0 => self.rts_call(0),
+            INSTR_CALL_FAST_RTS1 => self.rts_call(1),
+            INSTR_CALL_FAST_RTS2 => self.rts_call(2),
+            INSTR_CALL_FAST_RTS3 => self.rts_call(3),
+            INSTR_CALL_FAST_RTS4 => self.rts_call(4),
+            INSTR_CALL_FAST_RTS5 => self.rts_call(5),
 
             // ----- Tail call
             //
@@ -1020,24 +1044,38 @@ impl Interpreter {
         use opcodes::ext::*;
         let ext = self.fetch_u8()?;
         match ext {
-            // ----- Mutex (stubbed: trivial single-threaded behavior)
+            // ----- Mutex (single-threaded; pessimistic semantics)
             //
-            // createMutex: allocate a 1-word mutable cell with TAGGED(0)
+            // For genuine single-thread correctness we'd accurately
+            // model the counter (see bytecode.cpp:1496-1532). But the
+            // bootstrap's mutex use is entangled with other stubbed
+            // RTS calls (PolyBasicIOGeneral etc.) that return wrong
+            // values, and "correct" mutex semantics here just exposes
+            // those downstream bugs as crashes. So we run the
+            // pessimistic version: every lock-attempt is "contested",
+            // falling through to PolyThreadMutexBlock which returns
+            // zero. Net effect: bootstrap loops in mutex-block until
+            // the next non-mutex divergence happens.
+            //
+            // The right long-term fix is real impls of the RTS
+            // functions, not better mutex stubs.
             EXTINSTR_CREATE_MUTEX => {
-                use crate::length_word::F_MUTABLE_BIT;
-                let p = self.allocate(1, F_MUTABLE_BIT)?;
+                use crate::length_word::{F_MUTABLE_BIT, F_NO_OVERWRITE, F_WEAK_BIT};
+                let p = self.allocate(1, F_MUTABLE_BIT | F_NO_OVERWRITE | F_WEAK_BIT)?;
                 // SAFETY: just allocated 1 word
                 unsafe { p.add(0).write(PolyWord::tagged(0)) };
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
-            // lockMutex / tryLockMutex: pop arg, push 0 (success)
-            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX => self.stub_rts_call(0),
-            // atomicReset: pop ref, write 0, push 0
-            EXTINSTR_ATOMIC_RESET => {
-                let r = self.pop()?;
-                let p = r.as_ptr::<PolyWord>().cast_mut();
-                // SAFETY: caller emits valid ref
-                unsafe { p.write(PolyWord::tagged(0)) };
+            // lockMutex / tryLockMutex / atomicReset / atomicExchAdd:
+            // pop args, return TAGGED(0). See comment on EXTINSTR_CREATE_MUTEX
+            // above for why we go pessimistic here.
+            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX | EXTINSTR_ATOMIC_RESET => {
+                let _ = self.pop()?;
+                self.push_continue(PolyWord::tagged(0))
+            }
+            EXTINSTR_ATOMIC_EXCH_ADD => {
+                let _ = self.pop()?;
+                let _ = self.pop()?;
                 self.push_continue(PolyWord::tagged(0))
             }
 
@@ -1361,17 +1399,53 @@ impl Interpreter {
         Ok(PolyWord::from_ptr(p.cast_const()))
     }
 
-    /// Stubbed implementation of `call_fast_rts<N>`. Pops the stub
-    /// object + N RTS args, pushes TAGGED(0). Real impl would call
-    /// through the stub's C function pointer.
-    fn stub_rts_call(&mut self, n_args: usize) -> Result<StepResult, InterpError> {
-        // Args layout (top down): stub, arg0, arg1, ..., arg_{n-1}
-        // (per bytecode.cpp:681-712 — stub popped first.)
-        let _stub = self.pop()?;
-        for _ in 0..n_args {
-            let _ = self.pop()?;
+    /// Dispatch a `CALL_FAST_RTS<N>` opcode through the RTS table.
+    /// Stack layout (top down): stub object, arg0, arg1, ..., arg_{n-1}
+    /// — matches `bytecode.cpp:681-712`. We pop the stub, read its
+    /// word 0 (the dispatch token), look up the function, pop N args,
+    /// and push the result.
+    fn rts_call(&mut self, n_args: usize) -> Result<StepResult, InterpError> {
+        let stub = self.pop()?;
+        let p = stub.as_ptr::<PolyWord>();
+        // SAFETY: caller (bytecode) guarantees `stub` is a valid
+        // EntryPoint object with word 0 holding the dispatch token.
+        let token = unsafe { (*p).0 };
+        // Copy the entry out so we can drop the immutable borrow on
+        // self.rts before pop'ing/allocating.
+        let (entry_name, entry_func) = {
+            let e = self
+                .rts
+                .entry(token)
+                .ok_or(InterpError::UnresolvedRts { n: n_args })?;
+            (e.name, e.func)
+        };
+        // Pop args (we already popped the stub).
+        let mut args: [PolyWord; 5] = [PolyWord::ZERO; 5];
+        for slot in args.iter_mut().take(n_args) {
+            *slot = self.pop()?;
         }
-        self.push_continue(PolyWord::tagged(0))
+        // Dispatch by arity, checking it matches the opcode's expectation.
+        let fn_arity = entry_func.arity();
+        if fn_arity != n_args {
+            return Err(InterpError::RtsArityMismatch {
+                name: entry_name,
+                op_arity: n_args,
+                fn_arity,
+            });
+        }
+        crate::rts::trace_call(entry_name, n_args);
+        let mut ctx = RtsContext {
+            alloc_space: self.alloc_space.as_mut(),
+        };
+        let result = match entry_func {
+            RtsFn::Arity0(f) => f(&mut ctx),
+            RtsFn::Arity1(f) => f(&mut ctx, args[0]),
+            RtsFn::Arity2(f) => f(&mut ctx, args[0], args[1]),
+            RtsFn::Arity3(f) => f(&mut ctx, args[0], args[1], args[2]),
+            RtsFn::Arity4(f) => f(&mut ctx, args[0], args[1], args[2], args[3]),
+            RtsFn::Arity5(f) => f(&mut ctx, args[0], args[1], args[2], args[3], args[4]),
+        };
+        self.push_continue(result)
     }
 
     /// Implement TAIL_B_B (and its extended sibling EXTINSTR_tail).

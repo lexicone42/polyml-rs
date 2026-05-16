@@ -35,7 +35,7 @@ use crate::poly_word::{PolyWord, MAX_TAGGED, MIN_TAGGED};
 use crate::space::{MemorySpace, SpaceKind};
 
 /// The output of [`load_image`]: three populated spaces plus a pointer
-/// to the root object.
+/// to the root object plus a directory of EntryPoint objects.
 pub struct LoadedImage {
     pub immutable: MemorySpace,
     pub mutable: MemorySpace,
@@ -43,6 +43,11 @@ pub struct LoadedImage {
     /// Pointer to the root object (typically a closure containing the
     /// top-level function to invoke).
     pub root: *const PolyWord,
+    /// Every `ObjectBody::EntryPoint` from the image, paired with the
+    /// (mutable) pointer to its first word — where the loader wrote
+    /// `PolyWord::ZERO` as a placeholder. Use [`crate::rts::patch_entry_points`]
+    /// to fill these with RTS dispatch tokens after load.
+    pub entry_points: Vec<(String, *mut PolyWord)>,
 }
 
 // Pointers into the loaded heap are necessarily raw — both Send and
@@ -193,6 +198,7 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
     }
 
     // ---- Pass 2: write length words and contents.
+    let mut entry_points: Vec<(String, *mut PolyWord)> = Vec::new();
     for (id, obj) in image.objects.iter().enumerate() {
         let obj_ptr = pointers[id];
         let n_words = body_word_count(&obj.body);
@@ -202,6 +208,10 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
             crate::space::set_length_word(obj_ptr, n_words, flags);
         }
         write_body(obj_ptr, &obj.body, &pointers)?;
+        // Track entry points so the runtime can patch them.
+        if let ObjectBody::EntryPoint(name) = &obj.body {
+            entry_points.push((name.clone(), obj_ptr));
+        }
     }
 
     let root_ptr: *const PolyWord = pointers[root_idx];
@@ -211,6 +221,7 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
         mutable,
         code,
         root: root_ptr,
+        entry_points,
     })
 }
 

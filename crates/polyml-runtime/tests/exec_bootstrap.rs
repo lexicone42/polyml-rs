@@ -4,10 +4,12 @@
 
 use std::path::PathBuf;
 
+use std::sync::Arc;
+
 use polyml_image::pexport::Image;
 use polyml_runtime::{
     interpreter::{StepResult, opcodes},
-    load_image, Interpreter, PolyWord,
+    load_image, patch_entry_points, Interpreter, PolyWord, RtsTable,
 };
 
 fn workspace_root() -> PathBuf {
@@ -32,7 +34,20 @@ fn step_bootstrap_entry_as_far_as_possible() {
         return;
     };
     let image = Image::parse(&bytes).expect("parse");
-    let loaded = load_image(&image).expect("load_image");
+    let mut loaded = load_image(&image).expect("load_image");
+
+    // Register RTS functions and patch entry points.
+    // Toggle RTS tracing here when debugging which functions get called.
+    // polyml_runtime::rts::set_rts_trace(true);
+    let rts = Arc::new(RtsTable::new());
+    let (patched, missing) = patch_entry_points(&mut loaded, &rts);
+    eprintln!("RTS patch: {patched} resolved, {} unresolved.", missing.len());
+    if !missing.is_empty() {
+        eprintln!("Unresolved entry-point names (first 10):");
+        for name in missing.iter().take(10) {
+            eprintln!("  - {name}");
+        }
+    }
 
     // The root is a closure. Its first word is the code address (= the
     // bytecode entry point). To "call into" it from a fresh
@@ -47,7 +62,8 @@ fn step_bootstrap_entry_as_far_as_possible() {
     // of compiler-internal allocation; this is a guess on the high
     // side. We'll resize once we know.
     let mut interp = unsafe { Interpreter::from_code_object(8192, code_obj_ptr) }
-        .with_default_alloc_space(512 * 1024);
+        .with_default_alloc_space(512 * 1024)
+        .with_rts(rts);
     interp.test_seed_return_sentinel();
     interp.test_seed_top(root_closure_word);
 
