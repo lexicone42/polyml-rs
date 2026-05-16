@@ -1,0 +1,20 @@
+[package]
+name        = "polyml-bin"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+description = "polyml-rs entry point — the `poly` binary"
+
+[[bin]]
+name = "poly"
+path = "src/main.rs"
+
+[dependencies]
+polyml-runtime = { workspace = true }
+polyml-image   = { workspace = true }
+
+[lints]
+workspace = true
