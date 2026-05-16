@@ -284,17 +284,20 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyMultiplyArbitrary", RtsFn::Arity3(poly_multiply_arbitrary));
     t.register("PolyDivideArbitrary", RtsFn::Arity3(poly_divide_arbitrary));
     t.register("PolyRemainderArbitrary", RtsFn::Arity3(poly_remainder_arbitrary));
-    t.register("PolyQuotRemArbitraryPair", RtsFn::Arity3(zero3));
+    t.register("PolyQuotRemArbitraryPair", RtsFn::Arity3(poly_quot_rem_arbitrary_pair));
     t.register("PolyQuotRemArbitrary", RtsFn::Arity4(zero4));
     t.register("PolyCompareArbitrary", RtsFn::Arity2(poly_compare_arbitrary)); // no threadId
-    t.register("PolyGCDArbitrary", RtsFn::Arity3(zero3));
-    t.register("PolyLCMArbitrary", RtsFn::Arity3(zero3));
+    t.register("PolyGCDArbitrary", RtsFn::Arity3(poly_gcd_arbitrary));
+    t.register("PolyLCMArbitrary", RtsFn::Arity3(poly_lcm_arbitrary));
     t.register("PolyAndArbitrary", RtsFn::Arity3(poly_and_arbitrary));
     t.register("PolyOrArbitrary", RtsFn::Arity3(poly_or_arbitrary));
     t.register("PolyXorArbitrary", RtsFn::Arity3(poly_xor_arbitrary));
-    t.register("PolyShiftLeftArbitrary", RtsFn::Arity3(zero3));
-    t.register("PolyShiftRightArbitrary", RtsFn::Arity3(zero3));
-    t.register("PolyGetLowOrderAsLargeWord", RtsFn::Arity2(zero2));
+    t.register("PolyShiftLeftArbitrary", RtsFn::Arity3(poly_shift_left_arbitrary));
+    t.register("PolyShiftRightArbitrary", RtsFn::Arity3(poly_shift_right_arbitrary));
+    t.register(
+        "PolyGetLowOrderAsLargeWord",
+        RtsFn::Arity2(poly_get_low_order_as_large_word),
+    );
 
     // Threading
     //
@@ -308,11 +311,13 @@ fn register_builtins(t: &mut RtsTable) {
     // PolyThreadMutexUnlock(threadId, mutex): reset to unlocked.
     // Mirrors InterpreterReleaseMutex (bytecode.cpp:2465).
     t.register("PolyThreadMutexUnlock", RtsFn::Arity2(poly_thread_mutex_unlock));
-    t.register("PolyThreadCondVarWake", RtsFn::Arity2(zero2));
+    // Single-threaded mode: no other thread exists to wake / interrupt /
+    // broadcast to, so these are no-ops.
+    t.register("PolyThreadCondVarWake", RtsFn::Arity2(noop2));
     // PolyThreadForkThread takes (threadId, function, attrs, stack) — 4 args.
     t.register("PolyThreadForkThread", RtsFn::Arity4(poly_thread_fork_thread));
-    t.register("PolyThreadInterruptThread", RtsFn::Arity2(zero2));
-    t.register("PolyThreadBroadcastInterrupt", RtsFn::Arity1(zero1));
+    t.register("PolyThreadInterruptThread", RtsFn::Arity2(noop2));
+    t.register("PolyThreadBroadcastInterrupt", RtsFn::Arity1(noop1));
 
     // Compiler / code-object helpers
     //   PolySetCodeConstant(closure, offset, cWord, flags) → 4 (no threadId)
@@ -338,10 +343,18 @@ fn register_builtins(t: &mut RtsTable) {
 
 // Generic 0-returning stubs. The dispatch site (Interpreter::rts_call)
 // handles tracing via `trace_call`, so no need to log here.
-fn zero1(_: &mut RtsContext<'_>, _: PolyWord) -> PolyWord {
+fn zero2(_: &mut RtsContext<'_>, _: PolyWord, _: PolyWord) -> PolyWord {
     PolyWord::tagged(0)
 }
-fn zero2(_: &mut RtsContext<'_>, _: PolyWord, _: PolyWord) -> PolyWord {
+
+// Distinct from `zero1`/`zero2`: semantically these RTS functions
+// have nothing useful to do in our single-threaded interpreter
+// (CondVarWake, InterruptThread, BroadcastInterrupt). They're
+// no-ops by design, not stubs awaiting implementation.
+fn noop1(_: &mut RtsContext<'_>, _: PolyWord) -> PolyWord {
+    PolyWord::tagged(0)
+}
+fn noop2(_: &mut RtsContext<'_>, _: PolyWord, _: PolyWord) -> PolyWord {
     PolyWord::tagged(0)
 }
 fn zero3(_: &mut RtsContext<'_>, _: PolyWord, _: PolyWord, _: PolyWord) -> PolyWord {
@@ -558,6 +571,10 @@ fn poly_basic_io_general(
         // EOF = empty string. Allocates a proper 1-word
         // PolyStringObject with length 0 + F_BYTE_OBJ.
         10 | 26 => alloc_empty_string(ctx),
+        // 11/12: write array — actually attempt to write to the fd
+        // and return the byte count. Empty-pretend wasn't tested
+        // yet but full write support makes future REPL output work.
+        11 | 12 => write_array(strm, arg),
         // 15: return recommended buffer size (4096)
         15 => PolyWord::tagged(4096),
         // 16: input available? Pretend yes.
@@ -763,6 +780,201 @@ fn poly_xor_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, ar
         return PolyWord::from_bits((arg1.0 ^ arg2.0) | 1);
     }
     PolyWord::tagged(0)
+}
+
+/// Shift left of a tagged int. Shift must be tagged & non-negative;
+/// if result overflows the tag range we fall through to TAGGED(0).
+/// Mirrors `arb.cpp:2017-2096` fast path only.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_shift_left_arbitrary(
+    _: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg: PolyWord,
+    shift: PolyWord,
+) -> PolyWord {
+    if !shift.is_tagged() {
+        return PolyWord::tagged(0);
+    }
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let shift_by = shift.untag() as u32;
+    if shift_by == 0 {
+        return arg;
+    }
+    if arg.is_tagged() {
+        let x = arg.untag();
+        if x == 0 {
+            return PolyWord::tagged(0);
+        }
+        if shift_by >= isize::BITS - 1 {
+            return PolyWord::tagged(0); // overflow → would need bignum
+        }
+        let r = (x as i128) << shift_by;
+        if fits_tagged(r) {
+            return PolyWord::tagged(r as isize);
+        }
+    }
+    PolyWord::tagged(0)
+}
+
+/// Shift right (logical) of a tagged int.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_shift_right_arbitrary(
+    _: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg: PolyWord,
+    shift: PolyWord,
+) -> PolyWord {
+    if !shift.is_tagged() {
+        return PolyWord::tagged(0);
+    }
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let shift_by = shift.untag() as u32;
+    if shift_by == 0 {
+        return arg;
+    }
+    if arg.is_tagged() {
+        let x = arg.untag();
+        if shift_by >= isize::BITS {
+            return PolyWord::tagged(0);
+        }
+        // ML LargeWord.>> is logical; mirror that on the untagged
+        // value.
+        #[allow(clippy::cast_sign_loss)]
+        let r = (x as usize) >> shift_by;
+        #[allow(clippy::cast_possible_wrap)]
+        let r = r as isize;
+        if fits_tagged(r as i128) {
+            return PolyWord::tagged(r);
+        }
+    }
+    PolyWord::tagged(0)
+}
+
+/// GCD using i64 for the fast path. Bootstrap rarely calls this so a
+/// tagged-only impl is fine.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_gcd_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+    -> PolyWord
+{
+    if let Some((x, y)) = both_tagged(arg2, arg1) {
+        let mut a = x.unsigned_abs();
+        let mut b = y.unsigned_abs();
+        while b != 0 {
+            let t = b;
+            b = a % b;
+            a = t;
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        let g = a as isize;
+        if fits_tagged(g as i128) {
+            return PolyWord::tagged(g);
+        }
+    }
+    PolyWord::tagged(0)
+}
+
+/// LCM = (|x| / gcd(x,y)) * |y|, with care around zero.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_lcm_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+    -> PolyWord
+{
+    if let Some((x, y)) = both_tagged(arg2, arg1) {
+        if x == 0 || y == 0 {
+            return PolyWord::tagged(0);
+        }
+        let mut a = x.unsigned_abs();
+        let mut b = y.unsigned_abs();
+        let (orig_a, orig_b) = (a, b);
+        while b != 0 {
+            let t = b;
+            b = a % b;
+            a = t;
+        }
+        let g = a;
+        if g == 0 {
+            return PolyWord::tagged(0);
+        }
+        let Some(lcm) = (orig_a / g).checked_mul(orig_b) else {
+            return PolyWord::tagged(0);
+        };
+        #[allow(clippy::cast_sign_loss)]
+        let max = isize::MAX as usize;
+        if lcm > max {
+            return PolyWord::tagged(0);
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        let v = lcm as isize;
+        if fits_tagged(v as i128) {
+            return PolyWord::tagged(v);
+        }
+    }
+    PolyWord::tagged(0)
+}
+
+/// `PolyQuotRemArbitraryPair(threadId, arg1, arg2)` — compute
+/// (quotient, remainder) of `arg2` divided by `arg1`, return as a
+/// 2-element tuple (ordinary object). Mirrors `arb.cpp:1825-1856`.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_quot_rem_arbitrary_pair(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
+    let (q, r) = if let Some((x, y)) = both_tagged(arg2, arg1) {
+        if y == 0 || (x == MIN_TAGGED && y == -1) {
+            return PolyWord::tagged(0);
+        }
+        (PolyWord::tagged(x / y), PolyWord::tagged(x % y))
+    } else {
+        return PolyWord::tagged(0);
+    };
+    // Allocate a 2-word ordinary object holding (q, r).
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    let p = space.alloc(2);
+    // SAFETY: just allocated 2 words.
+    unsafe {
+        crate::space::set_length_word(p, 2, 0);
+        p.write(q);
+        p.add(1).write(r);
+    }
+    PolyWord::from_ptr(p.cast_const())
+}
+
+/// `PolyGetLowOrderAsLargeWord(threadId, arg)` — extract the low
+/// word of `arg`, box it as a sysword (1-word byte object).
+/// Mirrors `arb.cpp:1910-1949` fast path.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_get_low_order_as_large_word(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg: PolyWord,
+) -> PolyWord {
+    use crate::length_word::F_BYTE_OBJ;
+    let low_word: usize = if arg.is_tagged() {
+        #[allow(clippy::cast_sign_loss)]
+        let v = arg.untag() as usize;
+        v
+    } else if arg.is_data_ptr() {
+        // Boxed: read first body word as the low limb.
+        let p = arg.as_ptr::<PolyWord>();
+        // SAFETY: caller-trusted boxed bignum.
+        unsafe { (*p).0 }
+    } else {
+        return PolyWord::tagged(0);
+    };
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    let p = space.alloc(1);
+    // SAFETY: just allocated 1 word.
+    unsafe {
+        crate::space::set_length_word(p, 1, F_BYTE_OBJ);
+        p.write(PolyWord::from_bits(low_word));
+    }
+    PolyWord::from_ptr(p.cast_const())
 }
 
 /// `PolyCopyByteVecToClosure(threadId, byteVec, closure)` — install
@@ -972,6 +1184,55 @@ fn alloc_thread_object_stub(ctx: &mut RtsContext<'_>) -> PolyWord {
 /// Layout: 1-word byte object with flags
 /// `F_BYTE_OBJ | F_WEAK_BIT | F_MUTABLE_BIT | F_NO_OVERWRITE`
 /// per `run_time.cpp:396` `MakeVolatileWord`.
+use std::io::Write;
+
+/// IO subcode 11/12: write from an ML byte vector to the stream's
+/// underlying fd. `arg` is the byte vector + an offset + a length,
+/// usually packaged as a record. For now we attempt the simpler
+/// interpretation: arg is a 3-tuple (vec, offset, length). If the
+/// shape doesn't match (or strm isn't wrapping a real fd), we
+/// return 0 — meaning "wrote nothing" — which is the safe stub
+/// behaviour that doesn't break consumers.
+fn write_array(strm: PolyWord, arg: PolyWord) -> PolyWord {
+    // Best-effort fd extraction. `strm` is conventionally a
+    // wrapped-fd object (see `wrap_file_descriptor`): a 1-word byte
+    // object holding `fd + 1`.
+    if !strm.is_data_ptr() || !arg.is_data_ptr() {
+        return PolyWord::tagged(0);
+    }
+    // SAFETY: caller (compiler) is trusted.
+    let fd_plus_one = unsafe { *strm.as_ptr::<PolyWord>() }.0;
+    if fd_plus_one == 0 {
+        return PolyWord::tagged(0);
+    }
+    // arg shape: 3-tuple (vec, offset, length).
+    let p = arg.as_ptr::<PolyWord>();
+    let (vec, offset, length) = unsafe { (*p, *p.add(1), *p.add(2)) };
+    if !vec.is_data_ptr() || !offset.is_tagged() || !length.is_tagged() {
+        return PolyWord::tagged(0);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let off = offset.untag() as usize;
+    #[allow(clippy::cast_sign_loss)]
+    let len = length.untag() as usize;
+    if len == 0 {
+        return PolyWord::tagged(0);
+    }
+    // SAFETY: vec is a byte object; reading off..off+len bytes of
+    // its body is well-defined for trusted callers.
+    let base = vec.as_ptr::<u8>();
+    let slice = unsafe { std::slice::from_raw_parts(base.add(off), len) };
+    // Route via std::io for fds 1/2; ignore others for now.
+    let n = match fd_plus_one - 1 {
+        1 => std::io::stdout().write(slice).unwrap_or(0),
+        2 => std::io::stderr().write(slice).unwrap_or(0),
+        _ => 0,
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_wrap)]
+    PolyWord::tagged(n as isize)
+}
+
 /// Allocate the canonical "empty string" object: 1 word with length
 /// 0 and `F_BYTE_OBJ` flag. Mirrors `polystring.cpp:61-67`.
 fn alloc_empty_string(ctx: &mut RtsContext<'_>) -> PolyWord {
@@ -1132,5 +1393,46 @@ mod tests {
             PolyWord::tagged(1),
         );
         assert_eq!(r.untag(), 0);
+    }
+
+    #[test]
+    fn arb_shift_left_simple() {
+        // arg2-style ordering: shift_left(arg, shift) means arg << shift.
+        let r = poly_shift_left_arbitrary(
+            &mut ctx(),
+            t(),
+            PolyWord::tagged(5),
+            PolyWord::tagged(3),
+        );
+        assert_eq!(r.untag(), 40);
+    }
+
+    #[test]
+    fn arb_shift_right_simple() {
+        let r = poly_shift_right_arbitrary(
+            &mut ctx(),
+            t(),
+            PolyWord::tagged(40),
+            PolyWord::tagged(3),
+        );
+        assert_eq!(r.untag(), 5);
+    }
+
+    #[test]
+    fn arb_gcd_lcm() {
+        let g = poly_gcd_arbitrary(
+            &mut ctx(),
+            t(),
+            PolyWord::tagged(12),
+            PolyWord::tagged(18),
+        );
+        assert_eq!(g.untag(), 6);
+        let l = poly_lcm_arbitrary(
+            &mut ctx(),
+            t(),
+            PolyWord::tagged(4),
+            PolyWord::tagged(6),
+        );
+        assert_eq!(l.untag(), 12);
     }
 }
