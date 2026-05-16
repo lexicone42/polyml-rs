@@ -1186,6 +1186,52 @@ impl Interpreter {
                 self.pc_offset_signed(-((off as isize) + 3))?;
                 Ok(StepResult::Continue)
             }
+            // CASE16: switch dispatch with a u16 jump table inline.
+            //
+            //   Stack: top is the (tagged) selector.
+            //   PC layout: [arg1_lo arg1_hi  off0_lo off0_hi  off1...]
+            //   where arg1 is the number of cases (entries in table).
+            //
+            // Pop selector, untag → u. If u >= arg1 or u < 0, jump to
+            // the default case at pc + 2 + arg1*2 (past the table).
+            // Otherwise PC moves past the count, then adds the u16
+            // offset stored at table entry u (= bytes at pc + u*2).
+            //
+            // See bytecode.cpp:376-385.
+            INSTR_CASE16 => {
+                // Selector is conventionally tagged but upstream just
+                // does UNTAGGED unconditionally — we mirror that.
+                let selector = self.pop()?;
+                let u = selector.untag();
+                // Read arg1 = u16 inline. `fetch_u16_le` advances PC
+                // past it; we hold on to the "table start" position
+                // afterwards.
+                let table_start = self.pc;
+                let arg1 = self.fetch_u16_le()? as isize;
+                let table_after = self.pc; // immediately past arg1
+                if u < 0 || u >= arg1 {
+                    // Out of range: jump to default case at table_after + arg1*2
+                    // (We've already advanced past arg1; just add arg1*2.)
+                    self.pc_offset_signed(arg1 * 2)?;
+                } else {
+                    // SAFETY: u in [0, arg1), so table entry exists.
+                    let entry_off = unsafe {
+                        let entry = table_after.add((u as usize) * 2);
+                        let lo = *entry as usize;
+                        let hi = *entry.add(1) as usize;
+                        lo + hi * 256
+                    };
+                    // Upstream lands at table_after + entry_off:
+                    //   `pc += 2; pc += pc[u*2]+pc[u*2+1]*256;`
+                    //   the second `pc += ...` reads from the table
+                    //   THEN adds — base is table_after.
+                    self.pc = table_after;
+                    self.pc_offset_signed(entry_off as isize)?;
+                }
+                let _ = table_start;
+                Ok(StepResult::Continue)
+            }
+
             INSTR_JUMP8_FALSE => {
                 let off = self.fetch_u8()? as usize;
                 if self.pop()? == PolyWord::tagged(0) {
@@ -1483,9 +1529,37 @@ impl Interpreter {
                 let val = unsafe { *p.add(1) };
                 self.push_continue(val)
             }
-            EXTINSTR_RESET_W | EXTINSTR_RESET_R_W => {
+            EXTINSTR_RESET_W => {
+                // Wide RESET — drop top N items, no preservation.
+                // Mirrors INSTR_RESET_B's "wide" counterpart.
+                let n = self.fetch_u16_le()? as usize;
+                self.drop_n(n)
+            }
+            EXTINSTR_RESET_R_W => {
                 let n = self.fetch_u16_le()? as usize;
                 self.reset(n)
+            }
+
+            // signedToLongW: box a tagged int as a 1-word byte object
+            // holding the (sign-extended) untagged value. Replaces
+            // top in place. bytecode.cpp:1559-1569.
+            EXTINSTR_SIGNED_TO_LONG_W => {
+                let x = self.pop()?;
+                let value = x.untag(); // isize, sign-preserving
+                let space = self
+                    .alloc_space
+                    .as_mut()
+                    .ok_or(InterpError::NoAllocator)?;
+                let p = space.alloc(1);
+                // SAFETY: just allocated 1 word.
+                unsafe {
+                    crate::space::set_length_word(p, 1, crate::length_word::F_BYTE_OBJ);
+                    // Cast the untagged signed value back into a word
+                    // for storage (raw bit pattern).
+                    #[allow(clippy::cast_sign_loss)]
+                    p.write(PolyWord::from_bits(value as usize));
+                }
+                self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
 
             // ----- Wider jumps / case

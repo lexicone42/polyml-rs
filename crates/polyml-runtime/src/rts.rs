@@ -221,9 +221,13 @@ pub fn patch_entry_points(
 // ---- Built-in RTS functions ------------------------------------------
 
 fn register_builtins(t: &mut RtsTable) {
-    t.register("PolyIsBigEndian", RtsFn::Arity0(poly_is_big_endian));
-    t.register("PolySizeDouble", RtsFn::Arity0(poly_size_double));
-    t.register("PolySizeFloat", RtsFn::Arity0(poly_size_float));
+    // These take a unit arg in SML (rtsCallFast1) even though the
+    // C signature is `()`. PolyML's C side gets away with it because
+    // x86-64 passes the unused arg in rdi/rsi which the C body
+    // ignores; we have to be explicit and register as Arity1.
+    t.register("PolyIsBigEndian", RtsFn::Arity1(|_, _| poly_is_big_endian_inner()));
+    t.register("PolySizeDouble", RtsFn::Arity1(|_, _| poly_size_double_inner()));
+    t.register("PolySizeFloat", RtsFn::Arity1(|_, _| poly_size_float_inner()));
     t.register("PolyFinish", RtsFn::Arity1(poly_finish));
     t.register(
         "PolyInterpretedEnterIntMode",
@@ -306,12 +310,12 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyThreadBroadcastInterrupt", RtsFn::Arity1(zero1));
 
     // Compiler / code-object helpers
-    //   PolySetCodeConstant(threadId, code, offset, value, flags) → 5
-    t.register("PolySetCodeConstant", RtsFn::Arity5(zero5));
-    //   PolyGetCodeByte(threadId, code, offset) → 3
-    t.register("PolyGetCodeByte", RtsFn::Arity3(zero3));
-    //   PolyCopyByteVecToClosure(threadId, byteVec) → 2
-    t.register("PolyCopyByteVecToClosure", RtsFn::Arity2(zero2));
+    //   PolySetCodeConstant(closure, offset, cWord, flags) → 4 (no threadId)
+    t.register("PolySetCodeConstant", RtsFn::Arity4(zero4));
+    //   PolyGetCodeByte(code, offset) → 2 (no threadId; rtsCallFast2)
+    t.register("PolyGetCodeByte", RtsFn::Arity2(zero2));
+    //   PolyCopyByteVecToClosure(threadId, byteVec, closure) → 3
+    t.register("PolyCopyByteVecToClosure", RtsFn::Arity3(zero3));
     //   PolyLockMutableClosure(threadId, closure) → 2
     t.register("PolyLockMutableClosure", RtsFn::Arity2(zero2));
 
@@ -351,19 +355,16 @@ fn zero5(
 
 // ---- Built-in impls (real where simple, stubbed otherwise) -----------
 
-#[allow(clippy::needless_pass_by_value)]
-fn poly_is_big_endian(_: &mut RtsContext<'_>) -> PolyWord {
+fn poly_is_big_endian_inner() -> PolyWord {
     // We support little-endian targets only (x86_64, aarch64, riscv64).
     PolyWord::tagged(0)
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn poly_size_double(_: &mut RtsContext<'_>) -> PolyWord {
+fn poly_size_double_inner() -> PolyWord {
     PolyWord::tagged(isize::try_from(std::mem::size_of::<f64>()).unwrap_or(8))
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn poly_size_float(_: &mut RtsContext<'_>) -> PolyWord {
+fn poly_size_float_inner() -> PolyWord {
     PolyWord::tagged(isize::try_from(std::mem::size_of::<f32>()).unwrap_or(4))
 }
 
@@ -796,8 +797,10 @@ mod tests {
         let token = t.token_for("PolyIsBigEndian").unwrap();
         let entry = t.entry(token).unwrap();
         let mut ctx = RtsContext { alloc_space: None };
+        // SML's rtsCallFast1 means PolyIsBigEndian is invoked with a
+        // dummy unit arg, even though the C function takes none.
         let result = match entry.func {
-            RtsFn::Arity0(f) => f(&mut ctx),
+            RtsFn::Arity1(f) => f(&mut ctx, PolyWord::tagged(0)),
             _ => panic!("arity mismatch"),
         };
         assert_eq!(result.untag(), 0); // little-endian
