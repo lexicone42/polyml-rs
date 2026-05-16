@@ -174,6 +174,30 @@ fn step_bootstrap_entry_as_far_as_possible() {
         Err(e) => {
             eprintln!("Error after {steps} steps at pc_offset={}: {e}", interp.pc_offset());
             dump_recent(&recent);
+            // Hex-dump the bytes around the failing PC in the current
+            // code object. The PC reported above is the byte just
+            // after the failing opcode's last fetch.
+            let code_addr = interp.code_start_addr();
+            let pc_off = interp.pc_offset();
+            let lo = pc_off.saturating_sub(60);
+            let hi = pc_off + 12;
+            eprintln!(
+                "--- Bytes at code=0x{code_addr:016x} [{lo}..{hi}] (crash PC = {pc_off}) ---"
+            );
+            // SAFETY: code_start lives for the interpreter's lifetime;
+            // we read within the same allocation by induction (PC was
+            // valid as recently as the crash).
+            let code_ptr = code_addr as *const u8;
+            for off in lo..hi {
+                let b = unsafe { *code_ptr.add(off) };
+                let marker = if off == pc_off { " ← crash PC" } else { "" };
+                eprintln!("  +{off:4}: 0x{b:02x}{marker}");
+            }
+            // Dump top of stack.
+            eprintln!("Stack depth at crash: {}.", interp.stack_height());
+            for (i, w) in interp.dump_stack_top(10).into_iter().enumerate() {
+                eprintln!("  sp[{i:2}] = {w:?}");
+            }
         }
     }
     // Don't fail; the goal is observation.

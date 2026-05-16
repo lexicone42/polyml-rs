@@ -161,16 +161,22 @@ fn profile_bootstrap_hot_pcs() {
     // 5M steps is enough to see the dominant loop without taking
     // ages. Bumping this gives more accurate ratios but doesn't
     // change which PCs are hottest.
-    let max_steps = 50_000_000;
-    for _ in 0..max_steps {
+    let max_steps = 5_000_000;
+    let mut last_steps = 0u64;
+    for n in 0..max_steps {
+        if n % 50_000 == 0 {
+            last_steps = n;
+            eprintln!("  step {n}");
+        }
         match interp.step() {
             Ok(StepResult::Continue) => {}
             other => {
-                eprintln!("Stopped early: {other:?}");
+                eprintln!("Stopped early at step {n}: {other:?}");
                 break;
             }
         }
     }
+    eprintln!("Last successful checkpoint: step {last_steps}");
 
     let diag = interp.take_diagnostics().expect("diagnostics enabled");
     report(&diag);

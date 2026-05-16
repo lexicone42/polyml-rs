@@ -30,7 +30,7 @@
 //!   appropriate arity.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::poly_word::PolyWord;
 
@@ -228,7 +228,10 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyIsBigEndian", RtsFn::Arity1(|_, _| poly_is_big_endian_inner()));
     t.register("PolySizeDouble", RtsFn::Arity1(|_, _| poly_size_double_inner()));
     t.register("PolySizeFloat", RtsFn::Arity1(|_, _| poly_size_float_inner()));
-    t.register("PolyFinish", RtsFn::Arity1(poly_finish));
+    // PolyFinish: (threadId, exitCode). C signature has 2 args
+    // — never returns in upstream, but in our setup we treat it as
+    // a "return cleanly to the test harness" signal.
+    t.register("PolyFinish", RtsFn::Arity2(poly_finish));
     // EnterIntMode is `rtsCallFast0` (Fast = no threadId, 0 args).
     t.register(
         "PolyInterpretedEnterIntMode",
@@ -373,12 +376,45 @@ fn poly_size_float_inner() -> PolyWord {
     PolyWord::tagged(isize::try_from(std::mem::size_of::<f32>()).unwrap_or(4))
 }
 
-/// `PolyFinish(code)` — process exit. We can't actually exit here
-/// (we're inside the interpreter), so we just stash the value and
-/// return zero. The caller of `Interpreter::run` should treat
-/// subsequent returns as program termination.
+/// Process-exit signal: set by [`poly_finish`] when PolyML's
+/// PolyFinish RTS is called. Reading this from `Interpreter::step`
+/// lets us cleanly stop instead of executing junk bytecode after
+/// "exit". The low bits store `exit_code + 1` (so 0 = not exited).
+static FINISH_REQUESTED: AtomicUsize = AtomicUsize::new(0);
+
+/// Returns `Some(exit_code)` iff PolyFinish was called since the last
+/// [`clear_finish_requested`].
+#[must_use]
+pub fn finish_requested() -> Option<isize> {
+    match FINISH_REQUESTED.load(Ordering::Relaxed) {
+        0 => None,
+        #[allow(clippy::cast_possible_wrap)]
+        n => Some((n - 1) as isize),
+    }
+}
+
+/// Reset the finish flag. Call before re-running an interpreter on
+/// the same RtsTable.
+pub fn clear_finish_requested() {
+    FINISH_REQUESTED.store(0, Ordering::Relaxed);
+}
+
+/// `PolyFinish(threadId, code)` — process exit. We can't actually
+/// `exit()` from inside the interpreter, so we set a global flag
+/// the dispatcher checks at the top of `step()`. The interpreter
+/// then yields `StepResult::Returned(code)` cleanly.
 #[allow(clippy::needless_pass_by_value)]
-fn poly_finish(_: &mut RtsContext<'_>, _exit_code: PolyWord) -> PolyWord {
+fn poly_finish(
+    _: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    exit_code: PolyWord,
+) -> PolyWord {
+    if RTS_TRACE.load(Ordering::Relaxed) {
+        eprintln!("  PolyFinish called with exit code {exit_code:?}");
+    }
+    let code = exit_code.untag();
+    #[allow(clippy::cast_sign_loss)]
+    FINISH_REQUESTED.store((code as usize).wrapping_add(1), Ordering::Relaxed);
     PolyWord::tagged(0)
 }
 
@@ -517,6 +553,11 @@ fn poly_basic_io_general(
         0 => wrap_file_descriptor(ctx, 0),
         1 => wrap_file_descriptor(ctx, 1),
         2 => wrap_file_descriptor(ctx, 2),
+        // 10: get text as a string. Returning TAGGED(0) breaks the
+        // consumer (which dereferences the result as a string ptr).
+        // EOF = empty string. Allocates a proper 1-word
+        // PolyStringObject with length 0 + F_BYTE_OBJ.
+        10 | 26 => alloc_empty_string(ctx),
         // 15: return recommended buffer size (4096)
         15 => PolyWord::tagged(4096),
         // 16: input available? Pretend yes.
@@ -528,6 +569,7 @@ fn poly_basic_io_general(
         21 => PolyWord::tagged(3),
         // Various stub returns of TAGGED(0):
         //   7: close (no-op)
+        //   8/9: readArray — return 0 bytes read (= EOF)
         //   11/12: write array (wrote 0 bytes)
         //   17: bytes available
         //   18: get stream position
@@ -930,6 +972,22 @@ fn alloc_thread_object_stub(ctx: &mut RtsContext<'_>) -> PolyWord {
 /// Layout: 1-word byte object with flags
 /// `F_BYTE_OBJ | F_WEAK_BIT | F_MUTABLE_BIT | F_NO_OVERWRITE`
 /// per `run_time.cpp:396` `MakeVolatileWord`.
+/// Allocate the canonical "empty string" object: 1 word with length
+/// 0 and `F_BYTE_OBJ` flag. Mirrors `polystring.cpp:61-67`.
+fn alloc_empty_string(ctx: &mut RtsContext<'_>) -> PolyWord {
+    use crate::length_word::F_BYTE_OBJ;
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    let p = space.alloc(1);
+    // SAFETY: just allocated 1 word.
+    unsafe {
+        crate::space::set_length_word(p, 1, F_BYTE_OBJ);
+        p.write(PolyWord::from_bits(0)); // length = 0
+    }
+    PolyWord::from_ptr(p.cast_const())
+}
+
 fn wrap_file_descriptor(ctx: &mut RtsContext<'_>, fd: u32) -> PolyWord {
     use crate::length_word::{F_BYTE_OBJ, F_MUTABLE_BIT, F_NO_OVERWRITE, F_WEAK_BIT};
     let Some(space) = ctx.alloc_space.as_mut() else {

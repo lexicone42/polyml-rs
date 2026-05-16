@@ -467,6 +467,15 @@ impl Interpreter {
     pub fn step(&mut self) -> Result<StepResult, InterpError> {
         use opcodes::*;
 
+        // If PolyFinish was just called, halt cleanly with the
+        // requested exit code rather than executing junk bytecode
+        // past the "exit" point. (Upstream's PolyFinish calls
+        // `exit()` and never returns; we don't have that luxury.)
+        if let Some(code) = crate::rts::finish_requested() {
+            crate::rts::clear_finish_requested();
+            return Ok(StepResult::Returned(PolyWord::tagged(code)));
+        }
+
         let opcode_pc = self.pc;
         #[allow(clippy::cast_possible_truncation)]
         let off = self.pc_offset() as u32;
@@ -755,6 +764,14 @@ impl Interpreter {
             INSTR_LOAD_UNTAGGED => {
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
+                if !base.is_data_ptr() {
+                    if crate::rts::is_traced() {
+                        eprintln!(
+                            "  LOAD_UNTAGGED: base is not a pointer: {base:?}, index={index}"
+                        );
+                    }
+                    return Err(InterpError::NotAClosure(base));
+                }
                 let p = base.as_ptr::<PolyWord>();
                 // SAFETY: caller emits valid offsets
                 let raw = unsafe { *p.add(index) };
