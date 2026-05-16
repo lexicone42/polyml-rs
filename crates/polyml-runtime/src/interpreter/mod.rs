@@ -428,6 +428,21 @@ impl Interpreter {
             // ----- No-op
             INSTR_NO_OP => Ok(StepResult::Continue),
 
+            // ----- Stack-size check (function prologue)
+            //
+            // bytecode.cpp:472-484. The compiler emits this at function
+            // entry with a 16-bit immediate = stack words needed.
+            // Real PolyML would grow the stack or trap; we have a
+            // fixed-size stack and trust it's big enough. For now,
+            // just check and surface a clean error if not.
+            INSTR_STACK_SIZE16 => {
+                let needed = self.fetch_u16_le()? as usize;
+                if self.sp < needed {
+                    return Err(InterpError::StackOverflow);
+                }
+                Ok(StepResult::Continue)
+            }
+
             // ----- Constants
             INSTR_CONST_0 => self.push_continue(PolyWord::tagged(0)),
             INSTR_CONST_1 => self.push_continue(PolyWord::tagged(1)),
@@ -495,6 +510,86 @@ impl Interpreter {
             }
             INSTR_LOCK => self.clear_mutable_bit(false),
             INSTR_CLEAR_MUTABLE => self.clear_mutable_bit(true),
+
+            // ----- Generic allocation (with caller-supplied length+flags)
+            //
+            // allocByteMem: bytecode.cpp:1155-1164. Stack: [length, flags]
+            // top down (i.e., flags is top). Pops flags, peeks length,
+            // allocates `length` words with `flags`, replaces top with
+            // pointer.
+            INSTR_ALLOC_BYTE_MEM => {
+                let flags = self.pop()?.untag() as u8;
+                let length = self.peek(0)?.untag() as usize;
+                let p = self.allocate(length, flags)?;
+                // Bytes are uninitialized — caller fills.
+                self.pop()?;
+                self.push_continue(PolyWord::from_ptr(p.cast_const()))
+            }
+            // allocWordMemory: bytecode.cpp:1171-1183. Stack:
+            // [length, flags, initialiser] top down. Allocates with
+            // `length` and `flags`, initialises all slots to
+            // `initialiser`, replaces deepest (length) slot with pointer.
+            INSTR_ALLOC_WORD_MEMORY => {
+                let length = self.peek(2)?.untag() as usize;
+                let init = self.pop()?;
+                let flags = self.pop()?.untag() as u8;
+                let p = self.allocate(length, flags)?;
+                // SAFETY: just allocated `length` words
+                unsafe {
+                    for i in 0..length {
+                        p.add(i).write(init);
+                    }
+                }
+                self.pop()?; // pop length
+                self.push_continue(PolyWord::from_ptr(p.cast_const()))
+            }
+
+            // ----- Stack-allocated containers
+            //
+            // PolyML compiles small non-escaping tuples directly onto
+            // the stack rather than heap-allocating. STACK_CONTAINER_B N
+            // pushes N zero slots + one extra "container reference"
+            // word on top that points back into the stack at slot 0.
+            // (bytecode.cpp:672-679)
+            //
+            // The reference is a STACK ADDRESS, not a heap pointer; in
+            // our model it's an index into `self.stack`.
+            INSTR_STACK_CONTAINER_B => {
+                let n = self.fetch_u8()? as usize;
+                for _ in 0..n {
+                    self.push(PolyWord::tagged(0))?;
+                }
+                // Index of slot 0 (= the most recently pushed zero)
+                let ref_idx = self.sp;
+                self.push(PolyWord::from_bits(ref_idx))?;
+                Ok(StepResult::Continue)
+            }
+            // moveToContainerB N: pop value u, peek container ref on
+            // top, write u to container[N]. (bytecode.cpp:588-589)
+            INSTR_MOVE_TO_CONTAINER_B => {
+                let n = self.fetch_u8()? as usize;
+                let u = self.pop()?;
+                let container_ref = self.peek(0)?;
+                let ref_idx = container_ref.0;
+                if ref_idx + n >= self.stack.len() {
+                    return Err(InterpError::StackUnderflow);
+                }
+                self.stack[ref_idx + n] = u;
+                Ok(StepResult::Continue)
+            }
+            // indirectContainerB N: replace top (container ref) with
+            // container[N]. (bytecode.cpp:598-599)
+            INSTR_INDIRECT_CONTAINER_B => {
+                let n = self.fetch_u8()? as usize;
+                let container_ref = self.peek(0)?;
+                let ref_idx = container_ref.0;
+                if ref_idx + n >= self.stack.len() {
+                    return Err(InterpError::StackUnderflow);
+                }
+                let val = self.stack[ref_idx + n];
+                self.pop()?;
+                self.push_continue(val)
+            }
 
             // ----- Cell introspection (length / flag-byte of a heap obj)
             INSTR_CELL_LENGTH => {
@@ -624,6 +719,88 @@ impl Interpreter {
                 unsafe { p.add(index).write(to_store) };
                 self.pop()?;
                 self.push_continue(PolyWord::tagged(0))
+            }
+            // storeUntagged: pop untagged-bits + index, peek base,
+            // base[index] = bits (as raw, not re-tagged).
+            // bytecode.cpp:1259-1266.
+            INSTR_STORE_UNTAGGED => {
+                let raw = self.pop()?.untag() as usize;
+                let index = self.pop()?.untag() as usize;
+                let base = self.peek(0)?;
+                let p = base.as_ptr::<PolyWord>().cast_mut();
+                // SAFETY: caller emits valid offset on mutable base
+                unsafe { p.add(index).write(PolyWord::from_bits(raw)) };
+                self.pop()?;
+                self.push_continue(PolyWord::tagged(0))
+            }
+            // blockMoveByte: pop length, destOff, dest, srcOff, peek src,
+            // memmove. Use memmove (not memcpy) — bytecode permits
+            // overlapping ranges.
+            // bytecode.cpp:1281-1291.
+            INSTR_BLOCK_MOVE_BYTE => {
+                let length = self.pop()?.untag() as usize;
+                let dest_off = self.pop()?.untag() as usize;
+                let dest = self.pop()?.as_ptr::<u8>().cast_mut();
+                let src_off = self.pop()?.untag() as usize;
+                let src = self.peek(0)?.as_ptr::<u8>();
+                // SAFETY: caller emits valid offsets + lengths
+                unsafe { std::ptr::copy(src.add(src_off), dest.add(dest_off), length) };
+                self.pop()?;
+                self.push_continue(PolyWord::tagged(0))
+            }
+            // blockMoveWord: same but moves length WORDS (PolyWord-sized).
+            INSTR_BLOCK_MOVE_WORD => {
+                let length = self.pop()?.untag() as usize;
+                let dest_off = self.pop()?.untag() as usize;
+                let dest = self.pop()?.as_ptr::<PolyWord>().cast_mut();
+                let src_off = self.pop()?.untag() as usize;
+                let src = self.peek(0)?.as_ptr::<PolyWord>();
+                // SAFETY: caller emits valid offsets + lengths
+                unsafe { std::ptr::copy(src.add(src_off), dest.add(dest_off), length) };
+                self.pop()?;
+                self.push_continue(PolyWord::tagged(0))
+            }
+            // blockEqualByte: like blockMoveByte but memcmp == 0.
+            // bytecode.cpp:1293-1302.
+            INSTR_BLOCK_EQUAL_BYTE => {
+                let length = self.pop()?.untag() as usize;
+                let off2 = self.pop()?.untag() as usize;
+                let p2 = self.pop()?.as_ptr::<u8>();
+                let off1 = self.pop()?.untag() as usize;
+                let p1 = self.peek(0)?.as_ptr::<u8>();
+                // SAFETY: caller emits valid offsets + lengths
+                let equal = unsafe {
+                    let s1 = std::slice::from_raw_parts(p1.add(off1), length);
+                    let s2 = std::slice::from_raw_parts(p2.add(off2), length);
+                    s1 == s2
+                };
+                self.pop()?;
+                self.push_continue(if equal {
+                    PolyWord::tagged(1)
+                } else {
+                    PolyWord::tagged(0)
+                })
+            }
+            // blockCompareByte: like blockEqualByte but returns
+            // TAGGED(-1)/0/+1. bytecode.cpp:1304-1316.
+            INSTR_BLOCK_COMPARE_BYTE => {
+                let length = self.pop()?.untag() as usize;
+                let off2 = self.pop()?.untag() as usize;
+                let p2 = self.pop()?.as_ptr::<u8>();
+                let off1 = self.pop()?.untag() as usize;
+                let p1 = self.peek(0)?.as_ptr::<u8>();
+                // SAFETY: caller emits valid offsets + lengths
+                let ordering = unsafe {
+                    let s1 = std::slice::from_raw_parts(p1.add(off1), length);
+                    let s2 = std::slice::from_raw_parts(p2.add(off2), length);
+                    s1.cmp(s2)
+                };
+                self.pop()?;
+                self.push_continue(PolyWord::tagged(match ordering {
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Greater => 1,
+                }))
             }
 
             // ----- Exception handling
@@ -1081,10 +1258,14 @@ impl Interpreter {
                 unsafe { p.add(0).write(PolyWord::tagged(0)) };
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
-            // Mutex / atomic stubs: pessimistic (always contested).
-            // See PolyThreadMutexBlock in rts.rs for why optimistic
-            // mode exposes a handler-frame-layout issue downstream.
-            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX | EXTINSTR_ATOMIC_RESET => {
+            // Mutex stubs: optimistic (always acquired). Combined with
+            // the tail-call fix this gets us past the SML mutex retry
+            // loop. ATOMIC_RESET stays at zero.
+            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX => {
+                let _ = self.pop()?;
+                self.push_continue(PolyWord::tagged(1))
+            }
+            EXTINSTR_ATOMIC_RESET => {
                 let _ = self.pop()?;
                 self.push_continue(PolyWord::tagged(0))
             }
@@ -1464,7 +1645,11 @@ impl Interpreter {
     }
 
     /// Implement TAIL_B_B (and its extended sibling EXTINSTR_tail).
-    /// Mirrors `bytecode.cpp:391-424`.
+    /// Mirrors `bytecode.cpp:387-424`. The non-mixed-code path falls
+    /// through to `CALL_CLOSURE`, which re-pushes retPC + closure
+    /// after popping them — the net effect is that the new callee
+    /// sees the standard `[closure, retPC, args, ...]` frame layout
+    /// just like a normal CALL.
     fn do_tail_call(&mut self, tail_count: usize, skip: usize) -> Result<(), InterpError> {
         use crate::length_word;
 
@@ -1473,14 +1658,12 @@ impl Interpreter {
         }
 
         // Shift `tail_count` items from [sp, sp+tail_count) to
-        // [sp+skip, sp+skip+tail_count). The shift is "downward" in
-        // index terms (deeper into the stack); the source range is the
-        // current top items.
+        // [sp+skip, sp+skip+tail_count). This overwrites the current
+        // function's locals + frame slots with the new call frame's
+        // contents.
         let original_sp = self.sp;
         let mut tail_ptr = original_sp + tail_count;
         let mut new_sp = tail_ptr + skip;
-        // Boundary check: the destination range must not extend past
-        // the stack's end.
         if new_sp > self.stack.len() {
             return Err(InterpError::StackUnderflow);
         }
@@ -1491,16 +1674,26 @@ impl Interpreter {
         }
         self.sp = new_sp; // = original_sp + skip
 
-        // Pop the first item (discarded — it's a slot that becomes the
-        // PC field, but PC is overwritten by closure's code addr below).
-        let _ = self.pop()?;
-        // Pop the new closure.
+        // Pop the PC slot (originally a placeholder pushed by the
+        // caller's tail-call sequence) and the closure to call.
+        let ret_pc_slot = self.pop()?;
         let closure = self.pop()?;
         if !closure.is_data_ptr() {
             return Err(InterpError::NotAClosure(closure));
         }
-        // Set PC to the closure's first word (the code address) and
-        // refresh code-segment bounds.
+
+        // CRUCIAL: re-push retPC then closure (CALL_CLOSURE protocol).
+        // bytecode.cpp:412-414 — after `pc = ...; closure = ...;` the
+        // non-mixed path does `goto CALL_CLOSURE` which does
+        // `(--sp)->codeAddr = pc; *(--sp) = (PolyWord)closure;`.
+        // Without this, the new callee's stack lacks the standard
+        // [closure, retPC, args] frame layout and locals end up
+        // referencing wrong slots (handler-frame leakage manifested
+        // here as a CALL_LOCAL_B reading a non-closure value).
+        self.push(ret_pc_slot)?;
+        self.push(closure)?;
+
+        // Set PC and refresh code-segment bounds.
         let closure_ptr = closure.as_ptr::<PolyWord>();
         // SAFETY: closure invariant
         let code_word = unsafe { *closure_ptr };
@@ -1511,10 +1704,9 @@ impl Interpreter {
         self.code_end = consts_start.cast::<u8>();
         self.pc = self.code_start;
 
-        // CRUCIAL: do NOT push to `frames`. Tail call replaces the
-        // current frame; the eventual RETURN should pop the side-stack
-        // entry pushed by our CALLER (already there from when we were
-        // called).
+        // Do NOT push to `frames`. Tail call replaces the current
+        // frame; the eventual RETURN of the tail callee should pop
+        // the side-stack entry that our caller pushed.
         Ok(())
     }
 

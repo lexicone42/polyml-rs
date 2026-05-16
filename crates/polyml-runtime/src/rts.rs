@@ -292,7 +292,8 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyThreadMutexBlock", RtsFn::Arity2(poly_thread_mutex_block));
     t.register("PolyThreadMutexUnlock", RtsFn::Arity2(zero2));
     t.register("PolyThreadCondVarWake", RtsFn::Arity2(zero2));
-    t.register("PolyThreadForkThread", RtsFn::Arity3(zero3));
+    // PolyThreadForkThread takes (threadId, function, attrs, stack) — 4 args.
+    t.register("PolyThreadForkThread", RtsFn::Arity4(zero4));
     t.register("PolyThreadInterruptThread", RtsFn::Arity2(zero2));
     t.register("PolyThreadBroadcastInterrupt", RtsFn::Arity1(zero1));
 
