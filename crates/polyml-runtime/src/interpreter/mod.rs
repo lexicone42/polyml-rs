@@ -409,6 +409,14 @@ impl Interpreter {
 
         let opcode_pc = self.pc;
         let op = self.fetch_u8()?;
+        if crate::rts::is_traced() {
+            eprintln!(
+                "  [{:5}] op=0x{op:02x} sp_depth={} top={:?}",
+                self.pc_offset() - 1,
+                self.stack_height(),
+                if self.sp < self.stack.len() { Some(self.stack[self.sp]) } else { None }
+            );
+        }
         match op {
             // ----- No-op
             INSTR_NO_OP => Ok(StepResult::Continue),
@@ -1066,10 +1074,24 @@ impl Interpreter {
                 unsafe { p.add(0).write(PolyWord::tagged(0)) };
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
-            // lockMutex / tryLockMutex / atomicReset / atomicExchAdd:
-            // pop args, return TAGGED(0). See comment on EXTINSTR_CREATE_MUTEX
-            // above for why we go pessimistic here.
-            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX | EXTINSTR_ATOMIC_RESET => {
+            // Mutex stubs (lockMutex / tryLockMutex): pessimistic
+            // mode returns False (= contested) on every attempt,
+            // sending the bootstrap into the PolyThreadMutexBlock
+            // fallback. This yields a deterministic 376-step run
+            // that halts on stack underflow, which is the most
+            // predictable wall to iterate against.
+            //
+            // Switching to "optimistic" (return True / acquired)
+            // exposes downstream bugs from OTHER stubs returning
+            // wrong-shaped data (concretely: a CALL_LOCAL_B receives
+            // a misaligned address read from a stubbed PolyBasicIOGeneral
+            // result). Until those are real, optimistic mode is
+            // strictly worse for debugging.
+            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX => {
+                let _ = self.pop()?;
+                self.push_continue(PolyWord::tagged(0)) // False = contested
+            }
+            EXTINSTR_ATOMIC_RESET => {
                 let _ = self.pop()?;
                 self.push_continue(PolyWord::tagged(0))
             }
@@ -1512,7 +1534,16 @@ impl Interpreter {
     fn do_call(&mut self, closure: PolyWord) -> Result<(), InterpError> {
         use crate::length_word;
 
-        if !closure.is_data_ptr() {
+        if !closure.is_data_ptr() || closure.0 & (std::mem::size_of::<usize>() - 1) != 0 {
+            // Diagnostic: print recent frame info to help locate the
+            // bad call. Only when RTS_TRACE is on to avoid noise.
+            if crate::rts::is_traced() {
+                eprintln!(
+                    "  CALL bad closure: {closure:?} | frames depth={} | code_obj=0x{:x}",
+                    self.frames.len(),
+                    self.code_start as usize
+                );
+            }
             return Err(InterpError::NotAClosure(closure));
         }
         // Save the *current* PC as the return address. By this point

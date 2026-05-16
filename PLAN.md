@@ -119,27 +119,55 @@ interpreted, and can compile small SML programs into pexport images
 itself. **At this point we no longer need upstream `poly` for
 anything.**
 
+**Current status (mid-session 2026-05-16): infrastructurally complete;
+real-bootstrap-execution still pending.** Concretely:
+- Full dispatch loop (~85 opcodes) including ALU, control flow,
+  allocation, exception handling, tail calls, all extended opcodes
+  we've hit, fused-local peephole opcodes.
+- Real RTS dispatch infrastructure (`polyml-runtime::rts`): registry,
+  loader-time entry-point patching, arity-checked dispatch.
+- All 39 entry points in `bootstrap64.txt` resolve cleanly through
+  the registry (some real, most stubbed → TAGGED 0).
+- Empirical: 376 bytecode instructions execute on the real bootstrap
+  before hitting a stack-underflow caused by stubbed RTS calls
+  returning placeholder values rather than the structured data the
+  bootstrap expects.
+
+What's *left* for Phase 2.1:
+- Real implementations of the stubbed RTS functions, in particular:
+  - Arbitrary-precision arithmetic (the `Poly*Arbitrary` family) —
+    needs a big-int representation and matching the upstream object
+    layout for long-format numbers.
+  - `PolyBasicIOGeneral` — multi-purpose I/O dispatch by `code` arg.
+  - Compiler helpers (`PolySetCodeConstant`, `PolyGetCodeByte`,
+    `PolyCopyByteVecToClosure`, `PolyLockMutableClosure`).
+  - Single-threaded-correct mutex/cond-var semantics.
+- A "real" stack maps story is also needed when GC enters the picture.
+
+Estimate: 3-4 weeks of focused work for an experienced engineer to get
+to actual end-to-end SML compilation. Could be done in parallel with
+Phase 2.2.
+
 1. **Read interpreter.cpp + bytecode.cpp + int_opcodes.h end-to-end** (1w)
-   before coding. The opcode list is the contract.
+   before coding. The opcode list is the contract. **[DONE]**
 2. **Implement opcodes** (3w). Probably 80+ ops; many are trivial
    load/store/branch. Keep parity with C++ exactly; no clever
-   rewrites until we have a working baseline.
+   rewrites until we have a working baseline. **[DONE for ~85 ops]**
 3. **TaskData / SaveVec / RTS-call plumbing for interpreter** (1w).
    The interpreter uses the same allocation trap mechanism as native
-   code, so this overlaps with the Monday-milestone code.
-4. **Debugging and Stage1-7.sml validation** (1w). Run the full
-   bootstrap pipeline on our runtime. If Stage7 produces a heap
-   image, we win.
+   code, so this overlaps with the Monday-milestone code. **[DONE]**
+4. **Real RTS impls + Stage1-7.sml validation** (3-4w). Implement
+   the stubbed RTS functions; run the full bootstrap pipeline on our
+   runtime. If Stage7 produces a heap image, we win.
 
 **Risks**:
-- The interpreter shares conventions with native code (TaskData
-  layout, code-object layout, exception chain). Mismatches between
-  what we plumb here and what later Cranelift code does = subtle bugs.
-  Read both `arm64.cpp` and `interpreter.cpp` for the shared
-  invariants *before* committing to the structs.
-- Opcode list might be wider than we think. Interpreter perf isn't
-  the goal — *fidelity* is. Don't optimize until correctness is
-  there.
+- ~~The interpreter shares conventions with native code (TaskData
+  layout, code-object layout, exception chain).~~ Confirmed
+  manageable; the two-pass loader + per-frame side-stack handle
+  things cleanly.
+- The big-int representation has to match upstream byte-for-byte
+  (it's part of the heap-image's data, not just an in-memory format).
+  That'll be the bulk of step 4.
 
 ### Phase 2.2 — Cranelift backend, x86_64 (~8 weeks)
 

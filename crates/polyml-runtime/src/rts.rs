@@ -44,6 +44,12 @@ pub fn set_rts_trace(on: bool) {
     RTS_TRACE.store(on, Ordering::Relaxed);
 }
 
+/// Is tracing currently enabled?
+#[must_use]
+pub fn is_traced() -> bool {
+    RTS_TRACE.load(Ordering::Relaxed)
+}
+
 /// Public entry for the interpreter's dispatch site to log a call.
 pub fn trace_call(name: &str, n_args: usize) {
     if RTS_TRACE.load(Ordering::Relaxed) {
