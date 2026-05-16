@@ -4,3 +4,7 @@
 //! upstream PolyML (`vendor/polyml/libpolyml/pexport.cpp`). Eventually
 //! this crate will also implement the new `bicimage` format described
 //! in `notes/hard-problems.md` §5.
+
+pub mod pexport;
+
+pub use pexport::{Image, Object, ObjectBody, ObjectId, Value};

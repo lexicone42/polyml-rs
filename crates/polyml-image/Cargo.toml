@@ -8,5 +8,9 @@ repository.workspace   = true
 authors.workspace      = true
 description = "PolyML heap-image formats: pexport reader/writer (and eventually bicimage)"
 
+[dependencies]
+bitflags = "2.6"
+thiserror = "2"
+
 [lints]
 workspace = true
