@@ -28,6 +28,11 @@ must_use_candidate = "allow"
 # We reference C/C++ identifiers from upstream PolyML in doc comments
 # (e.g. MA_Interpreted, globalHeapBase). Backticking them is style noise.
 doc_markdown = "allow"
+# `clippy::missing_const_for_fn` is nursery and over-eager — it flags
+# functions taking &Vec, functions doing pointer writes, etc., that
+# can't actually be const-evaluated. We add const where it's both
+# possible and useful (data primitives) by hand instead.
+missing_const_for_fn = "allow"
 
 [workspace.dependencies]
 polyml-runtime = { path = "crates/polyml-runtime" }

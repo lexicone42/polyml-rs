@@ -8,5 +8,9 @@ repository.workspace   = true
 authors.workspace      = true
 description = "PolyML runtime: heap, GC, scheduler, FFI, exceptions"
 
+[dependencies]
+polyml-image = { workspace = true }
+thiserror = "2"
+
 [lints]
 workspace = true
