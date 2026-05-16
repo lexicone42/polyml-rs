@@ -1107,7 +1107,14 @@ impl Interpreter {
             }
             INSTR_JUMP_BACK8 => {
                 let off = self.fetch_u8()? as usize;
-                self.pc_offset_signed(-((off as isize) + 1))?;
+                // Compiler emits diff = ic - dest (where ic is the
+                // opcode position and dest is destination). Upstream's
+                // interpreter `pc -= *pc + 1` (with pc at the
+                // immediate, = ic+1) lands at pc = ic+1 - diff - 1
+                // = ic - diff = dest. Our self.pc is at ic+2 after
+                // both fetches, so we subtract (off + 2) to land at
+                // ic - off = dest.
+                self.pc_offset_signed(-((off as isize) + 2))?;
                 Ok(StepResult::Continue)
             }
             INSTR_JUMP16 => {
@@ -1117,7 +1124,9 @@ impl Interpreter {
             }
             INSTR_JUMP_BACK16 => {
                 let off = self.fetch_u16_le()? as usize;
-                self.pc_offset_signed(-((off as isize) + 1))?;
+                // Same shape as JUMP_BACK8 but 16-bit immediate;
+                // self.pc is at ic+3 after fetches.
+                self.pc_offset_signed(-((off as isize) + 3))?;
                 Ok(StepResult::Continue)
             }
             INSTR_JUMP8_FALSE => {
@@ -1913,7 +1922,8 @@ mod tests {
     #[test]
     fn loop_jump_back() {
         // Tight loop: counter starts at 5, subtract 1 each iter, exit
-        // when zero. Mirrors the older test but with RETURN_B 0.
+        // when zero. JUMP_BACK8 immediate = ic - dest (= compiler's
+        // diff formula): opcode at pc=10, destination at pc=2, so 8.
         let code = vec![
             INSTR_CONST_INT_B,
             5,
@@ -1927,7 +1937,7 @@ mod tests {
             INSTR_JUMP8_TRUE,
             2,
             INSTR_JUMP_BACK8,
-            9,
+            8, // 10 - 2 = 8
             INSTR_RETURN_B,
             0,
         ];
