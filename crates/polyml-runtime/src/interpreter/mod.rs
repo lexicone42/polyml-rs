@@ -1074,24 +1074,15 @@ impl Interpreter {
                 unsafe { p.add(0).write(PolyWord::tagged(0)) };
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
-            // Mutex stubs (lockMutex / tryLockMutex): pessimistic
-            // mode returns False (= contested) on every attempt,
-            // sending the bootstrap into the PolyThreadMutexBlock
-            // fallback. This yields a deterministic 376-step run
-            // that halts on stack underflow, which is the most
-            // predictable wall to iterate against.
-            //
-            // Switching to "optimistic" (return True / acquired)
-            // exposes downstream bugs from OTHER stubs returning
-            // wrong-shaped data (concretely: a CALL_LOCAL_B receives
-            // a misaligned address read from a stubbed PolyBasicIOGeneral
-            // result). Until those are real, optimistic mode is
-            // strictly worse for debugging.
-            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX => {
-                let _ = self.pop()?;
-                self.push_continue(PolyWord::tagged(0)) // False = contested
-            }
-            EXTINSTR_ATOMIC_RESET => {
+            // Single-threaded mutex stub: pessimistic (always
+            // contested). Optimistic mode (return True) gets the
+            // bootstrap past the mutex-block loop but immediately
+            // hits downstream non-aligned-closure errors caused by
+            // OTHER RTS stubs returning wrong-shaped data. Until
+            // those are real (PolyBasicIOGeneral, arbitrary
+            // precision, etc.) the pessimistic 376-step wall is the
+            // most informative baseline.
+            EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX | EXTINSTR_ATOMIC_RESET => {
                 let _ = self.pop()?;
                 self.push_continue(PolyWord::tagged(0))
             }
