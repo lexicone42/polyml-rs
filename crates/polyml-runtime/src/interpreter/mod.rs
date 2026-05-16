@@ -426,6 +426,12 @@ impl Interpreter {
         Ok(u16::from_le_bytes([lo, hi]))
     }
 
+    fn fetch_u32_le(&mut self) -> Result<u32, InterpError> {
+        let lo = u32::from(self.fetch_u16_le()?);
+        let hi = u32::from(self.fetch_u16_le()?);
+        Ok(lo | (hi << 16))
+    }
+
     /// Add a signed offset to PC. Used by jumps and PC-relative
     /// constant addressing.
     fn pc_offset_signed(&mut self, delta: isize) -> Result<(), InterpError> {
@@ -1560,6 +1566,19 @@ impl Interpreter {
                     p.write(PolyWord::from_bits(value as usize));
                 }
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
+            }
+
+            // ----- Wider constant addressing
+            //
+            // CONST_ADDR32_16: PC-relative constant fetch with 32-bit
+            // byte offset + 16-bit constant index.
+            //   bytecode.cpp:2349-2356
+            EXTINSTR_CONST_ADDR32_16 => {
+                let byte_off = self.fetch_u32_le()? as usize;
+                let c_num = self.fetch_u16_le()? as usize;
+                // SAFETY: trusted compiler-emitted offsets.
+                let w = unsafe { self.read_pc_const(byte_off, c_num + 3) };
+                self.push_continue(w)
             }
 
             // ----- Wider jumps / case

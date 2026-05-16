@@ -229,13 +229,15 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolySizeDouble", RtsFn::Arity1(|_, _| poly_size_double_inner()));
     t.register("PolySizeFloat", RtsFn::Arity1(|_, _| poly_size_float_inner()));
     t.register("PolyFinish", RtsFn::Arity1(poly_finish));
+    // EnterIntMode is `rtsCallFast0` (Fast = no threadId, 0 args).
     t.register(
         "PolyInterpretedEnterIntMode",
-        RtsFn::Arity0(poly_interpreted_enter_int_mode),
+        RtsFn::Arity0(|_| poly_interpreted_enter_int_mode_inner()),
     );
+    // GetAbiList is `rtsCallFull0` (Full = +threadId, so 1 actual arg).
     t.register(
         "PolyInterpretedGetAbiList",
-        RtsFn::Arity0(poly_interpreted_get_abi_list),
+        RtsFn::Arity1(|_, _| poly_interpreted_get_abi_list_inner()),
     );
     t.register("PolyThreadMaxStackSize", RtsFn::Arity1(poly_thread_max_stack_size));
     t.register(
@@ -380,18 +382,11 @@ fn poly_finish(_: &mut RtsContext<'_>, _exit_code: PolyWord) -> PolyWord {
     PolyWord::tagged(0)
 }
 
-/// `PolyInterpretedEnterIntMode()` — switches the runtime into
-/// interpreted mode. We're always in interpreted mode. Returns zero.
-#[allow(clippy::needless_pass_by_value)]
-fn poly_interpreted_enter_int_mode(_: &mut RtsContext<'_>) -> PolyWord {
+fn poly_interpreted_enter_int_mode_inner() -> PolyWord {
     PolyWord::tagged(0)
 }
 
-/// Returns a list of ABIs supported by the interpreted-mode FFI. We
-/// don't support FFI at all yet — return an empty list (= NIL =
-/// TAGGED(0)).
-#[allow(clippy::needless_pass_by_value)]
-fn poly_interpreted_get_abi_list(_: &mut RtsContext<'_>) -> PolyWord {
+fn poly_interpreted_get_abi_list_inner() -> PolyWord {
     PolyWord::tagged(0) // nil
 }
 
