@@ -295,7 +295,7 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyThreadMutexUnlock", RtsFn::Arity2(poly_thread_mutex_unlock));
     t.register("PolyThreadCondVarWake", RtsFn::Arity2(zero2));
     // PolyThreadForkThread takes (threadId, function, attrs, stack) — 4 args.
-    t.register("PolyThreadForkThread", RtsFn::Arity4(zero4));
+    t.register("PolyThreadForkThread", RtsFn::Arity4(poly_thread_fork_thread));
     t.register("PolyThreadInterruptThread", RtsFn::Arity2(zero2));
     t.register("PolyThreadBroadcastInterrupt", RtsFn::Arity1(zero1));
 
@@ -541,6 +541,53 @@ fn poly_basic_io_general(
         // Other codes — stub.
         _ => PolyWord::tagged(0),
     }
+}
+
+/// `PolyThreadForkThread(threadId, function, attrs, stack)` — in
+/// single-threaded mode, return a properly-shaped ThreadObject
+/// without actually running anything. The bootstrap stores this for
+/// later use; if it ever tries to interact with the thread, it'll
+/// see a well-formed (but dormant) descriptor.
+///
+/// ThreadObject layout per `processes.h:83-95`:
+///   slot 0: threadRef       (weak ref to TaskData)
+///   slot 1: flags           (tagged int, PFLAG_SYNCH = 2 default)
+///   slot 2: threadLocal     (head of thread-local list, TAGGED 0)
+///   slot 3: requestCopy     (interrupt request, TAGGED 0)
+///   slot 4: mlStackSize     (tagged int, 0 = unlimited)
+///   slots 5-8: debuggerSlots[4] (TAGGED 0)
+/// Flags: F_MUTABLE_BIT.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_thread_fork_thread(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    _function: PolyWord,
+    _attrs: PolyWord,
+    _stack: PolyWord,
+) -> PolyWord {
+    alloc_thread_object_stub(ctx)
+}
+
+fn alloc_thread_object_stub(ctx: &mut RtsContext<'_>) -> PolyWord {
+    use crate::length_word::F_MUTABLE_BIT;
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    let length = 9;
+    let p = space.alloc(length);
+    // SAFETY: just allocated 9 words
+    unsafe {
+        crate::space::set_length_word(p, length, F_MUTABLE_BIT);
+        p.add(0).write(PolyWord::tagged(0));     // threadRef (dummy)
+        p.add(1).write(PolyWord::tagged(2));     // flags = PFLAG_SYNCH
+        p.add(2).write(PolyWord::tagged(0));     // threadLocal = nil
+        p.add(3).write(PolyWord::tagged(0));     // requestCopy = none
+        p.add(4).write(PolyWord::tagged(0));     // mlStackSize = unlimited
+        for i in 5..length {
+            p.add(i).write(PolyWord::tagged(0)); // debuggerSlots
+        }
+    }
+    PolyWord::from_ptr(p.cast_const())
 }
 
 /// Allocate a "volatile word" object holding `fd+1` (PolyML's
