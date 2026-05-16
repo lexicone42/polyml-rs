@@ -274,6 +274,13 @@ impl Interpreter {
         self.stack.len() - self.sp
     }
 
+    /// Number of saved frames on the call side-stack. Useful for
+    /// detecting CALL / RETURN events during external tracing.
+    #[must_use]
+    pub fn frames_depth(&self) -> usize {
+        self.frames.len()
+    }
+
     /// Byte offset of the PC from the start of the current code
     /// segment.
     #[must_use]
@@ -1074,14 +1081,9 @@ impl Interpreter {
                 unsafe { p.add(0).write(PolyWord::tagged(0)) };
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
-            // Single-threaded mutex stub: pessimistic (always
-            // contested). Optimistic mode (return True) gets the
-            // bootstrap past the mutex-block loop but immediately
-            // hits downstream non-aligned-closure errors caused by
-            // OTHER RTS stubs returning wrong-shaped data. Until
-            // those are real (PolyBasicIOGeneral, arbitrary
-            // precision, etc.) the pessimistic 376-step wall is the
-            // most informative baseline.
+            // Mutex / atomic stubs: pessimistic (always contested).
+            // See PolyThreadMutexBlock in rts.rs for why optimistic
+            // mode exposes a handler-frame-layout issue downstream.
             EXTINSTR_LOCK_MUTEX | EXTINSTR_TRY_LOCK_MUTEX | EXTINSTR_ATOMIC_RESET => {
                 let _ = self.pop()?;
                 self.push_continue(PolyWord::tagged(0))
@@ -1526,13 +1528,38 @@ impl Interpreter {
         use crate::length_word;
 
         if !closure.is_data_ptr() || closure.0 & (std::mem::size_of::<usize>() - 1) != 0 {
-            // Diagnostic: print recent frame info to help locate the
-            // bad call. Only when RTS_TRACE is on to avoid noise.
+            // Diagnostic dump (RTS_TRACE only).
             if crate::rts::is_traced() {
+                let segment_size =
+                    unsafe { self.code_end.offset_from(self.code_start) as usize };
                 eprintln!(
-                    "  CALL bad closure: {closure:?} | frames depth={} | code_obj=0x{:x}",
+                    "  CALL bad closure: {closure:?} | frames depth={} | sp_depth={} | code_segment_bytes={}",
                     self.frames.len(),
-                    self.code_start as usize
+                    self.stack_height(),
+                    segment_size,
+                );
+                // Stack window
+                let n = std::cmp::min(40, self.stack_height());
+                for d in 0..n {
+                    let w = self.stack[self.sp + d];
+                    let marker = if w == closure { " <-- bad closure" } else { "" };
+                    eprintln!("    sp[{d:2}] = {w:?}{marker}");
+                }
+                // Bytecode window around the failing PC (which has
+                // already advanced past the opcode + immediate).
+                let cur_off = self.pc_offset();
+                let lo = cur_off.saturating_sub(20);
+                let hi = std::cmp::min(cur_off + 5, segment_size);
+                let bytes: Vec<u8> = (lo..hi)
+                    .map(|i| unsafe { *self.code_start.add(i) })
+                    .collect();
+                let hexdump = bytes
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                eprintln!(
+                    "    bytes [{lo}..{hi}] = {hexdump}  (PC after fetch = {cur_off})",
                 );
             }
             return Err(InterpError::NotAClosure(closure));

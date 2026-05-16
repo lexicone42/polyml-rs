@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use polyml_image::pexport::Image;
@@ -11,6 +12,22 @@ use polyml_runtime::{
     interpreter::{StepResult, opcodes},
     load_image, patch_entry_points, Interpreter, PolyWord, RtsTable,
 };
+
+/// Snapshot of one step for the failure-time trace dump.
+#[derive(Debug)]
+#[allow(dead_code)] // fields used via Debug derivation
+struct StepInfo {
+    n: usize,
+    pc_offset: usize,
+    op: u8,
+    sp_depth: usize,
+    top: Option<PolyWord>,
+    /// `Some(N)` when the immediately following step is in a different
+    /// code object — i.e., this step performed a CALL or tail-call.
+    new_frame_depth: Option<usize>,
+}
+
+const RECENT_CAP: usize = 80;
 
 fn workspace_root() -> PathBuf {
     let mut p: PathBuf = env!("CARGO_MANIFEST_DIR").into();
@@ -26,6 +43,7 @@ fn workspace_root() -> PathBuf {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn step_bootstrap_entry_as_far_as_possible() {
     let path = workspace_root().join("vendor/polyml/bootstrap/bootstrap64.txt");
@@ -37,6 +55,7 @@ fn step_bootstrap_entry_as_far_as_possible() {
     let mut loaded = load_image(&image).expect("load_image");
 
     // Register RTS functions and patch entry points.
+    // Toggle for verbose tracing when debugging.
     // polyml_runtime::rts::set_rts_trace(true);
     let rts = Arc::new(RtsTable::new());
     let (patched, missing) = patch_entry_points(&mut loaded, &rts);
@@ -67,9 +86,11 @@ fn step_bootstrap_entry_as_far_as_possible() {
     interp.test_seed_top(root_closure_word);
 
     // Step until something happens. Cap iterations to keep the test
-    // bounded.
+    // bounded. Keep a ring buffer of the most recent ~80 steps so we
+    // can dump them on failure.
     let max_steps = 100_000;
     let mut steps = 0;
+    let mut recent: VecDeque<StepInfo> = VecDeque::with_capacity(RECENT_CAP);
     let result = loop {
         if steps >= max_steps {
             break Ok::<_, polyml_runtime::InterpError>(StepResult::Unimplemented {
@@ -77,11 +98,46 @@ fn step_bootstrap_entry_as_far_as_possible() {
                 extended: false,
             });
         }
+        let pc_before = interp.pc_offset();
         steps += 1;
-        match interp.step() {
+        let stack_depth_before = interp.stack_height();
+        let frames_before = interp.frames_depth();
+        let outcome = interp.step();
+        let op = match outcome {
+            Ok(StepResult::Unimplemented { op, .. }) => Some(op),
+            _ => None,
+        };
+        let frames_after = interp.frames_depth();
+        let new_frame_depth = (frames_after != frames_before).then_some(frames_after);
+        if recent.len() == RECENT_CAP {
+            recent.pop_front();
+        }
+        recent.push_back(StepInfo {
+            n: steps,
+            pc_offset: pc_before,
+            op: op.unwrap_or(0xff),
+            sp_depth: stack_depth_before,
+            top: None, // peeking pre-step requires a method we don't have; skip
+            new_frame_depth,
+        });
+        match outcome {
             Ok(StepResult::Continue) => {}
             Ok(other) => break Ok(other),
             Err(e) => break Err(e),
+        }
+    };
+
+    let dump_recent = |recent: &VecDeque<StepInfo>| {
+        eprintln!("--- Last {} steps before halt ---", recent.len());
+        for s in recent {
+            let frame = s
+                .new_frame_depth
+                .map(|d| format!(" → frame depth {d}"))
+                .unwrap_or_default();
+            eprintln!(
+                "  #{:6} pc={:5} sp_depth={:3}{}",
+                s.n, s.pc_offset, s.sp_depth, frame
+            );
         }
     };
 
@@ -104,6 +160,7 @@ fn step_bootstrap_entry_as_far_as_possible() {
         }
         Err(e) => {
             eprintln!("Error after {steps} steps at pc_offset={}: {e}", interp.pc_offset());
+            dump_recent(&recent);
         }
     }
     // Don't fail; the goal is observation.
