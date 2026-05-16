@@ -7,11 +7,13 @@
 //! Stage 2 status: just the value model and a heap-image loader so
 //! far. No GC, no scheduler, no real execution.
 
+pub mod interpreter;
 pub mod length_word;
 pub mod loader;
 pub mod poly_word;
 pub mod space;
 
+pub use interpreter::{InterpError, Interpreter, StepResult};
 pub use loader::{load_image, LoadError, LoadedImage};
 pub use poly_word::PolyWord;
 pub use space::{MemorySpace, SpaceKind};
