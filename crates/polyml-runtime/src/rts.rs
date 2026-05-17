@@ -722,7 +722,7 @@ fn poly_subtract_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWor
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn poly_multiply_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+fn poly_multiply_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
     -> PolyWord
 {
     if let Some((x, y)) = both_tagged(arg2, arg1) {
@@ -730,8 +730,30 @@ fn poly_multiply_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWor
         if fits_tagged(r) {
             return PolyWord::tagged(r as isize);
         }
+        // Overflow: return a 1-word BOXED value so SML's
+        // `largeIntIsSmall` returns false. Without this, loops like
+        // LibrarySupport's `maxShort` (multiply-until-overflow)
+        // recurse forever. The boxed value carries the low word —
+        // enough for shape checks; full-precision math requires
+        // a real bignum allocator.
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        return alloc_overflow_box(ctx, r as i64 as usize);
     }
     PolyWord::tagged(0)
+}
+
+fn alloc_overflow_box(ctx: &mut RtsContext<'_>, low_word: usize) -> PolyWord {
+    use crate::length_word::F_BYTE_OBJ;
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    let p = space.alloc(1);
+    // SAFETY: just allocated 1 word.
+    unsafe {
+        crate::space::set_length_word(p, 1, F_BYTE_OBJ);
+        p.write(PolyWord::from_bits(low_word));
+    }
+    PolyWord::from_ptr(p.cast_const())
 }
 
 #[allow(clippy::needless_pass_by_value)]
