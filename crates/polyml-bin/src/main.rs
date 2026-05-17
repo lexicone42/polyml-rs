@@ -7,10 +7,14 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use polyml_image::pexport::{Image, ObjectBody};
-use polyml_runtime::{length_word, load_image, MemorySpace, PolyWord};
+use polyml_runtime::{
+    interpreter::diag::DiagState, length_word, load_image, patch_entry_points, Interpreter,
+    MemorySpace, PolyWord, RtsTable, StepResult,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "poly", version, about = "polyml-rs runtime CLI (work in progress)")]
@@ -32,6 +36,25 @@ enum Cmd {
         /// Path to a pexport (text) image.
         image: PathBuf,
     },
+    /// Execute a pexport heap image: load it, register RTS functions,
+    /// transfer control to the root closure, run until it returns or
+    /// hits an unimplemented opcode. Prints the result and a brief
+    /// execution profile.
+    Run {
+        /// Path to a pexport (text) image.
+        image: PathBuf,
+        /// Cap on bytecode instructions to execute. Default 5,000,000
+        /// is plenty for the standard bootstrap (~1.1M steps).
+        #[arg(long, default_value_t = 5_000_000)]
+        max_steps: u64,
+        /// Print an execution profile (hot code objects + PCs) after
+        /// the run. Adds a small per-step cost.
+        #[arg(long)]
+        profile: bool,
+        /// Trace each RTS function call as it happens.
+        #[arg(long)]
+        trace_rts: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -49,6 +72,121 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     match &cli.cmd {
         Cmd::Inspect { image } => inspect(image),
         Cmd::Load { image } => load(image),
+        Cmd::Run {
+            image,
+            max_steps,
+            profile,
+            trace_rts,
+        } => run_image(image, *max_steps, *profile, *trace_rts),
+    }
+}
+
+fn run_image(
+    path: &PathBuf,
+    max_steps: u64,
+    profile: bool,
+    trace_rts: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let image = Image::parse(&bytes)?;
+    let mut loaded = load_image(&image)?;
+
+    if trace_rts {
+        polyml_runtime::rts::set_rts_trace(true);
+    }
+    polyml_runtime::rts::clear_finish_requested();
+
+    let rts = Arc::new(RtsTable::new());
+    let (patched, missing) = patch_entry_points(&mut loaded, &rts);
+    println!("Loaded {}", path.display());
+    println!("  RTS patch: {patched} resolved, {} unresolved", missing.len());
+    if !missing.is_empty() {
+        println!("  unresolved entry points (first 10):");
+        for name in missing.iter().take(10) {
+            println!("    - {name}");
+        }
+    }
+
+    // Set up the call frame manually (no main loop yet — we pretend
+    // we're in the middle of a CALL on the root closure).
+    let root_closure_word = PolyWord::from_ptr(loaded.root);
+    // SAFETY: image is loaded; root is a valid closure.
+    let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
+    let mut interp = unsafe { Interpreter::from_code_object(8192, code_obj_ptr) }
+        .with_default_alloc_space(8 * 1024 * 1024)
+        .with_rts(rts);
+    if profile {
+        interp = interp.enable_diagnostics();
+    }
+    interp.test_seed_return_sentinel();
+    interp.test_seed_top(root_closure_word);
+
+    println!("Executing (cap {max_steps} steps)…");
+    let mut steps = 0u64;
+    let outcome = loop {
+        if steps >= max_steps {
+            break Ok::<_, polyml_runtime::InterpError>(StepResult::Continue);
+        }
+        steps += 1;
+        match interp.step() {
+            Ok(StepResult::Continue) => {}
+            Ok(other) => break Ok(other),
+            Err(e) => break Err(e),
+        }
+    };
+
+    println!();
+    println!("Executed {steps} bytecode step(s).");
+    match outcome {
+        Ok(StepResult::Returned(v)) => {
+            if v.is_tagged() {
+                println!(
+                    "Result: Tagged({}) — clean return (exit code in PolyFinish convention)",
+                    v.untag()
+                );
+            } else {
+                println!("Result: {v:?}");
+            }
+        }
+        Ok(StepResult::Continue) => {
+            println!("Hit step cap of {max_steps}. Bootstrap was still running.");
+        }
+        Ok(StepResult::Unimplemented { op, extended }) => {
+            let kind = if extended { "extended" } else { "base" };
+            println!("Stopped on unimplemented {kind} opcode 0x{op:02x}.");
+        }
+        Err(e) => {
+            println!("Halted with error: {e}");
+        }
+    }
+
+    if let Some(d) = interp.take_diagnostics() {
+        print_profile(&d);
+    }
+    Ok(())
+}
+
+fn print_profile(d: &DiagState) {
+    println!();
+    println!("--- Execution profile ---");
+    println!("Total steps observed:           {}", d.total_steps);
+    println!("Unique (code,offset) PCs:       {}", d.pc_visits.len());
+    println!(
+        "Unique code objects visited:    {}",
+        d.hot_code_objects(usize::MAX).len()
+    );
+    println!(
+        "Unique CALL targets:            {}",
+        d.hot_call_targets(usize::MAX).len()
+    );
+    println!();
+    #[allow(clippy::cast_precision_loss)]
+    let total = d.total_steps as f64;
+    println!("Top 10 hottest code objects:");
+    for (code, cnt) in d.hot_code_objects(10) {
+        #[allow(clippy::cast_precision_loss)]
+        let pct = 100.0 * cnt as f64 / total;
+        println!("  code=0x{code:016x}  steps={cnt:10}  ({pct:5.1}%)");
     }
 }
 
