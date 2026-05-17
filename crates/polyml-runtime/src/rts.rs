@@ -1981,4 +1981,24 @@ mod tests {
         );
         assert_eq!(l.untag(), 12);
     }
+
+    /// Multiply two near-max-tagged values; result overflows i64
+    /// and should come back as a boxed BigInt. Verify round-trip.
+    #[test]
+    fn arb_mult_overflow_round_trips_via_bigint() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut ctx = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
+        // 2^31 * 2^32 = 2^63 which exceeds MAX_TAGGED.
+        let a = PolyWord::tagged(1 << 31);
+        let b = PolyWord::tagged(1 << 32);
+        let r = poly_multiply_arbitrary(&mut ctx, PolyWord::tagged(0), a, b);
+        assert!(r.is_data_ptr(), "expected boxed bignum, got {r:?}");
+        // Read it back via our converter.
+        let bi = poly_word_to_bigint(r).expect("readable bignum");
+        assert_eq!(bi, BigInt::from(1u64 << 63), "wrong product");
+    }
 }

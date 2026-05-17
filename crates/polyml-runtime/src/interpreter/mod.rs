@@ -776,32 +776,9 @@ impl Interpreter {
                 let base = self.peek(0)?;
                 if !base.is_data_ptr() {
                     eprintln!(
-                        "  LOAD_UNTAGGED: base is not a pointer: {base:?}, index={index}, sp_depth={}, frames={}, code_segment_bytes={}",
-                        self.stack_height(),
-                        self.frames.len(),
-                        unsafe { self.code_end.offset_from(self.code_start) as usize },
+                        "  LOAD_UNTAGGED: base={base:?}, index={index}, sp_depth={}, frames={}",
+                        self.stack_height(), self.frames.len()
                     );
-                    // Dump stack window
-                    let n = std::cmp::min(20, self.stack_height());
-                    for d in 0..n {
-                        eprintln!("    sp[{d:2}] = {:?}", self.stack[self.sp + d]);
-                    }
-                    // Dump call frame chain
-                    eprintln!("  Call frames (top→bottom):");
-                    for (i, (s, _)) in self.frames.iter().rev().enumerate() {
-                        eprintln!("    [{i}] code_start=0x{:016x}", *s as usize);
-                    }
-                    // Dump bytecode window around failing PC
-                    let cur_off = self.pc_offset();
-                    let lo = cur_off.saturating_sub(40);
-                    let hi = cur_off + 4;
-                    eprintln!("  Bytecode @ code=0x{:016x} [{lo}..{hi}]:", self.code_start as usize);
-                    for off in lo..hi {
-                        // SAFETY: within current code segment
-                        let b = unsafe { *self.code_start.add(off) };
-                        let marker = if off + 1 == cur_off { " ← LOAD_UNTAGGED" } else { "" };
-                        eprintln!("    +{off:5}: 0x{b:02x}{marker}");
-                    }
                     return Err(InterpError::NotAClosure(base));
                 }
                 let p = base.as_ptr::<PolyWord>();
