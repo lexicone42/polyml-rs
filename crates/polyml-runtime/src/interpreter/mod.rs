@@ -173,12 +173,14 @@ pub struct Interpreter {
     /// exception-handler frame sits. `stack.len()` (past-the-end)
     /// means no handler in scope.
     handler_sp: usize,
-    /// Parallel stack tracking the call-frame depth at the time
-    /// each handler was registered. RAISE_EX uses this to roll
-    /// `self.frames` back to exactly the depth that was current
-    /// when SET_HANDLER fired — without it, we either keep frames
-    /// that no longer exist or drop frames we still need.
-    handler_frames_depth: Vec<usize>,
+    /// Parallel stack tracking, for each registered handler, the
+    /// call-frame depth AND the code-segment bounds at the time
+    /// it was installed. RAISE_EX uses this to roll `self.frames`
+    /// back to the right depth AND restore the handler's owning
+    /// code segment (which is the function that did SET_HANDLER —
+    /// NOT the caller, since the handler's PC lives in that
+    /// function's code bytes).
+    handler_frames_depth: Vec<(usize, *const u8, *const u8)>,
     /// Current exception packet (set by RAISE_EX, read by LDEXC).
     /// `None` means no exception has been raised yet.
     exception_packet: Option<PolyWord>,
@@ -908,7 +910,11 @@ impl Interpreter {
                 let entry = unsafe { self.pc.add(off) };
                 self.push(PolyWord::from_bits(entry as usize))?;
                 self.handler_sp = self.sp;
-                self.handler_frames_depth.push(self.frames.len());
+                self.handler_frames_depth.push((
+                    self.frames.len(),
+                    self.code_start,
+                    self.code_end,
+                ));
                 Ok(StepResult::Continue)
             }
             INSTR_SET_HANDLER16 => {
@@ -916,7 +922,11 @@ impl Interpreter {
                 let entry = unsafe { self.pc.add(off) };
                 self.push(PolyWord::from_bits(entry as usize))?;
                 self.handler_sp = self.sp;
-                self.handler_frames_depth.push(self.frames.len());
+                self.handler_frames_depth.push((
+                    self.frames.len(),
+                    self.code_start,
+                    self.code_end,
+                ));
                 Ok(StepResult::Continue)
             }
             INSTR_DELETE_HANDLER => {
@@ -962,22 +972,22 @@ impl Interpreter {
                 self.handler_sp = saved_old_handler.0;
                 self.pc = handler_pc_word.0 as *const u8;
                 // Roll the call-frame side stack back to the depth
-                // it had when this handler was installed, so subsequent
-                // RETURNs find the right callers.
-                let target_depth = self.handler_frames_depth.pop().unwrap_or(0);
+                // recorded at SET_HANDLER, and restore the code
+                // segment the handler lives in. The handler's PC
+                // is in the function that did SET_HANDLER — NOT
+                // the caller — so we must keep that function's
+                // code_start/code_end, even though its CALL frame
+                // is no longer on the side-stack (it's the "current"
+                // function from a frames-depth perspective).
+                let (target_depth, h_start, h_end) =
+                    self.handler_frames_depth.pop().unwrap_or((
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    ));
                 self.frames.truncate(target_depth);
-                // Recompute code bounds from the topmost remaining
-                // frame, if any. (If empty, the handler's PC is in
-                // the topmost code object — its bounds are gone but
-                // we treat null bounds as "checks disabled", and the
-                // next CALL/RETURN will refresh them.)
-                if let Some((s, e)) = self.frames.last().copied() {
-                    self.code_start = s;
-                    self.code_end = e;
-                } else {
-                    self.code_start = std::ptr::null();
-                    self.code_end = std::ptr::null();
-                }
+                self.code_start = h_start;
+                self.code_end = h_end;
                 Ok(StepResult::Continue)
             }
 
@@ -1618,6 +1628,23 @@ impl Interpreter {
                 }
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
+            // unsignedToLongW: same shape as signedToLongW but treats
+            // the input as unsigned. bytecode.cpp:1572-1582.
+            EXTINSTR_UNSIGNED_TO_LONG_W => {
+                let x = self.pop()?;
+                let value = x.0 >> 1; // untagged unsigned (drop tag bit)
+                let space = self
+                    .alloc_space
+                    .as_mut()
+                    .ok_or(InterpError::NoAllocator)?;
+                let p = space.alloc(1);
+                // SAFETY: just allocated 1 word.
+                unsafe {
+                    crate::space::set_length_word(p, 1, crate::length_word::F_BYTE_OBJ);
+                    p.write(PolyWord::from_bits(value));
+                }
+                self.push_continue(PolyWord::from_ptr(p.cast_const()))
+            }
 
             // ----- Wider constant addressing
             //
@@ -2059,15 +2086,15 @@ impl Interpreter {
         self.sp += 1;
         self.handler_sp = saved_old_handler.0;
         self.pc = handler_pc_word.0 as *const u8;
-        let target_depth = self.handler_frames_depth.pop().unwrap_or(0);
+        let (target_depth, h_start, h_end) =
+            self.handler_frames_depth.pop().unwrap_or((
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+            ));
         self.frames.truncate(target_depth);
-        if let Some((s, e)) = self.frames.last().copied() {
-            self.code_start = s;
-            self.code_end = e;
-        } else {
-            self.code_start = std::ptr::null();
-            self.code_end = std::ptr::null();
-        }
+        self.code_start = h_start;
+        self.code_end = h_end;
         Ok(())
     }
 

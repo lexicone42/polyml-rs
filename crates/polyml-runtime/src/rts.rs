@@ -342,7 +342,8 @@ fn register_builtins(t: &mut RtsTable) {
     //   PolyInterpretedCallFunction(threadId, cif, cfun, res, argv) → 5
     t.register("PolyInterpretedCallFunction", RtsFn::Arity5(zero5));
     //   PolyCreateEntryPointObject(threadId, name, isFunc) → 3
-    t.register("PolyCreateEntryPointObject", RtsFn::Arity3(zero3));
+    // PolyCreateEntryPointObject(threadId, name) → 2 (rtsCallFull1)
+    t.register("PolyCreateEntryPointObject", RtsFn::Arity2(zero2));
 }
 
 // Generic 0-returning stubs. The dispatch site (Interpreter::rts_call)
@@ -361,6 +362,7 @@ fn noop1(_: &mut RtsContext<'_>, _: PolyWord) -> PolyWord {
 fn noop2(_: &mut RtsContext<'_>, _: PolyWord, _: PolyWord) -> PolyWord {
     PolyWord::tagged(0)
 }
+#[allow(dead_code)]
 fn zero3(_: &mut RtsContext<'_>, _: PolyWord, _: PolyWord, _: PolyWord) -> PolyWord {
     PolyWord::tagged(0)
 }
