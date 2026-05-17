@@ -96,6 +96,10 @@ impl RtsFn {
 /// I/O, threading state, etc. as we implement more functions.
 pub struct RtsContext<'a> {
     pub alloc_space: Option<&'a mut crate::space::MemorySpace>,
+    /// Set by RTS functions that want to raise an SML exception
+    /// instead of returning normally. Read by the dispatch site
+    /// (`Interpreter::rts_call`) which routes to RAISE_EXCEPTION.
+    pub raised_exception: Option<PolyWord>,
 }
 
 // ---- RtsTable ---------------------------------------------------------
@@ -566,6 +570,19 @@ fn poly_basic_io_general(
         0 => wrap_file_descriptor(ctx, 0),
         1 => wrap_file_descriptor(ctx, 1),
         2 => wrap_file_descriptor(ctx, 2),
+        // 3/4: open file for text/binary input. `arg` is the filename
+        //     as a PolyString.
+        // 5/6: open file for text/binary output.
+        // 13/14: open file for text/binary append.
+        3 | 4 => open_file_input(ctx, arg),
+        5 | 6 => open_file_output(ctx, arg, false),
+        13 | 14 => open_file_output(ctx, arg, true),
+        // 7: close the file (and mark the stream as closed).
+        7 => close_file(strm),
+        // 8/9: read text/binary into an array. arg is a 3-tuple
+        //      (buffer, offset, length). Returns # bytes read
+        //      (0 = EOF).
+        8 | 9 => read_array_from_stream(strm, arg),
         // 10/26: read text/binary as a (PolyML) string. Route to
         // std::io::stdin for fd 0 so the bootstrap can actually
         // consume input from a pipe; everything else returns
@@ -585,9 +602,6 @@ fn poly_basic_io_general(
         // bootstrap probably wants to know if it's interactive.
         21 => PolyWord::tagged(3),
         // Various stub returns of TAGGED(0):
-        //   7: close (no-op)
-        //   8/9: readArray — return 0 bytes read (= EOF)
-        //   11/12: write array (wrote 0 bytes)
         //   17: bytes available
         //   18: get stream position
         //   19: seek to position (no-op)
@@ -1233,6 +1247,170 @@ fn write_array(strm: PolyWord, arg: PolyWord) -> PolyWord {
     PolyWord::tagged(n as isize)
 }
 
+/// Extract a Rust `String` from a PolyString pointer. Returns
+/// `None` for non-pointer / non-string-shaped args.
+fn poly_string_to_rust(s: PolyWord) -> Option<String> {
+    if !s.is_data_ptr() {
+        return None;
+    }
+    // SAFETY: caller passes a PolyString. Layout: word 0 = byte
+    // length; subsequent words hold the chars (zero-padded).
+    let p = s.as_ptr::<PolyWord>();
+    let len = unsafe { (*p).0 };
+    if len > 1_000_000 {
+        return None; // sanity bound
+    }
+    let chars_ptr = unsafe { p.add(1).cast::<u8>() };
+    let slice = unsafe { std::slice::from_raw_parts(chars_ptr, len) };
+    String::from_utf8(slice.to_vec()).ok()
+}
+
+/// IO subcodes 3/4: open a file for reading. Returns a wrapped fd
+/// or a TAGGED(0) on error (caller treats that as failure).
+fn open_file_input(ctx: &mut RtsContext<'_>, name_arg: PolyWord) -> PolyWord {
+    use std::os::fd::IntoRawFd;
+    let Some(name) = poly_string_to_rust(name_arg) else {
+        if RTS_TRACE.load(Ordering::Relaxed) {
+            eprintln!("  open_file_input: couldn't decode filename");
+        }
+        return PolyWord::tagged(0);
+    };
+    if RTS_TRACE.load(Ordering::Relaxed) {
+        eprintln!("  open_file_input: opening {name:?}");
+    }
+    match std::fs::File::open(&name) {
+        Ok(f) => {
+            let fd = f.into_raw_fd();
+            #[allow(clippy::cast_sign_loss)]
+            wrap_file_descriptor(ctx, fd as u32)
+        }
+        Err(e) => {
+            if RTS_TRACE.load(Ordering::Relaxed) {
+                eprintln!("  open_file_input: {name:?} → {e}");
+            }
+            // SML's `TextIO.openIn` chains via `handle IO.Io _ =>
+            // ...` to try alternate filenames. We need to actually
+            // raise an exception for that fallback to fire. The
+            // minimal exception packet is a TAGGED int that won't
+            // match `IO.Io` precisely but propagates as an
+            // unhandled exception until SOMETHING catches it (the
+            // handle is the outermost ` handle _ =>`).
+            ctx.raised_exception = Some(make_simple_exception(ctx, "Cannot open"));
+            PolyWord::tagged(0)
+        }
+    }
+}
+
+/// Allocate a minimal exception packet: a 2-word ordinary object
+/// (record/tuple shape) with [name_string, ()]. Real ML exceptions
+/// have a richer structure but this is enough to be caught by
+/// `handle _ =>` and propagate through the unwind path.
+fn make_simple_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
+    let s = alloc_poly_string(ctx, msg.as_bytes());
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return s;
+    };
+    let p = space.alloc(2);
+    // SAFETY: just allocated 2 words.
+    unsafe {
+        crate::space::set_length_word(p, 2, 0);
+        p.write(s);
+        p.add(1).write(PolyWord::tagged(0));
+    }
+    PolyWord::from_ptr(p.cast_const())
+}
+
+/// IO subcodes 5/6/13/14: open a file for writing (truncating
+/// unless `append`).
+fn open_file_output(ctx: &mut RtsContext<'_>, name_arg: PolyWord, append: bool) -> PolyWord {
+    use std::os::fd::IntoRawFd;
+    let Some(name) = poly_string_to_rust(name_arg) else {
+        return PolyWord::tagged(0);
+    };
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true);
+    if append {
+        opts.append(true);
+    } else {
+        opts.truncate(true);
+    }
+    opts.open(&name).map_or_else(
+        |_| PolyWord::tagged(0),
+        |f| {
+            let fd = f.into_raw_fd();
+            #[allow(clippy::cast_sign_loss)]
+            wrap_file_descriptor(ctx, fd as u32)
+        },
+    )
+}
+
+/// IO subcode 7: close the file. Skips stdio (fds 0/1/2). After
+/// close, mark the stream object as `0` (= "closed") so re-close
+/// is a no-op.
+fn close_file(strm: PolyWord) -> PolyWord {
+    use std::os::fd::FromRawFd;
+    if !strm.is_data_ptr() {
+        return PolyWord::tagged(0);
+    }
+    let p = strm.as_ptr::<PolyWord>().cast_mut();
+    // SAFETY: stream is a wrapped-fd object (1 byte-object word
+    // holding fd+1).
+    unsafe {
+        let fd_plus_one = (*p).0;
+        if fd_plus_one > 3 {
+            // Reconstruct File for Drop's sake (closes fd).
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let fd = (fd_plus_one - 1) as i32;
+            let _ = std::fs::File::from_raw_fd(fd);
+        }
+        p.write(PolyWord::from_bits(0));
+    }
+    PolyWord::tagged(0)
+}
+
+/// IO subcodes 8/9: read into an ML byte array at `(buffer, offset,
+/// length)`. Returns the # bytes actually read (0 = EOF). `arg` is
+/// the 3-tuple.
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::cast_possible_wrap)]
+fn read_array_from_stream(strm: PolyWord, arg: PolyWord) -> PolyWord {
+    use std::io::Read;
+    if !strm.is_data_ptr() || !arg.is_data_ptr() {
+        return PolyWord::tagged(0);
+    }
+    let fd_plus_one = unsafe { *strm.as_ptr::<PolyWord>() }.0;
+    if fd_plus_one == 0 {
+        return PolyWord::tagged(0);
+    }
+    let p = arg.as_ptr::<PolyWord>();
+    let (buf, offset, length) = unsafe { (*p, *p.add(1), *p.add(2)) };
+    if !buf.is_data_ptr() || !offset.is_tagged() || !length.is_tagged() {
+        return PolyWord::tagged(0);
+    }
+    let off = offset.untag() as usize;
+    let len = length.untag() as usize;
+    if len == 0 {
+        return PolyWord::tagged(0);
+    }
+    // SAFETY: buf is an ML byte array; off + len bounded by caller.
+    let base = buf.as_ptr::<u8>().cast_mut();
+    let slice = unsafe { std::slice::from_raw_parts_mut(base.add(off), len) };
+    #[allow(clippy::cast_possible_truncation)]
+    let fd = (fd_plus_one - 1) as i32;
+    let n = if fd == 0 {
+        std::io::stdin().read(slice).unwrap_or(0)
+    } else {
+        // For non-stdio fds, reconstruct a File to read, then
+        // immediately forget it so we don't close the fd.
+        use std::os::fd::{FromRawFd, IntoRawFd};
+        let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+        let r = f.read(slice).unwrap_or(0);
+        let _kept = f.into_raw_fd();
+        r
+    };
+    PolyWord::tagged(n as isize)
+}
+
 /// IO subcode 10/26: read a chunk of bytes from a stream into a
 /// fresh PolyStringObject (length-prefix word + chars).
 ///
@@ -1264,9 +1442,17 @@ fn read_string_from_stream(
         return alloc_empty_string(ctx);
     }
     let mut buf = vec![0u8; want];
-    let n = match fd_plus_one - 1 {
-        0 => std::io::stdin().read(&mut buf).unwrap_or(0),
-        _ => 0,
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    let fd = (fd_plus_one - 1) as i32;
+    let n = if fd == 0 {
+        std::io::stdin().read(&mut buf).unwrap_or(0)
+    } else {
+        // Borrow the fd without taking ownership (= no close).
+        use std::os::fd::{FromRawFd, IntoRawFd};
+        let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+        let r = f.read(&mut buf).unwrap_or(0);
+        let _kept = f.into_raw_fd();
+        r
     };
     if n == 0 {
         return alloc_empty_string(ctx);
@@ -1362,7 +1548,7 @@ mod tests {
         let t = RtsTable::new();
         let token = t.token_for("PolyIsBigEndian").unwrap();
         let entry = t.entry(token).unwrap();
-        let mut ctx = RtsContext { alloc_space: None };
+        let mut ctx = RtsContext { alloc_space: None, raised_exception: None };
         // SML's rtsCallFast1 means PolyIsBigEndian is invoked with a
         // dummy unit arg, even though the C function takes none.
         let result = match entry.func {
@@ -1379,7 +1565,7 @@ mod tests {
     }
 
     fn ctx() -> RtsContext<'static> {
-        RtsContext { alloc_space: None }
+        RtsContext { alloc_space: None, raised_exception: None }
     }
     fn t() -> PolyWord {
         PolyWord::tagged(0)

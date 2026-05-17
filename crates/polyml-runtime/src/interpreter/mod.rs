@@ -2021,6 +2021,7 @@ impl Interpreter {
         crate::rts::trace_call(entry_name, n_args);
         let mut ctx = RtsContext {
             alloc_space: self.alloc_space.as_mut(),
+            raised_exception: None,
         };
         let result = match entry_func {
             RtsFn::Arity0(f) => f(&mut ctx),
@@ -2030,7 +2031,44 @@ impl Interpreter {
             RtsFn::Arity4(f) => f(&mut ctx, args[0], args[1], args[2], args[3]),
             RtsFn::Arity5(f) => f(&mut ctx, args[0], args[1], args[2], args[3], args[4]),
         };
+        // If the RTS function asked to raise an exception, push the
+        // packet onto the stack and unwind to the registered handler.
+        // Matches upstream's CALL_FAST_RTS<N> dispatch:
+        //   if (GetExceptionPacket().IsDataPtr()) goto RAISE_EXCEPTION;
+        if let Some(packet) = ctx.raised_exception {
+            self.push(packet)?;
+            self.do_raise_ex()?;
+            return Ok(StepResult::Continue);
+        }
         self.push_continue(result)
+    }
+
+    /// Common RAISE_EX path, also reachable from an RTS-raised
+    /// exception. Pre-condition: the exception packet is on top of
+    /// the stack.
+    fn do_raise_ex(&mut self) -> Result<(), InterpError> {
+        let exn = self.peek(0)?;
+        self.exception_packet = Some(exn);
+        if self.handler_sp >= self.stack.len() {
+            return Err(InterpError::UnhandledException);
+        }
+        self.sp = self.handler_sp;
+        let handler_pc_word = self.stack[self.sp];
+        self.sp += 1;
+        let saved_old_handler = self.stack[self.sp];
+        self.sp += 1;
+        self.handler_sp = saved_old_handler.0;
+        self.pc = handler_pc_word.0 as *const u8;
+        let target_depth = self.handler_frames_depth.pop().unwrap_or(0);
+        self.frames.truncate(target_depth);
+        if let Some((s, e)) = self.frames.last().copied() {
+            self.code_start = s;
+            self.code_end = e;
+        } else {
+            self.code_start = std::ptr::null();
+            self.code_end = std::ptr::null();
+        }
+        Ok(())
     }
 
     /// Implement TAIL_B_B (and its extended sibling EXTINSTR_tail).
