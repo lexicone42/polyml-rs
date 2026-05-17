@@ -7,23 +7,52 @@ loader. Goal: faithful port of upstream's `vendor/polyml/libpolyml/`
 semantics with stronger memory safety and a friendlier development
 loop. See `PLAN.md` for the staged roadmap.
 
-## Where we are
+## Demo (Monday)
 
-End-to-end, our runtime executes the real PolyML bootstrap image:
+Three things to show:
+
+### 1. `poly run` executes the real PolyML bootstrap image
 
 ```
-$ poly run vendor/polyml/bootstrap/bootstrap64.txt
+$ cargo build --release -p polyml-bin
+$ ./target/release/poly run vendor/polyml/bootstrap/bootstrap64.txt
+Loaded vendor/polyml/bootstrap/bootstrap64.txt
+  RTS patch: 39 resolved, 0 unresolved
+Executing (cap 5000000 steps)…
 Executed 1111155 bytecode step(s).
 Result: Tagged(0) — clean return
 ```
 
-Pipe SML to stdin and it compiles:
+### 2. The bootstrap is a real SML compiler
 
 ```
-$ echo "1+1;" | poly run vendor/polyml/bootstrap/bootstrap64.txt
+$ echo "1+1;" | ./target/release/poly run vendor/polyml/bootstrap/bootstrap64.txt
 Error- in '<stdin>', line 1.
 Type error in function application. Function: 1 : int ...
 ```
+
+That error message is being emitted by the PolyML compiler running
+in our Rust interpreter, formatted and written through our stdio
+subcode-11/12 path. Real ML compiler output.
+
+### 3. The basis library loads through our runtime
+
+```
+$ cd vendor/polyml/
+$ ../../target/release/poly run --max-steps 5000000000 bootstrap/bootstrap64.txt < bootstrap/Stage1.sml
+Use: basis/build.sml
+Use: basis/InitialBasis.ML
+Use: basis/Universal.ML
+...
+Use: basis/IEEE_REAL.sml
+Use: basis/IEEEReal.sml
+Use: basis/Real.sml             ← gate here (deep bug under investigation)
+```
+
+44 SML source files (build.sml + 43 basis modules) opened, read,
+parsed, type-checked, and compiled by the PolyML compiler running
+inside our runtime, with the resulting closures installed in our
+heap.
 
 ## Bootstrap image structure (important!)
 
