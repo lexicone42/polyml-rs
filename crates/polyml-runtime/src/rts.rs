@@ -293,6 +293,47 @@ fn register_builtins(t: &mut RtsTable) {
     }
     t.register("PolyRealLdexp", RtsFn::Arity2(zero2));
     t.register("PolyFloatArbitraryPrecision", RtsFn::Arity2(zero2));
+    // Timing / system stubs.
+    t.register("PolyTimingTicksPerMicroSec", RtsFn::Arity1(|_, _| PolyWord::tagged(1)));
+    t.register("PolyTimingGetNow", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyTimingBaseYear", RtsFn::Arity1(|_, _| PolyWord::tagged(1970)));
+    t.register("PolyTimingConvertDateStuct", RtsFn::Arity2(zero2));
+    t.register("PolyTimingLocalOffset", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyTimingSummerApplies", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyTimingYearOffset", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // Process / OS / Foreign stubs.
+    t.register("PolyGetProcessName", RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)));
+    t.register("PolyGetEnv", RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)));
+    t.register("PolyGetEnvironment", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyFullGC", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyGetLocalStats", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyShowHierarchy", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyShowLoadedModules", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyExport", RtsFn::Arity3(zero3));
+    t.register("PolyExportPortable", RtsFn::Arity3(zero3));
+    t.register("PolyChDir", RtsFn::Arity2(zero2));
+    t.register("PolyGetModuleDirectory", RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)));
+    // FFI library loading stubs.
+    t.register("PolyFFILoadExecutable", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyFFILoadLibrary", RtsFn::Arity2(zero2));
+    t.register("PolyFFIUnloadLibrary", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyFFIGetSymbolAddress", RtsFn::Arity2(zero2));
+    t.register("PolyFFIMalloc", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyFFICreateExtData", RtsFn::Arity2(zero2));
+    t.register("PolyFFICreateExtFn", RtsFn::Arity2(zero2));
+    // Network stubs (we don't support sockets).
+    t.register("PolyNetworkGetFamilyFromAddress", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyNetworkGetAddrList", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyNetworkGetHostName", RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)));
+    t.register("PolyNetworkGetSockTypeList", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyNetworkReturnIP4AddressAny", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyNetworkReturnIP6AddressAny", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // process_env return values.
+    t.register("PolyProcessEnvFailureValue", RtsFn::Arity1(|_, _| PolyWord::tagged(1)));
+    t.register("PolyProcessEnvSuccessValue", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // Thread cond var stubs (no-ops in single-threaded mode).
+    t.register("PolyThreadCondVarWait", RtsFn::Arity2(noop2));
+    t.register("PolyThreadCondVarWaitUntil", RtsFn::Arity3(zero3));
     // FFI stubs (we don't support real FFI yet).
     t.register("PolyFFIGetError", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyFFISetError", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
@@ -457,7 +498,6 @@ fn noop1(_: &mut RtsContext<'_>, _: PolyWord) -> PolyWord {
 fn noop2(_: &mut RtsContext<'_>, _: PolyWord, _: PolyWord) -> PolyWord {
     PolyWord::tagged(0)
 }
-#[allow(dead_code)]
 fn zero3(_: &mut RtsContext<'_>, _: PolyWord, _: PolyWord, _: PolyWord) -> PolyWord {
     PolyWord::tagged(0)
 }
