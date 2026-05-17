@@ -301,6 +301,13 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyTimingLocalOffset", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyTimingSummerApplies", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyTimingYearOffset", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyTimingGetUser", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyTimingGetSystem", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyTimingGetReal", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyTimingGetGCUser", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyTimingGetGCSystem", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyTimingGetChildUser", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyTimingGetChildSystem", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     // Process / OS / Foreign stubs.
     t.register("PolyGetProcessName", RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)));
     t.register("PolyGetEnv", RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)));
@@ -1670,21 +1677,29 @@ fn open_file_input(ctx: &mut RtsContext<'_>, name_arg: PolyWord) -> PolyWord {
     }
 }
 
-/// Allocate a minimal exception packet: a 2-word ordinary object
-/// (record/tuple shape) with [name_string, ()]. Real ML exceptions
-/// have a richer structure but this is enough to be caught by
-/// `handle _ =>` and propagate through the unwind path.
+/// Allocate a PolyML-shaped exception packet: a 4-word ordinary
+/// object matching `class PolyException : public PolyObject` —
+///   [ex_id, ex_name, ex_arg, ex_location]
+/// (mlperror.h / save_vec.h in upstream).
+///
+/// ex_id is normally a unique pointer-like identifier; we use the
+/// allocated object's own pointer as a stand-in (each call produces
+/// a fresh address, so identity comparison treats each raise as a
+/// new exception kind).
 fn make_simple_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
     let s = alloc_poly_string(ctx, msg.as_bytes());
     let Some(space) = ctx.alloc_space.as_mut() else {
         return s;
     };
-    let p = space.alloc(2);
-    // SAFETY: just allocated 2 words.
+    let p = space.alloc(4);
+    // SAFETY: just allocated 4 words.
     unsafe {
-        crate::space::set_length_word(p, 2, 0);
-        p.write(s);
-        p.add(1).write(PolyWord::tagged(0));
+        crate::space::set_length_word(p, 4, 0);
+        // ex_id: self-pointer (so equality compares by identity).
+        p.write(PolyWord::from_ptr(p.cast_const()));
+        p.add(1).write(s); // ex_name
+        p.add(2).write(PolyWord::tagged(0)); // ex_arg = ()
+        p.add(3).write(PolyWord::tagged(0)); // ex_location = NONE
     }
     PolyWord::from_ptr(p.cast_const())
 }
