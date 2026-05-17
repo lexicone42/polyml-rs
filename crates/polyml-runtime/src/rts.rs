@@ -259,6 +259,40 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyRealDoubleToString",
         RtsFn::Arity4(|_, _, _, _, _| PolyWord::tagged(0)),
     );
+    // Real math RTS: registered as stubs so PolyCreateEntryPointObject
+    // can resolve them at basis-compile time. The actual math doesn't
+    // need to work at compile time — only the entry-point object's
+    // shape matters. Implementations can be filled in later.
+    //
+    // All of these are `rtsCallFast{F_F|FF_F|RR_R|...}` style:
+    // - F_F : double -> double (Arity1 — no threadId for Fast variants)
+    // - FF_F: double*double -> double (Arity2)
+    let real_unary_stubs = [
+        "PolyRealSqrt", "PolyRealSin", "PolyRealCos", "PolyRealTan",
+        "PolyRealArcSin", "PolyRealArcCos", "PolyRealArctan",
+        "PolyRealSinh", "PolyRealCosh", "PolyRealTanh",
+        "PolyRealExp", "PolyRealLog", "PolyRealLog10",
+        "PolyRealFloor", "PolyRealCeil", "PolyRealRound", "PolyRealTrunc",
+        "PolyRealFSqrt", "PolyRealFSin", "PolyRealFCos", "PolyRealFTan",
+        "PolyRealFArcSin", "PolyRealFArcCos", "PolyRealFArctan",
+        "PolyRealFSinh", "PolyRealFCosh", "PolyRealFTanh",
+        "PolyRealFExp", "PolyRealFLog", "PolyRealFLog10",
+        "PolyRealFFloor", "PolyRealFCeil", "PolyRealFRound", "PolyRealFTrunc",
+    ];
+    for name in real_unary_stubs {
+        t.register(name, RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    }
+    let real_binary_stubs = [
+        "PolyRealAtan2", "PolyRealCopySign", "PolyRealNextAfter",
+        "PolyRealPow", "PolyRealRem",
+        "PolyRealFAtan2", "PolyRealFCopySign", "PolyRealFNextAfter",
+        "PolyRealFPow", "PolyRealFRem",
+    ];
+    for name in real_binary_stubs {
+        t.register(name, RtsFn::Arity2(zero2));
+    }
+    t.register("PolyRealLdexp", RtsFn::Arity2(zero2));
+    t.register("PolyFloatArbitraryPrecision", RtsFn::Arity2(zero2));
     // FFI stubs (we don't support real FFI yet).
     t.register("PolyFFIGetError", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyFFISetError", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));

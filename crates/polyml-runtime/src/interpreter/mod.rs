@@ -1701,6 +1701,79 @@ impl Interpreter {
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
 
+            // ----- Float (f32) arithmetic. On 64-bit, Float values
+            // are *tagged* — packed into the high 32 bits of a
+            // PolyWord with the low bit set (FLT_SHIFT = 32).
+            // bytecode.cpp:224-249.
+            EXTINSTR_FLOAT_ABS => self.float_unop(f32::abs),
+            EXTINSTR_FLOAT_NEG => self.float_unop(|v: f32| -v),
+            EXTINSTR_FLOAT_ADD => self.float_binop(|y, x| y + x),
+            EXTINSTR_FLOAT_SUB => self.float_binop(|y, x| y - x),
+            EXTINSTR_FLOAT_MULT => self.float_binop(|y, x| y * x),
+            EXTINSTR_FLOAT_DIV => self.float_binop(|y, x| y / x),
+            EXTINSTR_FLOAT_EQUAL => self.float_cmp(|y, x| {
+                #[allow(clippy::float_cmp)]
+                { y == x }
+            }),
+            EXTINSTR_FLOAT_LESS => self.float_cmp(|y, x| y < x),
+            EXTINSTR_FLOAT_LESS_EQ => self.float_cmp(|y, x| y <= x),
+            EXTINSTR_FLOAT_GREATER => self.float_cmp(|y, x| y > x),
+            EXTINSTR_FLOAT_GREATER_EQ => self.float_cmp(|y, x| y >= x),
+            EXTINSTR_FLOAT_UNORDERED => self.float_cmp(|y, x| y.is_nan() || x.is_nan()),
+            EXTINSTR_FIXED_INT_TO_FLOAT => {
+                let i = self.peek(0)?;
+                #[allow(clippy::cast_precision_loss)]
+                let f = i.untag() as f32;
+                self.stack[self.sp] = Self::box_float(f);
+                Ok(StepResult::Continue)
+            }
+            EXTINSTR_FLOAT_TO_REAL => {
+                let f = Self::unbox_float(self.peek(0)?);
+                let p = self.alloc_real(f64::from(f))?;
+                self.stack[self.sp] = p;
+                Ok(StepResult::Continue)
+            }
+            EXTINSTR_REAL_TO_FLOAT => {
+                let r = self.peek(0)?;
+                // SAFETY: peek returns a boxed Real pointer.
+                let d = unsafe { Self::read_real(r) };
+                #[allow(clippy::cast_possible_truncation)]
+                let f = d as f32;
+                self.stack[self.sp] = Self::box_float(f);
+                Ok(StepResult::Continue)
+            }
+            EXTINSTR_FLOAT_TO_INT => {
+                let f = Self::unbox_float(self.peek(0)?);
+                #[allow(clippy::cast_possible_truncation)]
+                let i = f as isize;
+                self.stack[self.sp] = PolyWord::tagged(i);
+                Ok(StepResult::Continue)
+            }
+
+            // ----- Inline "fast call" RTS dispatch for typed FP
+            // signatures. These let the SML compiler skip the
+            // generic CALL_FAST_RTS<N> path for tight float loops.
+            //
+            // Stack: [arg(s)..., stub] (stub on top).
+            // Pop stub → read word 0 (= our RTS table token) →
+            // dispatch via RtsTable like CALL_FAST_RTS<N>, but the
+            // signature mapping is fixed by the opcode:
+            //   RtoR   : real → real   (Arity1; arg unboxed, result boxed)
+            //   GtoR   : general → real
+            //   RRtoR  : real,real → real
+            //   RGtoR  : real,general → real
+            //
+            // bytecode.cpp:1423-1450 + similar.
+            EXTINSTR_CALL_FAST_R_TO_R => self.call_fast_r_to_r(),
+            EXTINSTR_CALL_FAST_G_TO_R => self.call_fast_g_to_r(),
+            EXTINSTR_CALL_FAST_RR_TO_R => self.call_fast_rr_to_r(),
+            EXTINSTR_CALL_FAST_RG_TO_R => self.call_fast_rg_to_r(),
+            // Same shape but for f32 — pack/unpack via box_float.
+            EXTINSTR_CALL_FAST_F_TO_F => self.call_fast_f_to_f(),
+            EXTINSTR_CALL_FAST_G_TO_F => self.call_fast_g_to_f(),
+            EXTINSTR_CALL_FAST_FF_TO_F => self.call_fast_ff_to_f(),
+            EXTINSTR_CALL_FAST_FG_TO_F => self.call_fast_fg_to_f(),
+
             // ----- Real (f64) arithmetic. Each Real lives in a
             // 1-word byte object (8 bytes = sizeof(f64)). These ops
             // read the f64, do the math, write a new boxed Real.
@@ -2024,6 +2097,146 @@ impl Interpreter {
         let y = self.pop()?;
         let r = f(x.untag(), y.untag()).map_err(|()| InterpError::DivByZero)?;
         self.push_continue(PolyWord::tagged(r))
+    }
+
+    /// On 64-bit, Float (f32) values are *tagged* — packed into the
+    /// high 32 bits of a PolyWord with the low bit set. Helpers:
+    fn unbox_float(w: PolyWord) -> f32 {
+        // Right-shift moves the float bits to the low 32, sign-extended.
+        // The reinterpret as f32 is then a no-op cast.
+        #[allow(clippy::cast_possible_truncation)]
+        let i = ((w.0 as isize) >> 32) as i32;
+        f32::from_bits(i as u32)
+    }
+    fn box_float(f: f32) -> PolyWord {
+        let bits = u64::from(f.to_bits());
+        // Pack into high 32 bits, set tag bit.
+        let raw = (bits << 32) | 1;
+        #[allow(clippy::cast_possible_truncation)]
+        PolyWord::from_bits(raw as usize)
+    }
+
+    fn float_unop<F: FnOnce(f32) -> f32>(&mut self, op: F) -> Result<StepResult, InterpError> {
+        let v = Self::unbox_float(self.peek(0)?);
+        self.stack[self.sp] = Self::box_float(op(v));
+        Ok(StepResult::Continue)
+    }
+    fn float_binop<F: FnOnce(f32, f32) -> f32>(&mut self, op: F) -> Result<StepResult, InterpError> {
+        let x = Self::unbox_float(self.pop()?);
+        let y = Self::unbox_float(self.peek(0)?);
+        self.stack[self.sp] = Self::box_float(op(y, x));
+        Ok(StepResult::Continue)
+    }
+    fn float_cmp<F: FnOnce(f32, f32) -> bool>(&mut self, op: F) -> Result<StepResult, InterpError> {
+        let x = Self::unbox_float(self.pop()?);
+        let y = Self::unbox_float(self.peek(0)?);
+        self.stack[self.sp] = PolyWord::tagged(isize::from(op(y, x)));
+        Ok(StepResult::Continue)
+    }
+
+    /// Inline fast-call: real → real. Pop stub, pop arg (boxed Real),
+    /// look up the RTS function via the stub's token, dispatch with
+    /// the arg, allocate a boxed-Real result.
+    fn call_fast_r_to_r(&mut self) -> Result<StepResult, InterpError> {
+        let stub = self.pop()?;
+        let arg = self.pop()?;
+        let result = self.dispatch_typed_fast_call(stub, &[arg]);
+        let p = self.alloc_real(result)?;
+        self.push_continue(p)
+    }
+    fn call_fast_g_to_r(&mut self) -> Result<StepResult, InterpError> {
+        let stub = self.pop()?;
+        let arg = self.pop()?;
+        let result = self.dispatch_typed_fast_call(stub, &[arg]);
+        let p = self.alloc_real(result)?;
+        self.push_continue(p)
+    }
+    fn call_fast_rr_to_r(&mut self) -> Result<StepResult, InterpError> {
+        let stub = self.pop()?;
+        let arg2 = self.pop()?;
+        let arg1 = self.pop()?;
+        let result = self.dispatch_typed_fast_call(stub, &[arg1, arg2]);
+        let p = self.alloc_real(result)?;
+        self.push_continue(p)
+    }
+    fn call_fast_rg_to_r(&mut self) -> Result<StepResult, InterpError> {
+        let stub = self.pop()?;
+        let arg2 = self.pop()?;
+        let arg1 = self.pop()?;
+        let result = self.dispatch_typed_fast_call(stub, &[arg1, arg2]);
+        let p = self.alloc_real(result)?;
+        self.push_continue(p)
+    }
+    fn call_fast_f_to_f(&mut self) -> Result<StepResult, InterpError> {
+        let stub = self.pop()?;
+        let arg = self.pop()?;
+        let result = self.dispatch_typed_fast_call(stub, &[arg]);
+        #[allow(clippy::cast_possible_truncation)]
+        let f = result as f32;
+        self.push_continue(Self::box_float(f))
+    }
+    fn call_fast_g_to_f(&mut self) -> Result<StepResult, InterpError> {
+        let stub = self.pop()?;
+        let arg = self.pop()?;
+        let result = self.dispatch_typed_fast_call(stub, &[arg]);
+        #[allow(clippy::cast_possible_truncation)]
+        let f = result as f32;
+        self.push_continue(Self::box_float(f))
+    }
+    fn call_fast_ff_to_f(&mut self) -> Result<StepResult, InterpError> {
+        let stub = self.pop()?;
+        let arg2 = self.pop()?;
+        let arg1 = self.pop()?;
+        let result = self.dispatch_typed_fast_call(stub, &[arg1, arg2]);
+        #[allow(clippy::cast_possible_truncation)]
+        let f = result as f32;
+        self.push_continue(Self::box_float(f))
+    }
+    fn call_fast_fg_to_f(&mut self) -> Result<StepResult, InterpError> {
+        let stub = self.pop()?;
+        let arg2 = self.pop()?;
+        let arg1 = self.pop()?;
+        let result = self.dispatch_typed_fast_call(stub, &[arg1, arg2]);
+        #[allow(clippy::cast_possible_truncation)]
+        let f = result as f32;
+        self.push_continue(Self::box_float(f))
+    }
+
+    /// Dispatch a typed-FP-style fast call. The stub's word 0 is
+    /// our RTS table token; we look up and invoke with the given
+    /// args. Returns the result as f64 (caller boxes).
+    ///
+    /// For our stub Real RTS impls (which return TAGGED(0)), the
+    /// "f64 result" is 0.0 — which lets compilation pass even
+    /// though runtime values are garbage. Real impl can replace.
+    fn dispatch_typed_fast_call(&mut self, stub: PolyWord, args: &[PolyWord]) -> f64 {
+        if !stub.is_data_ptr() {
+            return 0.0;
+        }
+        let p = stub.as_ptr::<PolyWord>();
+        // SAFETY: stub is an entry-point object; word 0 is the token.
+        let token = unsafe { (*p).0 };
+        let Some(entry) = self.rts.entry(token) else {
+            return 0.0;
+        };
+        let entry_func = entry.func;
+        let rts_ref = self.rts.clone();
+        let mut ctx = crate::rts::RtsContext {
+            alloc_space: self.alloc_space.as_mut(),
+            raised_exception: None,
+            rts: Some(&rts_ref),
+        };
+        let result_word = match (args.len(), entry_func) {
+            (1, crate::rts::RtsFn::Arity1(f)) => f(&mut ctx, args[0]),
+            (2, crate::rts::RtsFn::Arity2(f)) => f(&mut ctx, args[0], args[1]),
+            _ => PolyWord::tagged(0),
+        };
+        if result_word.is_data_ptr() {
+            // SAFETY: result is a boxed-Real object.
+            unsafe { *result_word.as_ptr::<f64>() }
+        } else {
+            0.0
+        }
     }
 
     /// Real binop helper: pop x (boxed Real), peek y (boxed Real),
