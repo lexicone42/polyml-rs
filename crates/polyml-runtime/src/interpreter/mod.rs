@@ -791,16 +791,34 @@ impl Interpreter {
                     );
                     // Print the ring of recent call targets — gives us
                     // a "what was just executing" trail back from the
-                    // failure point. Most-recent first.
+                    // failure point. Most-recent first. We also try to
+                    // extract function names from each code object's
+                    // constant pool (first const = source-level name).
                     eprintln!("  Recent CALL targets (most recent first):");
                     let n = self.recent_call_targets.len();
                     for off in 0..n {
                         let idx = (self.recent_call_idx + n - 1 - off) % n;
                         let target = self.recent_call_targets[idx];
                         if target != 0 {
-                            eprintln!("    -{off:2}: code=0x{target:016x}");
+                            // SAFETY: target was recorded from a live
+                            // code-object pointer; still alive now.
+                            let name = unsafe {
+                                crate::length_word::function_name_for_code(
+                                    target as *const PolyWord,
+                                )
+                            }
+                            .unwrap_or_else(|| "<anonymous>".to_string());
+                            eprintln!("    -{off:2}: code=0x{target:016x}  {name}");
                         }
                     }
+                    // Also try to name the currently-executing code.
+                    let cur_name = unsafe {
+                        crate::length_word::function_name_for_code(
+                            self.code_start.cast::<PolyWord>(),
+                        )
+                    }
+                    .unwrap_or_else(|| "<anonymous>".to_string());
+                    eprintln!("  Current code: 0x{:016x} {cur_name}", self.code_start as usize);
                     return Err(InterpError::NotAClosure(base));
                 }
                 let p = base.as_ptr::<PolyWord>();

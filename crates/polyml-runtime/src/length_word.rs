@@ -150,6 +150,47 @@ pub unsafe fn const_segment_for_code(obj_ptr: *const PolyWord) -> (*const PolyWo
     }
 }
 
+/// Best-effort extract of the function-name string from a code object.
+///
+/// PolyML's compiler stores the function's source name (if known)
+/// as the FIRST entry of the constant area. The string is a
+/// `PolyStringObject` (length-prefix word + chars).
+///
+/// Returns `Some("name")` when the first constant looks like a
+/// non-empty string, `None` otherwise (anonymous functions or
+/// objects without that convention).
+///
+/// # Safety
+/// `obj_ptr` must point at a fully-initialised code object.
+#[must_use]
+pub unsafe fn function_name_for_code(obj_ptr: *const PolyWord) -> Option<String> {
+    // SAFETY: caller upholds.
+    unsafe {
+        let (cp, count) = const_segment_for_code(obj_ptr);
+        if count == 0 {
+            return None;
+        }
+        let name_word = *cp;
+        if name_word.0 == 0 || (name_word.0 & 1) != 0 {
+            // Anonymous code (name = 0) or a tagged value (not a string).
+            return None;
+        }
+        let name_ptr = name_word.as_ptr::<PolyWord>();
+        let lw = crate::space::MemorySpace::length_word_of(name_ptr);
+        if !is_byte_object(lw) {
+            return None;
+        }
+        // PolyStringObject: word 0 is the byte length, then chars.
+        let len = (*name_ptr).0;
+        if len == 0 || len > 4096 {
+            return None;
+        }
+        let chars_ptr = name_ptr.add(1).cast::<u8>();
+        let slice = std::slice::from_raw_parts(chars_ptr, len);
+        std::str::from_utf8(slice).ok().map(str::to_owned)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

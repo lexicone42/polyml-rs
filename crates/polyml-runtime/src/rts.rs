@@ -2045,6 +2045,52 @@ mod tests {
         assert_eq!(l.untag(), 12);
     }
 
+    #[test]
+    fn arb_mult_no_overflow_stays_tagged() {
+        let mut ctx = ctx();
+        // Both small — should stay tagged.
+        let r = poly_multiply_arbitrary(
+            &mut ctx, t(), PolyWord::tagged(123), PolyWord::tagged(456),
+        );
+        assert!(r.is_tagged());
+        assert_eq!(r.untag(), 123 * 456);
+    }
+
+    #[test]
+    fn arb_mult_exactly_at_max_tagged_overflows() {
+        // 2^31 * 2^31 = 2^62 which is MAX_TAGGED + 1 — should box.
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut ctx = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
+        let r = poly_multiply_arbitrary(
+            &mut ctx, t(), PolyWord::tagged(1 << 31), PolyWord::tagged(1 << 31),
+        );
+        assert!(r.is_data_ptr(), "2^62 should be boxed (MAX_TAGGED = 2^62-1)");
+        let bi = poly_word_to_bigint(r).expect("readable bignum");
+        assert_eq!(bi, BigInt::from(1u64 << 62), "wrong product");
+    }
+
+    #[test]
+    fn arb_mult_negative_overflow_round_trips() {
+        // -2^31 * 2^32 = -2^63
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut ctx = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
+        let a = PolyWord::tagged(-(1 << 31));
+        let b = PolyWord::tagged(1 << 32);
+        let r = poly_multiply_arbitrary(&mut ctx, t(), a, b);
+        assert!(r.is_data_ptr(), "expected boxed");
+        let bi = poly_word_to_bigint(r).expect("readable");
+        let expected = -BigInt::from(1u64 << 63);
+        assert_eq!(bi, expected);
+    }
+
     /// Multiply two near-max-tagged values; result overflows i64
     /// and should come back as a boxed BigInt. Verify round-trip.
     #[test]
