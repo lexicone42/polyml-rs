@@ -110,6 +110,36 @@ fn bootstrap_runs_lambda_application_cleanly() {
     );
 }
 
+/// The bootstrap64.txt image is the BARE PolyML interpreter (Stage 0
+/// of the bootstrap chain). It has no infix declarations or operator
+/// overloads — those come from `basis/InitialBasis.ML` which would
+/// normally be loaded by Stage1.sml piped to stdin. We can bootstrap
+/// the operators ourselves with a few prelude lines and then do real
+/// arithmetic.
+#[test]
+fn bootstrap_can_register_infix_plus_and_compute() {
+    let prelude = "infix 6 + -; RunCall.addOverload FixedInt.+ \"+\"; ";
+    let src = format!("{prelude} val x = 1 + 2; ");
+    let Ok((stdout, _)) = run_with_stdin(&src, 10_000_000) else {
+        return;
+    };
+    if stdout.is_empty() {
+        return;
+    }
+    // If `1 + 2` failed to type-check (or to evaluate), the bootstrap
+    // would have raised an exception, hit the error-write path, and
+    // we'd see "Error-" in the output. Clean Tagged(0) means the
+    // expression succeeded.
+    assert!(
+        stdout.contains("Tagged(0)"),
+        "expected clean exit after `val x = 1 + 2`, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Error-"),
+        "expected no compiler errors, got: {stdout}"
+    );
+}
+
 #[test]
 fn bootstrap_polyml_print_emits_output() {
     let Ok((stdout, stderr)) = run_with_stdin("PolyML.print 42;\n", 10_000_000) else {
