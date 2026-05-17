@@ -100,6 +100,10 @@ pub struct RtsContext<'a> {
     /// instead of returning normally. Read by the dispatch site
     /// (`Interpreter::rts_call`) which routes to RAISE_EXCEPTION.
     pub raised_exception: Option<PolyWord>,
+    /// Borrowed reference to the RTS table itself, so an RTS
+    /// function like `PolyCreateEntryPointObject` can look up
+    /// other RTS names to build runtime entry-point objects.
+    pub rts: Option<&'a RtsTable>,
 }
 
 // ---- RtsTable ---------------------------------------------------------
@@ -230,6 +234,22 @@ fn register_builtins(t: &mut RtsTable) {
     // x86-64 passes the unused arg in rdi/rsi which the C body
     // ignores; we have to be explicit and register as Arity1.
     t.register("PolyIsBigEndian", RtsFn::Arity1(|_, _| poly_is_big_endian_inner()));
+    // These are called as `rtsCallFast0` from LibrarySupport.sml.
+    // All return reasonable defaults for our environment.
+    t.register("PolyGetMaxAllocationSize", RtsFn::Arity0(|_| {
+        // Max object length: 1 << 24 words = plenty for any sensible alloc.
+        PolyWord::tagged(1 << 24)
+    }));
+    t.register("PolyGetMaxStringSize", RtsFn::Arity0(|_| {
+        // Same upper bound, in bytes.
+        PolyWord::tagged((1isize << 24) * 8)
+    }));
+    t.register("PolyGetOSType", RtsFn::Arity0(|_| PolyWord::tagged(0))); // 0 = Unix
+    t.register("PolyGetPolyVersionNumber", RtsFn::Arity0(|_| PolyWord::tagged(592)));
+    t.register("PolyChunkSizeArbitrary", RtsFn::Arity0(|_| PolyWord::tagged(64)));
+    t.register("PolyGetUserStatsCount", RtsFn::Arity0(|_| PolyWord::tagged(0)));
+    t.register("PolyThreadNumPhysicalProcessors", RtsFn::Arity0(|_| PolyWord::tagged(1)));
+    t.register("PolyThreadNumProcessors", RtsFn::Arity0(|_| PolyWord::tagged(1)));
     t.register("PolySizeDouble", RtsFn::Arity1(|_, _| poly_size_double_inner()));
     t.register("PolySizeFloat", RtsFn::Arity1(|_, _| poly_size_float_inner()));
     // PolyFinish: (threadId, exitCode). C signature has 2 args
@@ -343,7 +363,14 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyInterpretedCallFunction", RtsFn::Arity5(zero5));
     //   PolyCreateEntryPointObject(threadId, name, isFunc) → 3
     // PolyCreateEntryPointObject(threadId, name) → 2 (rtsCallFull1)
-    t.register("PolyCreateEntryPointObject", RtsFn::Arity2(zero2));
+    // PolyCreateEntryPointObject(threadId, name) → 2 (rtsCallFull1).
+    // Constructs an entry-point object at runtime — same shape as
+    // the ones the loader patches, but built from a name we resolve
+    // against the RTS table.
+    t.register(
+        "PolyCreateEntryPointObject",
+        RtsFn::Arity2(poly_create_entry_point_object),
+    );
 }
 
 // Generic 0-returning stubs. The dispatch site (Interpreter::rts_call)
@@ -1490,6 +1517,65 @@ fn alloc_poly_string(ctx: &mut RtsContext<'_>, bytes: &[u8]) -> PolyWord {
     PolyWord::from_ptr(p.cast_const())
 }
 
+/// `PolyCreateEntryPointObject(threadId, name)` — build a runtime
+/// entry-point object for an RTS function looked up by name. Same
+/// shape as load-time entry points: 1 word for the token + the
+/// name bytes (NUL-terminated). Raises an exception with
+/// "entry point not found: NAME" if the name doesn't resolve.
+///
+/// Mirrors `rtsentry.cpp:113-128` (creatEntryPointObject) +
+/// `rtsentry.cpp:141-167` (setEntryPoint).
+#[allow(clippy::needless_pass_by_value)]
+fn poly_create_entry_point_object(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    name_arg: PolyWord,
+) -> PolyWord {
+    use crate::length_word::{F_BYTE_OBJ, F_MUTABLE_BIT, F_NO_OVERWRITE, F_WEAK_BIT};
+    let Some(name) = poly_string_to_rust(name_arg) else {
+        return PolyWord::tagged(0);
+    };
+    let Some(rts) = ctx.rts else {
+        return PolyWord::tagged(0);
+    };
+    let Some(token) = rts.token_for(name.as_str()) else {
+        if RTS_TRACE.load(Ordering::Relaxed) {
+            eprintln!("  PolyCreateEntryPointObject: entry point not found: {name}");
+        }
+        ctx.raised_exception = Some(make_simple_exception(
+            ctx,
+            &format!("entry point not found: {name}"),
+        ));
+        return PolyWord::tagged(0);
+    };
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    // Layout: 1 word for token + NUL-terminated name, padded to word.
+    let name_bytes_total = name.len() + 1; // include NUL
+    let body_words = name_bytes_total.div_ceil(std::mem::size_of::<usize>());
+    let total = 1 + body_words;
+    let p = space.alloc(total);
+    // SAFETY: just allocated `total` words.
+    unsafe {
+        crate::space::set_length_word(
+            p,
+            total,
+            F_BYTE_OBJ | F_WEAK_BIT | F_MUTABLE_BIT | F_NO_OVERWRITE,
+        );
+        p.write(PolyWord::from_bits(token));
+        let dst = p.add(1).cast::<u8>();
+        std::ptr::copy_nonoverlapping(name.as_ptr(), dst, name.len());
+        dst.add(name.len()).write(0); // NUL terminator
+        // Zero padding within the last word.
+        let padding = body_words * std::mem::size_of::<usize>() - name_bytes_total;
+        if padding > 0 {
+            std::ptr::write_bytes(dst.add(name_bytes_total), 0, padding);
+        }
+    }
+    PolyWord::from_ptr(p.cast_const())
+}
+
 /// Allocate the canonical "empty string" object: 1 word with length
 /// 0 and `F_BYTE_OBJ` flag. Mirrors `polystring.cpp:61-67`.
 fn alloc_empty_string(ctx: &mut RtsContext<'_>) -> PolyWord {
@@ -1550,7 +1636,7 @@ mod tests {
         let t = RtsTable::new();
         let token = t.token_for("PolyIsBigEndian").unwrap();
         let entry = t.entry(token).unwrap();
-        let mut ctx = RtsContext { alloc_space: None, raised_exception: None };
+        let mut ctx = RtsContext { alloc_space: None, raised_exception: None, rts: None };
         // SML's rtsCallFast1 means PolyIsBigEndian is invoked with a
         // dummy unit arg, even though the C function takes none.
         let result = match entry.func {
@@ -1567,7 +1653,7 @@ mod tests {
     }
 
     fn ctx() -> RtsContext<'static> {
-        RtsContext { alloc_space: None, raised_exception: None }
+        RtsContext { alloc_space: None, raised_exception: None, rts: None }
     }
     fn t() -> PolyWord {
         PolyWord::tagged(0)

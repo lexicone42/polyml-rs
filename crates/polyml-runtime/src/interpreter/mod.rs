@@ -2046,9 +2046,11 @@ impl Interpreter {
             });
         }
         crate::rts::trace_call(entry_name, n_args);
+        let rts_ref = self.rts.clone(); // Arc clone, cheap
         let mut ctx = RtsContext {
             alloc_space: self.alloc_space.as_mut(),
             raised_exception: None,
+            rts: Some(&rts_ref),
         };
         let result = match entry_func {
             RtsFn::Arity0(f) => f(&mut ctx),

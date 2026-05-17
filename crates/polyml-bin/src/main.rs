@@ -112,8 +112,8 @@ fn run_image(
     let root_closure_word = PolyWord::from_ptr(loaded.root);
     // SAFETY: image is loaded; root is a valid closure.
     let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
-    let mut interp = unsafe { Interpreter::from_code_object(8192, code_obj_ptr) }
-        .with_default_alloc_space(8 * 1024 * 1024)
+    let mut interp = unsafe { Interpreter::from_code_object(64 * 1024, code_obj_ptr) }
+        .with_default_alloc_space(256 * 1024 * 1024)
         .with_rts(rts);
     if profile {
         interp = interp.enable_diagnostics();
