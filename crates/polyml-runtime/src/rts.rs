@@ -254,7 +254,7 @@ fn register_builtins(t: &mut RtsTable) {
     // Real / float RTS stubs (basis layer uses these).
     t.register("PolyGetRoundingMode", RtsFn::Arity1(|_, _| PolyWord::tagged(0))); // TO_NEAREST
     t.register("PolySetRoundingMode", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyRealFrexp", RtsFn::Arity2(zero2));
+    t.register("PolyRealFrexp", RtsFn::Arity2(poly_real_frexp));
     t.register(
         "PolyRealDoubleToString",
         RtsFn::Arity4(|_, _, _, _, _| PolyWord::tagged(0)),
@@ -1401,6 +1401,67 @@ fn poly_lock_mutable_closure(
         crate::space::set_length_word(code_obj, n, F_CODE_OBJ);
     }
     PolyWord::tagged(0)
+}
+
+/// `PolyRealFrexp(threadId, x)` — split a Real `x` into
+/// `(mantissa, exponent)` where `x = mantissa * 2^exponent` and
+/// `mantissa ∈ [0.5, 1.0)`. SML signature: `real -> int * real`.
+/// Returns a 2-word tuple `[boxed_mantissa, tagged_exponent]`.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_real_frexp(ctx: &mut RtsContext<'_>, _tid: PolyWord, x: PolyWord) -> PolyWord {
+    use crate::length_word::F_BYTE_OBJ;
+    let v: f64 = if x.is_data_ptr() {
+        // SAFETY: caller passes a boxed Real (1-word byte object).
+        unsafe { *x.as_ptr::<f64>() }
+    } else {
+        0.0
+    };
+    // Rust doesn't have built-in frexp; use the standard
+    // decomposition via integer bit pattern manipulation.
+    let (mantissa, exponent) = frexp_f64(v);
+
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    // Allocate the mantissa (boxed Real, 1 word).
+    let m_ptr = space.alloc(1);
+    // SAFETY: just allocated 1 word.
+    unsafe {
+        crate::space::set_length_word(m_ptr, 1, F_BYTE_OBJ);
+        m_ptr.cast::<f64>().write(mantissa);
+    }
+    // Allocate the tuple: 2 words, ordinary object.
+    let t_ptr = space.alloc(2);
+    // SAFETY: just allocated 2 words.
+    unsafe {
+        crate::space::set_length_word(t_ptr, 2, 0);
+        t_ptr.write(PolyWord::tagged(exponent as isize));
+        t_ptr.add(1).write(PolyWord::from_ptr(m_ptr.cast_const()));
+    }
+    PolyWord::from_ptr(t_ptr.cast_const())
+}
+
+/// Pure-Rust frexp for f64. Returns (mantissa, exponent) such that
+/// x = mantissa * 2^exponent and 0.5 <= |mantissa| < 1.0 (or 0).
+fn frexp_f64(x: f64) -> (f64, i32) {
+    if x == 0.0 || x.is_nan() || x.is_infinite() {
+        return (x, 0);
+    }
+    let bits = x.to_bits();
+    let exp_field = ((bits >> 52) & 0x7ff) as i32;
+    let new_exp = if exp_field == 0 {
+        // Subnormal: normalise by multiplying by 2^54.
+        #[allow(clippy::cast_precision_loss)]
+        let scaled = x * ((1u64 << 54) as f64);
+        let (m, e) = frexp_f64(scaled);
+        return (m, e - 54);
+    } else {
+        exp_field - 1022
+    };
+    // Force the exponent field to 1022 (= bias-1) so the result
+    // is in [0.5, 1.0) with the original sign and mantissa bits.
+    let new_bits = (bits & !(0x7ff << 52)) | (1022u64 << 52);
+    (f64::from_bits(new_bits), new_exp)
 }
 
 fn alloc_thread_object_stub(ctx: &mut RtsContext<'_>) -> PolyWord {

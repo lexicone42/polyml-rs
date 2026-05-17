@@ -191,6 +191,12 @@ pub struct Interpreter {
     /// For test-built interpreters: owns the code bytes so the PC
     /// pointer stays valid.
     _owned_code: Option<Vec<u8>>,
+    /// Ring buffer of the last N CALL_CLOSURE target addresses,
+    /// kept unconditionally with small fixed cost. Used by the
+    /// LOAD_UNTAGGED bad-base diagnostic so we can see what was
+    /// recently called before the failure.
+    recent_call_targets: [usize; 16],
+    recent_call_idx: usize,
     /// Optional execution-profile collector. `None` = disabled (the
     /// hot path pays only a branch). Enable with
     /// [`enable_diagnostics`](Self::enable_diagnostics).
@@ -221,6 +227,8 @@ impl Interpreter {
             handler_sp: stack_capacity, // past-the-end = no handler
             handler_frames_depth: Vec::new(),
             exception_packet: None,
+            recent_call_targets: [0; 16],
+            recent_call_idx: 0,
             rts: Arc::new(RtsTable::empty()),
             _owned_code: Some(code),
             diag: None,
@@ -259,6 +267,8 @@ impl Interpreter {
             handler_sp: stack_capacity,
             handler_frames_depth: Vec::new(),
             exception_packet: None,
+            recent_call_targets: [0; 16],
+            recent_call_idx: 0,
             rts: Arc::new(RtsTable::empty()),
             _owned_code: None,
             diag: None,
@@ -779,6 +789,18 @@ impl Interpreter {
                         "  LOAD_UNTAGGED: base={base:?}, index={index}, sp_depth={}, frames={}",
                         self.stack_height(), self.frames.len()
                     );
+                    // Print the ring of recent call targets — gives us
+                    // a "what was just executing" trail back from the
+                    // failure point. Most-recent first.
+                    eprintln!("  Recent CALL targets (most recent first):");
+                    let n = self.recent_call_targets.len();
+                    for off in 0..n {
+                        let idx = (self.recent_call_idx + n - 1 - off) % n;
+                        let target = self.recent_call_targets[idx];
+                        if target != 0 {
+                            eprintln!("    -{off:2}: code=0x{target:016x}");
+                        }
+                    }
                     return Err(InterpError::NotAClosure(base));
                 }
                 let p = base.as_ptr::<PolyWord>();
@@ -2467,6 +2489,9 @@ impl Interpreter {
         let (consts_start, _) = unsafe { length_word::const_segment_for_code(new_code_obj) };
         self.code_start = new_code_obj.cast::<u8>();
         self.code_end = consts_start.cast::<u8>();
+        // Record call target in ring buffer.
+        self.recent_call_targets[self.recent_call_idx] = new_code_obj as usize;
+        self.recent_call_idx = (self.recent_call_idx + 1) % self.recent_call_targets.len();
         self.pc = self.code_start;
         if let Some(d) = self.diag.as_mut() {
             *d.call_targets.entry(new_code_obj as usize).or_insert(0) += 1;
@@ -2757,11 +2782,14 @@ mod tests {
     fn unimplemented_surface() {
         // ESCAPE + an extension byte we don't handle (use a high value
         // that's not in our extension dispatch).
-        let code = vec![INSTR_ESCAPE, 0x6e]; // EXTINSTR_REAL_TO_INT — not implemented
+        // We've implemented most of the low/mid range — pick an
+        // extension byte that's still unmapped (loadC* / storeC* are
+        // FFI ops we haven't ported).
+        let code = vec![INSTR_ESCAPE, 0xe2]; // some unimplemented ext
         let mut interp = Interpreter::from_bytes(64, code);
         match interp.run().unwrap() {
             StepResult::Unimplemented { op, extended } => {
-                assert_eq!(op, 0x6e);
+                assert_eq!(op, 0xe2);
                 assert!(extended);
             }
             other => panic!("expected Unimplemented (extended), got {other:?}"),
