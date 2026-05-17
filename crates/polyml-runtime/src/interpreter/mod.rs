@@ -173,6 +173,12 @@ pub struct Interpreter {
     /// exception-handler frame sits. `stack.len()` (past-the-end)
     /// means no handler in scope.
     handler_sp: usize,
+    /// Parallel stack tracking the call-frame depth at the time
+    /// each handler was registered. RAISE_EX uses this to roll
+    /// `self.frames` back to exactly the depth that was current
+    /// when SET_HANDLER fired — without it, we either keep frames
+    /// that no longer exist or drop frames we still need.
+    handler_frames_depth: Vec<usize>,
     /// Current exception packet (set by RAISE_EX, read by LDEXC).
     /// `None` means no exception has been raised yet.
     exception_packet: Option<PolyWord>,
@@ -211,6 +217,7 @@ impl Interpreter {
             frames: Vec::new(),
             alloc_space: None,
             handler_sp: stack_capacity, // past-the-end = no handler
+            handler_frames_depth: Vec::new(),
             exception_packet: None,
             rts: Arc::new(RtsTable::empty()),
             _owned_code: Some(code),
@@ -248,6 +255,7 @@ impl Interpreter {
             frames: Vec::new(),
             alloc_space: None,
             handler_sp: stack_capacity,
+            handler_frames_depth: Vec::new(),
             exception_packet: None,
             rts: Arc::new(RtsTable::empty()),
             _owned_code: None,
@@ -900,6 +908,7 @@ impl Interpreter {
                 let entry = unsafe { self.pc.add(off) };
                 self.push(PolyWord::from_bits(entry as usize))?;
                 self.handler_sp = self.sp;
+                self.handler_frames_depth.push(self.frames.len());
                 Ok(StepResult::Continue)
             }
             INSTR_SET_HANDLER16 => {
@@ -907,6 +916,7 @@ impl Interpreter {
                 let entry = unsafe { self.pc.add(off) };
                 self.push(PolyWord::from_bits(entry as usize))?;
                 self.handler_sp = self.sp;
+                self.handler_frames_depth.push(self.frames.len());
                 Ok(StepResult::Continue)
             }
             INSTR_DELETE_HANDLER => {
@@ -922,6 +932,7 @@ impl Interpreter {
                 let old_handler = self.stack[self.sp];
                 self.handler_sp = old_handler.0;
                 self.stack[self.sp] = result;
+                self.handler_frames_depth.pop();
                 Ok(StepResult::Continue)
             }
             INSTR_LDEXC => {
@@ -932,9 +943,12 @@ impl Interpreter {
                 self.push_continue(pkt)
             }
             INSTR_RAISE_EX => {
-                // bytecode.cpp:486-498. Peek (don't pop) the exception
-                // on top, record it, then reset SP to the handler frame
-                // and jump to the saved handler PC.
+                // bytecode.cpp:486-499. Peek (don't pop) the exception
+                // on top, record it. Then unwind:
+                //   sp = handler_sp
+                //   pc = pop handler_pc
+                //   handler_sp = pop saved_old_handler_sp
+                //   frames truncated to depth recorded at SET_HANDLER
                 let exn = self.peek(0)?;
                 self.exception_packet = Some(exn);
                 if self.handler_sp >= self.stack.len() {
@@ -942,20 +956,28 @@ impl Interpreter {
                 }
                 self.sp = self.handler_sp;
                 let handler_pc_word = self.stack[self.sp];
-                self.sp += 1; // skip handler_pc slot; next slot is old_handler_sp
+                self.sp += 1; // past handler_pc
+                let saved_old_handler = self.stack[self.sp];
+                self.sp += 1; // past saved_old_handler_sp
+                self.handler_sp = saved_old_handler.0;
                 self.pc = handler_pc_word.0 as *const u8;
-                // We may have unwound across call frames into a
-                // different code object. Without per-handler bounds
-                // tracking, disable bounds checking until the next
-                // call (which will refresh code_start/code_end).
-                self.code_start = std::ptr::null();
-                self.code_end = std::ptr::null();
-                // Drop any callee frames we abandoned. This is
-                // conservative — a true implementation would record
-                // the frames-depth at SET_HANDLER and roll back to
-                // exactly that. For now: clear all, relying on the
-                // null-bounds bypass.
-                self.frames.clear();
+                // Roll the call-frame side stack back to the depth
+                // it had when this handler was installed, so subsequent
+                // RETURNs find the right callers.
+                let target_depth = self.handler_frames_depth.pop().unwrap_or(0);
+                self.frames.truncate(target_depth);
+                // Recompute code bounds from the topmost remaining
+                // frame, if any. (If empty, the handler's PC is in
+                // the topmost code object — its bounds are gone but
+                // we treat null bounds as "checks disabled", and the
+                // next CALL/RETURN will refresh them.)
+                if let Some((s, e)) = self.frames.last().copied() {
+                    self.code_start = s;
+                    self.code_end = e;
+                } else {
+                    self.code_start = std::ptr::null();
+                    self.code_end = std::ptr::null();
+                }
                 Ok(StepResult::Continue)
             }
 
