@@ -989,10 +989,12 @@ fn poly_compare_arbitrary(_: &mut RtsContext<'_>, arg1: PolyWord, arg2: PolyWord
         };
         return PolyWord::tagged(c);
     }
-    // One or both boxed — for now, default to 0 (equal). Real
-    // bignum compare introduced regressions in InitialBasis.ML
-    // when one operand was a tagged 0 and the other a boxed
-    // value; needs more investigation.
+    // One or both boxed. The upstream "boxed magnitude > MAX_TAGGED"
+    // shortcut depends on the assumption that ALL boxed values
+    // passed here are bignums. In our setup the SML compiler
+    // sometimes routes Word/LargeWord values through this same
+    // path, which would be miscompared. For now: default to 0
+    // (equal). Needs proper type-aware compare in future.
     PolyWord::tagged(0)
 }
 
