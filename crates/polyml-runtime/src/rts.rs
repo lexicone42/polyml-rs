@@ -228,6 +228,7 @@ pub fn patch_entry_points(
 
 // ---- Built-in RTS functions ------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 fn register_builtins(t: &mut RtsTable) {
     // These take a unit arg in SML (rtsCallFast1) even though the
     // C signature is `()`. PolyML's C side gets away with it because
@@ -250,6 +251,33 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyGetUserStatsCount", RtsFn::Arity0(|_| PolyWord::tagged(0)));
     t.register("PolyThreadNumPhysicalProcessors", RtsFn::Arity0(|_| PolyWord::tagged(1)));
     t.register("PolyThreadNumProcessors", RtsFn::Arity0(|_| PolyWord::tagged(1)));
+    // Real / float RTS stubs (basis layer uses these).
+    t.register("PolyGetRoundingMode", RtsFn::Arity1(|_, _| PolyWord::tagged(0))); // TO_NEAREST
+    t.register("PolySetRoundingMode", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyRealFrexp", RtsFn::Arity2(zero2));
+    t.register(
+        "PolyRealDoubleToString",
+        RtsFn::Arity4(|_, _, _, _, _| PolyWord::tagged(0)),
+    );
+    // FFI stubs (we don't support real FFI yet).
+    t.register("PolyFFIGetError", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyFFISetError", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyFFIFree", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyFFICallbackException", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // Threading stubs.
+    t.register("PolyThreadIsActive", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyThreadKillThread", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // Size queries (FFI). Use sizeof(T) values from the host.
+    t.register("PolySizeInt", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<i32>())));
+    t.register("PolySizeShort", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<i16>())));
+    t.register("PolySizeLong", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())));
+    t.register("PolySizeLonglong", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<i64>())));
+    t.register("PolySizeIntptr", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())));
+    t.register("PolySizeUintptr", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<usize>())));
+    t.register("PolySizePtrdiff", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())));
+    t.register("PolySizeSize", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<usize>())));
+    t.register("PolySizeSsize", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())));
+    t.register("PolyLog2Arbitrary", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolySizeDouble", RtsFn::Arity1(|_, _| poly_size_double_inner()));
     t.register("PolySizeFloat", RtsFn::Arity1(|_, _| poly_size_float_inner()));
     // PolyFinish: (threadId, exitCode). C signature has 2 args
@@ -371,6 +399,12 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyCreateEntryPointObject",
         RtsFn::Arity2(poly_create_entry_point_object),
     );
+}
+
+// Helper for returning a small unsigned size as a tagged int.
+fn size_word(n: usize) -> PolyWord {
+    #[allow(clippy::cast_possible_wrap)]
+    PolyWord::tagged(n as isize)
 }
 
 // Generic 0-returning stubs. The dispatch site (Interpreter::rts_call)

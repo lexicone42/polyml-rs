@@ -775,10 +775,32 @@ impl Interpreter {
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
                 if !base.is_data_ptr() {
-                    if crate::rts::is_traced() {
-                        eprintln!(
-                            "  LOAD_UNTAGGED: base is not a pointer: {base:?}, index={index}"
-                        );
+                    eprintln!(
+                        "  LOAD_UNTAGGED: base is not a pointer: {base:?}, index={index}, sp_depth={}, frames={}, code_segment_bytes={}",
+                        self.stack_height(),
+                        self.frames.len(),
+                        unsafe { self.code_end.offset_from(self.code_start) as usize },
+                    );
+                    // Dump stack window
+                    let n = std::cmp::min(20, self.stack_height());
+                    for d in 0..n {
+                        eprintln!("    sp[{d:2}] = {:?}", self.stack[self.sp + d]);
+                    }
+                    // Dump call frame chain
+                    eprintln!("  Call frames (top→bottom):");
+                    for (i, (s, _)) in self.frames.iter().rev().enumerate() {
+                        eprintln!("    [{i}] code_start=0x{:016x}", *s as usize);
+                    }
+                    // Dump bytecode window around failing PC
+                    let cur_off = self.pc_offset();
+                    let lo = cur_off.saturating_sub(40);
+                    let hi = cur_off + 4;
+                    eprintln!("  Bytecode @ code=0x{:016x} [{lo}..{hi}]:", self.code_start as usize);
+                    for off in lo..hi {
+                        // SAFETY: within current code segment
+                        let b = unsafe { *self.code_start.add(off) };
+                        let marker = if off + 1 == cur_off { " ← LOAD_UNTAGGED" } else { "" };
+                        eprintln!("    +{off:5}: 0x{b:02x}{marker}");
                     }
                     return Err(InterpError::NotAClosure(base));
                 }
@@ -1662,6 +1684,45 @@ impl Interpreter {
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
 
+            // ----- Real (f64) arithmetic. Each Real lives in a
+            // 1-word byte object (8 bytes = sizeof(f64)). These ops
+            // read the f64, do the math, write a new boxed Real.
+            // bytecode.cpp:1585-1900.
+            EXTINSTR_REAL_ABS => self.real_unop(f64::abs),
+            EXTINSTR_REAL_NEG => self.real_unop(|v: f64| -v),
+            EXTINSTR_REAL_ADD => self.real_binop(|y, x| y + x),
+            EXTINSTR_REAL_SUB => self.real_binop(|y, x| y - x),
+            EXTINSTR_REAL_MULT => self.real_binop(|y, x| y * x),
+            EXTINSTR_REAL_DIV => self.real_binop(|y, x| y / x),
+            EXTINSTR_REAL_EQUAL => self.real_cmp(|y, x| {
+                #[allow(clippy::float_cmp)]
+                { y == x }
+            }),
+            EXTINSTR_REAL_LESS => self.real_cmp(|y, x| y < x),
+            EXTINSTR_REAL_LESS_EQ => self.real_cmp(|y, x| y <= x),
+            EXTINSTR_REAL_GREATER => self.real_cmp(|y, x| y > x),
+            EXTINSTR_REAL_GREATER_EQ => self.real_cmp(|y, x| y >= x),
+            EXTINSTR_REAL_UNORDERED => self.real_cmp(|y, x| y.is_nan() || x.is_nan()),
+            EXTINSTR_FIXED_INT_TO_REAL => {
+                let i = self.peek(0)?;
+                #[allow(clippy::cast_precision_loss)]
+                let f = i.untag() as f64;
+                let p = self.alloc_real(f)?;
+                self.stack[self.sp] = p;
+                Ok(StepResult::Continue)
+            }
+            EXTINSTR_REAL_TO_INT => {
+                // ML semantics: round-to-nearest (banker's by default).
+                // For simplicity use Rust's `as` which truncates toward
+                // zero; bootstrap rarely converts non-integral reals.
+                let r = self.peek(0)?;
+                let f = unsafe { Self::read_real(r) };
+                #[allow(clippy::cast_possible_truncation)]
+                let i = f as isize;
+                self.stack[self.sp] = PolyWord::tagged(i);
+                Ok(StepResult::Continue)
+            }
+
             // ----- LargeWord arithmetic (boxed uintptr_t).
             //
             // Each long-word value lives in a 1-word byte object;
@@ -1946,6 +2007,62 @@ impl Interpreter {
         let y = self.pop()?;
         let r = f(x.untag(), y.untag()).map_err(|()| InterpError::DivByZero)?;
         self.push_continue(PolyWord::tagged(r))
+    }
+
+    /// Real binop helper: pop x (boxed Real), peek y (boxed Real),
+    /// compute `op(y, x)`, replace top with a freshly-allocated
+    /// boxed Real holding the result.
+    fn real_binop<F: FnOnce(f64, f64) -> f64>(&mut self, op: F) -> Result<StepResult, InterpError> {
+        let x = self.pop()?;
+        let y = self.peek(0)?;
+        // SAFETY: caller (compiler) emits valid boxed reals.
+        let fx = unsafe { Self::read_real(x) };
+        let fy = unsafe { Self::read_real(y) };
+        let result = op(fy, fx);
+        let p = self.alloc_real(result)?;
+        self.stack[self.sp] = p;
+        Ok(StepResult::Continue)
+    }
+
+    fn real_unop<F: FnOnce(f64) -> f64>(&mut self, op: F) -> Result<StepResult, InterpError> {
+        let r = self.peek(0)?;
+        let f = unsafe { Self::read_real(r) };
+        let p = self.alloc_real(op(f))?;
+        self.stack[self.sp] = p;
+        Ok(StepResult::Continue)
+    }
+
+    fn real_cmp<F: FnOnce(f64, f64) -> bool>(&mut self, op: F) -> Result<StepResult, InterpError> {
+        let x = self.pop()?;
+        let y = self.peek(0)?;
+        let fx = unsafe { Self::read_real(x) };
+        let fy = unsafe { Self::read_real(y) };
+        self.stack[self.sp] = PolyWord::tagged(isize::from(op(fy, fx)));
+        Ok(StepResult::Continue)
+    }
+
+    /// Read an f64 from a boxed Real (1-word byte object).
+    ///
+    /// # Safety
+    /// `w` must be a valid boxed-Real pointer.
+    unsafe fn read_real(w: PolyWord) -> f64 {
+        if !w.is_data_ptr() {
+            return 0.0;
+        }
+        // SAFETY: 1 word = 8 bytes = sizeof(f64); object body is
+        // word-aligned per Poly invariants.
+        unsafe { *w.as_ptr::<f64>() }
+    }
+
+    fn alloc_real(&mut self, v: f64) -> Result<PolyWord, InterpError> {
+        let space = self.alloc_space.as_mut().ok_or(InterpError::NoAllocator)?;
+        let p = space.alloc(1);
+        // SAFETY: just allocated 1 word (= 8 bytes), enough for f64.
+        unsafe {
+            crate::space::set_length_word(p, 1, crate::length_word::F_BYTE_OBJ);
+            p.cast::<f64>().write(v);
+        }
+        Ok(PolyWord::from_ptr(p.cast_const()))
     }
 
     /// LargeWord binop helper: pop x (boxed LargeWord), peek y
@@ -2262,6 +2379,17 @@ impl Interpreter {
         let ret_pc_slot = self.pop()?;
         let closure = self.pop()?;
         if !closure.is_data_ptr() {
+            eprintln!(
+                "  TAIL_CALL bad closure: {closure:?} | frames depth={} | sp_depth={} | new_sp={new_sp}",
+                self.frames.len(),
+                self.stack_height(),
+            );
+            // Stack window
+            let n = std::cmp::min(40, self.stack_height());
+            for d in 0..n {
+                let w = self.stack[self.sp + d];
+                eprintln!("    sp[{d:2}] = {w:?}");
+            }
             return Err(InterpError::NotAClosure(closure));
         }
 
@@ -2303,8 +2431,8 @@ impl Interpreter {
         use crate::length_word;
 
         if !closure.is_data_ptr() || closure.0 & (std::mem::size_of::<usize>() - 1) != 0 {
-            // Diagnostic dump (RTS_TRACE only).
-            if crate::rts::is_traced() {
+            // Diagnostic dump — always print since this is fatal.
+            {
                 let segment_size =
                     unsafe { self.code_end.offset_from(self.code_start) as usize };
                 eprintln!(
