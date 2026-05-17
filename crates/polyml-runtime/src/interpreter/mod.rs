@@ -819,6 +819,16 @@ impl Interpreter {
                     }
                     .unwrap_or_else(|| "<anonymous>".to_string());
                     eprintln!("  Current code: 0x{:016x} {cur_name}", self.code_start as usize);
+                    let cur_off = self.pc_offset();
+                    let lo = cur_off.saturating_sub(30);
+                    let hi = cur_off + 4;
+                    eprintln!("  Bytecode [{lo}..{hi}]:");
+                    for off in lo..hi {
+                        // SAFETY: within current code segment.
+                        let b = unsafe { *self.code_start.add(off) };
+                        let marker = if off + 1 == cur_off { " ← LOAD_UNTAGGED" } else { "" };
+                        eprintln!("    +{off:5}: 0x{b:02x}{marker}");
+                    }
                     return Err(InterpError::NotAClosure(base));
                 }
                 let p = base.as_ptr::<PolyWord>();
