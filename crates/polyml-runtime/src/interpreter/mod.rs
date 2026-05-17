@@ -1607,6 +1607,22 @@ impl Interpreter {
                 self.reset(n)
             }
 
+            // longWToTagged: read the first word of a boxed long-word
+            // and re-tag it (dropping the top bit). Mirrors
+            // bytecode.cpp:1545-1557.
+            EXTINSTR_LONG_W_TO_TAGGED => {
+                let p = self.peek(0)?;
+                if p.is_data_ptr() {
+                    let ptr = p.as_ptr::<PolyWord>();
+                    // SAFETY: caller-trusted long-word object.
+                    let raw = unsafe { (*ptr).0 };
+                    #[allow(clippy::cast_possible_wrap)]
+                    let v = raw as isize;
+                    self.stack[self.sp] = PolyWord::tagged(v);
+                }
+                Ok(StepResult::Continue)
+            }
+
             // signedToLongW: box a tagged int as a 1-word byte object
             // holding the (sign-extended) untagged value. Replaces
             // top in place. bytecode.cpp:1559-1569.
@@ -1645,6 +1661,40 @@ impl Interpreter {
                 }
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
+
+            // ----- LargeWord arithmetic (boxed uintptr_t).
+            //
+            // Each long-word value lives in a 1-word byte object;
+            // these ops read the first word, do the math, write
+            // a new 1-word byte object as the result.
+            // bytecode.cpp:1697-1830
+            EXTINSTR_LG_WORD_ADD => self.lg_word_binop(usize::wrapping_add),
+            EXTINSTR_LG_WORD_SUB => self.lg_word_binop(usize::wrapping_sub),
+            EXTINSTR_LG_WORD_MULT => self.lg_word_binop(usize::wrapping_mul),
+            EXTINSTR_LG_WORD_DIV => self.lg_word_binop(|y, x| y.checked_div(x).unwrap_or(0)),
+            EXTINSTR_LG_WORD_MOD => self.lg_word_binop(|y, x| y.checked_rem(x).unwrap_or(0)),
+            EXTINSTR_LG_WORD_AND => self.lg_word_binop(|y, x| y & x),
+            EXTINSTR_LG_WORD_OR => self.lg_word_binop(|y, x| y | x),
+            EXTINSTR_LG_WORD_XOR => self.lg_word_binop(|y, x| y ^ x),
+            // Shift ops take a TAGGED short word (not boxed) for the shift amount.
+            EXTINSTR_LG_WORD_SHIFT_LEFT => {
+                #[allow(clippy::cast_possible_truncation)]
+                self.lg_word_shift_op(|y, s| y.wrapping_shl(s as u32))
+            }
+            EXTINSTR_LG_WORD_SHIFT_R_LOG => {
+                #[allow(clippy::cast_possible_truncation)]
+                self.lg_word_shift_op(|y, s| y.wrapping_shr(s as u32))
+            }
+            EXTINSTR_LG_WORD_SHIFT_R_ARITH => {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+                self.lg_word_shift_op(|y, s| ((y as isize).wrapping_shr(s as u32)) as usize)
+            }
+            // Comparisons return tagged bool (1=true, 0=false).
+            EXTINSTR_LG_WORD_EQUAL => self.lg_word_cmp(|y, x| y == x),
+            EXTINSTR_LG_WORD_LESS => self.lg_word_cmp(|y, x| y < x),
+            EXTINSTR_LG_WORD_LESS_EQ => self.lg_word_cmp(|y, x| y <= x),
+            EXTINSTR_LG_WORD_GREATER => self.lg_word_cmp(|y, x| y > x),
+            EXTINSTR_LG_WORD_GREATER_EQ => self.lg_word_cmp(|y, x| y >= x),
 
             // ----- Wider constant addressing
             //
@@ -1898,9 +1948,76 @@ impl Interpreter {
         self.push_continue(PolyWord::tagged(r))
     }
 
-    /// `ARB_ADD`: pop `x`, peek `y`, replace top with `y + x` if both
-    /// tagged and result fits — else leave top alone. (Mirrors
-    /// upstream: pop x, peek y, branch on both-tagged-and-fit.)
+    /// LargeWord binop helper: pop x (boxed LargeWord), peek y
+    /// (boxed LargeWord), compute `op(y, x)`, replace top with
+    /// a freshly-allocated 1-word LargeWord holding the result.
+    fn lg_word_binop<F>(&mut self, op: F) -> Result<StepResult, InterpError>
+    where
+        F: FnOnce(usize, usize) -> usize,
+    {
+        let x = self.pop()?;
+        let y = self.peek(0)?;
+        let wx = unsafe { Self::read_lg_word(x) };
+        let wy = unsafe { Self::read_lg_word(y) };
+        let result_word = op(wy, wx);
+        let p = self.alloc_lg_word(result_word)?;
+        self.stack[self.sp] = p;
+        Ok(StepResult::Continue)
+    }
+
+    /// LargeWord shift helper: pop x (TAGGED shift amount), peek y
+    /// (boxed LargeWord), compute `op(y, x)`, replace top.
+    fn lg_word_shift_op<F>(&mut self, op: F) -> Result<StepResult, InterpError>
+    where
+        F: FnOnce(usize, usize) -> usize,
+    {
+        let x = self.pop()?;
+        let y = self.peek(0)?;
+        #[allow(clippy::cast_sign_loss)]
+        let shift = x.untag() as usize;
+        let wy = unsafe { Self::read_lg_word(y) };
+        let result_word = op(wy, shift);
+        let p = self.alloc_lg_word(result_word)?;
+        self.stack[self.sp] = p;
+        Ok(StepResult::Continue)
+    }
+
+    /// LargeWord comparison: pop x, peek y, push tagged bool.
+    fn lg_word_cmp<F>(&mut self, op: F) -> Result<StepResult, InterpError>
+    where
+        F: FnOnce(usize, usize) -> bool,
+    {
+        let x = self.pop()?;
+        let y = self.peek(0)?;
+        let wx = unsafe { Self::read_lg_word(x) };
+        let wy = unsafe { Self::read_lg_word(y) };
+        self.stack[self.sp] = PolyWord::tagged(isize::from(op(wy, wx)));
+        Ok(StepResult::Continue)
+    }
+
+    /// Read the first word of a boxed LargeWord object.
+    ///
+    /// # Safety
+    /// `w` must be a valid boxed-LargeWord pointer (1+ word byte object).
+    unsafe fn read_lg_word(w: PolyWord) -> usize {
+        if !w.is_data_ptr() {
+            return 0;
+        }
+        unsafe { (*w.as_ptr::<PolyWord>()).0 }
+    }
+
+    fn alloc_lg_word(&mut self, word: usize) -> Result<PolyWord, InterpError> {
+        let space = self.alloc_space.as_mut().ok_or(InterpError::NoAllocator)?;
+        let p = space.alloc(1);
+        // SAFETY: just allocated 1 word.
+        unsafe {
+            crate::space::set_length_word(p, 1, crate::length_word::F_BYTE_OBJ);
+            p.write(PolyWord::from_bits(word));
+        }
+        Ok(PolyWord::from_ptr(p.cast_const()))
+    }
+
+    /// `ARB_ADD`: pop `x`, peek `y`, replace top with `y + x`.
     fn arb_add_pair(&mut self) -> Result<StepResult, InterpError> {
         let x = self.pop()?;
         let y = self.peek(0)?;
@@ -1913,9 +2030,8 @@ impl Interpreter {
                 return Ok(StepResult::Continue);
             }
         }
-        // Slow path: would need bignum allocation. Leave top alone
-        // (= would propagate an "exception raised" sentinel in a
-        // full impl). Bootstrap rarely overflows compile-time math.
+        let result = crate::rts::arb_add_via_bigint(self.alloc_space.as_mut(), x, y);
+        self.stack[self.sp] = result;
         Ok(StepResult::Continue)
     }
 
@@ -1932,6 +2048,8 @@ impl Interpreter {
                 return Ok(StepResult::Continue);
             }
         }
+        let result = crate::rts::arb_sub_via_bigint(self.alloc_space.as_mut(), x, y);
+        self.stack[self.sp] = result;
         Ok(StepResult::Continue)
     }
 
@@ -1948,6 +2066,15 @@ impl Interpreter {
                 return Ok(StepResult::Continue);
             }
         }
+        // Overflow or boxed args: defer to the bignum-aware RTS impl.
+        // Critical for SML loops like LibrarySupport.maxShort that
+        // use IS_TAGGED on the result to detect overflow.
+        let result = crate::rts::arb_mult_via_bigint(
+            self.alloc_space.as_mut(),
+            x,
+            y,
+        );
+        self.stack[self.sp] = result;
         Ok(StepResult::Continue)
     }
 

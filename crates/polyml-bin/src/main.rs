@@ -54,6 +54,10 @@ enum Cmd {
         /// Trace each RTS function call as it happens.
         #[arg(long)]
         trace_rts: bool,
+        /// After the run, dump raw bytecode bytes for the hottest
+        /// code object's hot PC range. Requires --profile.
+        #[arg(long)]
+        disasm_hottest: bool,
     },
 }
 
@@ -77,7 +81,8 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             max_steps,
             profile,
             trace_rts,
-        } => run_image(image, *max_steps, *profile, *trace_rts),
+            disasm_hottest,
+        } => run_image(image, *max_steps, *profile, *trace_rts, *disasm_hottest),
     }
 }
 
@@ -86,6 +91,7 @@ fn run_image(
     max_steps: u64,
     profile: bool,
     trace_rts: bool,
+    disasm_hottest: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let image = Image::parse(&bytes)?;
@@ -162,8 +168,47 @@ fn run_image(
 
     if let Some(d) = interp.take_diagnostics() {
         print_profile(&d);
+        if disasm_hottest {
+            dump_hottest_bytecode(&d);
+        }
     }
     Ok(())
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn dump_hottest_bytecode(d: &DiagState) {
+    let Some((hot_code, total)) = d.hot_code_objects(1).into_iter().next() else {
+        return;
+    };
+    let offsets: Vec<u32> = d
+        .pc_visits
+        .iter()
+        .filter_map(|((c, o), _)| if *c == hot_code { Some(*o) } else { None })
+        .collect();
+    let lo = *offsets.iter().min().unwrap_or(&0) as usize;
+    let hi = *offsets.iter().max().unwrap_or(&0) as usize;
+    let win_end = (hi + 6).min(hi.saturating_add(20));
+
+    println!();
+    println!(
+        "--- Hottest code object disassembly (steps={total}, offsets {lo}..={hi}) ---"
+    );
+    let code_ptr = hot_code as *const u8;
+    for pc in lo..=win_end {
+        // SAFETY: code object is live for the program's lifetime.
+        let b = unsafe { *code_ptr.add(pc) };
+        let visits = d
+            .pc_visits
+            .get(&(hot_code, pc as u32))
+            .copied()
+            .unwrap_or(0);
+        let marker = if visits > 0 {
+            format!("  [×{visits}]")
+        } else {
+            String::new()
+        };
+        println!("  +{pc:4}: 0x{b:02x}{marker}");
+    }
 }
 
 fn print_profile(d: &DiagState) {
@@ -187,6 +232,11 @@ fn print_profile(d: &DiagState) {
         #[allow(clippy::cast_precision_loss)]
         let pct = 100.0 * cnt as f64 / total;
         println!("  code=0x{code:016x}  steps={cnt:10}  ({pct:5.1}%)");
+    }
+    println!();
+    println!("Top 10 CALL targets (most-entered functions):");
+    for (code, cnt) in d.hot_call_targets(10) {
+        println!("  code=0x{code:016x}  calls={cnt:10}");
     }
 }
 

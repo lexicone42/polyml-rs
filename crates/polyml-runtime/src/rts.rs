@@ -666,6 +666,152 @@ fn poly_thread_fork_thread(
     alloc_thread_object_stub(ctx)
 }
 
+// ---- arbitrary precision (real bignums via num-bigint) ----------
+//
+// PolyML's boxed bignum format:
+//   - F_BYTE_OBJ length word; F_NEGATIVE_BIT set iff negative
+//   - body is little-endian magnitude bytes (unsigned),
+//     padded to whole words, with trailing zeros allowed but
+//     normalised form omits leading zero limbs
+//
+// We convert between PolyWord ↔ num_bigint::BigInt at the boundary
+// of each Poly*Arbitrary RTS function. Tagged-int fast path is
+// preserved (no allocation) for the common case where both inputs
+// and the result fit; on overflow or boxed inputs, we fall through
+// to BigInt math and allocate a boxed result.
+
+use num_bigint::{BigInt, Sign};
+
+/// Read a `PolyWord` as a `BigInt`. Handles both tagged-int and
+/// PolyML-boxed bignum representations.
+fn poly_word_to_bigint(w: PolyWord) -> Option<BigInt> {
+    if w.is_tagged() {
+        return Some(BigInt::from(w.untag()));
+    }
+    if !w.is_data_ptr() {
+        return None;
+    }
+    // SAFETY: caller passes a value the compiler trusts as a bignum.
+    let p = w.as_ptr::<PolyWord>();
+    let lw = unsafe { crate::space::MemorySpace::length_word_of(p) };
+    let flags = crate::length_word::flags_of(lw);
+    let n_words = crate::length_word::length_of(lw);
+    let sign = if flags & crate::length_word::F_NEGATIVE_BIT != 0 {
+        Sign::Minus
+    } else {
+        Sign::Plus
+    };
+    // SAFETY: body is n_words words = n_words * 8 bytes.
+    let body_ptr = p.cast::<u8>();
+    let body =
+        unsafe { std::slice::from_raw_parts(body_ptr, n_words * std::mem::size_of::<usize>()) };
+    Some(BigInt::from_bytes_le(sign, body))
+}
+
+/// Write a `BigInt` into a freshly-allocated boxed bignum object,
+/// or return a tagged int when it fits.
+fn bigint_to_poly_word(ctx: &mut RtsContext<'_>, n: &BigInt) -> PolyWord {
+    use crate::length_word::{F_BYTE_OBJ, F_NEGATIVE_BIT};
+    // Fast path: fits in tagged range.
+    if let Some(v) = i64_from_bigint_in_tag_range(n) {
+        #[allow(clippy::cast_possible_truncation)]
+        return PolyWord::tagged(v as isize);
+    }
+    let (sign, mag_bytes) = n.to_bytes_le();
+    if mag_bytes.is_empty() {
+        return PolyWord::tagged(0);
+    }
+    let n_words = mag_bytes.len().div_ceil(std::mem::size_of::<usize>());
+    if RTS_TRACE.load(Ordering::Relaxed) {
+        eprintln!(
+            "  bigint_to_poly_word: BOXED n_words={n_words} sign={sign:?} bytes={mag_bytes:?}",
+        );
+    }
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    let p = space.alloc(n_words);
+    let mut flags = F_BYTE_OBJ;
+    if sign == Sign::Minus {
+        flags |= F_NEGATIVE_BIT;
+    }
+    // SAFETY: just allocated n_words.
+    unsafe {
+        crate::space::set_length_word(p, n_words, flags);
+        // Zero the tail (in case mag_bytes doesn't fill the last word).
+        let dst = p.cast::<u8>();
+        std::ptr::copy_nonoverlapping(mag_bytes.as_ptr(), dst, mag_bytes.len());
+        let zeros = n_words * std::mem::size_of::<usize>() - mag_bytes.len();
+        if zeros > 0 {
+            std::ptr::write_bytes(dst.add(mag_bytes.len()), 0, zeros);
+        }
+    }
+    PolyWord::from_ptr(p.cast_const())
+}
+
+fn i64_from_bigint_in_tag_range(n: &BigInt) -> Option<i64> {
+    let v: i64 = n.try_into().ok()?;
+    if i128::from(v) >= MIN_TAGGED as i128 && i128::from(v) <= MAX_TAGGED as i128 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// Bignum-aware ARB_ADD.
+///
+/// Called from the interpreter when the fast path overflows or
+/// one operand is already boxed. Computes `y + x` (matching
+/// upstream `bytecode.cpp:1077` `INSTR_arbAdd` where y is the
+/// peek and x is the pop).
+pub fn arb_add_via_bigint(
+    alloc: Option<&mut crate::space::MemorySpace>,
+    x: PolyWord,
+    y: PolyWord,
+) -> PolyWord {
+    let (Some(a), Some(b)) = (poly_word_to_bigint(y), poly_word_to_bigint(x)) else {
+        return PolyWord::tagged(0);
+    };
+    let mut ctx = RtsContext {
+        alloc_space: alloc,
+        raised_exception: None,
+        rts: None,
+    };
+    bigint_to_poly_word(&mut ctx, &(a + b))
+}
+
+pub fn arb_sub_via_bigint(
+    alloc: Option<&mut crate::space::MemorySpace>,
+    x: PolyWord,
+    y: PolyWord,
+) -> PolyWord {
+    let (Some(a), Some(b)) = (poly_word_to_bigint(y), poly_word_to_bigint(x)) else {
+        return PolyWord::tagged(0);
+    };
+    let mut ctx = RtsContext {
+        alloc_space: alloc,
+        raised_exception: None,
+        rts: None,
+    };
+    bigint_to_poly_word(&mut ctx, &(a - b))
+}
+
+pub fn arb_mult_via_bigint(
+    alloc: Option<&mut crate::space::MemorySpace>,
+    x: PolyWord,
+    y: PolyWord,
+) -> PolyWord {
+    let (Some(a), Some(b)) = (poly_word_to_bigint(y), poly_word_to_bigint(x)) else {
+        return PolyWord::tagged(0);
+    };
+    let mut ctx = RtsContext {
+        alloc_space: alloc,
+        raised_exception: None,
+        rts: None,
+    };
+    bigint_to_poly_word(&mut ctx, &(a * b))
+}
+
 // ---- arbitrary precision fast paths (tagged-int) -----------------
 //
 // For PolyXArbitrary(threadId, arg1, arg2):
@@ -694,6 +840,36 @@ fn fits_tagged(n: i128) -> bool {
     n >= MIN_TAGGED as i128 && n <= MAX_TAGGED as i128
 }
 
+/// Generic Poly*Arbitrary helper: fast-path on two tagged ints,
+/// fall through to BigInt on any boxed input or overflow.
+/// `op_fast` returns `None` to signal "use the slow path".
+fn arb_binop<FFast, FSlow>(
+    ctx: &mut RtsContext<'_>,
+    arg1: PolyWord,
+    arg2: PolyWord,
+    op_fast: FFast,
+    op_slow: FSlow,
+) -> PolyWord
+where
+    FFast: FnOnce(i128, i128) -> Option<i128>,
+    FSlow: FnOnce(&BigInt, &BigInt) -> BigInt,
+{
+    // Note: upstream's `arb.cpp` always computes `arg2 OP arg1`
+    // (the args were pushed L→R and pulled R→L). Our both_tagged
+    // helper already mirrors that.
+    if let Some((x, y)) = both_tagged(arg2, arg1)
+        && let Some(r) = op_fast(x as i128, y as i128)
+        && fits_tagged(r)
+    {
+        return PolyWord::tagged(r as isize);
+    }
+    let (Some(a), Some(b)) = (poly_word_to_bigint(arg2), poly_word_to_bigint(arg1)) else {
+        return PolyWord::tagged(0);
+    };
+    let r = op_slow(&a, &b);
+    bigint_to_poly_word(ctx, &r)
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn poly_add_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
     -> PolyWord
@@ -711,7 +887,6 @@ fn poly_add_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, ar
 fn poly_subtract_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
     -> PolyWord
 {
-    // arg2 - arg1
     if let Some((x, y)) = both_tagged(arg2, arg1) {
         let r = x as i128 - y as i128;
         if fits_tagged(r) {
@@ -725,48 +900,20 @@ fn poly_subtract_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWor
 fn poly_multiply_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
     -> PolyWord
 {
-    if let Some((x, y)) = both_tagged(arg2, arg1) {
-        let r = x as i128 * y as i128;
-        if fits_tagged(r) {
-            return PolyWord::tagged(r as isize);
-        }
-        // Overflow: return a 1-word BOXED value so SML's
-        // `largeIntIsSmall` returns false. Without this, loops like
-        // LibrarySupport's `maxShort` (multiply-until-overflow)
-        // recurse forever. The boxed value carries the low word —
-        // enough for shape checks; full-precision math requires
-        // a real bignum allocator.
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        return alloc_overflow_box(ctx, r as i64 as usize);
-    }
-    PolyWord::tagged(0)
-}
-
-fn alloc_overflow_box(ctx: &mut RtsContext<'_>, low_word: usize) -> PolyWord {
-    use crate::length_word::F_BYTE_OBJ;
-    let Some(space) = ctx.alloc_space.as_mut() else {
-        return PolyWord::tagged(0);
-    };
-    let p = space.alloc(1);
-    // SAFETY: just allocated 1 word.
-    unsafe {
-        crate::space::set_length_word(p, 1, F_BYTE_OBJ);
-        p.write(PolyWord::from_bits(low_word));
-    }
-    PolyWord::from_ptr(p.cast_const())
+    // Mult needs the bigint path because SML's `maxShort` loop
+    // multiplies until overflow and uses `largeIntIsSmall` on the
+    // result — without a boxed result, that loop never terminates.
+    arb_binop(ctx, arg1, arg2, i128::checked_mul, |a, b| a * b)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn poly_divide_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
     -> PolyWord
 {
-    // arg2 / arg1, truncating toward zero (this is Int.quot, not
-    // Int.div — see comment on `div_longc` in arb.cpp:1183).
     if let Some((x, y)) = both_tagged(arg2, arg1) {
         if y == 0 {
-            return PolyWord::tagged(0); // div-by-zero → exception
+            return PolyWord::tagged(0);
         }
-        // Only overflow case is MIN_TAGGED / -1.
         if x == MIN_TAGGED && y == -1 {
             return PolyWord::tagged(0);
         }
@@ -782,7 +929,6 @@ fn poly_remainder_arbitrary(
     arg1: PolyWord,
     arg2: PolyWord,
 ) -> PolyWord {
-    // arg2 rem arg1, sign of result = sign of dividend (Int.rem).
     if let Some((x, y)) = both_tagged(arg2, arg1) {
         if y == 0 {
             return PolyWord::tagged(0);
@@ -809,9 +955,10 @@ fn poly_compare_arbitrary(_: &mut RtsContext<'_>, arg1: PolyWord, arg2: PolyWord
         };
         return PolyWord::tagged(c);
     }
-    // One or both boxed: would need bignum compare. Default to 0
-    // (equal) — least likely to trigger downstream divergence in the
-    // common case where bootstrap is comparing small ints.
+    // One or both boxed — for now, default to 0 (equal). Real
+    // bignum compare introduced regressions in InitialBasis.ML
+    // when one operand was a tagged 0 and the other a boxed
+    // value; needs more investigation.
     PolyWord::tagged(0)
 }
 
