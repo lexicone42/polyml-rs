@@ -338,6 +338,11 @@ fn register_builtins(t: &mut RtsTable) {
     // process_env return values.
     t.register("PolyProcessEnvFailureValue", RtsFn::Arity1(|_, _| PolyWord::tagged(1)));
     t.register("PolyProcessEnvSuccessValue", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyProcessEnvErrorMessage", RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)));
+    t.register("PolyProcessEnvErrorFromString", RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)));
+    t.register("PolyProcessEnvSystem", RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)));
+    t.register("PolyTerminate", RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)));
+    t.register("PolyPollIODescriptors", RtsFn::Arity4(zero4));
     // Thread cond var stubs (no-ops in single-threaded mode).
     t.register("PolyThreadCondVarWait", RtsFn::Arity2(noop2));
     t.register("PolyThreadCondVarWaitUntil", RtsFn::Arity3(zero3));
