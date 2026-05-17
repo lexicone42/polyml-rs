@@ -566,11 +566,11 @@ fn poly_basic_io_general(
         0 => wrap_file_descriptor(ctx, 0),
         1 => wrap_file_descriptor(ctx, 1),
         2 => wrap_file_descriptor(ctx, 2),
-        // 10: get text as a string. Returning TAGGED(0) breaks the
-        // consumer (which dereferences the result as a string ptr).
-        // EOF = empty string. Allocates a proper 1-word
-        // PolyStringObject with length 0 + F_BYTE_OBJ.
-        10 | 26 => alloc_empty_string(ctx),
+        // 10/26: read text/binary as a (PolyML) string. Route to
+        // std::io::stdin for fd 0 so the bootstrap can actually
+        // consume input from a pipe; everything else returns
+        // an empty string (= EOF) which is safe.
+        10 | 26 => read_string_from_stream(ctx, strm, arg),
         // 11/12: write array — actually attempt to write to the fd
         // and return the byte count. Empty-pretend wasn't tested
         // yet but full write support makes future REPL output work.
@@ -1231,6 +1231,75 @@ fn write_array(strm: PolyWord, arg: PolyWord) -> PolyWord {
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_possible_wrap)]
     PolyWord::tagged(n as isize)
+}
+
+/// IO subcode 10/26: read a chunk of bytes from a stream into a
+/// fresh PolyStringObject (length-prefix word + chars).
+///
+/// For fd 0 (stdin) we route through `std::io::stdin().read()` so
+/// piped input actually reaches the bootstrap. Other fds return an
+/// empty string (= EOF) for now — extending to real file fds will
+/// require a real file-open path (subcodes 3/4) first.
+fn read_string_from_stream(
+    ctx: &mut RtsContext<'_>,
+    strm: PolyWord,
+    arg: PolyWord,
+) -> PolyWord {
+    use std::io::Read;
+    if !strm.is_data_ptr() {
+        return alloc_empty_string(ctx);
+    }
+    // SAFETY: strm is a wrapped-fd object created by
+    // `wrap_file_descriptor` (or an equivalent boxed sysword).
+    let fd_plus_one = unsafe { *strm.as_ptr::<PolyWord>() }.0;
+    #[allow(clippy::cast_sign_loss)]
+    let want = if arg.is_tagged() {
+        let n = arg.untag();
+        if n <= 0 { 0 } else { n as usize }
+    } else {
+        4096
+    };
+    let want = want.min(102_400);
+    if want == 0 || fd_plus_one == 0 {
+        return alloc_empty_string(ctx);
+    }
+    let mut buf = vec![0u8; want];
+    let n = match fd_plus_one - 1 {
+        0 => std::io::stdin().read(&mut buf).unwrap_or(0),
+        _ => 0,
+    };
+    if n == 0 {
+        return alloc_empty_string(ctx);
+    }
+    alloc_poly_string(ctx, &buf[..n])
+}
+
+/// Allocate a `PolyStringObject` (length-prefix word + chars +
+/// zero-padded). Mirrors `polystring.cpp:69-84`.
+fn alloc_poly_string(ctx: &mut RtsContext<'_>, bytes: &[u8]) -> PolyWord {
+    use crate::length_word::F_BYTE_OBJ;
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    // 1 word for the length prefix + ceil(len/8) words for chars.
+    let body_words = bytes.len().div_ceil(std::mem::size_of::<usize>());
+    let total_words = 1 + body_words;
+    let p = space.alloc(total_words);
+    // SAFETY: just allocated total_words words.
+    unsafe {
+        crate::space::set_length_word(p, total_words, F_BYTE_OBJ);
+        // Length word (first body word) = byte length.
+        p.write(PolyWord::from_bits(bytes.len()));
+        // Char bytes follow immediately after the length word.
+        let chars_dst = p.add(1).cast::<u8>();
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), chars_dst, bytes.len());
+        // Zero the trailing padding bytes (within the last word).
+        let padding = body_words * std::mem::size_of::<usize>() - bytes.len();
+        if padding > 0 {
+            std::ptr::write_bytes(chars_dst.add(bytes.len()), 0, padding);
+        }
+    }
+    PolyWord::from_ptr(p.cast_const())
 }
 
 /// Allocate the canonical "empty string" object: 1 word with length

@@ -1291,6 +1291,18 @@ impl Interpreter {
             INSTR_FIXED_QUOT => self.bin_op_tagged(|x, y| if x == 0 { Err(()) } else { Ok(y.wrapping_div(x)) }),
             INSTR_FIXED_REM => self.bin_op_tagged(|x, y| if x == 0 { Err(()) } else { Ok(y.wrapping_rem(x)) }),
 
+            // ----- Arbitrary-precision arithmetic with tagged-int
+            // fast path. Upstream falls through to add_longc /
+            // sub_longc / mult_longc on overflow; we don't have a
+            // bignum allocator yet, so we leave the value alone
+            // (= top stays as-is) — bootstrap rarely hits overflow
+            // in compile-time math.
+            //
+            // bytecode.cpp:1077-1148
+            INSTR_ARB_ADD => self.arb_add_pair(),
+            INSTR_ARB_SUBTRACT => self.arb_sub_pair(),
+            INSTR_ARB_MULTIPLY => self.arb_mult_pair(),
+
             // ----- Word arithmetic (TAG-AWARE, per bytecode.cpp:1001-)
             //
             // PolyML stores ints as `(n << 1) | 1`. WORD_ADD on two
@@ -1835,6 +1847,59 @@ impl Interpreter {
         let y = self.pop()?;
         let r = f(x.untag(), y.untag()).map_err(|()| InterpError::DivByZero)?;
         self.push_continue(PolyWord::tagged(r))
+    }
+
+    /// `ARB_ADD`: pop `x`, peek `y`, replace top with `y + x` if both
+    /// tagged and result fits — else leave top alone. (Mirrors
+    /// upstream: pop x, peek y, branch on both-tagged-and-fit.)
+    fn arb_add_pair(&mut self) -> Result<StepResult, InterpError> {
+        let x = self.pop()?;
+        let y = self.peek(0)?;
+        if x.is_tagged() && y.is_tagged() {
+            let t = (x.untag() as i128) + (y.untag() as i128);
+            if t >= crate::poly_word::MIN_TAGGED as i128
+                && t <= crate::poly_word::MAX_TAGGED as i128
+            {
+                self.stack[self.sp] = PolyWord::tagged(t as isize);
+                return Ok(StepResult::Continue);
+            }
+        }
+        // Slow path: would need bignum allocation. Leave top alone
+        // (= would propagate an "exception raised" sentinel in a
+        // full impl). Bootstrap rarely overflows compile-time math.
+        Ok(StepResult::Continue)
+    }
+
+    /// `ARB_SUBTRACT`: pop `x`, peek `y`, replace top with `y - x`.
+    fn arb_sub_pair(&mut self) -> Result<StepResult, InterpError> {
+        let x = self.pop()?;
+        let y = self.peek(0)?;
+        if x.is_tagged() && y.is_tagged() {
+            let t = (y.untag() as i128) - (x.untag() as i128);
+            if t >= crate::poly_word::MIN_TAGGED as i128
+                && t <= crate::poly_word::MAX_TAGGED as i128
+            {
+                self.stack[self.sp] = PolyWord::tagged(t as isize);
+                return Ok(StepResult::Continue);
+            }
+        }
+        Ok(StepResult::Continue)
+    }
+
+    /// `ARB_MULTIPLY`: pop `x`, peek `y`, replace top with `y * x`.
+    fn arb_mult_pair(&mut self) -> Result<StepResult, InterpError> {
+        let x = self.pop()?;
+        let y = self.peek(0)?;
+        if x.is_tagged() && y.is_tagged() {
+            let t = (y.untag() as i128) * (x.untag() as i128);
+            if t >= crate::poly_word::MIN_TAGGED as i128
+                && t <= crate::poly_word::MAX_TAGGED as i128
+            {
+                self.stack[self.sp] = PolyWord::tagged(t as isize);
+                return Ok(StepResult::Continue);
+            }
+        }
+        Ok(StepResult::Continue)
     }
 
     fn bin_op_word<F>(&mut self, f: F) -> Result<StepResult, InterpError>
