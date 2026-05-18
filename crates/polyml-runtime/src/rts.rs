@@ -400,7 +400,7 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyObjSize", RtsFn::Arity2(zero2));
     t.register("PolyShowSize", RtsFn::Arity2(zero2));
     t.register("PolyShareCommonData", RtsFn::Arity2(zero2));
-    t.register("PolySpecificGeneral", RtsFn::Arity3(zero3));
+    t.register("PolySpecificGeneral", RtsFn::Arity3(poly_specific_general));
     t.register("PolyProfiling", RtsFn::Arity2(zero2));
     t.register("PolyLoadHierarchy", RtsFn::Arity2(zero2));
     t.register("PolyLoadModule", RtsFn::Arity2(zero2));
@@ -769,6 +769,27 @@ fn poly_network_get_sock_type_list_inner() -> PolyWord {
     PolyWord::from_bits(addr)
 }
 
+/// `PolySpecificGeneral(threadId, code, arg)` — dispatch various
+/// poly-specific queries (architecture, RTS version, etc.).
+/// Mirrors `poly_specific.cpp:83-136`.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_specific_general(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    code: PolyWord,
+    _arg: PolyWord,
+) -> PolyWord {
+    let c = code.untag();
+    let s: &[u8] = match c {
+        9 => b"polyml-rs",          // GIT_VERSION
+        10 => b"Portable-5.9.0",    // RTS version (interpreted)
+        12 => b"Interpreted",       // architecture name
+        19 => b"",                  // RTS arg help (empty)
+        _ => return PolyWord::tagged(0),
+    };
+    alloc_poly_string(ctx, s)
+}
+
 fn poly_interpreted_get_abi_list_inner() -> PolyWord {
     // Returning nil ([]) causes Foreign.sml to raise Option when
     // looking for ("default", _) in the list. Build a single-element
@@ -997,6 +1018,11 @@ fn poly_basic_io_general(
         // For stdin/stdout/stderr this is usually accurate; the
         // bootstrap probably wants to know if it's interactive.
         21 => PolyWord::tagged(3),
+        // 50: open directory; 51: read next entry; 52: close.
+        // We use a global directory-state map keyed by a fresh id.
+        50 => open_directory(ctx, arg),
+        51 => read_directory(ctx, strm),
+        52 => close_directory(strm),
         // Various stub returns of TAGGED(0):
         //   17: bytes available
         //   18: get stream position
@@ -1873,6 +1899,97 @@ fn write_array(strm: PolyWord, arg: PolyWord) -> PolyWord {
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_possible_wrap)]
     PolyWord::tagged(n as isize)
+}
+
+/// Global state for open directories. Each entry is a Vec of
+/// remaining filenames (as bytes). Index = the "fd" stored in
+/// the wrapped-stream object (we use `id + 1`, 0 = closed).
+static DIR_STATE: std::sync::Mutex<Vec<Option<Vec<Vec<u8>>>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// IO subcode 50: open directory. Wraps the read-dir iterator in
+/// a stream-like object keyed by an integer id.
+fn open_directory(ctx: &mut RtsContext<'_>, name_arg: PolyWord) -> PolyWord {
+    let Some(name) = poly_string_to_rust(name_arg) else {
+        return PolyWord::tagged(0);
+    };
+    if RTS_TRACE.load(Ordering::Relaxed) {
+        eprintln!("  openDir({name:?})");
+    }
+    let Ok(entries) = std::fs::read_dir(&name) else {
+        // Raise OS.SysErr — but for now, return a "closed" stream
+        // so reallyexists handles it gracefully via SysErr handler.
+        ctx.raised_exception = Some(make_simple_exception(
+            ctx,
+            &format!("openDir failed: {name}"),
+        ));
+        return PolyWord::tagged(0);
+    };
+    let mut names: Vec<Vec<u8>> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().into_encoded_bytes())
+        .collect();
+    // Match upstream readDirectory which skips "." and "..".
+    names.retain(|b| !(b == b"." || b == b".."));
+    let id = {
+        let mut state = DIR_STATE.lock().unwrap();
+        let id = state.iter().position(Option::is_none).unwrap_or_else(|| {
+            state.push(None);
+            state.len() - 1
+        });
+        state[id] = Some(names);
+        id
+    };
+    // Wrap as if it were an fd. wrap_file_descriptor stores fd+1
+    // so passing `id` here yields a box containing `id+1` (0 = closed).
+    #[allow(clippy::cast_possible_truncation)]
+    wrap_file_descriptor(ctx, id as u32)
+}
+
+/// IO subcode 51: read next directory entry. Returns "" at end.
+fn read_directory(ctx: &mut RtsContext<'_>, strm: PolyWord) -> PolyWord {
+    if !strm.is_data_ptr() {
+        return alloc_empty_string(ctx);
+    }
+    // SAFETY: strm is a wrapped-fd object.
+    let id_plus_one = unsafe { *strm.as_ptr::<PolyWord>() }.0;
+    if id_plus_one == 0 {
+        return alloc_empty_string(ctx);
+    }
+    let id = id_plus_one - 1;
+    let popped = {
+        let mut state = DIR_STATE.lock().unwrap();
+        if let Some(Some(names)) = state.get_mut(id) {
+            names.pop()
+        } else {
+            None
+        }
+    };
+    if let Some(name) = popped {
+        return alloc_poly_string(ctx, &name);
+    }
+    alloc_empty_string(ctx)
+}
+
+/// IO subcode 52: close directory.
+fn close_directory(strm: PolyWord) -> PolyWord {
+    if !strm.is_data_ptr() {
+        return PolyWord::tagged(0);
+    }
+    let p = strm.as_ptr::<PolyWord>().cast_mut();
+    // SAFETY: strm is a wrapped object.
+    unsafe {
+        let id_plus_one = (*p).0;
+        if id_plus_one > 0 {
+            let id = id_plus_one - 1;
+            let mut state = DIR_STATE.lock().unwrap();
+            if let Some(slot) = state.get_mut(id) {
+                *slot = None;
+            }
+        }
+        p.write(PolyWord::from_bits(0));
+    }
+    PolyWord::tagged(0)
 }
 
 /// Extract a Rust `String` from a PolyString pointer. Returns
