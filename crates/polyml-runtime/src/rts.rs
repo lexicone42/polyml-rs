@@ -335,6 +335,40 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyNetworkGetSockTypeList", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyNetworkReturnIP4AddressAny", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyNetworkReturnIP6AddressAny", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // Many more network stubs — all unimplemented; Socket.sml will
+    // fail at runtime if you try to use them, but registration is
+    // enough for compile-time.
+    let net_stubs_arity1: &[&str] = &[
+        "PolyNetworkBytesAvailable", "PolyNetworkCloseSocket",
+        "PolyNetworkGetAtMark", "PolyNetworkGetSocketError",
+        "PolyNetworkGetPeerName", "PolyNetworkGetSockName",
+        "PolyNetworkGetLinger",
+    ];
+    for n in net_stubs_arity1 {
+        t.register(n, RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    }
+    let net_stubs_arity2: &[&str] = &[
+        "PolyNetworkAccept", "PolyNetworkBind", "PolyNetworkConnect",
+        "PolyNetworkGetProtByName", "PolyNetworkGetProtByNo",
+        "PolyNetworkListen", "PolyNetworkSetLinger", "PolyNetworkShutdown",
+    ];
+    for n in net_stubs_arity2 {
+        t.register(n, RtsFn::Arity2(zero2));
+    }
+    let net_stubs_arity3: &[&str] = &[
+        "PolyNetworkGetOption", "PolyNetworkSetOption",
+        "PolyNetworkReceive", "PolyNetworkSend",
+    ];
+    for n in net_stubs_arity3 {
+        t.register(n, RtsFn::Arity3(zero3));
+    }
+    let net_stubs_arity4: &[&str] = &[
+        "PolyNetworkReceiveFrom", "PolyNetworkSendTo",
+        "PolyNetworkSelect",
+    ];
+    for n in net_stubs_arity4 {
+        t.register(n, RtsFn::Arity4(zero4));
+    }
     // process_env return values.
     t.register("PolyProcessEnvFailureValue", RtsFn::Arity1(|_, _| PolyWord::tagged(1)));
     t.register("PolyProcessEnvSuccessValue", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
