@@ -589,7 +589,73 @@ fn poly_interpreted_enter_int_mode_inner() -> PolyWord {
 }
 
 fn poly_interpreted_get_abi_list_inner() -> PolyWord {
-    PolyWord::tagged(0) // nil
+    // Returning nil ([]) causes Foreign.sml to raise Option when
+    // looking for ("default", _) in the list. Build a single-element
+    // list `[("default", 0)]` so that valOf succeeds. The actual
+    // ABI value doesn't matter for compilation — only the structure.
+    //
+    // We have to allocate, but this is called without an alloc_space
+    // (legacy Arity0 stub interface). Return a static-ish layout
+    // by leaking a Box — only one allocation per process lifetime.
+    use crate::length_word::{F_BYTE_OBJ, make_length_word};
+    use std::sync::OnceLock;
+    static ABI_LIST: OnceLock<usize> = OnceLock::new();
+    let addr = *ABI_LIST.get_or_init(|| {
+        // Manually lay out:
+        //   string "default" — 1 (length word) + ceil(7/8)=1 = 2 words
+        //   abi word — 1 word boxed LargeWord (value 0)
+        //   tuple — 2 words [string, word]
+        //   cons cell — 2 words [tuple, nil=tagged(0)]
+        //
+        // Total: 2 + 1 + 2 + 2 = 7 words. Lay them out contiguously
+        // in a Box<[usize]> with appropriate length-word headers
+        // INTERLEAVED.
+        //
+        // Each object needs its length word AT obj_ptr - 1.
+        // Layout (each row = 1 word):
+        //   [0]  string length word           ← str_ptr-1 (header)
+        //   [1]  string body word 1 (length=7) ← str_ptr+0 (length prefix)
+        //   [2]  string body word 2 ("default")← str_ptr+1 (chars)
+        //   [3]  abi-word length word          ← abi_ptr-1
+        //   [4]  abi-word body (0)             ← abi_ptr+0
+        //   [5]  tuple length word             ← tup_ptr-1
+        //   [6]  tuple slot 0 (str)            ← tup_ptr+0
+        //   [7]  tuple slot 1 (abi)            ← tup_ptr+1
+        //   [8]  cons length word              ← cons_ptr-1
+        //   [9]  cons head (tup)               ← cons_ptr+0
+        //   [10] cons tail (nil)               ← cons_ptr+1
+        let storage: Box<[usize; 11]> = Box::new([0; 11]);
+        let base: *mut usize = Box::into_raw(storage).cast();
+        // SAFETY: just allocated, exclusive access.
+        unsafe {
+            // String "default" — 2 body words (length-prefix word + chars).
+            base.add(0).write(make_length_word(2, F_BYTE_OBJ).0);
+            let str_ptr = base.add(1);
+            str_ptr.add(0).write(7); // byte length
+            let chars: &[u8; 8] = b"default\0";
+            std::ptr::copy_nonoverlapping(
+                chars.as_ptr(),
+                str_ptr.add(1).cast::<u8>(),
+                8,
+            );
+            // ABI word — 1 byte-object word.
+            base.add(3).write(make_length_word(1, F_BYTE_OBJ).0);
+            let abi_ptr = base.add(4);
+            abi_ptr.write(0);
+            // Tuple [str, abi] — 2 ordinary words.
+            base.add(5).write(make_length_word(2, 0).0);
+            let tup_ptr = base.add(6);
+            tup_ptr.add(0).write(str_ptr as usize);
+            tup_ptr.add(1).write(abi_ptr as usize);
+            // Cons [tup, nil] — 2 ordinary words.
+            base.add(8).write(make_length_word(2, 0).0);
+            let cons_ptr = base.add(9);
+            cons_ptr.add(0).write(tup_ptr as usize);
+            cons_ptr.add(1).write(PolyWord::tagged(0).0); // nil
+            cons_ptr as usize
+        }
+    });
+    PolyWord::from_bits(addr)
 }
 
 /// Returns the maximum stack size for the thread. Pass through (no-op
