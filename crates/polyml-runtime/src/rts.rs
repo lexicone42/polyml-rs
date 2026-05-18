@@ -330,9 +330,9 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyFFICreateExtFn", RtsFn::Arity2(zero2));
     // Network stubs (we don't support sockets).
     t.register("PolyNetworkGetFamilyFromAddress", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyNetworkGetAddrList", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyNetworkGetAddrList", RtsFn::Arity1(|_, _| poly_network_get_addr_list_inner()));
     t.register("PolyNetworkGetHostName", RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)));
-    t.register("PolyNetworkGetSockTypeList", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register("PolyNetworkGetSockTypeList", RtsFn::Arity1(|_, _| poly_network_get_sock_type_list_inner()));
     t.register("PolyNetworkReturnIP4AddressAny", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyNetworkReturnIP6AddressAny", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     // Many more network stubs — all unimplemented; Socket.sml will
@@ -351,6 +351,13 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkAccept", "PolyNetworkBind", "PolyNetworkConnect",
         "PolyNetworkGetProtByName", "PolyNetworkGetProtByNo",
         "PolyNetworkListen", "PolyNetworkSetLinger", "PolyNetworkShutdown",
+        "PolyNetworkGetServByName", "PolyNetworkGetServByPort",
+        "PolyNetworkCreateIP4Address", "PolyNetworkCreateIP6Address",
+        "PolyNetworkGetAddressAndPortFromIP4",
+        "PolyNetworkGetAddressAndPortFromIP6",
+        "PolyNetworkGetAddrInfo", "PolyNetworkGetNameInfo",
+        "PolyNetworkCreateSocket",
+        "PolyNetworkStringToIP6Address", "PolyNetworkIP6AddressToString",
     ];
     for n in net_stubs_arity2 {
         t.register(n, RtsFn::Arity2(zero2));
@@ -358,6 +365,9 @@ fn register_builtins(t: &mut RtsTable) {
     let net_stubs_arity3: &[&str] = &[
         "PolyNetworkGetOption", "PolyNetworkSetOption",
         "PolyNetworkReceive", "PolyNetworkSend",
+        "PolyNetworkGetServByNameAndProtocol",
+        "PolyNetworkGetServByPortAndProtocol",
+        "PolyNetworkCreateSocketPair",
     ];
     for n in net_stubs_arity3 {
         t.register(n, RtsFn::Arity3(zero3));
@@ -377,6 +387,30 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyProcessEnvSystem", RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)));
     t.register("PolyTerminate", RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)));
     t.register("PolyPollIODescriptors", RtsFn::Arity4(zero4));
+    t.register("PolySetSignalHandler", RtsFn::Arity2(zero2));
+    t.register("PolyOSSpecificGeneral", RtsFn::Arity3(zero3));
+    t.register("PolyPosixCreatePersistentFD", RtsFn::Arity2(zero2));
+    t.register("PolyPosixSleep", RtsFn::Arity3(zero3));
+    t.register("PolyUnixExecute", RtsFn::Arity4(zero4));
+    t.register("PolyNetworkUnixPathToSockAddr", RtsFn::Arity2(zero2));
+    t.register("PolyNetworkUnixSockAddrToPath", RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)));
+    t.register("PolyGetRemoteStats", RtsFn::Arity2(zero2));
+    t.register("PolySetUserStat", RtsFn::Arity3(zero3));
+    t.register("PolyObjProfile", RtsFn::Arity2(zero2));
+    t.register("PolyObjSize", RtsFn::Arity2(zero2));
+    t.register("PolyShowSize", RtsFn::Arity2(zero2));
+    t.register("PolyShareCommonData", RtsFn::Arity2(zero2));
+    t.register("PolySpecificGeneral", RtsFn::Arity3(zero3));
+    t.register("PolyProfiling", RtsFn::Arity2(zero2));
+    t.register("PolyLoadHierarchy", RtsFn::Arity2(zero2));
+    t.register("PolyLoadModule", RtsFn::Arity2(zero2));
+    t.register("PolyLoadState", RtsFn::Arity2(zero2));
+    t.register("PolyReleaseModule", RtsFn::Arity2(zero2));
+    t.register("PolyRenameParent", RtsFn::Arity3(zero3));
+    t.register("PolySaveState", RtsFn::Arity3(zero3));
+    t.register("PolyShowParent", RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)));
+    t.register("PolyStoreModule", RtsFn::Arity3(zero3));
+    t.register("PolyGetModuleInfo", RtsFn::Arity2(zero2));
     // Thread cond var stubs (no-ops in single-threaded mode).
     t.register("PolyThreadCondVarWait", RtsFn::Arity2(noop2));
     t.register("PolyThreadCondVarWaitUntil", RtsFn::Arity3(zero3));
@@ -620,6 +654,119 @@ fn poly_finish(
 
 fn poly_interpreted_enter_int_mode_inner() -> PolyWord {
     PolyWord::tagged(0)
+}
+
+/// Build a static SML list `[(name, tagged_int)]` from a slice of
+/// (name, int) pairs. Each call uses a fresh static cell — the
+/// data is leaked but the call site usually caches the result.
+fn static_string_int_list(items: &'static [(&'static str, isize)]) -> usize {
+    use crate::length_word::{F_BYTE_OBJ, make_length_word};
+    // For each pair: PolyString (length_word + length + chars padded)
+    //               + 2-word ordinary tuple
+    // For the list:  cons cells (2-word ordinary) chaining toward nil.
+    //
+    // Pre-compute sizes per pair: 1 (str header) + 1 (str len) +
+    // ceil(name.len()/8) (chars) + 1 (tuple header) + 2 (tuple body)
+    //
+    // Total per cons: above + 1 (cons header) + 2 (cons body)
+    //
+    // Simpler: just allocate ALL words in one big Box, walking
+    // sequentially.
+    use std::cell::OnceCell;
+    let mut words: Vec<usize> = Vec::new();
+    let mut tuple_ptrs: Vec<usize> = Vec::new();
+    for (name, _) in items {
+        let chars_words = (name.len() + 1).div_ceil(std::mem::size_of::<usize>());
+        let str_size = 1 + chars_words; // length + chars
+        words.push(make_length_word(str_size, F_BYTE_OBJ).0);
+        let str_ptr_idx = words.len(); // word index of length-prefix word
+        words.push(name.len()); // length prefix
+        // chars padded to whole words
+        let mut chars: Vec<u8> = name.as_bytes().to_vec();
+        while !chars.len().is_multiple_of(std::mem::size_of::<usize>()) {
+            chars.push(0);
+        }
+        for chunk in chars.chunks_exact(std::mem::size_of::<usize>()) {
+            words.push(usize::from_le_bytes(chunk.try_into().unwrap()));
+        }
+        // Remember string base address (resolved at finalization).
+        tuple_ptrs.push(str_ptr_idx); // index into `words`
+    }
+    // Tuples and cons cells need to know absolute addresses. We
+    // allocate the Vec first, get its base ptr, then patch.
+    let base_offset_for_tuples = words.len();
+    for (i, (_, v)) in items.iter().enumerate() {
+        let _ = i;
+        words.push(make_length_word(2, 0).0); // tuple header
+        words.push(0); // placeholder for string ptr
+        // The "int" field is a TAGGED int.
+        words.push(PolyWord::tagged(*v).0);
+    }
+    let base_offset_for_conses = words.len();
+    for _ in items {
+        words.push(make_length_word(2, 0).0);
+        words.push(0); // placeholder for tuple ptr
+        words.push(0); // placeholder for tail
+    }
+
+    // Move to a Box so the address is stable.
+    let storage: Box<[usize]> = words.into_boxed_slice();
+    let base: *mut usize = Box::into_raw(storage).cast();
+    let n = items.len();
+
+    // Patch tuple slot 0 = string ptr, cons slot 0 = tuple ptr,
+    // cons slot 1 = next cons (or nil).
+    // SAFETY: just leaked Box, exclusive access; indices valid.
+    unsafe {
+        for (i, &str_idx) in tuple_ptrs.iter().enumerate() {
+            let tuple_word_off = base_offset_for_tuples + i * 3 + 1; // slot 0
+            base.add(tuple_word_off).write(base.add(str_idx) as usize);
+        }
+        for i in 0..n {
+            let cons_off = base_offset_for_conses + i * 3;
+            let tuple_off = base_offset_for_tuples + i * 3 + 1; // body[0]
+            base.add(cons_off + 1).write(base.add(tuple_off) as usize); // head = tuple ptr
+            if i + 1 < n {
+                let next_cons_body = base_offset_for_conses + (i + 1) * 3 + 1;
+                base.add(cons_off + 2).write(base.add(next_cons_body) as usize);
+            } else {
+                base.add(cons_off + 2).write(PolyWord::tagged(0).0); // nil
+            }
+        }
+    }
+
+    let _ = OnceCell::<()>::new(); // unused, satisfy import
+    // Return pointer to the first cons cell's body.
+    unsafe { base.add(base_offset_for_conses + 1) as usize }
+}
+
+fn poly_network_get_addr_list_inner() -> PolyWord {
+    use std::sync::OnceLock;
+    static LIST: OnceLock<usize> = OnceLock::new();
+    let addr = *LIST.get_or_init(|| {
+        // Common AF_* values on Linux x86-64.
+        static ITEMS: &[(&str, isize)] = &[
+            ("UNIX", 1),
+            ("INET", 2),
+            ("INET6", 10),
+        ];
+        static_string_int_list(ITEMS)
+    });
+    PolyWord::from_bits(addr)
+}
+
+fn poly_network_get_sock_type_list_inner() -> PolyWord {
+    use std::sync::OnceLock;
+    static LIST: OnceLock<usize> = OnceLock::new();
+    let addr = *LIST.get_or_init(|| {
+        static ITEMS: &[(&str, isize)] = &[
+            ("STREAM", 1),
+            ("DGRAM", 2),
+            ("RAW", 3),
+        ];
+        static_string_int_list(ITEMS)
+    });
+    PolyWord::from_bits(addr)
 }
 
 fn poly_interpreted_get_abi_list_inner() -> PolyWord {
