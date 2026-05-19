@@ -247,6 +247,12 @@ fn register_builtins(t: &mut RtsTable) {
     }));
     t.register("PolyGetOSType", RtsFn::Arity0(|_| PolyWord::tagged(0))); // 0 = Unix
     t.register("PolyGetPolyVersionNumber", RtsFn::Arity0(|_| PolyWord::tagged(592)));
+    // Compact 32-in-64 mode unit size; returns 0 in native 64-bit mode.
+    t.register("PolyGetC32UnitSize", RtsFn::Arity0(|_| PolyWord::tagged(0)));
+    // Stubs for PolyML.make compiling CodeArray.ML — these mutate code
+    // objects in the runtime's code area. Returns unit / tagged 0.
+    t.register("PolySetCodeByte", RtsFn::Arity3(poly_set_code_byte));
+    t.register("PolyGetCodeConstant", RtsFn::Arity3(poly_get_code_constant));
     t.register("PolyChunkSizeArbitrary", RtsFn::Arity0(|_| PolyWord::tagged(64)));
     t.register("PolyGetUserStatsCount", RtsFn::Arity0(|_| PolyWord::tagged(0)));
     t.register("PolyThreadNumPhysicalProcessors", RtsFn::Arity0(|_| PolyWord::tagged(1)));
@@ -444,6 +450,17 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyInterpretedEnterIntMode",
         RtsFn::Arity0(|_| poly_interpreted_enter_int_mode_inner()),
     );
+    // `PolyEndBootstrapMode(threadId, function)` — upstream calls
+    // `function ()` and never returns. For our single-threaded run
+    // the SML caller is `RunCall.rtsCallFull1 ... thirdStage`. If
+    // this RTS function returned plainly, the caller's `val ()` bind
+    // succeeds and Stage2.sml's local block ends — which would skip
+    // Stage 3 entirely. So we record the function in a thread-local
+    // slot; the interpreter checks it on RTS return and tail-calls it.
+    t.register(
+        "PolyEndBootstrapMode",
+        RtsFn::Arity2(poly_end_bootstrap_mode),
+    );
     // GetAbiList is `rtsCallFull0` (Full = +threadId, so 1 actual arg).
     t.register(
         "PolyInterpretedGetAbiList",
@@ -464,7 +481,8 @@ fn register_builtins(t: &mut RtsTable) {
         RtsFn::Arity1(poly_process_env_error_name),
     );
     t.register("PolyWaitForSignal", RtsFn::Arity1(poly_wait_for_signal));
-    t.register("PolyGetFunctionName", RtsFn::Arity1(poly_get_function_name));
+    // rtsCallFull1 → CALL_FAST_RTS2 (threadId + 1 SML arg).
+    t.register("PolyGetFunctionName", RtsFn::Arity2(poly_get_function_name));
 
     // ----- Stubs for the rest. These return TAGGED(0) and will
     // produce *incorrect* results when actually used, but they let
@@ -653,6 +671,38 @@ fn poly_finish(
 }
 
 fn poly_interpreted_enter_int_mode_inner() -> PolyWord {
+    PolyWord::tagged(0)
+}
+
+/// Slot read by the interpreter after every RTS return. When this
+/// holds a non-`ZERO` PolyWord, the interpreter treats the value as
+/// a `unit -> 'a` closure to tail-call (taking the place of whatever
+/// the RTS would have returned to).
+static BOOTSTRAP_TAIL_CALL: AtomicUsize = AtomicUsize::new(0);
+
+/// Used by [`crate::interpreter::Interpreter::take_tail_call`] to
+/// observe and clear the slot.
+#[must_use]
+pub fn take_bootstrap_tail_call() -> Option<PolyWord> {
+    let raw = BOOTSTRAP_TAIL_CALL.swap(0, Ordering::Relaxed);
+    if raw == 0 {
+        None
+    } else {
+        Some(PolyWord::from_bits(raw))
+    }
+}
+
+/// `PolyEndBootstrapMode(threadId, function)` — record `function`
+/// to be invoked (with unit arg) as soon as we return from this RTS
+/// call. The SML caller passes `thirdStage : unit -> unit` and
+/// expects it to never return.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_end_bootstrap_mode(
+    _ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    function: PolyWord,
+) -> PolyWord {
+    BOOTSTRAP_TAIL_CALL.store(function.0, Ordering::Relaxed);
     PolyWord::tagged(0)
 }
 
@@ -936,8 +986,12 @@ fn poly_wait_for_signal(_: &mut RtsContext<'_>, _arg: PolyWord) -> PolyWord {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn poly_get_function_name(_: &mut RtsContext<'_>, _code: PolyWord) -> PolyWord {
-    PolyWord::tagged(0)
+fn poly_get_function_name(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    _code: PolyWord,
+) -> PolyWord {
+    alloc_empty_string(ctx)
 }
 
 /// `PolyThreadMutexBlock(threadId, mutex)` — single-threaded
@@ -1023,6 +1077,18 @@ fn poly_basic_io_general(
         50 => open_directory(ctx, arg),
         51 => read_directory(ctx, strm),
         52 => close_directory(strm),
+        // 54: getcwd
+        54 => get_current_dir(ctx),
+        // 57: isDir(name) → 1 / 0
+        57 => fs_is_dir(arg),
+        // 60: fullPath(name) → canonicalized absolute path
+        60 => fs_full_path(ctx, arg),
+        // 61: modTime(name) → microseconds since epoch as tagged-or-arb int
+        61 => fs_mod_time(ctx, arg),
+        // 62: fileSize(name)
+        62 => fs_file_size(ctx, arg),
+        // 66: access(name, mode) → 1 / 0
+        66 => fs_access(arg, strm),
         // Various stub returns of TAGGED(0):
         //   17: bytes available
         //   18: get stream position
@@ -1764,6 +1830,61 @@ fn poly_lock_mutable_closure(
     PolyWord::tagged(0)
 }
 
+/// `PolySetCodeByte(closure, offset, byteVal)` — write a single byte
+/// into a code object referenced by a closure. Mirrors
+/// `poly_specific.cpp:396-402`.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_set_code_byte(
+    _ctx: &mut RtsContext<'_>,
+    closure: PolyWord,
+    offset: PolyWord,
+    byte_val: PolyWord,
+) -> PolyWord {
+    if !closure.is_data_ptr() {
+        return PolyWord::tagged(0);
+    }
+    let cl_ptr = closure.as_ptr::<PolyWord>();
+    // SAFETY: caller (compiler-generated bytecode) is trusted.
+    unsafe {
+        let code_word = *cl_ptr;
+        if !code_word.is_data_ptr() {
+            return PolyWord::tagged(0);
+        }
+        let code_ptr = code_word.as_ptr::<u8>().cast_mut();
+        let off = offset.untag() as usize;
+        let b = byte_val.untag() as u8;
+        code_ptr.add(off).write(b);
+    }
+    PolyWord::tagged(0)
+}
+
+/// `PolyGetCodeConstant(closure, offset, flags)` — read a PolyWord-
+/// sized constant from a code object at byte offset. Mirrors
+/// `poly_specific.cpp:371-393`.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_get_code_constant(
+    _ctx: &mut RtsContext<'_>,
+    closure: PolyWord,
+    offset: PolyWord,
+    _flags: PolyWord,
+) -> PolyWord {
+    if !closure.is_data_ptr() {
+        return PolyWord::tagged(0);
+    }
+    let cl_ptr = closure.as_ptr::<PolyWord>();
+    // SAFETY: caller trusted; assume code object pointer.
+    unsafe {
+        let code_word = *cl_ptr;
+        if !code_word.is_data_ptr() {
+            return PolyWord::tagged(0);
+        }
+        let code_ptr = code_word.as_ptr::<u8>();
+        let off = offset.untag() as usize;
+        let val_ptr = code_ptr.add(off).cast::<PolyWord>();
+        val_ptr.read_unaligned()
+    }
+}
+
 /// `PolyRealFrexp(threadId, x)` — split a Real `x` into
 /// `(mantissa, exponent)` where `x = mantissa * 2^exponent` and
 /// `mantissa ∈ [0.5, 1.0)`. SML signature: `real -> int * real`.
@@ -1990,6 +2111,86 @@ fn close_directory(strm: PolyWord) -> PolyWord {
         p.write(PolyWord::from_bits(0));
     }
     PolyWord::tagged(0)
+}
+
+/// IO subcode 54: `OS.FileSys.getDir`.
+fn get_current_dir(ctx: &mut RtsContext<'_>) -> PolyWord {
+    let bytes = std::env::current_dir()
+        .map(|p| p.into_os_string().into_encoded_bytes())
+        .unwrap_or_default();
+    alloc_poly_string(ctx, &bytes)
+}
+
+/// IO subcode 57: `OS.FileSys.isDir`.
+fn fs_is_dir(arg: PolyWord) -> PolyWord {
+    let Some(name) = poly_string_to_rust(arg) else {
+        return PolyWord::tagged(0);
+    };
+    match std::fs::metadata(&name) {
+        Ok(m) if m.is_dir() => PolyWord::tagged(1),
+        _ => PolyWord::tagged(0),
+    }
+}
+
+/// IO subcode 60: `OS.FileSys.fullPath` — canonicalize.
+fn fs_full_path(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
+    let Some(name) = poly_string_to_rust(arg) else {
+        return alloc_empty_string(ctx);
+    };
+    let canon = std::fs::canonicalize(&name).unwrap_or_else(|_| name.into());
+    alloc_poly_string(ctx, canon.into_os_string().into_encoded_bytes().as_slice())
+}
+
+/// IO subcode 61: `OS.FileSys.modTime` — microseconds since epoch.
+/// Returns a tagged or arbitrary-precision integer.
+fn fs_mod_time(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
+    let Some(name) = poly_string_to_rust(arg) else {
+        return PolyWord::tagged(0);
+    };
+    let usecs: i128 = std::fs::metadata(&name)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| {
+            i128::from(d.as_secs()) * 1_000_000 + i128::from(d.subsec_micros())
+        });
+    int_to_poly_word(ctx, usecs)
+}
+
+/// IO subcode 62: `OS.FileSys.fileSize`.
+fn fs_file_size(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
+    let Some(name) = poly_string_to_rust(arg) else {
+        return PolyWord::tagged(0);
+    };
+    let size = std::fs::metadata(&name).map(|m| m.len()).unwrap_or(0);
+    int_to_poly_word(ctx, i128::from(size))
+}
+
+/// IO subcode 66: `OS.FileSys.access(name, mode)`.
+/// The mode is a bit-set: 1=read, 2=write, 4=exec, 8=exists.
+fn fs_access(name_arg: PolyWord, mode_arg: PolyWord) -> PolyWord {
+    let Some(name) = poly_string_to_rust(name_arg) else {
+        return PolyWord::tagged(0);
+    };
+    let Ok(meta) = std::fs::metadata(&name) else {
+        return PolyWord::tagged(0);
+    };
+    let mode = mode_arg.untag();
+    let permissions = meta.permissions();
+    let ok = if mode & 8 != 0 {
+        true // existence
+    } else {
+        // For simplicity: allow read/exec; check write via permissions.
+        let want_write = mode & 2 != 0;
+        !(want_write && permissions.readonly())
+    };
+    PolyWord::tagged(if ok { 1 } else { 0 })
+}
+
+/// Helper: produce a PolyWord for a (possibly large) integer.
+fn int_to_poly_word(ctx: &mut RtsContext<'_>, v: i128) -> PolyWord {
+    let n = BigInt::from(v);
+    bigint_to_poly_word(ctx, &n)
 }
 
 /// Extract a Rust `String` from a PolyString pointer. Returns

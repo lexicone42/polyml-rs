@@ -357,6 +357,48 @@ impl Interpreter {
         unsafe { self.pc.offset_from(self.code_start) as usize }
     }
 
+    /// Snapshot of the recent-CALL-targets ring buffer, most-recent
+    /// first. Stale entries are zero.
+    #[must_use]
+    pub fn recent_call_targets_snapshot(&self) -> Vec<usize> {
+        let n = self.recent_call_targets.len();
+        (0..n)
+            .map(|off| {
+                let idx = (self.recent_call_idx + n - 1 - off) % n;
+                self.recent_call_targets[idx]
+            })
+            .filter(|t| *t != 0)
+            .collect()
+    }
+
+    /// Return `(lo, hi, hex_dump)` of the bytecode around the current
+    /// PC for diagnostic display. Reads ±`window` bytes, clamped to
+    /// the code segment.
+    #[must_use]
+    pub fn pc_context_bytes(&self, window: usize) -> (usize, usize, String) {
+        let cur = self.pc_offset();
+        let segment_size = unsafe { self.code_end.offset_from(self.code_start) as usize };
+        let lo = cur.saturating_sub(window);
+        let hi = std::cmp::min(cur + window, segment_size);
+        let bytes: Vec<u8> = (lo..hi)
+            .map(|i| unsafe { *self.code_start.add(i) })
+            .collect();
+        let hex = bytes
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let here = lo + i == cur;
+                if here {
+                    format!("[{b:02x}]")
+                } else {
+                    format!("{b:02x}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        (lo, hi, hex)
+    }
+
     /// Test/debug API: push a value onto the stack.
     #[doc(hidden)]
     pub fn test_seed_top(&mut self, w: PolyWord) {
@@ -1481,6 +1523,14 @@ impl Interpreter {
                 self.reset(n)
             }
 
+            // ----- Legacy atomic ops on the mutex object at top
+            // (bytecode.cpp:803-823). Single-threaded interpreter:
+            // add/subtract 2 (= raw representation of tagged 1 with
+            // the tag bit removed) to word 0, write back, replace
+            // top with the new value.
+            INSTR_ATOMIC_INCR => self.atomic_incr_decr(true),
+            INSTR_ATOMIC_DECR => self.atomic_incr_decr(false),
+
             // ----- Returns
             INSTR_RETURN_1 => self.do_return(1),
             INSTR_RETURN_2 => self.do_return(2),
@@ -1609,6 +1659,19 @@ impl Interpreter {
                 let _ = self.pop()?;
                 let _ = self.pop()?;
                 self.push_continue(PolyWord::tagged(0))
+            }
+            // log2(word at top), replace top. (bytecode.cpp:2359-2367.)
+            EXTINSTR_LOG2_WORD => {
+                let w = self.peek(0)?;
+                let mut p = w.untag() as usize;
+                let mut v: usize = 0;
+                p >>= 1;
+                while p != 0 {
+                    v += 1;
+                    p >>= 1;
+                }
+                self.pop()?;
+                self.push_continue(PolyWord::tagged(v as isize))
             }
 
             // ----- Wide variants of the base opcodes (16-bit immediates)
@@ -1940,6 +2003,31 @@ impl Interpreter {
             self.pop()?;
         }
         Ok(StepResult::Continue)
+    }
+
+    /// Legacy INSTR_ATOMIC_INCR / INSTR_ATOMIC_DECR.
+    ///
+    /// Both read the cell at top of stack, add or subtract `2` (= the
+    /// raw representation of tagged `1` with the tag bit cleared)
+    /// from word 0, write back, and replace top with the new value.
+    /// (bytecode.cpp:803-823.)
+    fn atomic_incr_decr(&mut self, incr: bool) -> Result<StepResult, InterpError> {
+        let cell = self.peek(0)?;
+        if !cell.is_data_ptr() {
+            return Err(InterpError::NotAClosure(cell));
+        }
+        let p = cell.as_ptr::<PolyWord>().cast_mut();
+        // SAFETY: cell is a heap-allocated mutable ref cell.
+        let new_word = unsafe {
+            let cur = (*p).0;
+            let new = if incr { cur.wrapping_add(2) } else { cur.wrapping_sub(2) };
+            let nw = PolyWord::from_bits(new);
+            p.write(nw);
+            nw
+        };
+        // Replace top with the new value.
+        self.pop()?;
+        self.push_continue(new_word)
     }
 
     fn indirect(&mut self, n: usize) -> Result<StepResult, InterpError> {
@@ -2553,6 +2641,11 @@ impl Interpreter {
             self.do_raise_ex()?;
             return Ok(StepResult::Continue);
         }
+        if let Some(fn_closure) = crate::rts::take_bootstrap_tail_call() {
+            self.push(PolyWord::tagged(0))?;
+            self.do_call(fn_closure)?;
+            return Ok(StepResult::Continue);
+        }
         self.push_continue(result)
     }
 
@@ -2704,6 +2797,16 @@ impl Interpreter {
                 eprintln!(
                     "    bytes [{lo}..{hi}] = {hexdump}  (PC after fetch = {cur_off})",
                 );
+                eprintln!("  Recent CALL targets (most recent first):");
+                let n = self.recent_call_targets.len();
+                for off in 0..n {
+                    let idx = (self.recent_call_idx + n - 1 - off) % n;
+                    let target = self.recent_call_targets[idx];
+                    if target != 0 {
+                        eprintln!("    -{off:2}: code=0x{target:016x}");
+                    }
+                }
+                eprintln!("  Current code: 0x{:016x}", self.code_start as usize);
             }
             return Err(InterpError::NotAClosure(closure));
         }
@@ -2720,6 +2823,44 @@ impl Interpreter {
         // SAFETY: caller (compiler) is trusted to emit a valid closure.
         let code_word = unsafe { *closure_ptr };
         let new_code_obj = code_word.as_ptr::<PolyWord>();
+        // Defensive: detect self-pointer pattern (4-word exception
+        // packets misrouted as closures). Diagnostic instead of a
+        // segfault.
+        if code_word.0 == closure.0 {
+            eprintln!(
+                "  do_call: closure {closure:?} has self-pointer word[0] — \
+                 likely an exception packet being called as a closure"
+            );
+            // Dump heap object layout
+            unsafe {
+                let lw = crate::space::MemorySpace::length_word_of(closure_ptr);
+                let n = length_word::length_of(lw);
+                let f = length_word::flags_of(lw);
+                eprintln!("  closure header: n_words={n} flags=0x{f:02x}");
+                for i in 0..std::cmp::min(n, 8) {
+                    let w = *closure_ptr.add(i);
+                    eprintln!("    word[{i}] = {w:?}");
+                }
+                // Try to decode word[1] as a PolyStringObject: word[0] = byte length, then chars.
+                if n >= 2 {
+                    let name_word = *closure_ptr.add(1);
+                    if name_word.is_data_ptr() {
+                        let name_ptr = name_word.as_ptr::<PolyWord>();
+                        let len_w = (*name_ptr).0;
+                        if len_w > 0 && len_w < 256 {
+                            let chars = std::slice::from_raw_parts(
+                                name_ptr.add(1).cast::<u8>(),
+                                len_w,
+                            );
+                            if let Ok(s) = std::str::from_utf8(chars) {
+                                eprintln!("  exception name string: {s:?}");
+                            }
+                        }
+                    }
+                }
+            }
+            return Err(InterpError::NotAClosure(closure));
+        }
 
         // Save caller's bounds on the side-stack before we overwrite.
         self.frames.push((self.code_start, self.code_end));

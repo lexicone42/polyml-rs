@@ -118,8 +118,8 @@ fn run_image(
     let root_closure_word = PolyWord::from_ptr(loaded.root);
     // SAFETY: image is loaded; root is a valid closure.
     let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
-    let mut interp = unsafe { Interpreter::from_code_object(64 * 1024, code_obj_ptr) }
-        .with_default_alloc_space(256 * 1024 * 1024)
+    let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
+        .with_default_alloc_space(3 * 1024 * 1024 * 1024)
         .with_rts(rts);
     if profile {
         interp = interp.enable_diagnostics();
@@ -160,6 +160,13 @@ fn run_image(
         Ok(StepResult::Unimplemented { op, extended }) => {
             let kind = if extended { "extended" } else { "base" };
             println!("Stopped on unimplemented {kind} opcode 0x{op:02x}.");
+            let (lo, hi, hex) = interp.pc_context_bytes(20);
+            println!("  bytecode [{lo}..{hi}]: {hex}");
+            let recent = interp.recent_call_targets_snapshot();
+            println!("  recent CALL targets (most recent first):");
+            for (off, target) in recent.iter().enumerate() {
+                println!("    -{off:2}: 0x{target:016x}");
+            }
         }
         Err(e) => {
             println!("Halted with error: {e}");
