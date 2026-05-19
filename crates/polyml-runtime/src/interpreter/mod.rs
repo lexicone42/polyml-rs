@@ -408,6 +408,7 @@ impl Interpreter {
             //    only forward body words (skipping length words),
             //    and dispatch by type (byte objects have no internal
             //    pointers, closures' word[0] is a raw code ptr).
+            let mut img_objects_scanned = 0usize;
             for (ptr, len) in &image_roots {
                 let base = *ptr as *mut PolyWord;
                 let mut i = 0usize;
@@ -452,8 +453,13 @@ impl Interpreter {
                         }
                     }
                     i += 1 + n;
+                    img_objects_scanned += 1;
                 }
             }
+            eprintln!(
+                "  GC roots: image-mut objects scanned = {img_objects_scanned}, total image-mut words = {}",
+                image_roots.iter().map(|(_, l)| l).sum::<usize>()
+            );
             // Suppress unused
             let _ = handler_sp;
         });
@@ -708,16 +714,14 @@ impl Interpreter {
             return Ok(StepResult::Returned(PolyWord::tagged(code)));
         }
 
-        // Trigger GC if the alloc space is getting full. 80% used
-        // is a rough heuristic; lower triggers more frequent GC,
-        // higher leaves less headroom.
-        if let Some(space) = self.alloc_space.as_ref() {
-            let used = space.used_words();
-            let cap = space.capacity_words();
-            if cap > 0 && used * 5 >= cap * 4 {
-                self.gc();
-            }
-        }
+        // GC trigger disabled by default. The collector itself is
+        // correct on unit tests, but post-GC execution of the full
+        // bootstrap still fails on at least one missed root we
+        // haven't pinned down. Until then, run the bootstrap with a
+        // big un-GC'd heap; callers can invoke `gc()` manually.
+        //
+        // To re-enable: when used / cap exceeds some threshold,
+        // call self.gc().
 
         let opcode_pc = self.pc;
         #[allow(clippy::cast_possible_truncation)]
