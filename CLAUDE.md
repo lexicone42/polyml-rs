@@ -35,24 +35,36 @@ That error message is being emitted by the PolyML compiler running
 in our Rust interpreter, formatted and written through our stdio
 subcode-11/12 path. Real ML compiler output.
 
-### 3. The basis library loads through our runtime
+### 3. The full bootstrap chain runs through our runtime
 
 ```
 $ cd vendor/polyml/
-$ ../../target/release/poly run --max-steps 5000000000 bootstrap/bootstrap64.txt < bootstrap/Stage1.sml
-Use: basis/build.sml
-Use: basis/InitialBasis.ML
-Use: basis/Universal.ML
-...
-Use: basis/IEEE_REAL.sml
-Use: basis/IEEEReal.sml
-Use: basis/Real.sml             ← gate here (deep bug under investigation)
+$ ../../target/release/poly run --max-steps 2000000000000 bootstrap/bootstrap64.txt < bootstrap/Stage1.sml
+... basis loads ...
+******Bootstrap stage 2 of 7******
+Making MLCompiler
+... ~150 modules compiled ...
+Created structure MLCompiler
+******Bootstrap stage 3 of 7******
+... basis re-loads on the freshly-compiled compiler ...
+******Bootstrap stage 4 of 7******
+... PolyML.make MLCompiler again ...
+******Bootstrap stage 5 of 7******
+******Bootstrap stage 6 of 7******
+******Bootstrap stage 7 of 7******
+******Writing object code******
+Result: Tagged(0) — clean return
 ```
 
-44 SML source files (build.sml + 43 basis modules) opened, read,
-parsed, type-checked, and compiled by the PolyML compiler running
-inside our runtime, with the resulting closures installed in our
-heap.
+Every stage of PolyML's self-compilation chain runs end-to-end
+through our Rust interpreter — same source the upstream PolyML
+build uses to bootstrap itself.
+
+(The `PolyML.export` and `PolyML.shareCommonData` calls in
+Stage 7 are stubbed to no-op, so we don't yet write the result
+image to disk; every preceding compile pass is real, though.)
+
+Requires a beefy heap (24GB+); we have no GC yet.
 
 ## Bootstrap image structure (important!)
 
