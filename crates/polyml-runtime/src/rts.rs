@@ -692,6 +692,19 @@ pub fn take_bootstrap_tail_call() -> Option<PolyWord> {
     }
 }
 
+/// Read the bootstrap tail-call slot without clearing it. Used by
+/// the GC to forward the held PolyWord without consuming it.
+#[must_use]
+pub fn peek_bootstrap_tail_call() -> PolyWord {
+    PolyWord::from_bits(BOOTSTRAP_TAIL_CALL.load(Ordering::Relaxed))
+}
+
+/// Overwrite the bootstrap tail-call slot. Used by the GC to write
+/// back the forwarded address after copying.
+pub fn set_bootstrap_tail_call(w: PolyWord) {
+    BOOTSTRAP_TAIL_CALL.store(w.0, Ordering::Relaxed);
+}
+
 /// `PolyEndBootstrapMode(threadId, function)` — record `function`
 /// to be invoked (with unit arg) as soon as we return from this RTS
 /// call. The SML caller passes `thirdStage : unit -> unit` and

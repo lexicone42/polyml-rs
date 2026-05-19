@@ -197,6 +197,10 @@ pub struct Interpreter {
     /// recently called before the failure.
     recent_call_targets: [usize; 16],
     recent_call_idx: usize,
+    /// Pointer + word-length pairs identifying mutable image-space
+    /// regions to scan as GC roots. Each call to
+    /// `with_image_mutable_root` appends here.
+    image_mutable_roots: Vec<(*const PolyWord, usize)>,
     /// Optional execution-profile collector. `None` = disabled (the
     /// hot path pays only a branch). Enable with
     /// [`enable_diagnostics`](Self::enable_diagnostics).
@@ -229,6 +233,7 @@ impl Interpreter {
             exception_packet: None,
             recent_call_targets: [0; 16],
             recent_call_idx: 0,
+            image_mutable_roots: Vec::new(),
             rts: Arc::new(RtsTable::empty()),
             _owned_code: Some(code),
             diag: None,
@@ -269,6 +274,7 @@ impl Interpreter {
             exception_packet: None,
             recent_call_targets: [0; 16],
             recent_call_idx: 0,
+            image_mutable_roots: Vec::new(),
             rts: Arc::new(RtsTable::empty()),
             _owned_code: None,
             diag: None,
@@ -316,6 +322,107 @@ impl Interpreter {
     #[must_use]
     pub fn with_default_alloc_space(self, capacity_words: usize) -> Self {
         self.with_alloc_space(MemorySpace::new(capacity_words, SpaceKind::Mutable))
+    }
+
+    /// Add a mutable image space to scan as a GC root. Pointers from
+    /// the image's globals into alloc-space objects (e.g. the SML
+    /// global namespace hashtable) must be visited so we don't
+    /// collect things that are still referenced from there.
+    ///
+    /// Multiple calls accumulate.
+    #[must_use]
+    pub fn with_image_mutable_root(mut self, ptr: *const PolyWord, len_words: usize) -> Self {
+        self.image_mutable_roots.push((ptr, len_words));
+        self
+    }
+
+    /// Run a copying GC over the alloc space, forwarding all roots
+    /// (interpreter stack, exception packet, code segment, frames,
+    /// recent-call ring buffer, BOOTSTRAP_TAIL_CALL, and any
+    /// configured image-mutable-root regions). Returns the new
+    /// `used_words` count of the alloc space.
+    pub fn gc(&mut self) -> Option<usize> {
+        let alloc = self.alloc_space.as_mut()?;
+        // Capture byte offsets we need to translate post-GC.
+        let pc_off = unsafe { self.pc.offset_from(self.code_start) };
+        let code_end_off = unsafe { self.code_end.offset_from(self.code_start) };
+        let frame_offsets: Vec<isize> = self
+            .frames
+            .iter()
+            .map(|(s, e)| unsafe { e.offset_from(*s) })
+            .collect();
+        // Stash code_start as a PolyWord pointer slot.
+        let mut code_start_slot = PolyWord::from_ptr(self.code_start.cast::<PolyWord>());
+        let mut frame_starts: Vec<PolyWord> = self
+            .frames
+            .iter()
+            .map(|(s, _)| PolyWord::from_ptr(s.cast::<PolyWord>()))
+            .collect();
+        let mut exn_slot = self.exception_packet.unwrap_or(PolyWord::ZERO);
+        let mut bootstrap_tail = crate::rts::peek_bootstrap_tail_call();
+
+        // Take ownership of the stack-slice we want the GC to forward
+        // by indexing into self.stack directly via raw pointer.
+        let stack_ptr = self.stack.as_mut_ptr();
+        let sp = self.sp;
+        let stack_len = self.stack.len();
+        let handler_sp = self.handler_sp;
+
+        let image_roots = self.image_mutable_roots.clone();
+
+        let new_used = crate::gc::collect(alloc, |c| {
+            // 1. Stack slots from sp..end. (Below sp is "free".)
+            // Some of these are the handler save area which contains
+            // raw PC addresses — those are NOT PolyWords pointing to
+            // alloc objects, but the GC's is-in-from-space check
+            // filters non-pointers, so it's safe to visit them all.
+            for i in sp..stack_len {
+                let slot = unsafe { stack_ptr.add(i) };
+                unsafe { c.forward(slot) };
+            }
+            // 2. Exception packet (might be None / TAGGED(0)).
+            unsafe { c.forward(&mut exn_slot as *mut _) };
+            // 3. code_start (as a PolyWord pointer to the code object).
+            unsafe { c.forward(&mut code_start_slot as *mut _) };
+            for fs in frame_starts.iter_mut() {
+                unsafe { c.forward(fs as *mut _) };
+            }
+            // 4. Bootstrap tail-call slot (PolyEndBootstrapMode arg).
+            unsafe { c.forward(&mut bootstrap_tail as *mut _) };
+            // 5. Image mutable spaces: scan every word as a candidate
+            //    root pointer.
+            for (ptr, len) in &image_roots {
+                for i in 0..*len {
+                    let slot = unsafe { (*ptr as *mut PolyWord).add(i) };
+                    unsafe { c.forward(slot) };
+                }
+            }
+            // Suppress unused
+            let _ = handler_sp;
+        });
+
+        // Apply updates.
+        self.exception_packet = if exn_slot.0 == 0 || exn_slot.is_tagged() {
+            None
+        } else {
+            Some(exn_slot)
+        };
+        let new_code_start = code_start_slot.as_ptr::<PolyWord>().cast::<u8>();
+        self.code_start = new_code_start;
+        // SAFETY: offsets remain valid; new code object has the same length.
+        self.pc = unsafe { new_code_start.offset(pc_off) };
+        self.code_end = unsafe { new_code_start.offset(code_end_off) };
+        for (i, fs) in frame_starts.into_iter().enumerate() {
+            let new_start = fs.as_ptr::<PolyWord>().cast::<u8>();
+            self.frames[i].0 = new_start;
+            self.frames[i].1 = unsafe { new_start.offset(frame_offsets[i]) };
+        }
+        crate::rts::set_bootstrap_tail_call(bootstrap_tail);
+
+        // Recent-call ring buffer: clear; not worth forwarding.
+        self.recent_call_targets.fill(0);
+
+        Some(new_used)
     }
 
     // ---- Inspection -----------------------------------------------------
@@ -536,6 +643,17 @@ impl Interpreter {
         if let Some(code) = crate::rts::finish_requested() {
             crate::rts::clear_finish_requested();
             return Ok(StepResult::Returned(PolyWord::tagged(code)));
+        }
+
+        // Trigger GC if the alloc space is getting full. 80% used
+        // is a rough heuristic; lower triggers more frequent GC,
+        // higher leaves less headroom.
+        if let Some(space) = self.alloc_space.as_ref() {
+            let used = space.used_words();
+            let cap = space.capacity_words();
+            if cap > 0 && used * 5 >= cap * 4 {
+                self.gc();
+            }
         }
 
         let opcode_pc = self.pc;

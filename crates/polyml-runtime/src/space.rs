@@ -35,8 +35,8 @@ pub enum SpaceKind {
 /// uses top-down within local heaps, but for permanent spaces
 /// populated at load the direction doesn't matter.
 pub struct MemorySpace {
-    storage: Box<[PolyWord]>,
-    used: usize,
+    pub(crate) storage: Box<[PolyWord]>,
+    pub(crate) used: usize,
     kind: SpaceKind,
 }
 
@@ -95,19 +95,28 @@ impl MemorySpace {
     /// loader pre-sizes spaces; an exhaustion here is a sizing bug, not
     /// a runtime condition.
     pub fn alloc(&mut self, n_words: usize) -> *mut PolyWord {
+        self.try_alloc(n_words).unwrap_or_else(|| {
+            panic!(
+                "MemorySpace {:?} exhausted: requested {n_words}, used {}/{}",
+                self.kind,
+                self.used,
+                self.storage.len()
+            )
+        })
+    }
+
+    /// Non-panicking allocation. Returns `None` if `n_words` (plus its
+    /// length word) wouldn't fit.
+    pub fn try_alloc(&mut self, n_words: usize) -> Option<*mut PolyWord> {
         let length_idx = self.used;
         let body_idx = length_idx + 1;
         let new_used = body_idx + n_words;
-        assert!(
-            new_used <= self.storage.len(),
-            "MemorySpace {:?} exhausted: requested {n_words}, used {}/{}",
-            self.kind,
-            self.used,
-            self.storage.len()
-        );
+        if new_used > self.storage.len() {
+            return None;
+        }
         self.used = new_used;
-        // SAFETY: body_idx is in-bounds because we asserted above.
-        unsafe { self.storage.as_mut_ptr().add(body_idx) }
+        // SAFETY: body_idx is in-bounds because we checked above.
+        Some(unsafe { self.storage.as_mut_ptr().add(body_idx) })
     }
 
     /// Read the length word that precedes the given object pointer.

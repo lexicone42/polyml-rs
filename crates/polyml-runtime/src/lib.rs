@@ -7,6 +7,7 @@
 //! Stage 2 status: just the value model and a heap-image loader so
 //! far. No GC, no scheduler, no real execution.
 
+pub mod gc;
 pub mod interpreter;
 pub mod length_word;
 pub mod loader;

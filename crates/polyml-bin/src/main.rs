@@ -118,9 +118,18 @@ fn run_image(
     let root_closure_word = PolyWord::from_ptr(loaded.root);
     // SAFETY: image is loaded; root is a valid closure.
     let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
+    // Register the mutable image space as a GC root region — the
+    // global namespace hashtable lives here and references runtime
+    // alloc-space objects (compiled structures, etc.). Without
+    // scanning it the GC would collect freshly-compiled code.
+    let image_mut_ptr = loaded.mutable.iter().next().map(|w| w as *const PolyWord);
+    let image_mut_len = loaded.mutable.used_words();
     let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
-        .with_default_alloc_space(3 * 1024 * 1024 * 1024)
+        .with_default_alloc_space(2 * 1024 * 1024 * 1024)
         .with_rts(rts);
+    if let Some(p) = image_mut_ptr {
+        interp = interp.with_image_mutable_root(p, image_mut_len);
+    }
     if profile {
         interp = interp.enable_diagnostics();
     }
