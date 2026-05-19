@@ -2585,14 +2585,44 @@ impl Interpreter {
         // SAFETY: caller (bytecode) guarantees `stub` is a valid
         // EntryPoint object with word 0 holding the dispatch token.
         let token = unsafe { (*p).0 };
-        // Copy the entry out so we can drop the immutable borrow on
-        // self.rts before pop'ing/allocating.
-        let (entry_name, entry_func) = {
-            let e = self
-                .rts
-                .entry(token)
-                .ok_or(InterpError::UnresolvedRts { n: n_args })?;
-            (e.name, e.func)
+        let entry_opt = self.rts.entry(token).cloned();
+        let (entry_name, entry_func) = match entry_opt {
+            Some(e) => (e.name, e.func),
+            None => {
+                // Pop the args off the stack before raising so the
+                // exception handler doesn't see them. Then build a
+                // fresh exception packet via the alloc space and
+                // unwind to the registered handler. The SML side
+                // catches with `handle _ => false` patterns.
+                for _ in 0..n_args {
+                    self.pop()?;
+                }
+                let name_bytes = unsafe {
+                    let total_words = crate::length_word::length_of(
+                        crate::space::MemorySpace::length_word_of(p),
+                    );
+                    let name_ptr = p.add(1).cast::<u8>();
+                    let max = total_words.saturating_sub(1) * std::mem::size_of::<usize>();
+                    let mut end = 0;
+                    while end < max && *name_ptr.add(end) != 0 {
+                        end += 1;
+                    }
+                    std::slice::from_raw_parts(name_ptr, end).to_vec()
+                };
+                let pretty = String::from_utf8_lossy(&name_bytes);
+                let mut ctx = crate::rts::RtsContext {
+                    alloc_space: self.alloc_space.as_mut(),
+                    raised_exception: None,
+                    rts: None,
+                };
+                let pkt = crate::rts::make_simple_exception_pub(
+                    &mut ctx,
+                    &format!("RTS entry point not implemented: {pretty}"),
+                );
+                self.push(pkt)?;
+                self.do_raise_ex()?;
+                return Ok(StepResult::Continue);
+            }
         };
         // Pop args (we already popped the stub).
         //

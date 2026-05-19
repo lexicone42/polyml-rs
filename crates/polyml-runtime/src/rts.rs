@@ -2256,6 +2256,13 @@ fn open_file_input(ctx: &mut RtsContext<'_>, name_arg: PolyWord) -> PolyWord {
 /// allocated object's own pointer as a stand-in (each call produces
 /// a fresh address, so identity comparison treats each raise as a
 /// new exception kind).
+/// Public version of [`make_simple_exception`] used by the
+/// interpreter when raising an exception for an unresolved RTS
+/// entry point.
+pub fn make_simple_exception_pub(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
+    make_simple_exception(ctx, msg)
+}
+
 fn make_simple_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
     let s = alloc_poly_string(ctx, msg.as_bytes());
     let Some(space) = ctx.alloc_space.as_mut() else {
@@ -2463,16 +2470,16 @@ fn poly_create_entry_point_object(
     let Some(rts) = ctx.rts else {
         return PolyWord::tagged(0);
     };
-    let Some(token) = rts.token_for(name.as_str()) else {
+    // Build a real entry-point object even if the name isn't
+    // registered. Token=0 means "unresolved"; later CALL_FAST_RTS<N>
+    // dispatch produces a clean `UnresolvedRts` error rather than a
+    // call into the exception packet itself.
+    let token = rts.token_for(name.as_str()).unwrap_or_else(|| {
         if RTS_TRACE.load(Ordering::Relaxed) {
             eprintln!("  PolyCreateEntryPointObject: entry point not found: {name}");
         }
-        ctx.raised_exception = Some(make_simple_exception(
-            ctx,
-            &format!("entry point not found: {name}"),
-        ));
-        return PolyWord::tagged(0);
-    };
+        0
+    });
     let Some(space) = ctx.alloc_space.as_mut() else {
         return PolyWord::tagged(0);
     };
