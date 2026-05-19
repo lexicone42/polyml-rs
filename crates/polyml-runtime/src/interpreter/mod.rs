@@ -358,6 +358,18 @@ impl Interpreter {
             .iter()
             .map(|(s, _)| PolyWord::from_ptr(s.cast::<PolyWord>()))
             .collect();
+        // Handler frames depth also saves code bounds that need
+        // forwarding so the handler can restore them on RAISE_EX.
+        let handler_offsets: Vec<isize> = self
+            .handler_frames_depth
+            .iter()
+            .map(|(_, s, e)| unsafe { e.offset_from(*s) })
+            .collect();
+        let mut handler_starts: Vec<PolyWord> = self
+            .handler_frames_depth
+            .iter()
+            .map(|(_, s, _)| PolyWord::from_ptr(s.cast::<PolyWord>()))
+            .collect();
         let mut exn_slot = self.exception_packet.unwrap_or(PolyWord::ZERO);
         let mut bootstrap_tail = crate::rts::peek_bootstrap_tail_call();
 
@@ -387,14 +399,59 @@ impl Interpreter {
             for fs in frame_starts.iter_mut() {
                 unsafe { c.forward(fs as *mut _) };
             }
+            for hs in handler_starts.iter_mut() {
+                unsafe { c.forward(hs as *mut _) };
+            }
             // 4. Bootstrap tail-call slot (PolyEndBootstrapMode arg).
             unsafe { c.forward(&mut bootstrap_tail as *mut _) };
-            // 5. Image mutable spaces: scan every word as a candidate
-            //    root pointer.
+            // 5. Image mutable spaces: walk object-by-object so we
+            //    only forward body words (skipping length words),
+            //    and dispatch by type (byte objects have no internal
+            //    pointers, closures' word[0] is a raw code ptr).
             for (ptr, len) in &image_roots {
-                for i in 0..*len {
-                    let slot = unsafe { (*ptr as *mut PolyWord).add(i) };
-                    unsafe { c.forward(slot) };
+                let base = *ptr as *mut PolyWord;
+                let mut i = 0usize;
+                while i < *len {
+                    // SAFETY: i < len bounds the slice access.
+                    let lw = unsafe { *base.add(i) };
+                    let n = crate::length_word::length_of(lw);
+                    if n == 0 || i + 1 + n > *len {
+                        // Bad header or out of range; stop scanning.
+                        break;
+                    }
+                    let body = unsafe { base.add(i + 1) };
+                    let ty = crate::length_word::type_of(lw);
+                    match ty {
+                        crate::length_word::F_BYTE_OBJ => {
+                            // No pointers.
+                        }
+                        crate::length_word::F_CODE_OBJ => {
+                            let (cp, count) = unsafe {
+                                crate::length_word::const_segment_for_code(body)
+                            };
+                            let cp_mut = cp.cast_mut();
+                            for k in 0..count {
+                                unsafe { c.forward(cp_mut.add(k)) };
+                            }
+                        }
+                        crate::length_word::F_CLOSURE_OBJ => {
+                            // Word 0 is a raw code-byte pointer; the
+                            // collector's `forward` handles mid-body
+                            // pointers via its find_object lookup
+                            // (in from-space only; image code ptrs
+                            // are outside from-space so left alone).
+                            for k in 0..n {
+                                unsafe { c.forward(body.add(k)) };
+                            }
+                        }
+                        _ => {
+                            // Ordinary word object.
+                            for k in 0..n {
+                                unsafe { c.forward(body.add(k)) };
+                            }
+                        }
+                    }
+                    i += 1 + n;
                 }
             }
             // Suppress unused
@@ -416,6 +473,12 @@ impl Interpreter {
             let new_start = fs.as_ptr::<PolyWord>().cast::<u8>();
             self.frames[i].0 = new_start;
             self.frames[i].1 = unsafe { new_start.offset(frame_offsets[i]) };
+        }
+        for (i, hs) in handler_starts.into_iter().enumerate() {
+            let new_start = hs.as_ptr::<PolyWord>().cast::<u8>();
+            self.handler_frames_depth[i].1 = new_start;
+            self.handler_frames_depth[i].2 =
+                unsafe { new_start.offset(handler_offsets[i]) };
         }
         crate::rts::set_bootstrap_tail_call(bootstrap_tail);
 

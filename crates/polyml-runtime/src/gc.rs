@@ -218,20 +218,12 @@ impl<'a> Collector<'a> {
                 }
             }
             F_CLOSURE_OBJ => {
-                // Word 0 is a *raw* code-object byte pointer, not a
-                // PolyWord. We still need to forward it: read as a
-                // pointer, find the underlying code object in
-                // from-space, get its forwarded address.
-                if n_words >= 1 {
-                    let code_slot = obj_ptr; // word 0
-                    let raw = unsafe { *code_slot };
-                    let code_ptr = raw.as_ptr::<PolyWord>();
-                    if self.contains_raw_ptr(code_ptr.cast()) {
-                        let fwd = unsafe { self.forward_object(code_ptr) };
-                        unsafe { code_slot.write(PolyWord::from_ptr(fwd)) };
-                    }
-                }
-                for i in 1..n_words {
+                // Word 0 is a raw code-object body-start pointer
+                // (treated by upstream as `POLYCODEPTR*`). With the
+                // unified `forward` that handles mid-body pointers
+                // via the object-map lookup, all word slots can be
+                // forwarded uniformly.
+                for i in 0..n_words {
                     unsafe { self.forward(obj_ptr.add(i)) };
                 }
             }
