@@ -64,7 +64,13 @@ build uses to bootstrap itself.
 Stage 7 are stubbed to no-op, so we don't yet write the result
 image to disk; every preceding compile pass is real, though.)
 
-Requires a beefy heap (24GB+); we have no GC yet.
+Heap default is 2 GB; the Cheney-style copying GC in
+`crates/polyml-runtime/src/gc.rs` keeps the working set bounded
+to ~100 MB through the whole chain. Auto-triggered at 80% fullness
+(override with `POLYML_GC_THRESHOLD`); per-cycle log can be silenced
+with `POLYML_GC_QUIET=1`, full correctness audit with
+`POLYML_GC_AUDIT=1` (slow — checks for residual from-space pointers
+across all interpreter state after each collect).
 
 ## Bootstrap image structure (important!)
 
