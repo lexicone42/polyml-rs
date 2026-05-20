@@ -343,6 +343,13 @@ impl Interpreter {
     /// `used_words` count of the alloc space.
     pub fn gc(&mut self) -> Option<usize> {
         let alloc = self.alloc_space.as_mut()?;
+        // Capture from-space range so we can audit for residual
+        // pointers after the swap. Anything in interpreter state
+        // (or the new to-space) that still points into this range
+        // post-GC is a missed root.
+        let from_range = alloc.as_ptr_range();
+        let from_lo = from_range.start as usize;
+        let from_hi = from_range.end as usize;
         // Capture byte offsets we need to translate post-GC.
         let pc_off = unsafe { self.pc.offset_from(self.code_start) };
         let code_end_off = unsafe { self.code_end.offset_from(self.code_start) };
@@ -390,7 +397,10 @@ impl Interpreter {
             // filters non-pointers, so it's safe to visit them all.
             for i in sp..stack_len {
                 let slot = unsafe { stack_ptr.add(i) };
-                unsafe { c.forward(slot) };
+                // Stack slots may carry raw PC byte pointers whose
+                // LSB happens to be 1; we can't filter by tagged-bit
+                // alone, so use the byte-address variant.
+                unsafe { c.forward_stack_slot(slot) };
             }
             // 2. Exception packet (might be None / TAGGED(0)).
             unsafe { c.forward(&mut exn_slot as *mut _) };
@@ -490,6 +500,100 @@ impl Interpreter {
 
         // Recent-call ring buffer: clear; not worth forwarding.
         self.recent_call_targets.fill(0);
+
+        // ---- Audit: any pointer still in old from-space is a missed root.
+        let mut residual = 0usize;
+        let mut samples: Vec<(&'static str, usize, usize)> = Vec::new();
+        let in_old = |addr: usize| addr >= from_lo && addr < from_hi;
+        // 1. Interpreter stack
+        for i in self.sp..self.stack.len() {
+            let v = self.stack[i].0;
+            if in_old(v) {
+                residual += 1;
+                if samples.len() < 5 {
+                    samples.push(("stack", i, v));
+                }
+            }
+        }
+        // 2. code_start, pc, code_end (byte ptrs)
+        for (name, p) in [
+            ("code_start", self.code_start as usize),
+            ("pc", self.pc as usize),
+            ("code_end", self.code_end as usize),
+        ] {
+            if in_old(p) {
+                residual += 1;
+                if samples.len() < 5 {
+                    samples.push((name, 0, p));
+                }
+            }
+        }
+        // 3. frames
+        for (idx, (s, e)) in self.frames.iter().enumerate() {
+            for (name, p) in [("frame_s", *s as usize), ("frame_e", *e as usize)] {
+                if in_old(p) {
+                    residual += 1;
+                    if samples.len() < 5 {
+                        samples.push((name, idx, p));
+                    }
+                }
+            }
+        }
+        // 4. handler_frames_depth
+        for (idx, (_, s, e)) in self.handler_frames_depth.iter().enumerate() {
+            for (name, p) in [("hf_s", *s as usize), ("hf_e", *e as usize)] {
+                if in_old(p) {
+                    residual += 1;
+                    if samples.len() < 5 {
+                        samples.push((name, idx, p));
+                    }
+                }
+            }
+        }
+        // 5. exception_packet
+        if let Some(w) = self.exception_packet {
+            if in_old(w.0) {
+                residual += 1;
+                samples.push(("exn_pkt", 0, w.0));
+            }
+        }
+        // 6. Walk the NEW alloc-space body words and look for stale
+        //    inbound pointers. This is the big one — missed children
+        //    of forwarded objects.
+        if let Some(space) = self.alloc_space.as_ref() {
+            let start = space.as_ptr_range().start;
+            let used = space.used_words();
+            // SAFETY: 0..used in-bounds.
+            let mut i = 0usize;
+            while i < used {
+                let lw = unsafe { *start.add(i) };
+                let n = crate::length_word::length_of(lw);
+                if n == 0 || i + 1 + n > used {
+                    break;
+                }
+                // Inspect body words (offset i+1 .. i+1+n).
+                for k in 0..n {
+                    let v = unsafe { (*start.add(i + 1 + k)).0 };
+                    if in_old(v) {
+                        residual += 1;
+                        if samples.len() < 5 {
+                            samples.push((
+                                "to_space_body",
+                                i + 1 + k,
+                                v,
+                            ));
+                        }
+                    }
+                }
+                i += 1 + n;
+            }
+        }
+        if residual > 0 {
+            eprintln!("  GC AUDIT: {residual} residual from-space pointers remain after collect:");
+            for (where_, idx, addr) in samples {
+                eprintln!("    {where_}[{idx}] = 0x{addr:016x}");
+            }
+        }
 
         Some(new_used)
     }
@@ -714,14 +818,24 @@ impl Interpreter {
             return Ok(StepResult::Returned(PolyWord::tagged(code)));
         }
 
-        // GC trigger disabled by default. The collector itself is
-        // correct on unit tests, but post-GC execution of the full
-        // bootstrap still fails on at least one missed root we
-        // haven't pinned down. Until then, run the bootstrap with a
-        // big un-GC'd heap; callers can invoke `gc()` manually.
-        //
-        // To re-enable: when used / cap exceeds some threshold,
-        // call self.gc().
+        // GC trigger gated on an env var so we can A/B test. Set
+        // POLYML_GC_THRESHOLD to a percentage (1-99) to enable
+        // auto-triggered collection at that fullness; unset = off.
+        if let Some(thresh) = crate::rts::gc_threshold_percent() {
+            if let Some(space) = self.alloc_space.as_ref() {
+                let used = space.used_words();
+                let cap = space.capacity_words();
+                if cap > 0 && used * 100 >= cap * (thresh as usize) {
+                    let before = used;
+                    let stack_depth = self.stack_height();
+                    let new_used = self.gc().unwrap_or(before);
+                    eprintln!(
+                        "  GC: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
+                        if before > 0 { (new_used * 100) / before } else { 0 }
+                    );
+                }
+            }
+        }
 
         let opcode_pc = self.pc;
         #[allow(clippy::cast_possible_truncation)]

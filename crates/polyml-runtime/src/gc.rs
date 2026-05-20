@@ -76,6 +76,9 @@ pub struct Collector<'a> {
     /// translate them to the corresponding mid-object address in
     /// to-space.
     from_objects: Vec<(usize, usize)>, // (body_start_addr, n_words)
+    /// Addresses that fell in from-space but didn't match any tracked
+    /// object — usually a pre-pass bug. Logged at end of collect.
+    untracked_addrs: Vec<usize>,
 }
 
 impl<'a> Collector<'a> {
@@ -96,29 +99,42 @@ impl<'a> Collector<'a> {
     /// by `slot`. The slot is updated in place to point at the
     /// to-space copy.
     ///
-    /// Handles three cases:
-    /// - Tagged or outside-from-space: leave unchanged.
-    /// - Pointer to a from-space object body start: standard forward.
-    /// - Pointer mid-body (a retPC or handler PC pushed on the stack
-    ///   as a `PolyWord::from_bits(addr)`): forward the containing
-    ///   object and adjust the slot to keep the same byte offset.
+    /// # Safety
+    /// `slot` must be a valid, writable pointer to a PolyWord.
+    pub unsafe fn forward(&mut self, slot: *mut PolyWord) {
+        // Tagged-PolyWord variant: respects LSB. Body words of
+        // word-objects, closures, and code-object constants are
+        // always tagged-or-pointer here, so we filter by LSB to
+        // skip immediates.
+        self.forward_impl(slot, /*tagged_filter=*/ true);
+    }
+
+    /// Variant for stack slots: PC values (retPC, handler PCs)
+    /// pushed on the stack are raw byte addresses and may have
+    /// LSB=1 just by chance. Don't filter by LSB — instead rely on
+    /// the from-space range check plus the object-map lookup.
     ///
     /// # Safety
-    /// `slot` must be a valid, writable pointer to a PolyWord. The
-    /// PolyWord must either be a tagged value or a pointer into our
-    /// from-space; pointers outside from-space are left untouched.
-    pub unsafe fn forward(&mut self, slot: *mut PolyWord) {
+    /// Same as [`forward`].
+    pub unsafe fn forward_stack_slot(&mut self, slot: *mut PolyWord) {
+        self.forward_impl(slot, /*tagged_filter=*/ false);
+    }
+
+    unsafe fn forward_impl(&mut self, slot: *mut PolyWord, tagged_filter: bool) {
         let w = unsafe { *slot };
-        if !self.contains_polyword(w) {
+        if tagged_filter && w.is_tagged() {
             return;
         }
         let addr = w.0;
+        // Range check on the raw address.
+        if addr < self.from_start as usize || addr >= self.from_end as usize {
+            return;
+        }
         // Look up which from-space object contains this address.
         // Body-start matches → ordinary forward. Otherwise it's a
         // mid-body pointer (PC value) and we keep the offset.
-        let Some((body_start, n_words)) = self.find_object(addr) else {
-            // Address is in from-space but doesn't match any tracked
-            // object (e.g., very high — leave alone).
+        let Some((body_start, _n_words)) = self.find_object(addr) else {
+            self.untracked_addrs.push(addr);
             return;
         };
         let body_ptr = body_start as *const PolyWord;
@@ -131,8 +147,9 @@ impl<'a> Collector<'a> {
     /// Binary-search the from-objects table for the object body
     /// whose range covers `addr` (in bytes). Returns
     /// `Some((body_start_addr, n_words))` if found, else `None`.
+    /// A zero-length object's body is a single-point range — the
+    /// body address itself, useful as an identity.
     fn find_object(&self, addr: usize) -> Option<(usize, usize)> {
-        // Partition point: first object whose start > addr.
         let idx = self
             .from_objects
             .partition_point(|(start, _)| *start <= addr);
@@ -141,7 +158,11 @@ impl<'a> Collector<'a> {
         }
         let (start, n) = self.from_objects[idx - 1];
         let end = start + n * std::mem::size_of::<usize>();
-        if addr < end { Some((start, n)) } else { None }
+        if addr < end || (n == 0 && addr == start) {
+            Some((start, n))
+        } else {
+            None
+        }
     }
 
     /// Forward an object that's known to be in from-space. Returns
@@ -278,17 +299,20 @@ where
         let used_words = alloc.used_words();
         let mut i = 0usize;
         while i < used_words {
-            // SAFETY: i is in-bounds of the storage slice (used_words
-            // is bounded by capacity_words).
+            // SAFETY: i is in-bounds of the storage slice.
             let lw = unsafe { *storage_start.add(i) };
             let n = length_of(lw);
-            if n == 0 || i + 1 + n > used_words {
-                // Malformed or end of valid data; stop.
-                break;
+            if i + 1 + n > used_words {
+                // Definitely malformed: object body would overrun
+                // the live region. Advance one slot conservatively.
+                i += 1;
+                continue;
             }
-            // Body starts at storage[i+1].
-            let body_addr =
-                unsafe { storage_start.add(i + 1) } as usize;
+            // A zero-length body is legal — empty arrays / vectors.
+            // The "body" address still has identity and may be
+            // referenced from elsewhere; record it so `find_object`
+            // can map pointers to it.
+            let body_addr = unsafe { storage_start.add(i + 1) } as usize;
             from_objects.push((body_addr, n));
             i += 1 + n;
         }
@@ -304,6 +328,7 @@ where
         to_storage: &mut scratch,
         to_used: 0,
         from_objects,
+        untracked_addrs: Vec::new(),
     };
 
     visit_roots(&mut col);
@@ -311,6 +336,29 @@ where
     unsafe { col.cheney_scan() };
 
     let new_used = col.to_used;
+    if !col.untracked_addrs.is_empty() {
+        let mut sample: Vec<usize> = col.untracked_addrs.iter().copied().collect();
+        sample.sort();
+        sample.dedup();
+        eprintln!(
+            "  GC untracked: {} pointer occurrences in from-space did not match any tracked object ({} unique addresses):",
+            col.untracked_addrs.len(),
+            sample.len(),
+        );
+        for addr in sample.iter().take(5) {
+            // Read the would-be length word at addr-8
+            // SAFETY: addr was a real pointer into from-space; addr-8
+            // may or may not be a valid header but the page is still
+            // mapped because the from_storage Box hasn't dropped yet.
+            let lw_ptr = (*addr - std::mem::size_of::<usize>()) as *const PolyWord;
+            let lw_val = unsafe { (*lw_ptr).0 };
+            let raw_len = length_of(PolyWord::from_bits(lw_val));
+            let raw_flags = flags_of(PolyWord::from_bits(lw_val));
+            eprintln!(
+                "    0x{addr:016x}  would-be LW @ -8: raw=0x{lw_val:016x}  length_of={raw_len}  flags=0x{raw_flags:02x}",
+            );
+        }
+    }
     alloc.replace_storage(scratch, new_used);
     new_used
 }

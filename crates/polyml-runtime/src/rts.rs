@@ -699,6 +699,16 @@ pub fn peek_bootstrap_tail_call() -> PolyWord {
     PolyWord::from_bits(BOOTSTRAP_TAIL_CALL.load(Ordering::Relaxed))
 }
 
+/// Read `POLYML_GC_THRESHOLD` env var as a 1-99 percentage; returns
+/// `None` if unset / invalid. The interpreter's step loop triggers
+/// GC when alloc-space fullness >= this percentage.
+#[must_use]
+pub fn gc_threshold_percent() -> Option<u8> {
+    let s = std::env::var("POLYML_GC_THRESHOLD").ok()?;
+    let p: u8 = s.parse().ok()?;
+    if (1..=99).contains(&p) { Some(p) } else { None }
+}
+
 /// Overwrite the bootstrap tail-call slot. Used by the GC to write
 /// back the forwarded address after copying.
 pub fn set_bootstrap_tail_call(w: PolyWord) {
