@@ -502,9 +502,20 @@ impl Interpreter {
         self.recent_call_targets.fill(0);
 
         // ---- Audit: any pointer still in old from-space is a missed root.
+        // Opt-in via POLYML_GC_AUDIT=1 — full audit is O(used+stack)
+        // and meaningful overhead on the hot loop.
+        if std::env::var("POLYML_GC_AUDIT").is_ok() {
+            self.audit_no_residual_from_space_ptrs(from_lo, from_hi);
+        }
+        let _ = from_lo;
+        let _ = from_hi;
+        Some(new_used)
+    }
+
+    fn audit_no_residual_from_space_ptrs(&self, from_lo: usize, from_hi: usize) {
+        let in_old = |addr: usize| addr >= from_lo && addr < from_hi;
         let mut residual = 0usize;
         let mut samples: Vec<(&'static str, usize, usize)> = Vec::new();
-        let in_old = |addr: usize| addr >= from_lo && addr < from_hi;
         // 1. Interpreter stack
         for i in self.sp..self.stack.len() {
             let v = self.stack[i].0;
@@ -594,8 +605,6 @@ impl Interpreter {
                 eprintln!("    {where_}[{idx}] = 0x{addr:016x}");
             }
         }
-
-        Some(new_used)
     }
 
     // ---- Inspection -----------------------------------------------------
