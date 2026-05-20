@@ -827,17 +827,18 @@ impl Interpreter {
             return Ok(StepResult::Returned(PolyWord::tagged(code)));
         }
 
-        // GC trigger gated on an env var so we can A/B test. Set
-        // POLYML_GC_THRESHOLD to a percentage (1-99) to enable
-        // auto-triggered collection at that fullness; unset = off.
-        if let Some(thresh) = crate::rts::gc_threshold_percent() {
-            if let Some(space) = self.alloc_space.as_ref() {
-                let used = space.used_words();
-                let cap = space.capacity_words();
-                if cap > 0 && used * 100 >= cap * (thresh as usize) {
-                    let before = used;
-                    let stack_depth = self.stack_height();
-                    let new_used = self.gc().unwrap_or(before);
+        // Auto-GC: trigger at the configured fullness threshold.
+        // POLYML_GC_THRESHOLD overrides; default is 80%.
+        // POLYML_GC_QUIET=1 suppresses the per-cycle log line.
+        let thresh = crate::rts::gc_threshold_percent().unwrap_or(80) as usize;
+        if let Some(space) = self.alloc_space.as_ref() {
+            let used = space.used_words();
+            let cap = space.capacity_words();
+            if cap > 0 && used * 100 >= cap * thresh {
+                let before = used;
+                let stack_depth = self.stack_height();
+                let new_used = self.gc().unwrap_or(before);
+                if std::env::var("POLYML_GC_QUIET").is_err() {
                     eprintln!(
                         "  GC: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
                         if before > 0 { (new_used * 100) / before } else { 0 }
