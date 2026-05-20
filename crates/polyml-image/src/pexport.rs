@@ -183,6 +183,113 @@ pub enum ParseError {
     CountMismatch { declared: u32, observed: u32 },
 }
 
+// ----- Writer -----------------------------------------------------------
+
+fn write_object<W: std::io::Write>(
+    w: &mut W,
+    id: u32,
+    obj: &Object,
+) -> std::io::Result<()> {
+    write!(w, "{id}:")?;
+    // Modifier letters in the order MNVW (matches upstream).
+    if obj.flags.contains(ObjFlags::MUTABLE) {
+        w.write_all(b"M")?;
+    }
+    if obj.flags.contains(ObjFlags::NEGATIVE) {
+        w.write_all(b"N")?;
+    }
+    if obj.flags.contains(ObjFlags::NO_OVERWRITE) {
+        w.write_all(b"V")?;
+    }
+    if obj.flags.contains(ObjFlags::WEAK) {
+        w.write_all(b"W")?;
+    }
+    match &obj.body {
+        ObjectBody::Ordinary(values) => {
+            write!(w, "O{}|", values.len())?;
+            write_value_list(w, values)?;
+        }
+        ObjectBody::Closure { code_addr, values } => {
+            // n_items = 1 code-addr "word" + values
+            let n_items = 1 + values.len();
+            write!(w, "C{n_items}|")?;
+            write_value(w, &Value::Ref(*code_addr))?;
+            for v in values {
+                w.write_all(b",")?;
+                write_value(w, v)?;
+            }
+        }
+        ObjectBody::LegacyClosure { values } => {
+            write!(w, "L{}|", values.len())?;
+            write_value_list(w, values)?;
+        }
+        ObjectBody::String(bytes) => {
+            write!(w, "S{}|", bytes.len())?;
+            write_hex(w, bytes)?;
+        }
+        ObjectBody::Bytes(bytes) => {
+            write!(w, "B{}|", bytes.len())?;
+            write_hex(w, bytes)?;
+        }
+        ObjectBody::Code {
+            code_bytes,
+            constants,
+            relocs,
+        } => {
+            write!(
+                w,
+                "F{},{}|",
+                constants.len(),
+                code_bytes.len(),
+            )?;
+            write_hex(w, code_bytes)?;
+            w.write_all(b"|")?;
+            write_value_list(w, constants)?;
+            w.write_all(b"|")?;
+            for r in relocs {
+                write!(w, "{},{},", r.offset, r.kind)?;
+                write_value(w, &Value::Ref(r.target))?;
+                w.write_all(b" ")?;
+            }
+        }
+        ObjectBody::EntryPoint(name) => {
+            write!(w, "E{}|{}", name.len(), name)?;
+        }
+        ObjectBody::WeakRef => {
+            w.write_all(b"K")?;
+        }
+    }
+    w.write_all(b"\n")?;
+    Ok(())
+}
+
+fn write_value_list<W: std::io::Write>(
+    w: &mut W,
+    values: &[Value],
+) -> std::io::Result<()> {
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            w.write_all(b",")?;
+        }
+        write_value(w, v)?;
+    }
+    Ok(())
+}
+
+fn write_value<W: std::io::Write>(w: &mut W, v: &Value) -> std::io::Result<()> {
+    match v {
+        Value::Tagged(n) => write!(w, "{n}"),
+        Value::Ref(id) => write!(w, "@{id}"),
+    }
+}
+
+fn write_hex<W: std::io::Write>(w: &mut W, bytes: &[u8]) -> std::io::Result<()> {
+    for b in bytes {
+        write!(w, "{:02x}", b)?;
+    }
+    Ok(())
+}
+
 // ----- Parser -----------------------------------------------------------
 
 struct Cursor<'a> {
@@ -299,6 +406,36 @@ const fn hex_digit(b: u8, at: usize) -> Result<u8, ParseError> {
 }
 
 impl Image {
+    /// Write this image out in the pexport text format. Round-trips
+    /// with [`parse`](Self::parse).
+    ///
+    /// Mirrors `vendor/polyml/libpolyml/pexport.cpp:114-250`.
+    pub fn write<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        let n = self.objects.len();
+        let word_size_n: u8 = match self.word_size {
+            WordSize::Bits32 => 4,
+            WordSize::Bits64 => 8,
+        };
+        let arch_char: u8 = match self.arch {
+            SourceArch::Interpreted => b'I',
+            SourceArch::X86 => b'X',
+            SourceArch::Arm => b'A',
+            SourceArch::Other(c) => c,
+        };
+        writeln!(w, "Objects\t{n}")?;
+        writeln!(
+            w,
+            "Root\t{} {} {}",
+            self.root,
+            arch_char as char,
+            word_size_n,
+        )?;
+        for (id, obj) in self.objects.iter().enumerate() {
+            write_object(w, id as u32, obj)?;
+        }
+        Ok(())
+    }
+
     /// Parse a pexport file from raw bytes. The file is expected to be
     /// ASCII-clean (newlines, decimal digits, hex digits, the type
     /// letters, and the punctuation `: , | @ <space> <tab>`).
@@ -810,5 +947,50 @@ mod tests {
             err,
             ParseError::BadIndex { .. } | ParseError::CountMismatch { .. }
         ));
+    }
+
+    fn roundtrip(src: &[u8]) {
+        let img = Image::parse(src).unwrap();
+        let mut buf = Vec::new();
+        img.write(&mut buf).unwrap();
+        let img2 = Image::parse(&buf).unwrap_or_else(|e| {
+            panic!(
+                "re-parse failed: {e:?}\n--- emitted ---\n{}",
+                String::from_utf8_lossy(&buf),
+            )
+        });
+        assert_eq!(img.root, img2.root);
+        assert_eq!(img.arch, img2.arch);
+        assert_eq!(img.word_size, img2.word_size);
+        assert_eq!(img.objects.len(), img2.objects.len());
+        for (a, b) in img.objects.iter().zip(img2.objects.iter()) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn roundtrip_ordinary_and_ref() {
+        roundtrip(b"Objects\t2\nRoot\t0 I 8\n0:MO2|@1,42\n1:O1|7\n");
+    }
+
+    #[test]
+    fn roundtrip_string_and_bytes() {
+        roundtrip(b"Objects\t2\nRoot\t0 I 8\n0:S5|68656c6c6f\n1:NB3|010203\n");
+    }
+
+    #[test]
+    fn roundtrip_closure() {
+        roundtrip(b"Objects\t2\nRoot\t0 I 8\n0:F0,4|deadbeef||\n1:C2|@0,9\n");
+    }
+
+    #[test]
+    fn roundtrip_entry_and_weak() {
+        roundtrip(b"Objects\t2\nRoot\t0 I 8\n0:VWE10|PolyFinish\n1:WK\n");
+    }
+
+    #[test]
+    fn roundtrip_code_with_reloc() {
+        // 1 const, 4 code bytes, 1 reloc at offset 0, kind 1, target @0
+        roundtrip(b"Objects\t1\nRoot\t0 I 8\n0:F1,4|deadbeef|@0|0,1,@0 \n");
     }
 }

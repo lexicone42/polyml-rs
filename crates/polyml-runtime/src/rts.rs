@@ -322,8 +322,10 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyGetLocalStats", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyShowHierarchy", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyShowLoadedModules", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyExport", RtsFn::Arity3(zero3));
-    t.register("PolyExportPortable", RtsFn::Arity3(zero3));
+    t.register("PolyExport", RtsFn::Arity3(poly_export));
+    // Portable variant uses the same pexport text format as our regular
+    // export — both go through the same snapshot path.
+    t.register("PolyExportPortable", RtsFn::Arity3(poly_export));
     t.register("PolyChDir", RtsFn::Arity2(zero2));
     t.register("PolyGetModuleDirectory", RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)));
     // FFI library loading stubs.
@@ -671,6 +673,64 @@ fn poly_finish(
 }
 
 fn poly_interpreted_enter_int_mode_inner() -> PolyWord {
+    PolyWord::tagged(0)
+}
+
+/// `PolyExport(threadId, filename, root_function)` — snapshot the live
+/// heap reachable from `root_function` and write a pexport text file
+/// to `filename`. Mirrors `vendor/polyml/libpolyml/pexport.cpp` for the
+/// interpreted-mode case.
+///
+/// On any I/O error or unreachable-root, sets the SML exception and
+/// returns TAGGED(0). Otherwise returns TAGGED(0) (unit) successfully.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_export(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    filename: PolyWord,
+    root: PolyWord,
+) -> PolyWord {
+    use std::io::BufWriter;
+    let Some(name) = poly_string_to_rust(filename) else {
+        ctx.raised_exception = Some(make_simple_exception(
+            ctx,
+            "PolyExport: filename is not a string",
+        ));
+        return PolyWord::tagged(0);
+    };
+    if !root.is_data_ptr() {
+        ctx.raised_exception = Some(make_simple_exception(
+            ctx,
+            "PolyExport: root must be a heap object (got tagged value)",
+        ));
+        return PolyWord::tagged(0);
+    }
+    let image = unsafe { crate::export::snapshot(root) };
+    let file = match std::fs::File::create(&name) {
+        Ok(f) => f,
+        Err(e) => {
+            ctx.raised_exception = Some(make_simple_exception(
+                ctx,
+                &format!("PolyExport: open {name:?} failed: {e}"),
+            ));
+            return PolyWord::tagged(0);
+        }
+    };
+    let mut w = BufWriter::new(file);
+    if let Err(e) = image.write(&mut w) {
+        ctx.raised_exception = Some(make_simple_exception(
+            ctx,
+            &format!("PolyExport: write {name:?} failed: {e}"),
+        ));
+        return PolyWord::tagged(0);
+    }
+    if RTS_TRACE.load(Ordering::Relaxed) {
+        eprintln!(
+            "  PolyExport: wrote {} objects, root id 0, to {:?}",
+            image.objects.len(),
+            name,
+        );
+    }
     PolyWord::tagged(0)
 }
 

@@ -106,6 +106,28 @@ fn parse_bootstrap64() {
 }
 
 #[test]
+fn bootstrap64_roundtrips_through_writer() {
+    let Some(path) = bootstrap_file("bootstrap64.txt") else {
+        eprintln!("SKIP: vendor/polyml/bootstrap/bootstrap64.txt not present");
+        return;
+    };
+    let Some(bytes) = load_or_skip(&path) else { return };
+
+    let img = Image::parse(&bytes).expect("parse");
+    let mut emitted = Vec::with_capacity(bytes.len());
+    img.write(&mut emitted).expect("write");
+    let img2 = Image::parse(&emitted).expect("re-parse");
+
+    assert_eq!(img.root, img2.root);
+    assert_eq!(img.arch, img2.arch);
+    assert_eq!(img.word_size, img2.word_size);
+    assert_eq!(img.objects.len(), img2.objects.len());
+    for (i, (a, b)) in img.objects.iter().zip(&img2.objects).enumerate() {
+        assert_eq!(a, b, "object {i} differs after round-trip");
+    }
+}
+
+#[test]
 fn parse_bootstrap32() {
     let Some(path) = bootstrap_file("bootstrap32.txt") else {
         eprintln!("SKIP: vendor/polyml/bootstrap/bootstrap32.txt not present");
