@@ -19,6 +19,7 @@
 
 use crate::{Jit, JitError};
 use cranelift::prelude::*;
+use cranelift::codegen::ir::BlockArg;
 use cranelift_module::{Linkage, Module};
 
 // Opcode constants — kept in sync with
@@ -35,6 +36,9 @@ const INSTR_RETURN_1: u8 = 0x42;
 const INSTR_FIXED_ADD: u8 = 0xaa;
 const INSTR_FIXED_SUB: u8 = 0xab;
 const INSTR_FIXED_MULT: u8 = 0xac;
+const INSTR_JUMP8: u8 = 0x02;
+const INSTR_JUMP8_FALSE: u8 = 0x03;
+const INSTR_JUMP8_TRUE: u8 = 0x46;
 
 /// Errors specific to bytecode translation.
 #[derive(Debug, thiserror::Error)]
@@ -61,11 +65,29 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
     let int = types::I64;
     ctx.func.signature.returns.push(AbiParam::new(int));
 
+    // Pass 1: scan to find branch target PCs and the stack depth
+    // expected at each target. Each unique target gets its own
+    // Cranelift block; the block's parameters carry the stack
+    // values across the branch.
+    let targets = scan_branch_targets(bytecode)?;
+
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
-        let block = builder.create_block();
-        builder.switch_to_block(block);
-        builder.seal_block(block);
+        let entry = builder.create_block();
+
+        // Allocate one block per unique branch target, with as many
+        // block-params as the stack depth at that PC.
+        let mut block_at: std::collections::HashMap<usize, Block> =
+            std::collections::HashMap::new();
+        for (&target_pc, &depth) in &targets {
+            let blk = builder.create_block();
+            for _ in 0..depth {
+                builder.append_block_param(blk, int);
+            }
+            block_at.insert(target_pc, blk);
+        }
+
+        builder.switch_to_block(entry);
 
         // Compile-time stack of in-IR values; the position in this
         // Vec corresponds to the SML stack position. `push` is just
@@ -75,6 +97,33 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
         let mut returned = false;
 
         while pc < bytecode.len() {
+            // If we just entered a branch-target PC, switch to its
+            // block and re-seed the stack from the block params.
+            if let Some(&target_blk) = block_at.get(&pc) {
+                if !returned {
+                    let args: Vec<BlockArg> =
+                        stack.iter().copied().map(BlockArg::from).collect();
+                    builder.ins().jump(target_blk, &args);
+                }
+                builder.switch_to_block(target_blk);
+                stack.clear();
+                for i in 0..builder.block_params(target_blk).len() {
+                    stack.push(builder.block_params(target_blk)[i]);
+                }
+                returned = false;
+            }
+            // After an unconditional terminator (RETURN/JUMP/branch),
+            // we keep walking the bytecode but the bytes are
+            // unreachable unless we hit a future branch target. Skip
+            // emitting IR for those bytes — but still respect opcode
+            // boundaries so we don't read an immediate byte as an
+            // opcode.
+            if returned {
+                let len = opcode_total_len(bytecode, pc)?;
+                pc += len;
+                continue;
+            }
+
             let op = bytecode[pc];
             pc += 1;
             match op {
@@ -133,7 +182,42 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
                     let v = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
                     builder.ins().return_(&[v]);
                     returned = true;
-                    break;
+                }
+                INSTR_JUMP8 => {
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let off = bytecode[pc] as usize;
+                    pc += 1;
+                    let target_pc = pc + off;
+                    let target_blk = *block_at.get(&target_pc)
+                        .expect("target should be registered in pass 1");
+                    let args: Vec<BlockArg> =
+                        stack.iter().copied().map(BlockArg::from).collect();
+                    builder.ins().jump(target_blk, &args);
+                    returned = true;
+                }
+                INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => {
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let off = bytecode[pc] as usize;
+                    pc += 1;
+                    let target_pc = pc + off;
+                    let cond = stack.pop().ok_or(TranslateError::Underflow(pc - 2))?;
+                    let target_blk = *block_at.get(&target_pc)
+                        .expect("target should be registered in pass 1");
+                    let fall_blk = *block_at.get(&pc).expect("fallthrough should be registered");
+                    let zero = builder.ins().iconst(int, tag(0));
+                    let is_zero = builder.ins().icmp(IntCC::Equal, cond, zero);
+                    let args: Vec<BlockArg> =
+                        stack.iter().copied().map(BlockArg::from).collect();
+                    if op == INSTR_JUMP8_FALSE {
+                        builder.ins().brif(is_zero, target_blk, &args, fall_blk, &args);
+                    } else {
+                        builder.ins().brif(is_zero, fall_blk, &args, target_blk, &args);
+                    }
+                    returned = true;
                 }
                 _ => {
                     return Err(TranslateError::Unsupported { op, at: pc - 1 });
@@ -141,6 +225,11 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
             }
         }
 
+        // Seal all blocks. Note: with our pre-pass we know every
+        // block's predecessors, so calling seal_all_blocks is safe
+        // even on blocks that have no incoming edges (Cranelift will
+        // optimise those away or treat them as unreachable).
+        builder.seal_all_blocks();
         if !returned {
             return Err(TranslateError::FellOffEnd);
         }
@@ -169,6 +258,123 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
 /// PolyWord tagging: a small int `n` is represented as `2n + 1`.
 fn tag(n: i64) -> i64 {
     n.wrapping_mul(2).wrapping_add(1)
+}
+
+/// Return the total byte length of the opcode at `bc[pc]` (opcode +
+/// any immediates). Used by the main loop to step over unreachable
+/// bytes without misaligning to an immediate.
+fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
+    if pc >= bc.len() {
+        return Err(TranslateError::Truncated(pc));
+    }
+    Ok(match bc[pc] {
+        INSTR_CONST_INT_B | INSTR_JUMP8 | INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => 2,
+        INSTR_CONST_0..=INSTR_CONST_4
+        | INSTR_CONST_10
+        | INSTR_RETURN_1
+        | INSTR_FIXED_ADD
+        | INSTR_FIXED_SUB
+        | INSTR_FIXED_MULT => 1,
+        op => return Err(TranslateError::Unsupported { op, at: pc }),
+    })
+}
+
+/// First pass: walk the bytecode, tracking the static stack depth
+/// at each PC. For every branch instruction, record both the
+/// taken-target PC and (for conditional branches) the fallthrough
+/// PC, along with the expected stack depth at that target. Returns
+/// `target_pc -> depth`.
+///
+/// The depth of a conditional fallthrough is one less than the
+/// pre-branch depth, because the conditional pops the test value.
+/// `JUMP8` (unconditional) doesn't pop; it just jumps with the
+/// same depth.
+fn scan_branch_targets(
+    bytecode: &[u8],
+) -> Result<std::collections::BTreeMap<usize, usize>, TranslateError> {
+    let mut targets: std::collections::BTreeMap<usize, usize> =
+        std::collections::BTreeMap::new();
+    let mut depth: usize = 0;
+    let mut pc = 0usize;
+    while pc < bytecode.len() {
+        let op = bytecode[pc];
+        pc += 1;
+        match op {
+            INSTR_CONST_0..=INSTR_CONST_4 => depth += 1,
+            INSTR_CONST_10 => depth += 1,
+            INSTR_CONST_INT_B => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                pc += 1;
+                depth += 1;
+            }
+            INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT => {
+                if depth < 2 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                depth -= 1;
+            }
+            INSTR_RETURN_1 => {
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                // Path ends here; subsequent bytes start a new fragment
+                // — but the only way to enter them is via a branch
+                // target. We don't track stack depth into unreachable
+                // code.
+                depth = depth.saturating_sub(1); // for clarity post-pop
+            }
+            INSTR_JUMP8 => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let off = bytecode[pc] as usize;
+                pc += 1;
+                let target = pc + off;
+                record_target(&mut targets, target, depth)?;
+            }
+            INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let off = bytecode[pc] as usize;
+                pc += 1;
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
+                let post_pop = depth - 1;
+                let taken = pc + off;
+                record_target(&mut targets, taken, post_pop)?;
+                // Fallthrough also a branch target (so both arms
+                // start with the same block-param shape).
+                record_target(&mut targets, pc, post_pop)?;
+                depth = post_pop;
+            }
+            _ => {
+                return Err(TranslateError::Unsupported { op, at: pc - 1 });
+            }
+        }
+    }
+    Ok(targets)
+}
+
+fn record_target(
+    targets: &mut std::collections::BTreeMap<usize, usize>,
+    pc: usize,
+    depth: usize,
+) -> Result<(), TranslateError> {
+    match targets.get(&pc) {
+        None => {
+            targets.insert(pc, depth);
+            Ok(())
+        }
+        Some(&existing) if existing == depth => Ok(()),
+        // Mismatched stack depth at a branch target — surface as
+        // an unsupported pattern; future work could spill the
+        // stack to memory and unify depths.
+        Some(_) => Err(TranslateError::Unsupported { op: 0xFE, at: pc }),
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +500,100 @@ mod tests {
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
         assert_eq!(untag(f()), -2);
+    }
+
+    #[test]
+    fn translate_jump_skips_over_dead_code() {
+        // JUMP8 +2 → skip 2 bytes (an unreachable CONST_2)
+        // After jump: push 4, return 4.
+        // Layout (offsets):
+        //  0: JUMP8 off=2     (after immediate, pc=2; target = 2+2 = 4)
+        //  2: CONST_2         (dead — unreachable, but valid bytecode)
+        //  3: RETURN_1        (dead)
+        //  4: CONST_4         ← jump lands here
+        //  5: RETURN_1
+        // Note: dead code is allowed because the pre-pass walks
+        // linearly and JUMP8 is treated as a terminator for that path.
+        // To keep pass 1 happy we replace the dead bytes with no-op-
+        // shaped opcodes: a CONST + RETURN_1 just tracks depth 1→0.
+        let bc = vec![
+            INSTR_JUMP8, 2,           // 0..2
+            INSTR_CONST_2,            // 2
+            INSTR_RETURN_1,           // 3
+            INSTR_CONST_4,            // 4 (target)
+            INSTR_RETURN_1,           // 5
+        ];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 4);
+    }
+
+    #[test]
+    fn translate_if_then_else_via_jump_false() {
+        // Compute: if cond then 1 else 2
+        // We use CONST_1 as a truthy condition (tagged 1 = raw 3).
+        // Layout:
+        //  0: CONST_1            (push the condition value: 1)
+        //  1: JUMP8_FALSE off=3  (pop; if 0 jump fwd 3 → pc=6)
+        //                        (after immediate, pc=3)
+        //  3: CONST_1            (then-arm: push 1)
+        //  4: JUMP8 off=1        (jump over else → pc=7)
+        //  6: CONST_2            (else-arm: push 2)
+        //  7: RETURN_1
+        let bc = vec![
+            INSTR_CONST_1,            // 0
+            INSTR_JUMP8_FALSE, 3,     // 1..3, target = 3 + 3 = 6
+            INSTR_CONST_1,            // 3 (then)
+            INSTR_JUMP8, 1,           // 4..6, target = 6 + 1 = 7
+            INSTR_CONST_2,            // 6 (else)
+            INSTR_RETURN_1,           // 7
+        ];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        // Condition was 1 (truthy), so we take the then-arm → 1.
+        assert_eq!(untag(f()), 1);
+    }
+
+    #[test]
+    fn translate_if_else_with_false_condition() {
+        //  0: CONST_0            (push 0 = false)
+        //  1: JUMP8_FALSE off=3  (taken: jump to 6)
+        //  3: CONST_1            (then; dead this run)
+        //  4: JUMP8 off=1        (skip else; dead this run)
+        //  6: CONST_2            (else)
+        //  7: RETURN_1
+        let bc = vec![
+            INSTR_CONST_0,
+            INSTR_JUMP8_FALSE, 3,
+            INSTR_CONST_1,
+            INSTR_JUMP8, 1,
+            INSTR_CONST_2,
+            INSTR_RETURN_1,
+        ];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 2);
+    }
+
+    #[test]
+    fn translate_jump_true() {
+        //  0: CONST_3            (truthy)
+        //  1: JUMP8_TRUE off=3   (taken: jump to 6)
+        //  3: CONST_0            (dead)
+        //  4: JUMP8 off=1        (dead)
+        //  6: CONST_4
+        //  7: RETURN_1
+        let bc = vec![
+            INSTR_CONST_3,
+            INSTR_JUMP8_TRUE, 3,
+            INSTR_CONST_0,
+            INSTR_JUMP8, 1,
+            INSTR_CONST_4,
+            INSTR_RETURN_1,
+        ];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 4);
     }
 
     #[test]
