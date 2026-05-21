@@ -121,25 +121,22 @@ Consequences for testing:
 The `bootstrap_can_register_infix_plus_and_compute` test in
 `crates/polyml-bin/tests/cli_run.rs` exercises this path.
 
-To actually load the basis and reach "1 + 1 prints 3", we need real
-file I/O (PolyBasicIOGeneral subcodes 3/4/8/9 for open/read).
-
 ## Open issues
 
-- **Post-error PC crash**: after a handled exception's error path
-  prints to stderr, the bootstrap's continuation eventually hits
-  "pc out of bounds (offset 322739 into segment of 128 bytes)".
-  Successful runs are unaffected. The handler-depth tracking is
-  correct as of `9853c02`; the issue is some missing detail in
-  the post-handler RETURN/cleanup sequence.
+- **JIT closure trampoline is a stub**: `closure_call_trampoline`
+  in `crates/polyml-jit/src/lib.rs` returns TAGGED(0). Translation
+  of CALL_CONST_ADDR8/CALL_LOCAL_B succeeds (so coverage grows),
+  but JIT'd code can't actually be EXECUTED on real closures yet.
 
-- **File I/O**: PolyBasicIOGeneral subcodes 3 (open text input)
-  and 4 (open binary input) are still stubs returning TAGGED(0).
-  Implementing them + real reads from non-stdin fds (subcodes
-  8/9 for arrays) is the gating step toward loading the basis.
+- **JIT coverage ~9%**: `cargo test -p polyml-jit --test
+  coverage_bootstrap -- --nocapture` shows top blockers. After
+  CALL_CONST_ADDR8 was implemented, the next big ones are
+  TAIL_B_B (570 fns), RESET_R_B (445), RAISE_EX (392),
+  STACK_CONTAINER_B (241), and Cranelift verifier errors (647).
 
-- **GC**: none. The bump allocator leaks. Bootstrap-and-exit
-  workloads don't notice; long-running programs would OOM.
+- **GC**: copying GC is in. The bump allocator behind it
+  doesn't fragment; long-running programs stay under ~100 MB
+  through the full bootstrap chain.
 
 ## Diagnostic tooling (use it!)
 
