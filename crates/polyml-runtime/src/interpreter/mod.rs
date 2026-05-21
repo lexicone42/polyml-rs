@@ -2183,6 +2183,16 @@ impl Interpreter {
                 self.stack[self.sp] = p;
                 Ok(StepResult::Continue)
             }
+            // ASR of tagged short word. bytecode.cpp:2076 (EXTINSTR_wordShiftRArith).
+            // Top of stack is the shift amount; below it is the value.
+            // We must arithmetic-shift the untagged value, then re-tag.
+            EXTINSTR_WORD_SHIFT_R_ARITH => self.bin_op_word(|x, y| {
+                let s = (x >> 1) & 63;
+                let v = (y >> 1) as isize; // sign-extend before shift
+                #[allow(clippy::cast_sign_loss)]
+                let r = v.wrapping_shr(s as u32) as usize;
+                (r << 1) | 1
+            }),
             EXTINSTR_REAL_TO_INT => {
                 // ML semantics: round-to-nearest (banker's by default).
                 // For simplicity use Rust's `as` which truncates toward

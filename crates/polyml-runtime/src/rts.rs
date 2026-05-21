@@ -263,7 +263,7 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyRealFrexp", RtsFn::Arity2(poly_real_frexp));
     t.register(
         "PolyRealDoubleToString",
-        RtsFn::Arity4(|_, _, _, _, _| PolyWord::tagged(0)),
+        RtsFn::Arity4(poly_real_double_to_string),
     );
     // Real math RTS: registered as stubs so PolyCreateEntryPointObject
     // can resolve them at basis-compile time. The actual math doesn't
@@ -1414,29 +1414,24 @@ where
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn poly_add_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
-    -> PolyWord
-{
-    if let Some((x, y)) = both_tagged(arg2, arg1) {
-        let r = x as i128 + y as i128;
-        if fits_tagged(r) {
-            return PolyWord::tagged(r as isize);
-        }
-    }
-    PolyWord::tagged(0)
+fn poly_add_arbitrary(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
+    arb_binop(ctx, arg1, arg2, i128::checked_add, |a, b| a + b)
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn poly_subtract_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
-    -> PolyWord
-{
-    if let Some((x, y)) = both_tagged(arg2, arg1) {
-        let r = x as i128 - y as i128;
-        if fits_tagged(r) {
-            return PolyWord::tagged(r as isize);
-        }
-    }
-    PolyWord::tagged(0)
+fn poly_subtract_arbitrary(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
+    // Upstream order: result = arg2 - arg1 (arb_binop already mirrors that).
+    arb_binop(ctx, arg1, arg2, i128::checked_sub, |a, b| a - b)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1450,38 +1445,53 @@ fn poly_multiply_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyW
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn poly_divide_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
-    -> PolyWord
-{
-    if let Some((x, y)) = both_tagged(arg2, arg1) {
-        if y == 0 {
-            return PolyWord::tagged(0);
-        }
-        if x == MIN_TAGGED && y == -1 {
-            return PolyWord::tagged(0);
-        }
-        return PolyWord::tagged(x / y);
-    }
-    PolyWord::tagged(0)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn poly_remainder_arbitrary(
-    _: &mut RtsContext<'_>,
+fn poly_divide_arbitrary(
+    ctx: &mut RtsContext<'_>,
     _tid: PolyWord,
     arg1: PolyWord,
     arg2: PolyWord,
 ) -> PolyWord {
-    if let Some((x, y)) = both_tagged(arg2, arg1) {
-        if y == 0 {
+    // arg1 = dividend, arg2 = divisor (see PolyQuotRemArbitraryPair).
+    if let Some((dvdr, dvd)) = both_tagged(arg2, arg1) {
+        if dvdr == 0 {
             return PolyWord::tagged(0);
         }
-        if x == MIN_TAGGED && y == -1 {
-            return PolyWord::tagged(0);
+        if !(dvd == MIN_TAGGED && dvdr == -1) {
+            return PolyWord::tagged(dvd / dvdr);
         }
-        return PolyWord::tagged(x % y);
+        // Fall through to bigint for MIN_TAGGED / -1 overflow.
     }
-    PolyWord::tagged(0)
+    let (Some(a), Some(b)) = (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) else {
+        return PolyWord::tagged(0);
+    };
+    if b == BigInt::from(0) {
+        return PolyWord::tagged(0);
+    }
+    bigint_to_poly_word(ctx, &(a / b))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn poly_remainder_arbitrary(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
+    if let Some((dvdr, dvd)) = both_tagged(arg2, arg1) {
+        if dvdr == 0 {
+            return PolyWord::tagged(0);
+        }
+        if !(dvd == MIN_TAGGED && dvdr == -1) {
+            return PolyWord::tagged(dvd % dvdr);
+        }
+    }
+    let (Some(a), Some(b)) = (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) else {
+        return PolyWord::tagged(0);
+    };
+    if b == BigInt::from(0) {
+        return PolyWord::tagged(0);
+    }
+    bigint_to_poly_word(ctx, &(a % b))
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1678,13 +1688,37 @@ fn poly_quot_rem_arbitrary_pair(
     arg1: PolyWord,
     arg2: PolyWord,
 ) -> PolyWord {
-    let (q, r) = if let Some((x, y)) = both_tagged(arg2, arg1) {
-        if y == 0 || (x == MIN_TAGGED && y == -1) {
+    // Upstream `arb.cpp:1825` calls `quotRem(taskData, pushedArg2,
+    // pushedArg1, ...)`, and `quotRem(td, y, x, ...)` computes x/y.
+    // So arg1 is the dividend, arg2 is the divisor.
+    // `IntInf.quot/rem` use truncated division (Rust's `/` and `%`).
+    let (q_word, r_word) = if let Some((dvdr, dvd)) = both_tagged(arg2, arg1) {
+        if dvdr == 0 {
             return PolyWord::tagged(0);
         }
-        (PolyWord::tagged(x / y), PolyWord::tagged(x % y))
+        if dvd == MIN_TAGGED && dvdr == -1 {
+            // Tagged-overflow on quotient (MIN/-1) — need bigint path.
+            let a = BigInt::from(dvd);
+            let b = BigInt::from(dvdr);
+            let q = bigint_to_poly_word(ctx, &(&a / &b));
+            let r = bigint_to_poly_word(ctx, &(&a % &b));
+            (q, r)
+        } else {
+            (PolyWord::tagged(dvd / dvdr), PolyWord::tagged(dvd % dvdr))
+        }
     } else {
-        return PolyWord::tagged(0);
+        let (Some(a), Some(b)) =
+            (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2))
+        else {
+            return PolyWord::tagged(0);
+        };
+        // `b == 0` can't happen at the bignum level (would be tagged 0).
+        if b == BigInt::from(0) {
+            return PolyWord::tagged(0);
+        }
+        let q = bigint_to_poly_word(ctx, &(&a / &b));
+        let r = bigint_to_poly_word(ctx, &(&a % &b));
+        (q, r)
     };
     // Allocate a 2-word ordinary object holding (q, r).
     let Some(space) = ctx.alloc_space.as_mut() else {
@@ -1694,8 +1728,8 @@ fn poly_quot_rem_arbitrary_pair(
     // SAFETY: just allocated 2 words.
     unsafe {
         crate::space::set_length_word(p, 2, 0);
-        p.write(q);
-        p.add(1).write(r);
+        p.write(q_word);
+        p.add(1).write(r_word);
     }
     PolyWord::from_ptr(p.cast_const())
 }
@@ -1967,6 +2001,135 @@ fn poly_get_code_constant(
         let val_ptr = code_ptr.add(off).cast::<PolyWord>();
         val_ptr.read_unaligned()
     }
+}
+
+/// `PolyRealDoubleToString(threadId, arg, kind, prec)` — format a
+/// boxed Real to an SML string. `kind` is a tagged char ('e', 'E',
+/// 'f', 'F', or anything else → 'G'); `prec` is a tagged int.
+/// Output uses SML conventions: '-' replaced by '~', '+' removed
+/// after 'E', leading zeros after 'E' suppressed.
+/// Mirrors `reals.cpp:PolyRealDoubleToString`.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_real_double_to_string(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg: PolyWord,
+    kind: PolyWord,
+    prec: PolyWord,
+) -> PolyWord {
+    let v: f64 = if arg.is_data_ptr() {
+        // SAFETY: caller passes a boxed Real (1-word byte object).
+        unsafe { *arg.as_ptr::<f64>() }
+    } else {
+        0.0
+    };
+    let kind_ch = if kind.is_tagged() {
+        u32::try_from(kind.untag()).ok().and_then(char::from_u32).unwrap_or('G')
+    } else {
+        'G'
+    };
+    #[allow(clippy::cast_sign_loss)]
+    let p = if prec.is_tagged() {
+        prec.untag().max(0) as usize
+    } else {
+        6
+    };
+
+    // Non-finite handled by SML wrapper, but be defensive.
+    if v.is_nan() {
+        return alloc_poly_string(ctx, b"nan");
+    }
+    if v.is_infinite() {
+        let s: &[u8] = if v < 0.0 { b"~inf" } else { b"inf" };
+        return alloc_poly_string(ctx, s);
+    }
+
+    let raw = match kind_ch {
+        'e' | 'E' => format!("{v:.*E}", p),
+        'f' | 'F' => format!("{v:.*}", p),
+        // G: use %g-like semantics. Use Rust's default if precision
+        // is at least the magnitude of the integer part; else fall
+        // back to scientific. The post-processor below strips
+        // trailing zeros.
+        _ => {
+            let abs = v.abs();
+            let exp10 = if abs == 0.0 {
+                0
+            } else {
+                abs.log10().floor() as i32
+            };
+            let prec_g = if p == 0 { 1 } else { p };
+            if exp10 < -4 || exp10 >= prec_g as i32 {
+                // Use scientific with prec_g - 1 fractional digits.
+                let s = format!("{v:.*E}", prec_g - 1);
+                strip_g_trailing(&s)
+            } else {
+                // Use fixed with (prec_g - 1 - exp10) fractional digits.
+                let nfrac = (prec_g as i32 - 1 - exp10).max(0) as usize;
+                let s = format!("{v:.*}", nfrac);
+                strip_g_trailing(&s)
+            }
+        }
+    };
+
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len() + 4);
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'-' => out.push(b'~'),
+            b'+' => {} // dropped (only appears after E)
+            b'e' | b'E' => {
+                out.push(b'E');
+                // Skip a single + if present, then skip leading zeros
+                // (but keep at least one digit).
+                i += 1;
+                let mut sign: Option<u8> = None;
+                if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+                    sign = Some(if bytes[i] == b'-' { b'~' } else { 0 });
+                    i += 1;
+                }
+                // Skip leading zeros.
+                let digits_start = i;
+                while i < bytes.len() && bytes[i] == b'0' {
+                    i += 1;
+                }
+                // If we consumed everything, leave one '0'.
+                let no_digits_left = i >= bytes.len() || !bytes[i].is_ascii_digit();
+                if let Some(s) = sign
+                    && s != 0
+                    && !(no_digits_left && i == digits_start)
+                {
+                    out.push(s);
+                }
+                if no_digits_left {
+                    out.push(b'0');
+                }
+                continue;
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    alloc_poly_string(ctx, &out)
+}
+
+fn strip_g_trailing(s: &str) -> String {
+    // For %G: strip trailing zeros after decimal point, then strip a
+    // dangling '.'. Don't touch the exponent suffix.
+    let (mantissa, exp_part) = match s.find(['e', 'E']) {
+        Some(idx) => (&s[..idx], &s[idx..]),
+        None => (s, ""),
+    };
+    if !mantissa.contains('.') {
+        return s.to_string();
+    }
+    let trimmed = mantissa.trim_end_matches('0');
+    let trimmed = trimmed.trim_end_matches('.');
+    let mut out = String::with_capacity(s.len());
+    out.push_str(trimmed);
+    out.push_str(exp_part);
+    out
 }
 
 /// `PolyRealFrexp(threadId, x)` — split a Real `x` into
@@ -2697,20 +2860,21 @@ mod tests {
 
     #[test]
     fn arb_div_fast_path() {
-        // arg2 / arg1 = 20 / 6 = 3 (truncate toward zero)
-        let r = poly_divide_arbitrary(&mut ctx(), t(), PolyWord::tagged(6), PolyWord::tagged(20));
+        // arg1 / arg2 = 20 / 6 = 3 (truncate toward zero).
+        // Upstream order: arg1 = dividend, arg2 = divisor.
+        let r = poly_divide_arbitrary(&mut ctx(), t(), PolyWord::tagged(20), PolyWord::tagged(6));
         assert_eq!(r.untag(), 3);
         // -20 / 6 = -3 (truncate toward zero, NOT -4)
-        let r = poly_divide_arbitrary(&mut ctx(), t(), PolyWord::tagged(6), PolyWord::tagged(-20));
+        let r = poly_divide_arbitrary(&mut ctx(), t(), PolyWord::tagged(-20), PolyWord::tagged(6));
         assert_eq!(r.untag(), -3);
     }
 
     #[test]
     fn arb_rem_fast_path() {
         // 20 rem 6 = 2 (sign of dividend)
-        let r = poly_remainder_arbitrary(&mut ctx(), t(), PolyWord::tagged(6), PolyWord::tagged(20));
+        let r = poly_remainder_arbitrary(&mut ctx(), t(), PolyWord::tagged(20), PolyWord::tagged(6));
         assert_eq!(r.untag(), 2);
-        let r = poly_remainder_arbitrary(&mut ctx(), t(), PolyWord::tagged(6), PolyWord::tagged(-20));
+        let r = poly_remainder_arbitrary(&mut ctx(), t(), PolyWord::tagged(-20), PolyWord::tagged(6));
         assert_eq!(r.untag(), -2);
     }
 
