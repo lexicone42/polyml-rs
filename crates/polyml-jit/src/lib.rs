@@ -21,6 +21,9 @@
 
 pub mod translate;
 
+#[cfg(test)]
+mod bench;
+
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
