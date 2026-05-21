@@ -45,7 +45,7 @@ fn jit_coverage_on_bootstrap_code_objects() {
     let mut total = 0usize;
     let mut ok = 0usize;
     // First-unsupported-opcode histogram for diagnosis.
-    let mut blockers: std::collections::BTreeMap<u8, usize> = Default::default();
+    let mut blockers: std::collections::BTreeMap<String, usize> = Default::default();
     let mut shortest_ok: Option<usize> = None;
     let mut shortest_ok_bytes: Vec<u8> = Vec::new();
 
@@ -76,10 +76,19 @@ fn jit_coverage_on_bootstrap_code_objects() {
                     }
                 }
                 Err(translate::TranslateError::Unsupported { op, .. }) => {
-                    *blockers.entry(op).or_insert(0) += 1;
+                    *blockers.entry(format!("op 0x{op:02x}")).or_insert(0) += 1;
                 }
-                Err(_) => {
-                    *blockers.entry(0xFF).or_insert(0) += 1;
+                Err(translate::TranslateError::Truncated(_)) => {
+                    *blockers.entry("truncated".into()).or_insert(0) += 1;
+                }
+                Err(translate::TranslateError::Underflow(_)) => {
+                    *blockers.entry("underflow".into()).or_insert(0) += 1;
+                }
+                Err(translate::TranslateError::FellOffEnd) => {
+                    *blockers.entry("fell-off-end".into()).or_insert(0) += 1;
+                }
+                Err(translate::TranslateError::Jit(_)) => {
+                    *blockers.entry("jit-internal".into()).or_insert(0) += 1;
                 }
             }
         });
@@ -91,11 +100,11 @@ fn jit_coverage_on_bootstrap_code_objects() {
     if let Some(s) = shortest_ok {
         eprintln!("  shortest JIT'd bytecode: {s} bytes = {:?}", shortest_ok_bytes);
     }
-    eprintln!("  top 10 blocking opcodes (first-unsupported in failing functions):");
-    let mut blockers_vec: Vec<(u8, usize)> = blockers.into_iter().collect();
+    eprintln!("  top 10 blockers (first-failure reason per failing function):");
+    let mut blockers_vec: Vec<(String, usize)> = blockers.into_iter().collect();
     blockers_vec.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    for (op, n) in blockers_vec.iter().take(10) {
-        eprintln!("    0x{op:02x}: {n}");
+    for (kind, n) in blockers_vec.iter().take(10) {
+        eprintln!("    {kind:<22}: {n}");
     }
 
     // Don't assert any specific coverage — just print the report. This

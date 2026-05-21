@@ -113,7 +113,7 @@ fn jit_matches_interp_for_addition_chain() {
     let bc = straight_line_add_program(50);
     let mut jit = Jit::new().unwrap();
     let jit_fn = compile(&mut jit, &bc).unwrap();
-    assert_eq!(untag(jit_fn()), 50);
+    assert_eq!(untag(unsafe { jit_fn(std::ptr::null()) }), 50);
     assert_eq!(untag(interp(&bc)), 50);
 }
 
@@ -130,7 +130,7 @@ fn jit_matches_interp_for_mult_chain() {
     ];
     let mut jit = Jit::new().unwrap();
     let jit_fn = compile(&mut jit, &bc).unwrap();
-    assert_eq!(untag(jit_fn()), 32);
+    assert_eq!(untag(unsafe { jit_fn(std::ptr::null()) }), 32);
     assert_eq!(untag(interp(&bc)), 32);
 }
 
@@ -142,7 +142,7 @@ fn jit_speedup_over_micro_interpreter() {
     let jit_fn = compile(&mut jit, &bc).unwrap();
 
     // Sanity-check both return 1000.
-    assert_eq!(untag(jit_fn()), 1000);
+    assert_eq!(untag(unsafe { jit_fn(std::ptr::null()) }), 1000);
     assert_eq!(untag(interp(&bc)), 1000);
 
     let iters = 100_000;
@@ -150,7 +150,7 @@ fn jit_speedup_over_micro_interpreter() {
     let t0 = std::time::Instant::now();
     let mut sink = 0i64;
     for _ in 0..iters {
-        sink = sink.wrapping_add(jit_fn());
+        sink = sink.wrapping_add(unsafe { jit_fn(std::ptr::null()) });
     }
     let jit_elapsed = t0.elapsed();
 

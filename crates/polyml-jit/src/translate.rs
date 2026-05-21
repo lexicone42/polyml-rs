@@ -45,6 +45,13 @@ const INSTR_JUMP_BACK8: u8 = 0x1e;
 const INSTR_LOCAL_B: u8 = 0x22;
 const INSTR_LOCAL_0: u8 = 0x29;
 const INSTR_LOCAL_7: u8 = 0x30;
+const INSTR_INDIRECT_LOCAL_B0: u8 = 0xc7;
+const INSTR_INDIRECT_LOCAL_B1: u8 = 0xc1;
+const INSTR_INDIRECT_CLOSURE_B0: u8 = 0x77;
+const INSTR_INDIRECT_CLOSURE_B1: u8 = 0x7a;
+const INSTR_INDIRECT_CLOSURE_B2: u8 = 0x7c;
+const INSTR_ENTER_INT_X86: u8 = 0xff;
+const INSTR_ENTER_INT_ARM64: u8 = 0xe9;
 
 /// Errors specific to bytecode translation.
 #[derive(Debug, thiserror::Error)]
@@ -65,10 +72,20 @@ pub enum TranslateError {
 /// no arguments and returns an `i64` (the raw PolyWord). Uses the
 /// shared `jit` environment so the compiled bytes outlive the
 /// returned pointer for as long as the `Jit` does.
-pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64, TranslateError> {
+/// Signature of every JIT'd function:
+///   `extern "C" fn(args: *const i64) -> i64`
+/// The caller passes a pointer to an array of `arg_count` PolyWords
+/// (one per SML arg) — for 0-arg functions the pointer is unused
+/// (still must be a valid pointer; pass null is undefined). The
+/// return value is the result PolyWord.
+pub type JitFn = unsafe extern "C" fn(args: *const i64) -> i64;
+
+pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<JitFn, TranslateError> {
     let mut ctx = jit.module.make_context();
     let mut func_builder_ctx = FunctionBuilderContext::new();
     let int = types::I64;
+    // Signature: takes one pointer (treated as i64), returns one i64.
+    ctx.func.signature.params.push(AbiParam::new(int));
     ctx.func.signature.returns.push(AbiParam::new(int));
 
     // Pass 1: scan to find branch target PCs and the stack depth
@@ -77,9 +94,12 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
     // values across the branch.
     let targets = scan_branch_targets(bytecode)?;
 
+    let (entry_pc, arg_count) = function_prologue(bytecode);
+
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
         let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
 
         // Allocate one block per unique branch target, with as many
         // block-params as the stack depth at that PC.
@@ -94,12 +114,26 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
         }
 
         builder.switch_to_block(entry);
+        let args_ptr = builder.block_params(entry)[0];
 
         // Compile-time stack of in-IR values; the position in this
         // Vec corresponds to the SML stack position. `push` is just
         // `Vec::push`; `pop` is `Vec::pop`.
-        let mut stack: Vec<Value> = Vec::new();
-        let mut pc = 0usize;
+        // Seed the stack with the function's incoming args (loaded
+        // from the args_ptr argument). PolyML's calling convention
+        // puts args in stack order, so arg 0 is the bottom-of-stack
+        // for the function's POV (= what LOCAL_(N-1) reads).
+        let mut stack: Vec<Value> = Vec::with_capacity(arg_count);
+        for i in 0..arg_count {
+            let v = builder.ins().load(
+                int,
+                cranelift::prelude::MemFlags::trusted(),
+                args_ptr,
+                (i as i32) * 8,
+            );
+            stack.push(v);
+        }
+        let mut pc = entry_pc;
         let mut returned = false;
 
         while pc < bytecode.len() {
@@ -157,6 +191,59 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
                     }
                     let v = stack[stack.len() - 1 - depth];
                     stack.push(v);
+                }
+                INSTR_INDIRECT_LOCAL_B0 | INSTR_INDIRECT_LOCAL_B1 => {
+                    // Read sp[depth] as a pointer, push the value at
+                    // offset 0 (B0) or 1 word offset (B1) within the
+                    // pointed object.
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let depth = bytecode[pc] as usize;
+                    pc += 1;
+                    if depth >= stack.len() {
+                        return Err(TranslateError::Underflow(pc - 2));
+                    }
+                    let base = stack[stack.len() - 1 - depth];
+                    let offset_bytes =
+                        if op == INSTR_INDIRECT_LOCAL_B0 { 0 } else { 8 };
+                    let val = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        base,
+                        offset_bytes,
+                    );
+                    stack.push(val);
+                }
+                INSTR_INDIRECT_CLOSURE_B0
+                | INSTR_INDIRECT_CLOSURE_B1
+                | INSTR_INDIRECT_CLOSURE_B2 => {
+                    // Read sp[depth] as a closure pointer; push
+                    // *(ptr + (1 + slot) words). The +1 skips word[0]
+                    // (the code address); slot 0 → first captured.
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let depth = bytecode[pc] as usize;
+                    pc += 1;
+                    if depth >= stack.len() {
+                        return Err(TranslateError::Underflow(pc - 2));
+                    }
+                    let slot = match op {
+                        INSTR_INDIRECT_CLOSURE_B0 => 0,
+                        INSTR_INDIRECT_CLOSURE_B1 => 1,
+                        INSTR_INDIRECT_CLOSURE_B2 => 2,
+                        _ => unreachable!(),
+                    };
+                    let base = stack[stack.len() - 1 - depth];
+                    let offset_bytes: i32 = (1 + slot) * 8;
+                    let val = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        base,
+                        offset_bytes,
+                    );
+                    stack.push(val);
                 }
                 INSTR_CONST_INT_B => {
                     if pc >= bytecode.len() {
@@ -316,7 +403,7 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
 
     let code_ptr = jit.module.get_finalized_function(func_id);
     // SAFETY: signature matches; JIT memory live while `jit` is.
-    let f: extern "C" fn() -> i64 = unsafe { std::mem::transmute(code_ptr) };
+    let f: JitFn = unsafe { std::mem::transmute(code_ptr) };
     Ok(f)
 }
 
@@ -338,7 +425,12 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_JUMP8_FALSE
         | INSTR_JUMP8_TRUE
         | INSTR_JUMP_BACK8
-        | INSTR_LOCAL_B => 2,
+        | INSTR_LOCAL_B
+        | INSTR_INDIRECT_LOCAL_B0
+        | INSTR_INDIRECT_LOCAL_B1
+        | INSTR_INDIRECT_CLOSURE_B0
+        | INSTR_INDIRECT_CLOSURE_B1
+        | INSTR_INDIRECT_CLOSURE_B2 => 2,
         INSTR_CONST_0..=INSTR_CONST_4
         | INSTR_CONST_10
         | INSTR_RETURN_1
@@ -362,6 +454,27 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
 /// pre-branch depth, because the conditional pops the test value.
 /// `JUMP8` (unconditional) doesn't pop; it just jumps with the
 /// same depth.
+/// If the bytecode starts with an enter-int marker, return
+/// `(body_start_pc, arg_count)`. Else `(0, 0)`. The compiler
+/// emits `0xff` (X86) or `0xe9` (Arm64) followed by
+/// `(arg_count | 0x80)` at every function entry.
+fn function_prologue(bytecode: &[u8]) -> (usize, usize) {
+    if bytecode.len() < 2 {
+        return (0, 0);
+    }
+    match bytecode[0] {
+        INSTR_ENTER_INT_X86 | INSTR_ENTER_INT_ARM64 => {
+            let arg = (bytecode[1] & 0x7f) as usize;
+            (2, arg)
+        }
+        _ => (0, 0),
+    }
+}
+
+fn function_entry_pc(bytecode: &[u8]) -> usize {
+    function_prologue(bytecode).0
+}
+
 fn scan_branch_targets(
     bytecode: &[u8],
 ) -> Result<std::collections::BTreeMap<usize, usize>, TranslateError> {
@@ -372,9 +485,25 @@ fn scan_branch_targets(
     // a position whose recorded depth matches the depth at the
     // jump source.
     let mut depth_at: Vec<Option<usize>> = vec![None; bytecode.len()];
-    let mut depth: usize = 0;
-    let mut pc = 0usize;
+    let (start_pc, arg_count) = function_prologue(bytecode);
+    let mut depth: usize = arg_count;
+    let mut pc = start_pc;
+    let mut reachable = true;
     while pc < bytecode.len() {
+        // If we just exited a terminator (returned/jumped) and now
+        // re-enter at a recorded branch target, adopt that target's
+        // depth as our new reachable depth. If we're at an
+        // unreachable PC with no recorded target, skip ahead one
+        // opcode worth of bytes.
+        if !reachable {
+            if let Some(&recorded) = targets.get(&pc) {
+                depth = recorded;
+                reachable = true;
+            } else {
+                pc += opcode_total_len(bytecode, pc)?;
+                continue;
+            }
+        }
         depth_at[pc] = Some(depth);
         let op = bytecode[pc];
         pc += 1;
@@ -399,6 +528,22 @@ fn scan_branch_targets(
                 }
                 depth += 1;
             }
+            INSTR_INDIRECT_LOCAL_B0
+            | INSTR_INDIRECT_LOCAL_B1
+            | INSTR_INDIRECT_CLOSURE_B0
+            | INSTR_INDIRECT_CLOSURE_B1
+            | INSTR_INDIRECT_CLOSURE_B2 => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let d = bytecode[pc] as usize;
+                pc += 1;
+                if d >= depth {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
+                // Net stack effect: peek (no pop) + push value → +1.
+                depth += 1;
+            }
             INSTR_CONST_INT_B => {
                 if pc >= bytecode.len() {
                     return Err(TranslateError::Truncated(pc));
@@ -417,11 +562,10 @@ fn scan_branch_targets(
                 if depth == 0 {
                     return Err(TranslateError::Underflow(pc - 1));
                 }
-                // Path ends here; subsequent bytes start a new fragment
-                // — but the only way to enter them is via a branch
-                // target. We don't track stack depth into unreachable
-                // code.
-                depth = depth.saturating_sub(1); // for clarity post-pop
+                // Terminator. Subsequent bytes are unreachable on
+                // this linear path; we re-enter only via a branch
+                // target above.
+                reachable = false;
             }
             INSTR_JUMP8 => {
                 if pc >= bytecode.len() {
@@ -431,6 +575,7 @@ fn scan_branch_targets(
                 pc += 1;
                 let target = pc + off;
                 record_target(&mut targets, target, depth)?;
+                reachable = false;
             }
             INSTR_JUMP_BACK8 => {
                 if pc >= bytecode.len() {
@@ -461,6 +606,7 @@ fn scan_branch_targets(
                     return Err(TranslateError::Unsupported { op: 0xFE, at: target });
                 }
                 record_target(&mut targets, target, depth)?;
+                reachable = false;
             }
             INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => {
                 if pc >= bytecode.len() {
@@ -514,13 +660,24 @@ mod tests {
         (t - 1) >> 1
     }
 
+    /// Call a JitFn with no SML args (null pointer suffices for
+    /// functions that don't read from `args_ptr`).
+    fn call0(f: JitFn) -> i64 {
+        unsafe { f(std::ptr::null()) }
+    }
+
+    /// Call a JitFn with the given SML args.
+    fn call_with(f: JitFn, args: &[i64]) -> i64 {
+        unsafe { f(args.as_ptr()) }
+    }
+
     #[test]
     fn translate_const0_return() {
         // Bytecode: INSTR_CONST_0; INSTR_RETURN_1
         let bc = vec![INSTR_CONST_0, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 0);
+        assert_eq!(untag(call0(f)), 0);
     }
 
     #[test]
@@ -529,7 +686,7 @@ mod tests {
         let bc = vec![INSTR_CONST_INT_B, 42, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 42);
+        assert_eq!(untag(call0(f)), 42);
     }
 
     #[test]
@@ -538,7 +695,7 @@ mod tests {
         let bc = vec![INSTR_CONST_INT_B, 0xF9, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), -7);
+        assert_eq!(untag(call0(f)), -7);
     }
 
     #[test]
@@ -549,7 +706,7 @@ mod tests {
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 4);
+        assert_eq!(untag(call0(f)), 4);
     }
 
     #[test]
@@ -583,7 +740,7 @@ mod tests {
         let bc = vec![INSTR_CONST_1, INSTR_CONST_2, INSTR_FIXED_ADD, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 3);
+        assert_eq!(untag(call0(f)), 3);
     }
 
     #[test]
@@ -592,7 +749,7 @@ mod tests {
         let bc = vec![INSTR_CONST_4, INSTR_CONST_1, INSTR_FIXED_SUB, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 3);
+        assert_eq!(untag(call0(f)), 3);
     }
 
     #[test]
@@ -601,7 +758,7 @@ mod tests {
         let bc = vec![INSTR_CONST_3, INSTR_CONST_4, INSTR_FIXED_MULT, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 12);
+        assert_eq!(untag(call0(f)), 12);
     }
 
     #[test]
@@ -613,7 +770,7 @@ mod tests {
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 19);
+        assert_eq!(untag(call0(f)), 19);
     }
 
     #[test]
@@ -627,7 +784,7 @@ mod tests {
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), -2);
+        assert_eq!(untag(call0(f)), -2);
     }
 
     #[test]
@@ -653,7 +810,7 @@ mod tests {
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 4);
+        assert_eq!(untag(call0(f)), 4);
     }
 
     #[test]
@@ -679,7 +836,7 @@ mod tests {
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
         // Condition was 1 (truthy), so we take the then-arm → 1.
-        assert_eq!(untag(f()), 1);
+        assert_eq!(untag(call0(f)), 1);
     }
 
     #[test]
@@ -700,7 +857,7 @@ mod tests {
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 2);
+        assert_eq!(untag(call0(f)), 2);
     }
 
     #[test]
@@ -721,7 +878,7 @@ mod tests {
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 4);
+        assert_eq!(untag(call0(f)), 4);
     }
 
     #[test]
@@ -730,7 +887,7 @@ mod tests {
         let bc = vec![INSTR_CONST_3, INSTR_CONST_3, INSTR_EQUAL_WORD, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 1);
+        assert_eq!(untag(call0(f)), 1);
     }
 
     #[test]
@@ -738,7 +895,7 @@ mod tests {
         let bc = vec![INSTR_CONST_2, INSTR_CONST_3, INSTR_EQUAL_WORD, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 0);
+        assert_eq!(untag(call0(f)), 0);
     }
 
     #[test]
@@ -747,7 +904,7 @@ mod tests {
         let bc = vec![INSTR_CONST_2, INSTR_CONST_4, INSTR_LESS_SIGNED, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 1);
+        assert_eq!(untag(call0(f)), 1);
     }
 
     #[test]
@@ -801,7 +958,7 @@ mod tests {
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 4);
+        assert_eq!(untag(call0(f)), 4);
     }
 
     #[test]
@@ -812,7 +969,7 @@ mod tests {
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 14);
+        assert_eq!(untag(call0(f)), 14);
     }
 
     #[test]
@@ -825,7 +982,7 @@ mod tests {
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 1);
+        assert_eq!(untag(call0(f)), 1);
     }
 
     #[test]
@@ -839,7 +996,36 @@ mod tests {
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(f()), 12);
+        assert_eq!(untag(call0(f)), 12);
+    }
+
+    #[test]
+    fn translate_indirect_local_b0_compiles() {
+        // We can't easily synthesize a real heap pointer in
+        // bytecode (CONST_INT_B is signed-byte only), so this test
+        // just verifies the translation pipeline accepts the opcode
+        // pattern without errors. End-to-end execution lives in
+        // the integration test that runs real bootstrap code.
+        let bc = vec![
+            INSTR_CONST_0,         // push a value (won't be deref'd)
+            INSTR_INDIRECT_LOCAL_B0, 0,
+            INSTR_RETURN_1,
+        ];
+        let mut jit = Jit::new().unwrap();
+        let _f = compile(&mut jit, &bc).expect("compile must succeed");
+        // We don't call _f() — it would deref tagged(0) as a pointer
+        // and segfault. Pure compile-time test.
+    }
+
+    #[test]
+    fn translate_indirect_closure_compiles() {
+        let bc = vec![
+            INSTR_CONST_1,
+            INSTR_INDIRECT_CLOSURE_B0, 0,
+            INSTR_RETURN_1,
+        ];
+        let mut jit = Jit::new().unwrap();
+        let _f = compile(&mut jit, &bc).expect("compile must succeed");
     }
 
     #[test]
