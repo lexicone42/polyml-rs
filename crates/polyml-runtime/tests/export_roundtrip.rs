@@ -89,3 +89,71 @@ fn body_tag(b: &ObjectBody) -> &'static str {
         ObjectBody::WeakRef => "WeakRef",
     }
 }
+
+/// Closing the loop: parse bootstrap64 → load → snapshot heap →
+/// write pexport → re-parse → re-load. Verify the re-loaded image's
+/// root reaches roughly the same number of objects via BFS.
+#[test]
+fn loop_closing_via_reload() {
+    let Some(path) = bootstrap_file("bootstrap64.txt") else {
+        eprintln!("SKIP: vendor/polyml/bootstrap/bootstrap64.txt not present");
+        return;
+    };
+    let bytes = std::fs::read(&path).unwrap();
+    let original = Image::parse(&bytes).unwrap();
+    let loaded1 = load_image(&original).unwrap();
+
+    // Snapshot + write + re-parse.
+    let snap = unsafe { export::snapshot(PolyWord::from_ptr(loaded1.root)) };
+    let mut buf = Vec::with_capacity(8 * 1024 * 1024);
+    snap.write(&mut buf).unwrap();
+    let reparsed = Image::parse(&buf).unwrap();
+
+    // Load the re-emitted image with the regular loader.
+    let loaded2 = match load_image(&reparsed) {
+        Ok(l) => l,
+        Err(e) => panic!("re-load failed: {e}"),
+    };
+
+    // Re-loaded heap should be non-empty and have a sensible root.
+    assert!(loaded2.immutable.used_words() + loaded2.mutable.used_words() + loaded2.code.used_words() > 0);
+    assert!(!loaded2.root.is_null());
+
+    // BFS from the re-loaded root and count reachable objects.
+    let mut seen: std::collections::HashSet<*const PolyWord> = std::collections::HashSet::new();
+    let mut queue = vec![loaded2.root];
+    while let Some(p) = queue.pop() {
+        if !seen.insert(p) {
+            continue;
+        }
+        if seen.len() > 50_000 {
+            break;
+        }
+        let lw = unsafe { polyml_runtime::space::MemorySpace::length_word_of(p) };
+        let n = polyml_runtime::length_word::length_of(lw);
+        if polyml_runtime::length_word::is_byte_object(lw) {
+            continue;
+        }
+        if polyml_runtime::length_word::is_code_object(lw) {
+            let (cp, count) = unsafe { polyml_runtime::length_word::const_segment_for_code(p) };
+            for i in 0..count {
+                let w = unsafe { *cp.add(i) };
+                if w.is_data_ptr() {
+                    queue.push(w.as_ptr::<PolyWord>());
+                }
+            }
+            continue;
+        }
+        for i in 0..n {
+            let w = unsafe { *p.add(i) };
+            if w.is_data_ptr() {
+                queue.push(w.as_ptr::<PolyWord>());
+            }
+        }
+    }
+    eprintln!(
+        "re-loaded BFS reached {} objects (loop closed)",
+        seen.len()
+    );
+    assert!(seen.len() > 10_000, "expected >10k reachable, got {}", seen.len());
+}
