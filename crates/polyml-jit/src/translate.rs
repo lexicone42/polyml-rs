@@ -45,6 +45,12 @@ const INSTR_JUMP_BACK8: u8 = 0x1e;
 const INSTR_LOCAL_B: u8 = 0x22;
 const INSTR_LOCAL_0: u8 = 0x29;
 const INSTR_LOCAL_7: u8 = 0x30;
+const INSTR_LOCAL_8: u8 = 0x31;
+const INSTR_LOCAL_11: u8 = 0x34;
+const INSTR_RETURN_2: u8 = 0x43;
+const INSTR_RETURN_3: u8 = 0x44;
+const INSTR_RETURN_B: u8 = 0x1f;
+const INSTR_RETURN_W: u8 = 0x0d;
 const INSTR_INDIRECT_LOCAL_B0: u8 = 0xc7;
 const INSTR_INDIRECT_LOCAL_B1: u8 = 0xc1;
 const INSTR_INDIRECT_CLOSURE_B0: u8 = 0x77;
@@ -75,6 +81,11 @@ const INSTR_RESET_B: u8 = 0x26;
 const INSTR_RESET_R_1: u8 = 0x64;
 const INSTR_RESET_R_2: u8 = 0x65;
 const INSTR_RESET_R_3: u8 = 0x66;
+const INSTR_CALL_LOCAL_B: u8 = 0x16;
+const INSTR_TUPLE_2: u8 = 0x69;
+const INSTR_TUPLE_3: u8 = 0x6a;
+const INSTR_TUPLE_4: u8 = 0x6b;
+const INSTR_TUPLE_B: u8 = 0x68;
 
 /// Errors specific to bytecode translation.
 #[derive(Debug, thiserror::Error)]
@@ -160,6 +171,43 @@ pub fn compile_with_consts(
         .module
         .declare_func_in_func(rts_func_id, &mut ctx.func);
 
+    // Closure-call trampoline. Same signature shape as the RTS
+    // trampoline but semantically dispatches a closure value
+    // rather than an entry-point token.
+    let mut closure_sig = jit.module.make_signature();
+    closure_sig.params.push(AbiParam::new(types::I64));
+    closure_sig.params.push(AbiParam::new(types::I64));
+    closure_sig.params.push(AbiParam::new(types::I64));
+    closure_sig.returns.push(AbiParam::new(types::I64));
+    let closure_func_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_closure_call",
+            Linkage::Import,
+            &closure_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let closure_func_ref = jit
+        .module
+        .declare_func_in_func(closure_func_id, &mut ctx.func);
+
+    // Tuple-alloc trampoline.
+    let mut alloc_sig = jit.module.make_signature();
+    alloc_sig.params.push(AbiParam::new(types::I64));
+    alloc_sig.params.push(AbiParam::new(types::I64));
+    alloc_sig.returns.push(AbiParam::new(types::I64));
+    let alloc_func_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_alloc_tuple",
+            Linkage::Import,
+            &alloc_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let alloc_func_ref = jit
+        .module
+        .declare_func_in_func(alloc_func_id, &mut ctx.func);
+
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
         let entry = builder.create_block();
@@ -236,7 +284,7 @@ pub fn compile_with_consts(
                     stack.push(builder.ins().iconst(int, tag(n)));
                 }
                 INSTR_CONST_10 => stack.push(builder.ins().iconst(int, tag(10))),
-                INSTR_LOCAL_0..=INSTR_LOCAL_7 => {
+                INSTR_LOCAL_0..=INSTR_LOCAL_11 => {
                     let depth = (op - INSTR_LOCAL_0) as usize;
                     if depth >= stack.len() {
                         return Err(TranslateError::Underflow(pc - 1));
@@ -311,6 +359,84 @@ pub fn compile_with_consts(
                     let top = stack.pop().unwrap();
                     stack.truncate(stack.len() - n);
                     stack.push(top);
+                }
+                INSTR_TUPLE_2 | INSTR_TUPLE_3 | INSTR_TUPLE_4 | INSTR_TUPLE_B => {
+                    let n = match op {
+                        INSTR_TUPLE_2 => 2,
+                        INSTR_TUPLE_3 => 3,
+                        INSTR_TUPLE_4 => 4,
+                        INSTR_TUPLE_B => {
+                            if pc >= bytecode.len() {
+                                return Err(TranslateError::Truncated(pc));
+                            }
+                            let n = bytecode[pc] as usize;
+                            pc += 1;
+                            n
+                        }
+                        _ => unreachable!(),
+                    };
+                    if stack.len() < n {
+                        return Err(TranslateError::Underflow(pc - 1));
+                    }
+                    let mut vals: Vec<Value> = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        vals.push(stack.pop().unwrap());
+                    }
+                    let slot_size = std::cmp::max(8, (n * 8) as u32);
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift::prelude::StackSlotData::new(
+                            cranelift::prelude::StackSlotKind::ExplicitSlot,
+                            slot_size,
+                            3,
+                        ),
+                    );
+                    for (k, v) in vals.iter().enumerate() {
+                        let idx = n - 1 - k;
+                        builder.ins().stack_store(*v, slot, (idx * 8) as i32);
+                    }
+                    let n_v = builder.ins().iconst(types::I64, n as i64);
+                    let vals_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    let call_inst =
+                        builder.ins().call(alloc_func_ref, &[n_v, vals_ptr]);
+                    let result_val = builder.inst_results(call_inst)[0];
+                    stack.push(result_val);
+                }
+                INSTR_CALL_LOCAL_B => {
+                    // [N]: closure is at sp[N]; the N args above it
+                    // are the call args. Pop both, call trampoline,
+                    // push result.
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let n_args = bytecode[pc] as usize;
+                    pc += 1;
+                    if stack.len() < n_args + 1 {
+                        return Err(TranslateError::Underflow(pc - 2));
+                    }
+                    let mut args_vec: Vec<Value> = Vec::with_capacity(n_args);
+                    for _ in 0..n_args {
+                        args_vec.push(stack.pop().unwrap());
+                    }
+                    let closure = stack.pop().unwrap();
+                    let slot_size = std::cmp::max(8, (n_args * 8) as u32);
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift::prelude::StackSlotData::new(
+                            cranelift::prelude::StackSlotKind::ExplicitSlot,
+                            slot_size,
+                            3,
+                        ),
+                    );
+                    for (i, v) in args_vec.iter().enumerate() {
+                        builder.ins().stack_store(*v, slot, (i * 8) as i32);
+                    }
+                    let args_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    let n_args_v = builder.ins().iconst(types::I64, n_args as i64);
+                    let call_inst = builder.ins().call(
+                        closure_func_ref,
+                        &[closure, n_args_v, args_ptr],
+                    );
+                    let result_val = builder.inst_results(call_inst)[0];
+                    stack.push(result_val);
                 }
                 INSTR_CALL_FAST_RTS0
                 | INSTR_CALL_FAST_RTS1
@@ -608,8 +734,29 @@ pub fn compile_with_consts(
                     let result = builder.ins().iadd(doubled, one);
                     stack.push(result);
                 }
-                INSTR_RETURN_1 => {
+                INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3 => {
+                    // For our JIT ABI we just return the top value;
+                    // the SML-stack pops of args+closure+retPC are
+                    // irrelevant (we don't model that frame here).
                     let v = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    builder.ins().return_(&[v]);
+                    returned = true;
+                }
+                INSTR_RETURN_B => {
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    pc += 1; // consume N immediate
+                    let v = stack.pop().ok_or(TranslateError::Underflow(pc - 2))?;
+                    builder.ins().return_(&[v]);
+                    returned = true;
+                }
+                INSTR_RETURN_W => {
+                    if pc + 1 >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    pc += 2; // consume 16-bit N immediate
+                    let v = stack.pop().ok_or(TranslateError::Underflow(pc - 3))?;
                     builder.ins().return_(&[v]);
                     returned = true;
                 }
@@ -735,6 +882,9 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_CALL_FAST_RTS3
         | INSTR_CALL_FAST_RTS4
         | INSTR_CALL_FAST_RTS5 => 1,
+        INSTR_CALL_LOCAL_B => 2,
+        INSTR_TUPLE_2 | INSTR_TUPLE_3 | INSTR_TUPLE_4 => 1,
+        INSTR_TUPLE_B => 2,
         INSTR_IS_TAGGED_LOCAL_B => 2,
         INSTR_CONST_0..=INSTR_CONST_4
         | INSTR_CONST_10
@@ -744,7 +894,7 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_FIXED_MULT
         | INSTR_EQUAL_WORD
         | INSTR_LESS_SIGNED
-        | INSTR_LOCAL_0..=INSTR_LOCAL_7
+        | INSTR_LOCAL_0..=INSTR_LOCAL_11
         | INSTR_INDIRECT_0
         | INSTR_INDIRECT_0_LOCAL_0
         | INSTR_NO_OP
@@ -752,7 +902,11 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_RESET_2
         | INSTR_RESET_R_1
         | INSTR_RESET_R_2
-        | INSTR_RESET_R_3 => 1,
+        | INSTR_RESET_R_3
+        | INSTR_RETURN_2
+        | INSTR_RETURN_3 => 1,
+        INSTR_RETURN_B => 2,
+        INSTR_RETURN_W => 3,
         INSTR_RESET_B => 2,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
@@ -808,7 +962,7 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
             match op {
                 INSTR_CONST_0..=INSTR_CONST_4 | INSTR_CONST_10 => (1, 0, None, 0),
                 INSTR_CONST_INT_B => (1, 0, None, 1),
-                INSTR_LOCAL_0..=INSTR_LOCAL_7 => {
+                INSTR_LOCAL_0..=INSTR_LOCAL_11 => {
                     let d = (op - INSTR_LOCAL_0) as usize;
                     (1, 0, Some(d), 0)
                 }
@@ -869,11 +1023,26 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     let n = (op - INSTR_CALL_FAST_RTS0) as i32;
                     (1, n + 1, None, 0)
                 }
+                INSTR_CALL_LOCAL_B => {
+                    if pc >= bytecode.len() { return None; }
+                    let n = bytecode[pc] as i32;
+                    (1, n + 1, None, 1)
+                }
+                INSTR_TUPLE_2 => (1, 2, None, 0),
+                INSTR_TUPLE_3 => (1, 3, None, 0),
+                INSTR_TUPLE_4 => (1, 4, None, 0),
+                INSTR_TUPLE_B => {
+                    if pc >= bytecode.len() { return None; }
+                    let n = bytecode[pc] as i32;
+                    (1, n, None, 1)
+                }
                 INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
                 | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED => (1, 2, None, 0),
                 INSTR_JUMP8 | INSTR_JUMP_BACK8 => (0, 0, None, 1),
                 INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => (0, 1, None, 1),
-                INSTR_RETURN_1 => (0, 1, None, 0),
+                INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3 => (0, 1, None, 0),
+                INSTR_RETURN_B => (0, 1, None, 1),
+                INSTR_RETURN_W => (0, 1, None, 2),
                 _ => {
                     // Unknown opcode — stop walking but return what
                     // we inferred from the prefix we did understand.
@@ -940,7 +1109,7 @@ fn scan_branch_targets(
         match op {
             INSTR_CONST_0..=INSTR_CONST_4 => depth += 1,
             INSTR_CONST_10 => depth += 1,
-            INSTR_LOCAL_0..=INSTR_LOCAL_7 => {
+            INSTR_LOCAL_0..=INSTR_LOCAL_11 => {
                 let d = (op - INSTR_LOCAL_0) as usize;
                 if d >= depth {
                     return Err(TranslateError::Underflow(pc - 1));
@@ -1072,11 +1241,37 @@ fn scan_branch_targets(
             | INSTR_CALL_FAST_RTS4
             | INSTR_CALL_FAST_RTS5 => {
                 let n = (op - INSTR_CALL_FAST_RTS0) as usize;
-                // Pop stub + N args; push 1 result. Net: -(N+1)+1 = -N.
                 if depth < n + 1 {
                     return Err(TranslateError::Underflow(pc - 1));
                 }
                 depth = depth - n - 1 + 1;
+            }
+            INSTR_CALL_LOCAL_B => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let n = bytecode[pc] as usize;
+                pc += 1;
+                if depth < n + 1 {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
+                depth = depth - n - 1 + 1;
+            }
+            INSTR_TUPLE_2 | INSTR_TUPLE_3 | INSTR_TUPLE_4 | INSTR_TUPLE_B => {
+                let n = match op {
+                    INSTR_TUPLE_2 => 2,
+                    INSTR_TUPLE_3 => 3,
+                    INSTR_TUPLE_4 => 4,
+                    INSTR_TUPLE_B => {
+                        if pc >= bytecode.len() { return Err(TranslateError::Truncated(pc)); }
+                        let n = bytecode[pc] as usize;
+                        pc += 1;
+                        n
+                    }
+                    _ => unreachable!(),
+                };
+                if depth < n { return Err(TranslateError::Underflow(pc - 1)); }
+                depth = depth - n + 1;
             }
             INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => {
                 if pc >= bytecode.len() {
@@ -1099,13 +1294,22 @@ fn scan_branch_targets(
                 }
                 depth -= 1;
             }
-            INSTR_RETURN_1 => {
+            INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3 => {
                 if depth == 0 {
                     return Err(TranslateError::Underflow(pc - 1));
                 }
-                // Terminator. Subsequent bytes are unreachable on
-                // this linear path; we re-enter only via a branch
-                // target above.
+                reachable = false;
+            }
+            INSTR_RETURN_B => {
+                if pc >= bytecode.len() { return Err(TranslateError::Truncated(pc)); }
+                pc += 1;
+                if depth == 0 { return Err(TranslateError::Underflow(pc - 2)); }
+                reachable = false;
+            }
+            INSTR_RETURN_W => {
+                if pc + 1 >= bytecode.len() { return Err(TranslateError::Truncated(pc)); }
+                pc += 2;
+                if depth == 0 { return Err(TranslateError::Underflow(pc - 3)); }
                 reachable = false;
             }
             INSTR_JUMP8 => {

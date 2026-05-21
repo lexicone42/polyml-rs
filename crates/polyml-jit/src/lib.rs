@@ -42,6 +42,33 @@ pub unsafe extern "C" fn rts_trampoline(
     1
 }
 
+/// Closure-call trampoline. Signature must match what `translate.rs`
+/// declares: `(closure_word, n_args, args_ptr) -> i64`.
+///
+/// Stub returns TAGGED(0) — real dispatch needs an Interpreter
+/// handle plumbed through. This lets `CALL_LOCAL_B` translate
+/// cleanly so coverage reports can grow; the resulting binary
+/// can't yet be safely *executed* on real closures.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn closure_call_trampoline(
+    _closure_word: i64,
+    _n_args: i64,
+    _args_ptr: *const i64,
+) -> i64 {
+    1
+}
+
+/// Tuple-alloc trampoline. `(n_words, values_ptr) -> i64` returning
+/// the new heap-object pointer (or TAGGED(0) for an empty tuple).
+/// Real impl will call into the interpreter's alloc space.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alloc_tuple_trampoline(
+    _n_words: i64,
+    _values_ptr: *const i64,
+) -> i64 {
+    1
+}
+
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -82,6 +109,14 @@ impl Jit {
         // Register the RTS-call trampoline so JIT'd code can call back
         // into Rust for any opcode that needs interpreter state.
         builder.symbol("polyml_jit_rts_trampoline", rts_trampoline as *const u8);
+        builder.symbol(
+            "polyml_jit_closure_call",
+            closure_call_trampoline as *const u8,
+        );
+        builder.symbol(
+            "polyml_jit_alloc_tuple",
+            alloc_tuple_trampoline as *const u8,
+        );
         Ok(Self {
             module: JITModule::new(builder),
             next_id: 0,
