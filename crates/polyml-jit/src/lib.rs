@@ -19,6 +19,8 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+pub mod translate;
+
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -38,7 +40,7 @@ pub enum JitError {
 /// A live JIT environment. Owns the Cranelift module that holds
 /// compiled functions — drop it and the JITted memory is freed.
 pub struct Jit {
-    module: JITModule,
+    pub(crate) module: JITModule,
     /// Monotonic counter so each compile gets a unique symbol name.
     next_id: u64,
 }
@@ -63,7 +65,7 @@ impl Jit {
         })
     }
 
-    fn fresh_name(&mut self, prefix: &str) -> String {
+    pub(crate) fn fresh_name(&mut self, prefix: &str) -> String {
         let id = self.next_id;
         self.next_id += 1;
         format!("{prefix}_{id}")
