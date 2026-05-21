@@ -64,15 +64,19 @@ fn jit_coverage_on_bootstrap_code_objects() {
             // Bound sanity: shouldn't exceed the object body.
             let max_bytes = n_words * std::mem::size_of::<usize>();
             let bytecode_len = bytecode_len.min(max_bytes);
-            let bytecode: &[u8] = unsafe {
-                std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), bytecode_len)
+            // Full body extends through all n_words: bytecode +
+            // constant pool + trailer. compile_with_consts walks
+            // only [0..bytecode_len) for opcodes; CONST_ADDR8_*
+            // reads land in the constants area at higher offsets.
+            let full_body: &[u8] = unsafe {
+                std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes)
             };
-            match translate::compile(&mut jit, bytecode) {
+            match translate::compile_with_consts(&mut jit, full_body, bytecode_len) {
                 Ok(_) => {
                     ok += 1;
                     if shortest_ok.map_or(true, |s| bytecode_len < s) {
                         shortest_ok = Some(bytecode_len);
-                        shortest_ok_bytes = bytecode.to_vec();
+                        shortest_ok_bytes = full_body[..bytecode_len].to_vec();
                     }
                 }
                 Err(translate::TranslateError::Unsupported { op, .. }) => {

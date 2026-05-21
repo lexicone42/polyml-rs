@@ -24,6 +24,24 @@ pub mod translate;
 #[cfg(test)]
 mod bench;
 
+/// Trampoline that JIT'd code calls to dispatch CALL_FAST_RTS<N>.
+/// Signature must match what `translate.rs` declares for the
+/// extern symbol — `(stub: i64, n_args: i64, args: *const i64)
+/// -> i64`. For now this is a placeholder that returns TAGGED(0);
+/// real interpreter dispatch needs RTS-table access (a thread-local
+/// or context pointer threaded through).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rts_trampoline(
+    _stub_word: i64,
+    _n_args: i64,
+    _args: *const i64,
+) -> i64 {
+    // Tagged(0). Once we wire up Interpreter::rts_call this becomes
+    // the dispatch entry; for the moment any JIT'd RTS call returns
+    // unit, which compiles cleanly even if it'd execute wrong.
+    1
+}
+
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -52,7 +70,6 @@ impl Jit {
     /// Build a default native-target JIT environment.
     pub fn new() -> Result<Self, JitError> {
         let mut flags = settings::builder();
-        // Default optimisation level; we'll tune later.
         flags
             .set("opt_level", "speed")
             .map_err(|e| JitError::Settings(e.to_string()))?;
@@ -61,7 +78,10 @@ impl Jit {
         let isa = isa_builder
             .finish(settings::Flags::new(flags))
             .map_err(|e| JitError::Isa(e.to_string()))?;
-        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        // Register the RTS-call trampoline so JIT'd code can call back
+        // into Rust for any opcode that needs interpreter state.
+        builder.symbol("polyml_jit_rts_trampoline", rts_trampoline as *const u8);
         Ok(Self {
             module: JITModule::new(builder),
             next_id: 0,

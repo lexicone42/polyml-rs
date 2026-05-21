@@ -59,6 +59,14 @@ const INSTR_INDIRECT_0_LOCAL_0: u8 = 0xc6;
 const INSTR_NO_OP: u8 = 0x52;
 const INSTR_JUMP_TAGGED_LOCAL: u8 = 0xc4;
 const INSTR_IS_TAGGED_LOCAL_B: u8 = 0xc2;
+const INSTR_CONST_ADDR8_0: u8 = 0x55;
+const INSTR_CONST_ADDR8_1: u8 = 0x56;
+const INSTR_CALL_FAST_RTS0: u8 = 0x83;
+const INSTR_CALL_FAST_RTS1: u8 = 0x84;
+const INSTR_CALL_FAST_RTS2: u8 = 0x85;
+const INSTR_CALL_FAST_RTS3: u8 = 0x86;
+const INSTR_CALL_FAST_RTS4: u8 = 0x87;
+const INSTR_CALL_FAST_RTS5: u8 = 0x88;
 
 /// Errors specific to bytecode translation.
 #[derive(Debug, thiserror::Error)]
@@ -87,7 +95,24 @@ pub enum TranslateError {
 /// return value is the result PolyWord.
 pub type JitFn = unsafe extern "C" fn(args: *const i64) -> i64;
 
+/// Compile bytecode where the bytecode portion is the entire slice
+/// (no constant pool accessible). CONST_ADDR* opcodes will fail
+/// with `Unsupported` because they read past the bytecode end.
 pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<JitFn, TranslateError> {
+    compile_with_consts(jit, bytecode, bytecode.len())
+}
+
+/// Compile a code object where `full_body` contains the entire
+/// object (bytecode followed by constants area + trailer), and
+/// `bytecode_end` is the byte offset where the bytecode opcodes
+/// stop. CONST_ADDR* reads land in `full_body[bytecode_end..]`.
+pub fn compile_with_consts(
+    jit: &mut Jit,
+    full_body: &[u8],
+    bytecode_end: usize,
+) -> Result<JitFn, TranslateError> {
+    let bytecode = &full_body[..bytecode_end];
+    let _full_body = full_body; // keep for CONST_ADDR reads below
     let mut ctx = jit.module.make_context();
     let mut func_builder_ctx = FunctionBuilderContext::new();
     let int = types::I64;
@@ -107,6 +132,25 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<JitFn, TranslateError> 
     } else {
         infer_arg_count(bytecode, entry_pc).unwrap_or(0)
     };
+
+    // Declare the RTS trampoline import for this module. Signature:
+    //   fn(stub: i64, n_args: i64, args_ptr: i64) -> i64
+    let mut rts_sig = jit.module.make_signature();
+    rts_sig.params.push(AbiParam::new(types::I64));
+    rts_sig.params.push(AbiParam::new(types::I64));
+    rts_sig.params.push(AbiParam::new(types::I64));
+    rts_sig.returns.push(AbiParam::new(types::I64));
+    let rts_func_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_rts_trampoline",
+            Linkage::Import,
+            &rts_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let rts_func_ref = jit
+        .module
+        .declare_func_in_func(rts_func_id, &mut ctx.func);
 
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -228,6 +272,63 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<JitFn, TranslateError> 
                     stack.push(val);
                 }
                 INSTR_NO_OP => { /* skip */ }
+                INSTR_CALL_FAST_RTS0
+                | INSTR_CALL_FAST_RTS1
+                | INSTR_CALL_FAST_RTS2
+                | INSTR_CALL_FAST_RTS3
+                | INSTR_CALL_FAST_RTS4
+                | INSTR_CALL_FAST_RTS5 => {
+                    let n_args = (op - INSTR_CALL_FAST_RTS0) as usize;
+                    // Pop stub first (top), then N args. We need
+                    // args[0..N] in slot[0..N] in their original
+                    // top-down order from the SML stack — which
+                    // matches what the Rust trampoline expects.
+                    let stub = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let mut args_vec: Vec<Value> = Vec::with_capacity(n_args);
+                    for _ in 0..n_args {
+                        args_vec.push(stack.pop().ok_or(TranslateError::Underflow(pc - 1))?);
+                    }
+                    // Allocate a stack slot for the args buffer
+                    // (zero-sized slot is fine when n_args == 0).
+                    let slot_size = std::cmp::max(8, (n_args * 8) as u32);
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift::prelude::StackSlotData::new(
+                            cranelift::prelude::StackSlotKind::ExplicitSlot,
+                            slot_size,
+                            3,
+                        ),
+                    );
+                    for (i, v) in args_vec.iter().enumerate() {
+                        builder.ins().stack_store(*v, slot, (i * 8) as i32);
+                    }
+                    let args_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    let n_args_v = builder.ins().iconst(types::I64, n_args as i64);
+                    let _ = stub;
+                    let call_inst = builder.ins().call(
+                        rts_func_ref,
+                        &[stub, n_args_v, args_ptr],
+                    );
+                    let result_val = builder.inst_results(call_inst)[0];
+                    stack.push(result_val);
+                }
+                INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => {
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let imm = bytecode[pc] as usize;
+                    pc += 1;
+                    let idx = if op == INSTR_CONST_ADDR8_0 { 3 } else { 4 };
+                    // read address (bytes from start of full_body):
+                    //   pc_after_imm + imm + idx * 8
+                    let read_at = pc + imm + idx * 8;
+                    if read_at + 8 > _full_body.len() {
+                        return Err(TranslateError::Unsupported { op, at: pc - 2 });
+                    }
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(&_full_body[read_at..read_at + 8]);
+                    let val = i64::from_le_bytes(buf);
+                    stack.push(builder.ins().iconst(int, val));
+                }
                 INSTR_INDIRECT_0 => {
                     // top = ptr; replace top with ptr[0]
                     let base = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
@@ -545,6 +646,13 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_INDIRECT_CLOSURE_B1
         | INSTR_INDIRECT_CLOSURE_B2 => 2,
         INSTR_INDIRECT_LOCAL_BB | INSTR_INDIRECT_CLOSURE_BB | INSTR_JUMP_TAGGED_LOCAL => 3,
+        INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => 2,
+        INSTR_CALL_FAST_RTS0
+        | INSTR_CALL_FAST_RTS1
+        | INSTR_CALL_FAST_RTS2
+        | INSTR_CALL_FAST_RTS3
+        | INSTR_CALL_FAST_RTS4
+        | INSTR_CALL_FAST_RTS5 => 1,
         INSTR_IS_TAGGED_LOCAL_B => 2,
         INSTR_CONST_0..=INSTR_CONST_4
         | INSTR_CONST_10
@@ -647,6 +755,16 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     if pc >= bytecode.len() { return None; }
                     let d = bytecode[pc] as usize;
                     (1, 0, Some(d), 1)
+                }
+                INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => (1, 0, None, 1),
+                INSTR_CALL_FAST_RTS0
+                | INSTR_CALL_FAST_RTS1
+                | INSTR_CALL_FAST_RTS2
+                | INSTR_CALL_FAST_RTS3
+                | INSTR_CALL_FAST_RTS4
+                | INSTR_CALL_FAST_RTS5 => {
+                    let n = (op - INSTR_CALL_FAST_RTS0) as i32;
+                    (1, n + 1, None, 0)
                 }
                 INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
                 | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED => (1, 2, None, 0),
@@ -806,6 +924,26 @@ fn scan_branch_targets(
                 depth += 1;
             }
             INSTR_NO_OP => {}
+            INSTR_CALL_FAST_RTS0
+            | INSTR_CALL_FAST_RTS1
+            | INSTR_CALL_FAST_RTS2
+            | INSTR_CALL_FAST_RTS3
+            | INSTR_CALL_FAST_RTS4
+            | INSTR_CALL_FAST_RTS5 => {
+                let n = (op - INSTR_CALL_FAST_RTS0) as usize;
+                // Pop stub + N args; push 1 result. Net: -(N+1)+1 = -N.
+                if depth < n + 1 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                depth = depth - n - 1 + 1;
+            }
+            INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                pc += 1;
+                depth += 1;
+            }
             INSTR_CONST_INT_B => {
                 if pc >= bytecode.len() {
                     return Err(TranslateError::Truncated(pc));
