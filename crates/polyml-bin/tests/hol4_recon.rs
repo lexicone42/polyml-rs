@@ -87,6 +87,140 @@ fn skip_if_missing() -> Option<()> {
     Some(())
 }
 
+/// Path to the basis-loaded checkpoint built by:
+///
+/// ```sh
+/// cd vendor/polyml
+/// echo 'val () = Bootstrap.use "basis/build.sml";
+///       val () = PolyML.export("/tmp/basis_loaded", PolyML.rootFunction);' \
+///   | ../../target/release/poly run --max-steps 10000000000 \
+///       bootstrap/bootstrap64.txt
+/// ```
+///
+/// Re-using this skips the 3-5 min basis-load on every test. The
+/// helper functions below check for it and skip the test cleanly
+/// if it's absent.
+fn checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/basis_loaded");
+    p.exists().then_some(p)
+}
+
+fn run_through_checkpoint(sml: &str, max_steps: u64) -> Option<(String, i32)> {
+    let ckpt = checkpoint_path()?;
+    let mut child = Command::new(poly_bin())
+        .arg("run")
+        .arg("--max-steps")
+        .arg(max_steps.to_string())
+        .arg(&ckpt)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("POLYML_GC_QUIET", "1")
+        .spawn()
+        .ok()?;
+    child.stdin.as_mut()?.write_all(sml.as_bytes()).ok()?;
+    drop(child.stdin.take());
+    let out = child.wait_with_output().ok()?;
+    let combined = format!(
+        "{}\n---STDERR---\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Some((combined, out.status.code().unwrap_or(-1)))
+}
+
+#[test]
+fn recon_via_checkpoint_compiles_simple_buffer() {
+    let Some(_) = checkpoint_path() else {
+        eprintln!("SKIP: /tmp/basis_loaded not present (build via README)");
+        return;
+    };
+    if hol4_dir().is_none() {
+        eprintln!("SKIP: vendor/hol4 not present");
+        return;
+    }
+    let hol = hol4_dir().unwrap();
+    let driver = format!(
+        "PolyML.use \"{path}/tools/util/SimpleBuffer.sig\";\n\
+         PolyML.use \"{path}/tools/util/SimpleBuffer.sml\";\n\
+         print \"HOL_OK\\n\";\n",
+        path = hol.display(),
+    );
+    let Some((out, code)) = run_through_checkpoint(&driver, 1_000_000_000) else {
+        panic!("subprocess failure");
+    };
+    assert!(out.contains("HOL_OK"), "no HOL_OK. Output:\n{out}");
+    assert_eq!(code, 0, "non-zero exit. Output:\n{out}");
+}
+
+#[test]
+fn recon_via_checkpoint_compiles_portable() {
+    let Some(_) = checkpoint_path() else {
+        eprintln!("SKIP: /tmp/basis_loaded not present");
+        return;
+    };
+    if hol4_dir().is_none() {
+        eprintln!("SKIP: vendor/hol4 not present");
+        return;
+    }
+    let hol = hol4_dir().unwrap();
+    let pm = format!("{}/src/portableML", hol.display());
+    let driver = format!(
+        "fun U f = PolyML.use (\"{pm}/\" ^ f);\n\
+         U \"quotation_dtype.sml\";\n\
+         U \"poly/PrettyImpl.sml\";\n\
+         U \"Uref.sig\"; U \"Uref.sml\";\n\
+         U \"HOLPP.sig\"; U \"HOLPP.sml\";\n\
+         U \"OldPP.sig\"; U \"OldPP.sml\";\n\
+         U \"poly/Arbnumcore.sig\"; U \"poly/Arbnumcore.sml\";\n\
+         U \"Arbnum.sig\"; U \"Arbnum.sml\";\n\
+         U \"Portable.sig\"; U \"Portable.sml\";\n\
+         print \"HOL_PORTABLE_OK\\n\";\n",
+    );
+    let Some((out, _)) = run_through_checkpoint(&driver, 5_000_000_000) else {
+        panic!("subprocess failure");
+    };
+    assert!(out.contains("HOL_PORTABLE_OK"), "Output:\n{out}");
+}
+
+#[test]
+fn recon_via_checkpoint_compiles_prekernel_lib() {
+    let Some(_) = checkpoint_path() else {
+        eprintln!("SKIP: /tmp/basis_loaded not present");
+        return;
+    };
+    if hol4_dir().is_none() {
+        eprintln!("SKIP: vendor/hol4 not present");
+        return;
+    }
+    let hol = hol4_dir().unwrap();
+    let pm = format!("{}/src/portableML", hol.display());
+    let pk = format!("{}/src/prekernel", hol.display());
+    let driver = format!(
+        "fun PMu f = PolyML.use (\"{pm}/\" ^ f);\n\
+         fun PKu f = PolyML.use (\"{pk}/\" ^ f);\n\
+         PMu \"quotation_dtype.sml\";\n\
+         PMu \"poly/PrettyImpl.sml\";\n\
+         PMu \"Uref.sig\"; PMu \"Uref.sml\";\n\
+         PMu \"HOLPP.sig\"; PMu \"HOLPP.sml\";\n\
+         PMu \"OldPP.sig\"; PMu \"OldPP.sml\";\n\
+         PMu \"poly/Arbnumcore.sig\"; PMu \"poly/Arbnumcore.sml\";\n\
+         PMu \"Arbnum.sig\"; PMu \"Arbnum.sml\";\n\
+         PMu \"Portable.sig\"; PMu \"Portable.sml\";\n\
+         PMu \"Redblackmap.sig\"; PMu \"Redblackmap.sml\";\n\
+         PKu \"Feedback_dtype.sml\";\n\
+         PKu \"Feedback.sig\"; PKu \"Feedback.sml\";\n\
+         PKu \"Lib.sig\"; PKu \"Lib.sml\";\n\
+         print \"HOL_LIB_OK\\n\";\n",
+    );
+    let Some((out, _)) = run_through_checkpoint(&driver, 10_000_000_000) else {
+        panic!("subprocess failure");
+    };
+    assert!(out.contains("HOL_LIB_OK"), "Output (tail):\n{}",
+        out.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev()
+            .collect::<Vec<_>>().join("\n"));
+}
+
 #[test]
 #[ignore = "slow: loads HOL4 source through full basis (~3-5 min)"]
 fn recon_compiles_simple_buffer() {
