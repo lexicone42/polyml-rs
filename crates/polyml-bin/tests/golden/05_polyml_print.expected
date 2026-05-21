@@ -1,0 +1,4 @@
+# Bare-bootstrap printer just emits '?' for unknown types but we
+# care that *something* reaches our stdout, proving the write path.
+?
+Tagged(0)

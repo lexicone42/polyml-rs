@@ -1,0 +1,2 @@
+# The compiler should emit a type error referencing the bad usage.
+Type error

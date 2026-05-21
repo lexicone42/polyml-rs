@@ -1,0 +1,2 @@
+# Identity lambda applied to an int — compiles and evaluates cleanly.
+Tagged(0)

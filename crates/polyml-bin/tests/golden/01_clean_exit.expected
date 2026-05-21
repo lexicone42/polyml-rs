@@ -1,0 +1,3 @@
+# Bare-bootstrap accepts a tagged-int literal and exits cleanly.
+Tagged(0)
+clean return

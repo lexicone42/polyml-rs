@@ -1,0 +1,3 @@
+# With the overload installed, `1 + 2` type-checks and evaluates.
+Tagged(0)
+clean return

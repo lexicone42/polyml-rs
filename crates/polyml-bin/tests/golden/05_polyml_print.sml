@@ -1,0 +1,1 @@
+PolyML.print 42;
