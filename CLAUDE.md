@@ -60,9 +60,15 @@ Every stage of PolyML's self-compilation chain runs end-to-end
 through our Rust interpreter — same source the upstream PolyML
 build uses to bootstrap itself.
 
-(The `PolyML.export` and `PolyML.shareCommonData` calls in
-Stage 7 are stubbed to no-op, so we don't yet write the result
-image to disk; every preceding compile pass is real, though.)
+Stage 7's `PolyML.export(fileName, root)` is wired up to
+[`polyml_runtime::export::snapshot`] + [`Image::write`] and writes
+a real pexport text file. The export ↔ load loop closes
+structurally — loading bootstrap64.txt, snapshotting the live
+heap from its root, writing pexport text, re-parsing, and
+re-loading reaches every one of the original 22,588 objects
+(verified by `crates/polyml-runtime/tests/export_roundtrip.rs`).
+`PolyML.shareCommonData` is still a no-op (deduplication-style
+optimization; safe to skip).
 
 Heap default is 2 GB; the Cheney-style copying GC in
 `crates/polyml-runtime/src/gc.rs` keeps the working set bounded
