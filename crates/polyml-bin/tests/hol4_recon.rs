@@ -498,8 +498,10 @@ fn recon_via_checkpoint_proves_implication_self() {
          K0u \"Term.sig\"; K0u \"Term.sml\";\n\
          Tu \"Compute.sig\"; Tu \"Compute.sml\";\n\
          Tu \"std-thmsig.ML\"; Tu \"std-thm.ML\";\n\
-         (* Five primitive inference rules: REFL, ASSUME, DISCH, MP, TRANS. *)\n\
+         (* Primitive inference rules of HOL: REFL, ASSUME, DISCH, MP,\n\
+            TRANS, SYM, EQ_MP, AP_TERM, BETA_CONV. *)\n\
          val bool_ty = Type.mk_type(\"bool\", []);\n\
+         val alpha = Type.mk_vartype \"'a\";\n\
          val p = Term.mk_var(\"p\", bool_ty);\n\
          val q = Term.mk_var(\"q\", bool_ty);\n\
          val r = Term.mk_var(\"r\", bool_ty);\n\
@@ -514,9 +516,9 @@ fn recon_via_checkpoint_proves_implication_self() {
          val () = print (\"DISCH: hyps=\" ^ Int.toString (List.length (Thm.hyp th_imp_self)) ^ \" lhs=\" ^ Bool.toString (Term.aconv lhs0 p) ^ \" rhs=\" ^ Bool.toString (Term.aconv Rand0 p) ^ \"\\n\");\n\
          (* MP: from `p ==> q` and `p`, derive `q`. *)\n\
          val pq = Term.prim_mk_imp p q;\n\
-         val th_pq = Thm.ASSUME pq;        (* p==>q |- p==>q *)\n\
-         val th_p  = Thm.ASSUME p;         (* p |- p *)\n\
-         val th_mp = Thm.MP th_pq th_p;    (* p, p==>q |- q *)\n\
+         val th_pq = Thm.ASSUME pq;\n\
+         val th_p  = Thm.ASSUME p;\n\
+         val th_mp = Thm.MP th_pq th_p;\n\
          val () = print (\"MP: hyps=\" ^ Int.toString (List.length (Thm.hyp th_mp)) ^ \" concl=q:\" ^ Bool.toString (Term.aconv (Thm.concl th_mp) q) ^ \"\\n\");\n\
          (* TRANS: from `p = q` and `q = r`, derive `p = r`. *)\n\
          val pq_eq = Term.prim_mk_eq bool_ty p q;\n\
@@ -526,6 +528,53 @@ fn recon_via_checkpoint_proves_implication_self() {
          val th_pr_eq = Thm.TRANS th_pq_eq th_qr_eq;\n\
          val (l2, r2, _) = Term.dest_eq_ty (Thm.concl th_pr_eq);\n\
          val () = print (\"TRANS: hyps=\" ^ Int.toString (List.length (Thm.hyp th_pr_eq)) ^ \" lhs=p:\" ^ Bool.toString (Term.aconv l2 p) ^ \" rhs=r:\" ^ Bool.toString (Term.aconv r2 r) ^ \"\\n\");\n\
+         (* SYM: from `p = q` derive `q = p`. *)\n\
+         val th_sym = Thm.SYM th_pq_eq;\n\
+         val (l3, r3, _) = Term.dest_eq_ty (Thm.concl th_sym);\n\
+         val () = print (\"SYM: hyps=\" ^ Int.toString (List.length (Thm.hyp th_sym)) ^ \" lhs=q:\" ^ Bool.toString (Term.aconv l3 q) ^ \" rhs=p:\" ^ Bool.toString (Term.aconv r3 p) ^ \"\\n\");\n\
+         (* EQ_MP: from `p = q` and `p`, derive `q`. *)\n\
+         val th_eqmp = Thm.EQ_MP th_pq_eq th_p;\n\
+         val () = print (\"EQ_MP: hyps=\" ^ Int.toString (List.length (Thm.hyp th_eqmp)) ^ \" concl=q:\" ^ Bool.toString (Term.aconv (Thm.concl th_eqmp) q) ^ \"\\n\");\n\
+         (* AP_TERM: from `p = q` and term `f : bool->bool`, derive `f p = f q`. *)\n\
+         val bb_ty = Type.--> (bool_ty, bool_ty);\n\
+         val f = Term.mk_var(\"f\", bb_ty);\n\
+         val th_ap = Thm.AP_TERM f th_pq_eq;\n\
+         val (l4, r4, _) = Term.dest_eq_ty (Thm.concl th_ap);\n\
+         val () = print (\"AP_TERM: hyps=\" ^ Int.toString (List.length (Thm.hyp th_ap)) ^ \" lhs=f(p):\" ^ Bool.toString (Term.aconv l4 (Term.mk_comb(f, p))) ^ \"\\n\");\n\
+         (* BETA_CONV: `(\\x. x) p = p`. The lambda is over a:'a, applied to p. *)\n\
+         val x_var = Term.mk_var(\"x\", bool_ty);\n\
+         val lam_id = Term.mk_abs(x_var, x_var);   (* \\x. x *)\n\
+         val app = Term.mk_comb(lam_id, p);         (* (\\x. x) p *)\n\
+         val th_beta = Thm.BETA_CONV app;\n\
+         val (l5, r5, _) = Term.dest_eq_ty (Thm.concl th_beta);\n\
+         val () = print (\"BETA_CONV: hyps=\" ^ Int.toString (List.length (Thm.hyp th_beta)) ^ \" lhs=(\\\\x.x)p:\" ^ Bool.toString (Term.aconv l5 app) ^ \" rhs=p:\" ^ Bool.toString (Term.aconv r5 p) ^ \"\\n\");\n\
+         (* ABS: from `|- M = N` derive `|- (\\x. M) = (\\x. N)`.\n\
+            Use REFL p as the equality; abstract x_var. *)\n\
+         val th_abs = Thm.ABS x_var th_refl;\n\
+         val (l_abs, r_abs, _) = Term.dest_eq_ty (Thm.concl th_abs);\n\
+         val () = print (\"ABS: hyps=\" ^ Int.toString (List.length (Thm.hyp th_abs)) ^ \" lhs_is_abs:\" ^ Bool.toString (Term.is_abs l_abs) ^ \" rhs_is_abs:\" ^ Bool.toString (Term.is_abs r_abs) ^ \"\\n\");\n\
+         (* MK_COMB: from `|- f = g` and `|- x = y`, derive `|- f x = g y`.\n\
+            Build `|- f = f` via REFL(f) and `|- p = q` from ASSUME(p=q). *)\n\
+         val th_refl_f = Thm.REFL f;\n\
+         val th_mkcomb = Thm.MK_COMB (th_refl_f, th_pq_eq);\n\
+         val (l_mk, r_mk, _) = Term.dest_eq_ty (Thm.concl th_mkcomb);\n\
+         val () = print (\"MK_COMB: hyps=\" ^ Int.toString (List.length (Thm.hyp th_mkcomb)) ^ \" lhs=fp:\" ^ Bool.toString (Term.aconv l_mk (Term.mk_comb(f, p))) ^ \" rhs=fq:\" ^ Bool.toString (Term.aconv r_mk (Term.mk_comb(f, q))) ^ \"\\n\");\n\
+         (* INST_TYPE: REFL of polymorphic x:'a; instantiate 'a:=bool.\n\
+            The resulting theorem has both sides re-typed to bool. *)\n\
+         val x_alpha = Term.mk_var(\"x\", alpha);\n\
+         val th_refl_alpha = Thm.REFL x_alpha;\n\
+         val th_inst = Thm.INST_TYPE [{{redex=alpha, residue=bool_ty}}] th_refl_alpha;\n\
+         val (l6, r6, ty6) = Term.dest_eq_ty (Thm.concl th_inst);\n\
+         val () = print (\"INST_TYPE: hyps=\" ^ Int.toString (List.length (Thm.hyp th_inst)) ^ \" ty=bool:\" ^ Bool.toString (ty6 = bool_ty) ^ \" lhs_eq_rhs:\" ^ Bool.toString (Term.aconv l6 r6) ^ \"\\n\");\n\
+         (* GEN/SPEC would require register_forall (loading boolTheory's\n\
+            forall axiom); that's a deeper dependency. Stop at the\n\
+            primitives that don't need boolean theory wiring. *)\n\
+         (* A composed proof: prove `(p ==> q), p |- q` using MP, then\n\
+            wrap with DISCH twice to get `|- p ==> (p==>q) ==> q`. *)\n\
+         val th_step1 = Thm.MP (Thm.ASSUME pq) (Thm.ASSUME p);\n\
+         val th_step2 = Thm.DISCH pq th_step1;\n\
+         val th_step3 = Thm.DISCH p th_step2;\n\
+         val () = print (\"COMPOSED: hyps=\" ^ Int.toString (List.length (Thm.hyp th_step3)) ^ \"\\n\");\n\
          print \"HOL_PROOF_OK\\n\";\n",
     );
     let Some((out, _)) = run_through_checkpoint(&driver, 100_000_000_000) else {
@@ -547,6 +596,30 @@ fn recon_via_checkpoint_proves_implication_self() {
     // TRANS th_pq_eq th_qr_eq produces (p=q, q=r) |- p=r with two hypotheses.
     assert!(out.contains("TRANS: hyps=2 lhs=p:true rhs=r:true"),
         "TRANS inference incorrect. Output:\n{out}");
+    // SYM of (p=q) produces (p=q) |- q=p.
+    assert!(out.contains("SYM: hyps=1 lhs=q:true rhs=p:true"),
+        "SYM inference incorrect. Output:\n{out}");
+    // EQ_MP th_pq_eq th_p produces (p=q, p) |- q with two hypotheses.
+    assert!(out.contains("EQ_MP: hyps=2 concl=q:true"),
+        "EQ_MP inference incorrect. Output:\n{out}");
+    // AP_TERM f th_pq_eq produces (p=q) |- f p = f q.
+    assert!(out.contains("AP_TERM: hyps=1 lhs=f(p):true"),
+        "AP_TERM inference incorrect. Output:\n{out}");
+    // BETA_CONV of `(\x. x) p` produces |- (\x.x) p = p with no hypotheses.
+    assert!(out.contains("BETA_CONV: hyps=0 lhs=(\\x.x)p:true rhs=p:true"),
+        "BETA_CONV inference incorrect. Output:\n{out}");
+    // ABS x_var on REFL(p) → |- (\x. p) = (\x. p), both sides are abstractions.
+    assert!(out.contains("ABS: hyps=0 lhs_is_abs:true rhs_is_abs:true"),
+        "ABS inference incorrect. Output:\n{out}");
+    // MK_COMB(REFL(f), ASSUME(p=q)) → (p=q) |- f p = f q.
+    assert!(out.contains("MK_COMB: hyps=1 lhs=fp:true rhs=fq:true"),
+        "MK_COMB inference incorrect. Output:\n{out}");
+    // INST_TYPE 'a := bool on REFL(x:'a) → |- (x:bool) = (x:bool).
+    assert!(out.contains("INST_TYPE: hyps=0 ty=bool:true lhs_eq_rhs:true"),
+        "INST_TYPE inference incorrect. Output:\n{out}");
+    // Composed: discharging both hyps gives a closed theorem.
+    assert!(out.contains("COMPOSED: hyps=0"),
+        "Composed proof incorrect. Output:\n{out}");
 }
 
 /// Beyond compilation: actually USE the HOL4 kernel by constructing
