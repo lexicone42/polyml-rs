@@ -60,7 +60,14 @@ fn jit_coverage_on_bootstrap_code_objects() {
             let (cp, _count) = unsafe { length_word::const_segment_for_code(code_obj_ptr) };
             let body_start = code_obj_ptr as usize;
             let cp_start = cp as usize;
-            let bytecode_len = cp_start.saturating_sub(body_start);
+            // bytecode area ends one PolyWord before the constant area:
+            // the loader writes a count word immediately before the
+            // constants segment. Without this subtraction the JIT
+            // would read the count word as opcodes (often 0x00 high
+            // bytes, blocking ~20% of functions).
+            let bytecode_len = cp_start
+                .saturating_sub(body_start)
+                .saturating_sub(std::mem::size_of::<usize>());
             // Bound sanity: shouldn't exceed the object body.
             let max_bytes = n_words * std::mem::size_of::<usize>();
             let bytecode_len = bytecode_len.min(max_bytes);
@@ -91,8 +98,12 @@ fn jit_coverage_on_bootstrap_code_objects() {
                 Err(translate::TranslateError::FellOffEnd) => {
                     *blockers.entry("fell-off-end".into()).or_insert(0) += 1;
                 }
-                Err(translate::TranslateError::Jit(_)) => {
-                    *blockers.entry("jit-internal".into()).or_insert(0) += 1;
+                Err(translate::TranslateError::Jit(je)) => {
+                    // Truncate the message — Cranelift errors can be long
+                    // and we want them to group sensibly.
+                    let s = je.to_string();
+                    let short: String = s.chars().take(80).collect();
+                    *blockers.entry(format!("jit-internal: {short}")).or_insert(0) += 1;
                 }
             }
         });

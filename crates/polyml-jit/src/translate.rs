@@ -82,6 +82,8 @@ const INSTR_RESET_R_1: u8 = 0x64;
 const INSTR_RESET_R_2: u8 = 0x65;
 const INSTR_RESET_R_3: u8 = 0x66;
 const INSTR_CALL_LOCAL_B: u8 = 0x16;
+const INSTR_CALL_CONST_ADDR8_0: u8 = 0x57;
+const INSTR_CALL_CONST_ADDR8_1: u8 = 0x58;
 const INSTR_TUPLE_2: u8 = 0x69;
 const INSTR_TUPLE_3: u8 = 0x6a;
 const INSTR_TUPLE_4: u8 = 0x6b;
@@ -143,7 +145,7 @@ pub fn compile_with_consts(
     // expected at each target. Each unique target gets its own
     // Cranelift block; the block's parameters carry the stack
     // values across the branch.
-    let targets = scan_branch_targets(bytecode)?;
+    let targets = scan_branch_targets(bytecode, full_body)?;
 
     let (entry_pc, prologue_arg_count) = function_prologue(bytecode);
     let arg_count = if prologue_arg_count > 0 || entry_pc > 0 {
@@ -494,6 +496,61 @@ pub fn compile_with_consts(
                     buf.copy_from_slice(&_full_body[read_at..read_at + 8]);
                     let val = i64::from_le_bytes(buf);
                     stack.push(builder.ins().iconst(int, val));
+                }
+                INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1 => {
+                    // Like CONST_ADDR8_*: resolve the closure pointer
+                    // from the const segment. Then determine the callee
+                    // arity by inspecting the closure → code object's
+                    // enter_int prologue at JIT-compile time. Finally
+                    // call the closure trampoline with the resolved
+                    // n_args.
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let imm = bytecode[pc] as usize;
+                    pc += 1;
+                    let idx = if op == INSTR_CALL_CONST_ADDR8_0 { 3 } else { 4 };
+                    let read_at = pc + imm + idx * 8;
+                    if read_at + 8 > _full_body.len() {
+                        return Err(TranslateError::Unsupported { op, at: pc - 2 });
+                    }
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(&_full_body[read_at..read_at + 8]);
+                    let closure_addr = u64::from_le_bytes(buf);
+                    // Static arity inspection: deref closure → code obj
+                    // → first two bytes (0xff/0xe9, arity|0x80). If the
+                    // prologue isn't recognisable, bail to the
+                    // interpreter rather than guess arity.
+                    let Some(n_args) = closure_arity_from_addr(closure_addr) else {
+                        return Err(TranslateError::Unsupported { op, at: pc - 2 });
+                    };
+                    if stack.len() < n_args {
+                        return Err(TranslateError::Underflow(pc - 2));
+                    }
+                    let mut args_vec: Vec<Value> = Vec::with_capacity(n_args);
+                    for _ in 0..n_args {
+                        args_vec.push(stack.pop().unwrap());
+                    }
+                    let closure_v = builder.ins().iconst(int, closure_addr as i64);
+                    let slot_size = std::cmp::max(8, (n_args * 8) as u32);
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift::prelude::StackSlotData::new(
+                            cranelift::prelude::StackSlotKind::ExplicitSlot,
+                            slot_size,
+                            3,
+                        ),
+                    );
+                    for (i, v) in args_vec.iter().enumerate() {
+                        builder.ins().stack_store(*v, slot, (i * 8) as i32);
+                    }
+                    let args_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    let n_args_v = builder.ins().iconst(types::I64, n_args as i64);
+                    let call_inst = builder.ins().call(
+                        closure_func_ref,
+                        &[closure_v, n_args_v, args_ptr],
+                    );
+                    let result_val = builder.inst_results(call_inst)[0];
+                    stack.push(result_val);
                 }
                 INSTR_INDIRECT_0 => {
                     // top = ptr; replace top with ptr[0]
@@ -876,6 +933,7 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_JUMP_NEQ_LOCAL
         | INSTR_JUMP_NEQ_LOCAL_IND => 3,
         INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => 2,
+        INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1 => 2,
         INSTR_CALL_FAST_RTS0
         | INSTR_CALL_FAST_RTS1
         | INSTR_CALL_FAST_RTS2
@@ -936,6 +994,76 @@ fn function_prologue(bytecode: &[u8]) -> (usize, usize) {
             (2, arg)
         }
         _ => (0, 0),
+    }
+}
+
+/// Determine the callee arity of a closure whose address is `addr`
+/// (a raw PolyML heap address). Walks closure[0] → code-object body
+/// → enter_int prologue bytes. Returns `Some(arity)` on success,
+/// `None` if the bytes don't look like a recognisable enter_int
+/// marker (in which case the JIT should fall back to the interpreter
+/// rather than guess).
+///
+/// # Safety
+/// Deferences `addr` and `*addr`. The caller — only `compile_with_consts`
+/// — must trust that the addr came from a live code object's constant
+/// pool, which is true at JIT-compile time since the heap is frozen
+/// (no GC has run between load and translate).
+/// Determine the arity of a closure whose address is `addr`.
+///
+/// Two candidate layouts are tried:
+///   (a) `addr` is a closure object whose first word points at a code object
+///   (b) `addr` is a code-object pointer directly
+/// The code object's first byte may be `enter_int` (0xff/0xe9 with arity in
+/// the next byte), or plain bytecode — pexport-loaded images strip
+/// the enter_int marker. For the stripped case we run `infer_arg_count`
+/// over the code object's body to deduce arity from `LOCAL_N` peek
+/// patterns.
+///
+/// # Safety
+/// Dereferences `addr` and assumes the heap layout is well-formed
+/// (callers must only invoke this at JIT-compile time, before any
+/// GC has run since image load).
+fn closure_arity_from_addr(addr: u64) -> Option<usize> {
+    if addr == 0 || addr & 0x7 != 0 {
+        return None;
+    }
+    // SAFETY: caller-trusted JIT-compile-time invariant.
+    unsafe {
+        // Resolve the code-object pointer. Two candidate layouts:
+        //   (a) `addr` is a closure: closure[0] is the code-obj pointer
+        //   (b) `addr` is the code-obj pointer itself
+        // We try (a) first since our loader uses F_CLOSURE_OBJ.
+        let closure_ptr = addr as *const usize;
+        let candidate_a = closure_ptr.read();
+        let code_obj = if candidate_a != 0 && candidate_a & 0x7 == 0 {
+            candidate_a
+        } else {
+            addr as usize
+        };
+        // Read the length-word of the code object to find body bytes.
+        // length-word is at code_obj - 8 (the word before body start).
+        let lw_ptr = (code_obj as *const usize).sub(1);
+        let lw = lw_ptr.read();
+        // `length_of(lw)` extracts the low 56 bits (n_words).
+        let n_words = lw & 0x00ff_ffff_ffff_ffff;
+        if n_words == 0 || n_words > (1 << 24) {
+            return None;
+        }
+        // Body slice covers n_words * 8 bytes starting at code_obj.
+        let body_len_bytes = n_words * 8;
+        let body =
+            std::slice::from_raw_parts(code_obj as *const u8, body_len_bytes);
+        // Fast path: if there's an enter_int prologue, decode directly.
+        if body.len() >= 2 {
+            let b0 = body[0];
+            if b0 == INSTR_ENTER_INT_X86 || b0 == INSTR_ENTER_INT_ARM64 {
+                return Some((body[1] & 0x7f) as usize);
+            }
+        }
+        // Slow path: infer from LOCAL_N peeks in the code object's
+        // own bytecode prefix.
+        infer_arg_count(body, 0)
     }
 }
 
@@ -1014,6 +1142,13 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     (1, 0, Some(d), 1)
                 }
                 INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => (1, 0, None, 1),
+                INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1 => {
+                    // Static arity inspection: we know the callee
+                    // since the closure address is in the const pool,
+                    // but `infer_arg_count` walks only the bytecode
+                    // slice — no access to constants here. So bail.
+                    return Some((-min_depth).max(0) as usize);
+                }
                 INSTR_CALL_FAST_RTS0
                 | INSTR_CALL_FAST_RTS1
                 | INSTR_CALL_FAST_RTS2
@@ -1069,6 +1204,7 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
 
 fn scan_branch_targets(
     bytecode: &[u8],
+    full_body: &[u8],
 ) -> Result<std::collections::BTreeMap<usize, usize>, TranslateError> {
     let mut targets: std::collections::BTreeMap<usize, usize> =
         std::collections::BTreeMap::new();
@@ -1279,6 +1415,28 @@ fn scan_branch_targets(
                 }
                 pc += 1;
                 depth += 1;
+            }
+            INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1 => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let imm = bytecode[pc] as usize;
+                pc += 1;
+                let idx = if op == INSTR_CALL_CONST_ADDR8_0 { 3 } else { 4 };
+                let read_at = pc + imm + idx * 8;
+                if read_at + 8 > full_body.len() {
+                    return Err(TranslateError::Unsupported { op, at: pc - 2 });
+                }
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(&full_body[read_at..read_at + 8]);
+                let closure_addr = u64::from_le_bytes(buf);
+                let Some(n) = closure_arity_from_addr(closure_addr) else {
+                    return Err(TranslateError::Unsupported { op, at: pc - 2 });
+                };
+                if depth < n {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
+                depth = depth - n + 1;
             }
             INSTR_CONST_INT_B => {
                 if pc >= bytecode.len() {
