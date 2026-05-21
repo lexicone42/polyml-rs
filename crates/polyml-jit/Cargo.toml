@@ -1,0 +1,19 @@
+[package]
+name = "polyml-jit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cranelift = "0.131"
+cranelift-jit = "0.131"
+cranelift-module = "0.131"
+cranelift-native = "0.131"
+polyml-runtime = { path = "../polyml-runtime" }
+thiserror = "2"

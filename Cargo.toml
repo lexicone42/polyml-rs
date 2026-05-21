@@ -4,6 +4,7 @@ members = [
     "crates/polyml-runtime",
     "crates/polyml-image",
     "crates/polyml-bin",
+    "crates/polyml-jit",
 ]
 
 [workspace.package]
