@@ -480,6 +480,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "polyml-image",
  "polyml-runtime",
  "thiserror",
 ]

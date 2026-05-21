@@ -17,3 +17,6 @@ cranelift-module = "0.131"
 cranelift-native = "0.131"
 polyml-runtime = { path = "../polyml-runtime" }
 thiserror = "2"
+
+[dev-dependencies]
+polyml-image = { path = "../polyml-image" }
