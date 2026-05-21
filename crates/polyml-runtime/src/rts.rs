@@ -395,7 +395,8 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyProcessEnvSystem", RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)));
     t.register("PolyTerminate", RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)));
     t.register("PolyPollIODescriptors", RtsFn::Arity4(zero4));
-    t.register("PolySetSignalHandler", RtsFn::Arity2(zero2));
+    // rtsCallFull2 → threadId + 2 args → CALL_FAST_RTS3.
+    t.register("PolySetSignalHandler", RtsFn::Arity3(zero3));
     t.register("PolyOSSpecificGeneral", RtsFn::Arity3(zero3));
     t.register("PolyPosixCreatePersistentFD", RtsFn::Arity2(zero2));
     t.register("PolyPosixSleep", RtsFn::Arity3(zero3));
