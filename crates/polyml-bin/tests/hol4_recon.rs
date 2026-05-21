@@ -222,6 +222,58 @@ fn recon_via_checkpoint_compiles_prekernel_lib() {
 }
 
 #[test]
+fn recon_via_checkpoint_compiles_hol4_kernel() {
+    let Some(_) = checkpoint_path() else {
+        eprintln!("SKIP: /tmp/basis_loaded not present");
+        return;
+    };
+    if hol4_dir().is_none() {
+        eprintln!("SKIP: vendor/hol4 not present");
+        return;
+    }
+    let hol = hol4_dir().unwrap();
+    let pm = format!("{}/src/portableML", hol.display());
+    let pk = format!("{}/src/prekernel", hol.display());
+    let k0 = format!("{}/src/0", hol.display());
+    let tp = format!("{}/tools-poly/poly", hol.display());
+    let driver = format!(
+        "fun PMu f = PolyML.use (\"{pm}/\" ^ f);\n\
+         fun PKu f = PolyML.use (\"{pk}/\" ^ f);\n\
+         fun K0u f = PolyML.use (\"{k0}/\" ^ f);\n\
+         fun TPu f = PolyML.use (\"{tp}/\" ^ f);\n\
+         PMu \"quotation_dtype.sml\";\n\
+         PMu \"poly/PrettyImpl.sml\";\n\
+         PMu \"Uref.sig\"; PMu \"Uref.sml\";\n\
+         PMu \"HOLPP.sig\"; PMu \"HOLPP.sml\";\n\
+         PMu \"OldPP.sig\"; PMu \"OldPP.sml\";\n\
+         PMu \"poly/Arbnumcore.sig\"; PMu \"poly/Arbnumcore.sml\";\n\
+         PMu \"Arbnum.sig\"; PMu \"Arbnum.sml\";\n\
+         PMu \"Portable.sig\"; PMu \"Portable.sml\";\n\
+         PMu \"Redblackmap.sig\"; PMu \"Redblackmap.sml\";\n\
+         PMu \"HOLset.sig\"; PMu \"HOLset.sml\";\n\
+         PKu \"Feedback_dtype.sml\";\n\
+         PKu \"Feedback.sig\"; PKu \"Feedback.sml\";\n\
+         PKu \"Lib.sig\"; PKu \"Lib.sml\";\n\
+         PKu \"Count.sig\"; PKu \"Count.sml\";\n\
+         PKu \"Tag.sig\"; PKu \"Tag.sml\";\n\
+         PKu \"KernelSig.sig\"; PKu \"KernelSig.sml\";\n\
+         TPu \"Binarymap.sig\"; TPu \"Binarymap.sml\";\n\
+         K0u \"KernelTypes.sml\";\n\
+         K0u \"Type.sig\"; K0u \"Type.sml\";\n\
+         K0u \"Subst.sig\"; K0u \"Subst.sml\";\n\
+         K0u \"Term.sig\"; K0u \"Term.sml\";\n\
+         K0u \"Net.sig\"; K0u \"Net.sml\";\n\
+         print \"HOL_KERNEL_OK\\n\";\n",
+    );
+    let Some((out, _)) = run_through_checkpoint(&driver, 100_000_000_000) else {
+        panic!("subprocess failure");
+    };
+    assert!(out.contains("HOL_KERNEL_OK"), "Output (tail):\n{}",
+        out.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev()
+            .collect::<Vec<_>>().join("\n"));
+}
+
+#[test]
 #[ignore = "slow: loads HOL4 source through full basis (~3-5 min)"]
 fn recon_compiles_simple_buffer() {
     if skip_if_missing().is_none() {
