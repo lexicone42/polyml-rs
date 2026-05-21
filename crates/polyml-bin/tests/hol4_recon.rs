@@ -575,6 +575,37 @@ fn recon_via_checkpoint_proves_implication_self() {
          val th_step2 = Thm.DISCH pq th_step1;\n\
          val th_step3 = Thm.DISCH p th_step2;\n\
          val () = print (\"COMPOSED: hyps=\" ^ Int.toString (List.length (Thm.hyp th_step3)) ^ \"\\n\");\n\
+         (* Real derived theorem: transitivity of implication.\n\
+            From p==>q and q==>r derive p==>r. Discharge all three. *)\n\
+         val qr = Term.prim_mk_imp q r;\n\
+         val h_pq  = Thm.ASSUME pq;        (* p==>q |- p==>q *)\n\
+         val h_qr  = Thm.ASSUME qr;        (* q==>r |- q==>r *)\n\
+         val h_p   = Thm.ASSUME p;         (* p |- p *)\n\
+         val mp1   = Thm.MP h_pq h_p;      (* p, p==>q |- q *)\n\
+         val mp2   = Thm.MP h_qr mp1;      (* p, p==>q, q==>r |- r *)\n\
+         val d1    = Thm.DISCH p mp2;      (* p==>q, q==>r |- p==>r *)\n\
+         val d2    = Thm.DISCH qr d1;      (* p==>q |- (q==>r)==>(p==>r) *)\n\
+         val d3    = Thm.DISCH pq d2;      (* |- (p==>q)==>(q==>r)==>(p==>r) *)\n\
+         val () = print (\"TRANS_IMP_HYPS: \" ^ Int.toString (List.length (Thm.hyp d3)) ^ \"\\n\");\n\
+         (* The conclusion should be `(p==>q) ==> (q==>r) ==> (p==>r)`. *)\n\
+         val c = Thm.concl d3;\n\
+         val (op1, a1) = Term.dest_comb c;       (* op1=(==> pq, rest); a1 = (q==>r)==>(p==>r) *)\n\
+         val (_, lhs_outer) = Term.dest_comb op1;\n\
+         val () = print (\"TRANS_IMP_LHS_OUTER: \" ^ Bool.toString (Term.aconv lhs_outer pq) ^ \"\\n\");\n\
+         val (op2, a2) = Term.dest_comb a1;\n\
+         val (_, lhs_mid) = Term.dest_comb op2;\n\
+         val () = print (\"TRANS_IMP_LHS_MID: \" ^ Bool.toString (Term.aconv lhs_mid qr) ^ \"\\n\");\n\
+         val (op3, rhs_inner) = Term.dest_comb a2;\n\
+         val (_, lhs_inner) = Term.dest_comb op3;\n\
+         val () = print (\"TRANS_IMP_INNER: \" ^ Bool.toString (Term.aconv lhs_inner p) ^ \" \" ^ Bool.toString (Term.aconv rhs_inner r) ^ \"\\n\");\n\
+         (* Leibniz substitution: from |- p = q and |- P p, derive |- P q.\n\
+            Proof: AP_TERM P (premise: p=q) → |- P p = P q, then EQ_MP. *)\n\
+         val Pp = Term.mk_comb(f, p);                  (* P p, where P=f *)\n\
+         val th_Pp = Thm.ASSUME Pp;                    (* P p |- P p *)\n\
+         val th_Peq = Thm.AP_TERM f th_pq_eq;          (* p=q |- P p = P q *)\n\
+         val th_Pq = Thm.EQ_MP th_Peq th_Pp;           (* p=q, P p |- P q *)\n\
+         val Pq = Term.mk_comb(f, q);\n\
+         val () = print (\"LEIBNIZ: hyps=\" ^ Int.toString (List.length (Thm.hyp th_Pq)) ^ \" concl=fq:\" ^ Bool.toString (Term.aconv (Thm.concl th_Pq) Pq) ^ \"\\n\");\n\
          print \"HOL_PROOF_OK\\n\";\n",
     );
     let Some((out, _)) = run_through_checkpoint(&driver, 100_000_000_000) else {
@@ -620,6 +651,19 @@ fn recon_via_checkpoint_proves_implication_self() {
     // Composed: discharging both hyps gives a closed theorem.
     assert!(out.contains("COMPOSED: hyps=0"),
         "Composed proof incorrect. Output:\n{out}");
+    // Transitivity of implication, derived from primitives:
+    // |- (p==>q) ==> (q==>r) ==> (p==>r), no hypotheses.
+    assert!(out.contains("TRANS_IMP_HYPS: 0"),
+        "Transitivity-of-impl hyps wrong. Output:\n{out}");
+    assert!(out.contains("TRANS_IMP_LHS_OUTER: true"),
+        "Transitivity-of-impl outer LHS wrong. Output:\n{out}");
+    assert!(out.contains("TRANS_IMP_LHS_MID: true"),
+        "Transitivity-of-impl middle LHS wrong. Output:\n{out}");
+    assert!(out.contains("TRANS_IMP_INNER: true true"),
+        "Transitivity-of-impl inner LHS/RHS wrong. Output:\n{out}");
+    // Leibniz substitution: (p=q, P p) |- P q. Two hypotheses.
+    assert!(out.contains("LEIBNIZ: hyps=2 concl=fq:true"),
+        "Leibniz substitution wrong. Output:\n{out}");
 }
 
 /// Beyond compilation: actually USE the HOL4 kernel by constructing
