@@ -178,13 +178,22 @@ impl SnapshotBuilder {
     }
 
     fn build_code(&mut self, body_ptr: *const PolyWord, n: usize) -> ObjectBody {
-        // The bytecode portion runs from offset 0 up to the start of
-        // the constants segment (computed via the trailing-offset
-        // word). Use const_segment_for_code to find the boundary.
+        // PolyML code-object layout:
+        //   [0 .. endIC)     bytecode bytes
+        //   [endIC]          count word (one PolyWord)
+        //   [endIC + 8 ..]   constants
+        //   [last word]      trailing signed-byte offset back to const segment
+        //
+        // `const_segment_for_code` returns the address of the first
+        // constant (cp), so the count word lives at `cp - 8` and the
+        // actual bytecode ends at `cp - 8`. We need to subtract that
+        // single PolyWord so the snapshot doesn't include the count
+        // word as if it were bytecode.
         let (cp_start, count) = unsafe { length_word::const_segment_for_code(body_ptr) };
         let cp_start_addr = cp_start as usize;
         let body_start_addr = body_ptr as usize;
-        let bytecode_len_bytes = cp_start_addr.saturating_sub(body_start_addr);
+        let bytecode_len_bytes = (cp_start_addr.saturating_sub(body_start_addr))
+            .saturating_sub(std::mem::size_of::<usize>());
         let code_bytes: Vec<u8> = (0..bytecode_len_bytes)
             .map(|i| unsafe { *body_ptr.cast::<u8>().add(i) })
             .collect();
