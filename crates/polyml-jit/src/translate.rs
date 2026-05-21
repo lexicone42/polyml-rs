@@ -42,6 +42,9 @@ const INSTR_JUMP8: u8 = 0x02;
 const INSTR_JUMP8_FALSE: u8 = 0x03;
 const INSTR_JUMP8_TRUE: u8 = 0x46;
 const INSTR_JUMP_BACK8: u8 = 0x1e;
+const INSTR_LOCAL_B: u8 = 0x22;
+const INSTR_LOCAL_0: u8 = 0x29;
+const INSTR_LOCAL_7: u8 = 0x30;
 
 /// Errors specific to bytecode translation.
 #[derive(Debug, thiserror::Error)]
@@ -135,6 +138,26 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
                     stack.push(builder.ins().iconst(int, tag(n)));
                 }
                 INSTR_CONST_10 => stack.push(builder.ins().iconst(int, tag(10))),
+                INSTR_LOCAL_0..=INSTR_LOCAL_7 => {
+                    let depth = (op - INSTR_LOCAL_0) as usize;
+                    if depth >= stack.len() {
+                        return Err(TranslateError::Underflow(pc - 1));
+                    }
+                    let v = stack[stack.len() - 1 - depth];
+                    stack.push(v);
+                }
+                INSTR_LOCAL_B => {
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let depth = bytecode[pc] as usize;
+                    pc += 1;
+                    if depth >= stack.len() {
+                        return Err(TranslateError::Underflow(pc - 2));
+                    }
+                    let v = stack[stack.len() - 1 - depth];
+                    stack.push(v);
+                }
                 INSTR_CONST_INT_B => {
                     if pc >= bytecode.len() {
                         return Err(TranslateError::Truncated(pc));
@@ -314,7 +337,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_JUMP8
         | INSTR_JUMP8_FALSE
         | INSTR_JUMP8_TRUE
-        | INSTR_JUMP_BACK8 => 2,
+        | INSTR_JUMP_BACK8
+        | INSTR_LOCAL_B => 2,
         INSTR_CONST_0..=INSTR_CONST_4
         | INSTR_CONST_10
         | INSTR_RETURN_1
@@ -322,7 +346,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_FIXED_SUB
         | INSTR_FIXED_MULT
         | INSTR_EQUAL_WORD
-        | INSTR_LESS_SIGNED => 1,
+        | INSTR_LESS_SIGNED
+        | INSTR_LOCAL_0..=INSTR_LOCAL_7 => 1,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -356,6 +381,24 @@ fn scan_branch_targets(
         match op {
             INSTR_CONST_0..=INSTR_CONST_4 => depth += 1,
             INSTR_CONST_10 => depth += 1,
+            INSTR_LOCAL_0..=INSTR_LOCAL_7 => {
+                let d = (op - INSTR_LOCAL_0) as usize;
+                if d >= depth {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                depth += 1;
+            }
+            INSTR_LOCAL_B => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let d = bytecode[pc] as usize;
+                pc += 1;
+                if d >= depth {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
+                depth += 1;
+            }
             INSTR_CONST_INT_B => {
                 if pc >= bytecode.len() {
                     return Err(TranslateError::Truncated(pc));
@@ -759,6 +802,44 @@ mod tests {
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
         assert_eq!(untag(f()), 4);
+    }
+
+    #[test]
+    fn translate_local_0_duplicates_top() {
+        // push 7; LOCAL_0 (= dup top); ADD; return → 14
+        let bc = vec![
+            INSTR_CONST_INT_B, 7, INSTR_LOCAL_0, INSTR_FIXED_ADD, INSTR_RETURN_1,
+        ];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 14);
+    }
+
+    #[test]
+    fn translate_local_b_with_explicit_depth() {
+        // push 1, 2, 3; LOCAL_B 2 (= peek depth 2 = the "1"); return
+        let bc = vec![
+            INSTR_CONST_1, INSTR_CONST_2, INSTR_CONST_3,
+            INSTR_LOCAL_B, 2,
+            INSTR_RETURN_1,
+        ];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 1);
+    }
+
+    #[test]
+    fn translate_local_2_skipping_two_above() {
+        // push 5, 6, 7; LOCAL_2 (= peek 2 down = "5"); ADD → 12
+        let bc = vec![
+            INSTR_CONST_INT_B, 5, INSTR_CONST_INT_B, 6, INSTR_CONST_INT_B, 7,
+            0x2b, // INSTR_LOCAL_2
+            INSTR_FIXED_ADD,
+            INSTR_RETURN_1,
+        ];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 12);
     }
 
     #[test]
