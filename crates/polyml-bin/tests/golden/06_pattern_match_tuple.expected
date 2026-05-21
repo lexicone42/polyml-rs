@@ -1,0 +1,2 @@
+# Destructure a 2-tuple via val pattern.
+Tagged(0)
