@@ -52,6 +52,13 @@ const INSTR_INDIRECT_CLOSURE_B1: u8 = 0x7a;
 const INSTR_INDIRECT_CLOSURE_B2: u8 = 0x7c;
 const INSTR_ENTER_INT_X86: u8 = 0xff;
 const INSTR_ENTER_INT_ARM64: u8 = 0xe9;
+const INSTR_INDIRECT_LOCAL_BB: u8 = 0x21;
+const INSTR_INDIRECT_CLOSURE_BB: u8 = 0x54;
+const INSTR_INDIRECT_0: u8 = 0x35;
+const INSTR_INDIRECT_0_LOCAL_0: u8 = 0xc6;
+const INSTR_NO_OP: u8 = 0x52;
+const INSTR_JUMP_TAGGED_LOCAL: u8 = 0xc4;
+const INSTR_IS_TAGGED_LOCAL_B: u8 = 0xc2;
 
 /// Errors specific to bytecode translation.
 #[derive(Debug, thiserror::Error)]
@@ -94,7 +101,12 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<JitFn, TranslateError> 
     // values across the branch.
     let targets = scan_branch_targets(bytecode)?;
 
-    let (entry_pc, arg_count) = function_prologue(bytecode);
+    let (entry_pc, prologue_arg_count) = function_prologue(bytecode);
+    let arg_count = if prologue_arg_count > 0 || entry_pc > 0 {
+        prologue_arg_count
+    } else {
+        infer_arg_count(bytecode, entry_pc).unwrap_or(0)
+    };
 
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -212,6 +224,107 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<JitFn, TranslateError> 
                         cranelift::prelude::MemFlags::trusted(),
                         base,
                         offset_bytes,
+                    );
+                    stack.push(val);
+                }
+                INSTR_NO_OP => { /* skip */ }
+                INSTR_INDIRECT_0 => {
+                    // top = ptr; replace top with ptr[0]
+                    let base = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let val = builder.ins().load(int, cranelift::prelude::MemFlags::trusted(), base, 0);
+                    stack.push(val);
+                }
+                INSTR_INDIRECT_0_LOCAL_0 => {
+                    // peek top (= LOCAL_0); load offset 0
+                    if stack.is_empty() {
+                        return Err(TranslateError::Underflow(pc - 1));
+                    }
+                    let base = *stack.last().unwrap();
+                    let val = builder.ins().load(int, cranelift::prelude::MemFlags::trusted(), base, 0);
+                    stack.push(val);
+                }
+                INSTR_INDIRECT_LOCAL_BB => {
+                    // depth, slot (each 1 byte)
+                    if pc + 1 >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let depth = bytecode[pc] as usize;
+                    let slot = bytecode[pc + 1] as usize;
+                    pc += 2;
+                    if depth >= stack.len() {
+                        return Err(TranslateError::Underflow(pc - 3));
+                    }
+                    let base = stack[stack.len() - 1 - depth];
+                    let val = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        base,
+                        (slot * 8) as i32,
+                    );
+                    stack.push(val);
+                }
+                INSTR_JUMP_TAGGED_LOCAL => {
+                    // [depth, off]; if sp[depth] is tagged (LSB=1)
+                    // jump forward `off` bytes; else fallthrough.
+                    if pc + 1 >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let d = bytecode[pc] as usize;
+                    let off = bytecode[pc + 1] as usize;
+                    pc += 2;
+                    if d >= stack.len() {
+                        return Err(TranslateError::Underflow(pc - 3));
+                    }
+                    let v = stack[stack.len() - 1 - d];
+                    let one = builder.ins().iconst(int, 1);
+                    let lsb = builder.ins().band(v, one);
+                    let target_pc = pc + off;
+                    let target_blk = *block_at.get(&target_pc)
+                        .expect("JUMP_TAGGED_LOCAL target should be registered");
+                    let fall_blk = *block_at.get(&pc)
+                        .expect("JUMP_TAGGED_LOCAL fallthrough should be registered");
+                    let args: Vec<BlockArg> =
+                        stack.iter().copied().map(BlockArg::from).collect();
+                    // brif: if cond ≠ 0 then then-block else else-block.
+                    // LSB=1 → tagged → take the jump.
+                    builder.ins().brif(lsb, target_blk, &args, fall_blk, &args);
+                    returned = true;
+                }
+                INSTR_IS_TAGGED_LOCAL_B => {
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let d = bytecode[pc] as usize;
+                    pc += 1;
+                    if d >= stack.len() {
+                        return Err(TranslateError::Underflow(pc - 2));
+                    }
+                    let v = stack[stack.len() - 1 - d];
+                    let one = builder.ins().iconst(int, 1);
+                    let lsb = builder.ins().band(v, one);
+                    // lsb is already 0 or 1; tag it: 2*lsb + 1.
+                    let doubled = builder.ins().ishl_imm(lsb, 1);
+                    let result = builder.ins().iadd(doubled, one);
+                    stack.push(result);
+                }
+                INSTR_INDIRECT_CLOSURE_BB => {
+                    // depth, slot (each 1 byte). Closure has code at
+                    // word[0]; slot 0 is the first captured.
+                    if pc + 1 >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let depth = bytecode[pc] as usize;
+                    let slot = bytecode[pc + 1] as usize;
+                    pc += 2;
+                    if depth >= stack.len() {
+                        return Err(TranslateError::Underflow(pc - 3));
+                    }
+                    let base = stack[stack.len() - 1 - depth];
+                    let val = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        base,
+                        ((1 + slot) * 8) as i32,
                     );
                     stack.push(val);
                 }
@@ -431,6 +544,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_INDIRECT_CLOSURE_B0
         | INSTR_INDIRECT_CLOSURE_B1
         | INSTR_INDIRECT_CLOSURE_B2 => 2,
+        INSTR_INDIRECT_LOCAL_BB | INSTR_INDIRECT_CLOSURE_BB | INSTR_JUMP_TAGGED_LOCAL => 3,
+        INSTR_IS_TAGGED_LOCAL_B => 2,
         INSTR_CONST_0..=INSTR_CONST_4
         | INSTR_CONST_10
         | INSTR_RETURN_1
@@ -439,7 +554,10 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_FIXED_MULT
         | INSTR_EQUAL_WORD
         | INSTR_LESS_SIGNED
-        | INSTR_LOCAL_0..=INSTR_LOCAL_7 => 1,
+        | INSTR_LOCAL_0..=INSTR_LOCAL_7
+        | INSTR_INDIRECT_0
+        | INSTR_INDIRECT_0_LOCAL_0
+        | INSTR_NO_OP => 1,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -475,6 +593,90 @@ fn function_entry_pc(bytecode: &[u8]) -> usize {
     function_prologue(bytecode).0
 }
 
+/// Lightweight first-walk that determines the minimum incoming
+/// stack size required by the function. Useful for bytecode that
+/// has no enter-int prologue (the bootstrap image): we infer the
+/// arg count by finding the largest stack-relative read.
+///
+/// Returns `Some(arg_count)` on a clean walk, `None` if the
+/// bytecode hits unsupported opcodes during scanning (we'll
+/// surface the same error later in scan_branch_targets).
+fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut min_depth: i32 = 0;
+    let mut pc = start_pc;
+    while pc < bytecode.len() {
+        let op = bytecode[pc];
+        pc += 1;
+        let (push_count, pop_count, peek_depth, immediate_bytes): (i32, i32, Option<usize>, usize) =
+            match op {
+                INSTR_CONST_0..=INSTR_CONST_4 | INSTR_CONST_10 => (1, 0, None, 0),
+                INSTR_CONST_INT_B => (1, 0, None, 1),
+                INSTR_LOCAL_0..=INSTR_LOCAL_7 => {
+                    let d = (op - INSTR_LOCAL_0) as usize;
+                    (1, 0, Some(d), 0)
+                }
+                INSTR_LOCAL_B => {
+                    if pc >= bytecode.len() { return None; }
+                    let d = bytecode[pc] as usize;
+                    (1, 0, Some(d), 1)
+                }
+                INSTR_INDIRECT_LOCAL_B0
+                | INSTR_INDIRECT_LOCAL_B1
+                | INSTR_INDIRECT_CLOSURE_B0
+                | INSTR_INDIRECT_CLOSURE_B1
+                | INSTR_INDIRECT_CLOSURE_B2 => {
+                    if pc >= bytecode.len() { return None; }
+                    let d = bytecode[pc] as usize;
+                    (1, 0, Some(d), 1)
+                }
+                INSTR_INDIRECT_LOCAL_BB | INSTR_INDIRECT_CLOSURE_BB => {
+                    if pc + 1 >= bytecode.len() { return None; }
+                    let d = bytecode[pc] as usize;
+                    (1, 0, Some(d), 2)
+                }
+                INSTR_INDIRECT_0 => (1, 1, None, 0),
+                INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
+                INSTR_NO_OP => (0, 0, None, 0),
+                INSTR_JUMP_TAGGED_LOCAL => {
+                    if pc + 1 >= bytecode.len() { return None; }
+                    let d = bytecode[pc] as usize;
+                    (0, 0, Some(d), 2)
+                }
+                INSTR_IS_TAGGED_LOCAL_B => {
+                    if pc >= bytecode.len() { return None; }
+                    let d = bytecode[pc] as usize;
+                    (1, 0, Some(d), 1)
+                }
+                INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
+                | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED => (1, 2, None, 0),
+                INSTR_JUMP8 | INSTR_JUMP_BACK8 => (0, 0, None, 1),
+                INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => (0, 1, None, 1),
+                INSTR_RETURN_1 => (0, 1, None, 0),
+                _ => {
+                    // Unknown opcode — stop walking but return what
+                    // we inferred from the prefix we did understand.
+                    return Some((-min_depth).max(0) as usize);
+                }
+            };
+        // Effects: peek doesn't move sp; pop then push for binops.
+        if let Some(d) = peek_depth {
+            // depth-relative read; conceptually requires depth > d.
+            let needed = (d as i32) + 1;
+            if depth < needed {
+                min_depth = std::cmp::min(min_depth, depth - needed);
+            }
+        }
+        for _ in 0..pop_count {
+            depth -= 1;
+            min_depth = std::cmp::min(min_depth, depth);
+        }
+        depth += push_count;
+        pc += immediate_bytes;
+    }
+    Some((-min_depth).max(0) as usize)
+}
+
 fn scan_branch_targets(
     bytecode: &[u8],
 ) -> Result<std::collections::BTreeMap<usize, usize>, TranslateError> {
@@ -485,7 +687,14 @@ fn scan_branch_targets(
     // a position whose recorded depth matches the depth at the
     // jump source.
     let mut depth_at: Vec<Option<usize>> = vec![None; bytecode.len()];
-    let (start_pc, arg_count) = function_prologue(bytecode);
+    let (start_pc, prologue_arg_count) = function_prologue(bytecode);
+    // If there's no enter-int prologue, infer arg count from peek
+    // patterns in the bytecode itself.
+    let arg_count = if prologue_arg_count > 0 || start_pc > 0 {
+        prologue_arg_count
+    } else {
+        infer_arg_count(bytecode, start_pc).unwrap_or(0)
+    };
     let mut depth: usize = arg_count;
     let mut pc = start_pc;
     let mut reachable = true;
@@ -541,9 +750,62 @@ fn scan_branch_targets(
                 if d >= depth {
                     return Err(TranslateError::Underflow(pc - 2));
                 }
-                // Net stack effect: peek (no pop) + push value → +1.
                 depth += 1;
             }
+            INSTR_INDIRECT_LOCAL_BB | INSTR_INDIRECT_CLOSURE_BB => {
+                if pc + 1 >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let d = bytecode[pc] as usize;
+                pc += 2;
+                if d >= depth {
+                    return Err(TranslateError::Underflow(pc - 3));
+                }
+                depth += 1;
+            }
+            INSTR_JUMP_TAGGED_LOCAL => {
+                // depth byte + off byte; conditional branch on the
+                // tag-bit of sp[depth]. No pop. Both arms continue
+                // at the same depth.
+                if pc + 1 >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let d = bytecode[pc] as usize;
+                let off = bytecode[pc + 1] as usize;
+                pc += 2;
+                if d >= depth {
+                    return Err(TranslateError::Underflow(pc - 3));
+                }
+                let taken = pc + off;
+                record_target(&mut targets, taken, depth)?;
+                record_target(&mut targets, pc, depth)?;
+            }
+            INSTR_IS_TAGGED_LOCAL_B => {
+                // depth byte; pop nothing, push 1 (tagged bool from
+                // a tag-bit test on sp[depth]).
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let d = bytecode[pc] as usize;
+                pc += 1;
+                if d >= depth {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
+                depth += 1;
+            }
+            INSTR_INDIRECT_0 => {
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                // peek+pop+push = net 0; actually pop top + push value
+            }
+            INSTR_INDIRECT_0_LOCAL_0 => {
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                depth += 1;
+            }
+            INSTR_NO_OP => {}
             INSTR_CONST_INT_B => {
                 if pc >= bytecode.len() {
                     return Err(TranslateError::Truncated(pc));
@@ -719,11 +981,15 @@ mod tests {
     }
 
     #[test]
-    fn translate_rejects_return_on_empty_stack() {
+    fn translate_lone_return1_is_identity_function() {
+        // Bare RETURN_1 = "return arg 0". The arg-inference pass
+        // figures out the function takes 1 arg.
         let bc = vec![INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
-        let err = compile(&mut jit, &bc).unwrap_err();
-        assert!(matches!(err, TranslateError::Underflow(_)), "got {err:?}");
+        let f = compile(&mut jit, &bc).unwrap();
+        let args = [tag(99)];
+        let result = call_with(f, &args);
+        assert_eq!(untag(result), 99);
     }
 
     #[test]
