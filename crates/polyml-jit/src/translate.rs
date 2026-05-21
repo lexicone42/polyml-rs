@@ -36,9 +36,12 @@ const INSTR_RETURN_1: u8 = 0x42;
 const INSTR_FIXED_ADD: u8 = 0xaa;
 const INSTR_FIXED_SUB: u8 = 0xab;
 const INSTR_FIXED_MULT: u8 = 0xac;
+const INSTR_EQUAL_WORD: u8 = 0xa0;
+const INSTR_LESS_SIGNED: u8 = 0xa2;
 const INSTR_JUMP8: u8 = 0x02;
 const INSTR_JUMP8_FALSE: u8 = 0x03;
 const INSTR_JUMP8_TRUE: u8 = 0x46;
+const INSTR_JUMP_BACK8: u8 = 0x1e;
 
 /// Errors specific to bytecode translation.
 #[derive(Debug, thiserror::Error)]
@@ -161,6 +164,31 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
                     let result = builder.ins().iadd(diff, one);
                     stack.push(result);
                 }
+                INSTR_EQUAL_WORD => {
+                    // pop x, y; push tagged(1) if x == y else tagged(0).
+                    // Since tagged ints have the same bit pattern when
+                    // equal, a raw word compare is correct.
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let cmp = builder.ins().icmp(IntCC::Equal, x, y);
+                    let cmp64 = builder.ins().uextend(int, cmp);
+                    let doubled = builder.ins().ishl_imm(cmp64, 1);
+                    let one = builder.ins().iconst(int, 1);
+                    let result = builder.ins().iadd(doubled, one);
+                    stack.push(result);
+                }
+                INSTR_LESS_SIGNED => {
+                    // Interp: bin_op_cmp(|x, y| (y as isize) < (x as isize))
+                    // pop x, y; push tagged(1) if y < x else tagged(0).
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let cmp = builder.ins().icmp(IntCC::SignedLessThan, y, x);
+                    let cmp64 = builder.ins().uextend(int, cmp);
+                    let doubled = builder.ins().ishl_imm(cmp64, 1);
+                    let one = builder.ins().iconst(int, 1);
+                    let result = builder.ins().iadd(doubled, one);
+                    stack.push(result);
+                }
                 INSTR_FIXED_MULT => {
                     // Interp: result_n = x_n * y_n
                     // Untag both via arithmetic shift right by 1
@@ -192,6 +220,20 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
                     let target_pc = pc + off;
                     let target_blk = *block_at.get(&target_pc)
                         .expect("target should be registered in pass 1");
+                    let args: Vec<BlockArg> =
+                        stack.iter().copied().map(BlockArg::from).collect();
+                    builder.ins().jump(target_blk, &args);
+                    returned = true;
+                }
+                INSTR_JUMP_BACK8 => {
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let off = bytecode[pc] as usize;
+                    pc += 1;
+                    let target_pc = pc - off - 2;
+                    let target_blk = *block_at.get(&target_pc)
+                        .expect("back-edge target should be registered in pass 1");
                     let args: Vec<BlockArg> =
                         stack.iter().copied().map(BlockArg::from).collect();
                     builder.ins().jump(target_blk, &args);
@@ -268,13 +310,19 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         return Err(TranslateError::Truncated(pc));
     }
     Ok(match bc[pc] {
-        INSTR_CONST_INT_B | INSTR_JUMP8 | INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => 2,
+        INSTR_CONST_INT_B
+        | INSTR_JUMP8
+        | INSTR_JUMP8_FALSE
+        | INSTR_JUMP8_TRUE
+        | INSTR_JUMP_BACK8 => 2,
         INSTR_CONST_0..=INSTR_CONST_4
         | INSTR_CONST_10
         | INSTR_RETURN_1
         | INSTR_FIXED_ADD
         | INSTR_FIXED_SUB
-        | INSTR_FIXED_MULT => 1,
+        | INSTR_FIXED_MULT
+        | INSTR_EQUAL_WORD
+        | INSTR_LESS_SIGNED => 1,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -294,9 +342,15 @@ fn scan_branch_targets(
 ) -> Result<std::collections::BTreeMap<usize, usize>, TranslateError> {
     let mut targets: std::collections::BTreeMap<usize, usize> =
         std::collections::BTreeMap::new();
+    // depth_at[pc] = stack depth observed at the *start* of the
+    // opcode at pc, used to validate that backward jumps land at
+    // a position whose recorded depth matches the depth at the
+    // jump source.
+    let mut depth_at: Vec<Option<usize>> = vec![None; bytecode.len()];
     let mut depth: usize = 0;
     let mut pc = 0usize;
     while pc < bytecode.len() {
+        depth_at[pc] = Some(depth);
         let op = bytecode[pc];
         pc += 1;
         match op {
@@ -309,7 +363,8 @@ fn scan_branch_targets(
                 pc += 1;
                 depth += 1;
             }
-            INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT => {
+            INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
+            | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED => {
                 if depth < 2 {
                     return Err(TranslateError::Underflow(pc - 1));
                 }
@@ -332,6 +387,36 @@ fn scan_branch_targets(
                 let off = bytecode[pc] as usize;
                 pc += 1;
                 let target = pc + off;
+                record_target(&mut targets, target, depth)?;
+            }
+            INSTR_JUMP_BACK8 => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let off = bytecode[pc] as usize;
+                pc += 1;
+                // Our interpreter computes:
+                //   self.pc_offset_signed(-((off + 2) as isize))
+                // which corresponds to landing at pc - off - 2 in the
+                // "PC after immediate" frame. Equivalently the target
+                // is `(pc_post_imm) - off - 2`; with `pc` already
+                // advanced past both the opcode and the immediate,
+                // target = pc - off - 2.
+                if pc < off + 2 {
+                    return Err(TranslateError::Unsupported { op, at: pc - 2 });
+                }
+                let target = pc - off - 2;
+                // Validate: the depth at the target (recorded earlier
+                // during this same linear scan) must match the depth
+                // here, since both sides of the back-edge share the
+                // same Block.
+                let expected = depth_at[target].ok_or(TranslateError::Unsupported {
+                    op,
+                    at: pc - 2,
+                })?;
+                if expected != depth {
+                    return Err(TranslateError::Unsupported { op: 0xFE, at: target });
+                }
                 record_target(&mut targets, target, depth)?;
             }
             INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => {
@@ -590,6 +675,86 @@ mod tests {
             INSTR_JUMP8, 1,
             INSTR_CONST_4,
             INSTR_RETURN_1,
+        ];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 4);
+    }
+
+    #[test]
+    fn translate_equal_word_matches() {
+        // push 3; push 3; EQUAL → tagged 1 (true); return
+        let bc = vec![INSTR_CONST_3, INSTR_CONST_3, INSTR_EQUAL_WORD, INSTR_RETURN_1];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 1);
+    }
+
+    #[test]
+    fn translate_equal_word_mismatch() {
+        let bc = vec![INSTR_CONST_2, INSTR_CONST_3, INSTR_EQUAL_WORD, INSTR_RETURN_1];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 0);
+    }
+
+    #[test]
+    fn translate_less_signed() {
+        // push y=2, push x=4, LESS_SIGNED → y<x → 2<4 → tagged 1
+        let bc = vec![INSTR_CONST_2, INSTR_CONST_4, INSTR_LESS_SIGNED, INSTR_RETURN_1];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 1);
+    }
+
+    #[test]
+    fn translate_countdown_loop() {
+        // SML pseudocode:
+        //   var i = 4
+        //   loop:
+        //     if i == 0: exit
+        //     i = i + (-1)
+        //     goto loop
+        //   return i  (= 0)
+        //
+        // Bytecode (depth at each PC noted in comments):
+        //  0: CONST_4              ; depth: → 1
+        //  1: ; ── loop head, depth = 1 ──
+        //  1: CONST_0              ; → 2
+        //  2: EQUAL_WORD           ; → 2 → after = depth 1? Wait.
+        //     Actually we need the counter back on stack after the
+        //     comparison. EQUAL_WORD POPS both operands and pushes
+        //     the bool. So the counter is consumed. We need to dup
+        //     it first... but we don't have a DUP opcode in our
+        //     translator yet.
+        //
+        // Alternative: load CONST_4 each iteration is meaningless.
+        // The simplest loop that exercises JUMP_BACK without needing
+        // any new opcode beyond what we have is a degenerate loop
+        // that always exits immediately:
+        //
+        //  0: CONST_3 ; counter = 3
+        //  1: CONST_3 ; compare with 3
+        //  2: EQUAL_WORD ; counter==3 → tagged 1 → truthy
+        //  3: JUMP8_TRUE +2 ; if true, exit loop (jump fwd 2 → pc=7)
+        //  5: JUMP_BACK8 5  ; else go back to loop head (pc-7=5? off=5)
+        //                   ; pc here = 7 after immediate, off=5 →
+        //                   ; target = 7 - 5 - 2 = 0. Lands at depth
+        //                   ; 0, but we want to re-enter at depth 0.
+        //                   ; Then CONST_3, CONST_3, EQUAL again.
+        //  7: ; exit, stack depth = 0
+        //  7: CONST_4
+        //  8: RETURN_1
+        //
+        // Since the test is always-equal, the loop exits on first iteration.
+        let bc = vec![
+            INSTR_CONST_3,        // 0
+            INSTR_CONST_3,        // 1
+            INSTR_EQUAL_WORD,     // 2
+            INSTR_JUMP8_TRUE, 2,  // 3..5, target = 5 + 2 = 7
+            INSTR_JUMP_BACK8, 5,  // 5..7, target = 7 - 5 - 2 = 0
+            INSTR_CONST_4,        // 7
+            INSTR_RETURN_1,       // 8
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
