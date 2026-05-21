@@ -62,11 +62,25 @@ build uses to bootstrap itself.
 
 Stage 7's `PolyML.export(fileName, root)` is wired up to
 [`polyml_runtime::export::snapshot`] + [`Image::write`] and writes
-a real pexport text file. The export ↔ load loop closes
-structurally — loading bootstrap64.txt, snapshotting the live
-heap from its root, writing pexport text, re-parsing, and
-re-loading reaches every one of the original 22,588 objects
-(verified by `crates/polyml-runtime/tests/export_roundtrip.rs`).
+a real pexport text file. **The bootstrap loop is closed
+end-to-end:**
+
+```
+$ cat > /tmp/quick.sml <<'EOF'
+val () = Bootstrap.use "basis/build.sml";
+val () = PolyML.export("/tmp/my_export", fn () => ());
+EOF
+$ cd vendor/polyml
+$ ../../target/release/poly run bootstrap/bootstrap64.txt < /tmp/quick.sml
+# ... loads all 94 basis files, writes the pexport snapshot ...
+Result: Tagged(0)
+$ ../../target/release/poly load /tmp/my_export
+Loaded /tmp/my_export
+  root closure -> code object, len=11 bytes=88, is_code=true
+$ ../../target/release/poly run /tmp/my_export
+Executing (cap 5000000 steps)…   # starts executing the re-loaded image
+```
+
 `PolyML.shareCommonData` is still a no-op (deduplication-style
 optimization; safe to skip).
 
