@@ -32,6 +32,9 @@ const INSTR_CONST_4: u8 = 0x3f;
 const INSTR_CONST_10: u8 = 0x40;
 const INSTR_CONST_INT_B: u8 = 0x28;
 const INSTR_RETURN_1: u8 = 0x42;
+const INSTR_FIXED_ADD: u8 = 0xaa;
+const INSTR_FIXED_SUB: u8 = 0xab;
+const INSTR_FIXED_MULT: u8 = 0xac;
 
 /// Errors specific to bytecode translation.
 #[derive(Debug, thiserror::Error)]
@@ -87,6 +90,44 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<extern "C" fn() -> i64,
                     let imm = bytecode[pc] as i8 as i64;
                     pc += 1;
                     stack.push(builder.ins().iconst(int, tag(imm)));
+                }
+                INSTR_FIXED_ADD => {
+                    // bin_op_tagged in the interp pops x (top) and y;
+                    // result_n = x_n + y_n; (commutative).
+                    // tagged identity: (x_t + y_t) - 1
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let sum = builder.ins().iadd(x, y);
+                    let one = builder.ins().iconst(int, 1);
+                    let result = builder.ins().isub(sum, one);
+                    stack.push(result);
+                }
+                INSTR_FIXED_SUB => {
+                    // Interp: result_n = y_n - x_n
+                    // tagged: (y_t - x_t) + 1
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let diff = builder.ins().isub(y, x);
+                    let one = builder.ins().iconst(int, 1);
+                    let result = builder.ins().iadd(diff, one);
+                    stack.push(result);
+                }
+                INSTR_FIXED_MULT => {
+                    // Interp: result_n = x_n * y_n
+                    // Untag both via arithmetic shift right by 1
+                    // (after subtracting the tag bit). Multiply, re-tag.
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let one = builder.ins().iconst(int, 1);
+                    let x_minus_1 = builder.ins().isub(x, one);
+                    let xn = builder.ins().sshr_imm(x_minus_1, 1);
+                    let y_minus_1 = builder.ins().isub(y, one);
+                    let yn = builder.ins().sshr_imm(y_minus_1, 1);
+                    let prod = builder.ins().imul(xn, yn);
+                    // re-tag: 2 * prod + 1
+                    let doubled = builder.ins().ishl_imm(prod, 1);
+                    let result = builder.ins().iadd(doubled, one);
+                    stack.push(result);
                 }
                 INSTR_RETURN_1 => {
                     let v = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
@@ -200,6 +241,59 @@ mod tests {
         let mut jit = Jit::new().unwrap();
         let err = compile(&mut jit, &bc).unwrap_err();
         assert!(matches!(err, TranslateError::Unsupported { op: 0xFD, .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn translate_fixed_add_1_plus_2() {
+        // push 1; push 2; ADD; return → 3
+        let bc = vec![INSTR_CONST_1, INSTR_CONST_2, INSTR_FIXED_ADD, INSTR_RETURN_1];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 3);
+    }
+
+    #[test]
+    fn translate_fixed_sub_4_minus_1() {
+        // push 4; push 1; SUB → y_n - x_n = 4 - 1 = 3
+        let bc = vec![INSTR_CONST_4, INSTR_CONST_1, INSTR_FIXED_SUB, INSTR_RETURN_1];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 3);
+    }
+
+    #[test]
+    fn translate_fixed_mult_3_times_4() {
+        // push 3; push 4; MULT → 12
+        let bc = vec![INSTR_CONST_3, INSTR_CONST_4, INSTR_FIXED_MULT, INSTR_RETURN_1];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 12);
+    }
+
+    #[test]
+    fn translate_polynomial_3_times_3_plus_10() {
+        // 3 * 3 + 10 — push 3, push 3, MULT, push 10, ADD, return
+        let bc = vec![
+            INSTR_CONST_3, INSTR_CONST_3, INSTR_FIXED_MULT, INSTR_CONST_10,
+            INSTR_FIXED_ADD, INSTR_RETURN_1,
+        ];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), 19);
+    }
+
+    #[test]
+    fn translate_negative_arithmetic() {
+        // -5 + 3 = -2, encoded with INSTR_CONST_INT_B
+        let bc = vec![
+            INSTR_CONST_INT_B, (-5i8) as u8,
+            INSTR_CONST_3,
+            INSTR_FIXED_ADD,
+            INSTR_RETURN_1,
+        ];
+        let mut jit = Jit::new().unwrap();
+        let f = compile(&mut jit, &bc).unwrap();
+        assert_eq!(untag(f()), -2);
     }
 
     #[test]
