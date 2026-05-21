@@ -67,6 +67,14 @@ const INSTR_CALL_FAST_RTS2: u8 = 0x85;
 const INSTR_CALL_FAST_RTS3: u8 = 0x86;
 const INSTR_CALL_FAST_RTS4: u8 = 0x87;
 const INSTR_CALL_FAST_RTS5: u8 = 0x88;
+const INSTR_JUMP_NEQ_LOCAL: u8 = 0xc5;
+const INSTR_JUMP_NEQ_LOCAL_IND: u8 = 0xc3;
+const INSTR_RESET_1: u8 = 0x50;
+const INSTR_RESET_2: u8 = 0x51;
+const INSTR_RESET_B: u8 = 0x26;
+const INSTR_RESET_R_1: u8 = 0x64;
+const INSTR_RESET_R_2: u8 = 0x65;
+const INSTR_RESET_R_3: u8 = 0x66;
 
 /// Errors specific to bytecode translation.
 #[derive(Debug, thiserror::Error)]
@@ -272,6 +280,38 @@ pub fn compile_with_consts(
                     stack.push(val);
                 }
                 INSTR_NO_OP => { /* skip */ }
+                INSTR_RESET_1 => {
+                    stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                }
+                INSTR_RESET_2 => {
+                    stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                }
+                INSTR_RESET_B => {
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let n = bytecode[pc] as usize;
+                    pc += 1;
+                    if stack.len() < n {
+                        return Err(TranslateError::Underflow(pc - 2));
+                    }
+                    stack.truncate(stack.len() - n);
+                }
+                INSTR_RESET_R_1 | INSTR_RESET_R_2 | INSTR_RESET_R_3 => {
+                    // Preserve top, drop N below it.
+                    let n = match op {
+                        INSTR_RESET_R_1 => 1,
+                        INSTR_RESET_R_2 => 2,
+                        _ => 3,
+                    };
+                    if stack.len() < n + 1 {
+                        return Err(TranslateError::Underflow(pc - 1));
+                    }
+                    let top = stack.pop().unwrap();
+                    stack.truncate(stack.len() - n);
+                    stack.push(top);
+                }
                 INSTR_CALL_FAST_RTS0
                 | INSTR_CALL_FAST_RTS1
                 | INSTR_CALL_FAST_RTS2
@@ -403,10 +443,48 @@ pub fn compile_with_consts(
                     let v = stack[stack.len() - 1 - d];
                     let one = builder.ins().iconst(int, 1);
                     let lsb = builder.ins().band(v, one);
-                    // lsb is already 0 or 1; tag it: 2*lsb + 1.
                     let doubled = builder.ins().ishl_imm(lsb, 1);
                     let result = builder.ins().iadd(doubled, one);
                     stack.push(result);
+                }
+                INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => {
+                    // [depth, want, off]; peek sp[depth] = u
+                    // (or *u for IND); if u == tag(want) fall thru
+                    // else jump forward `off`.
+                    if pc + 2 >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let d = bytecode[pc] as usize;
+                    let want = bytecode[pc + 1] as i8 as i64;
+                    let off = bytecode[pc + 2] as usize;
+                    pc += 3;
+                    if d >= stack.len() {
+                        return Err(TranslateError::Underflow(pc - 4));
+                    }
+                    let local = stack[stack.len() - 1 - d];
+                    let v = if op == INSTR_JUMP_NEQ_LOCAL_IND {
+                        builder.ins().load(
+                            int,
+                            cranelift::prelude::MemFlags::trusted(),
+                            local,
+                            0,
+                        )
+                    } else {
+                        local
+                    };
+                    let want_tagged =
+                        builder.ins().iconst(int, want.wrapping_mul(2).wrapping_add(1));
+                    let eq = builder.ins().icmp(IntCC::Equal, v, want_tagged);
+                    let target_pc = pc + off;
+                    let target_blk = *block_at.get(&target_pc)
+                        .expect("JUMP_NEQ_LOCAL target should be registered");
+                    let fall_blk = *block_at.get(&pc)
+                        .expect("JUMP_NEQ_LOCAL fallthrough should be registered");
+                    let args: Vec<BlockArg> =
+                        stack.iter().copied().map(BlockArg::from).collect();
+                    // eq=1 → fall through (equal). eq=0 → jump.
+                    builder.ins().brif(eq, fall_blk, &args, target_blk, &args);
+                    returned = true;
                 }
                 INSTR_INDIRECT_CLOSURE_BB => {
                     // depth, slot (each 1 byte). Closure has code at
@@ -645,7 +723,11 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_INDIRECT_CLOSURE_B0
         | INSTR_INDIRECT_CLOSURE_B1
         | INSTR_INDIRECT_CLOSURE_B2 => 2,
-        INSTR_INDIRECT_LOCAL_BB | INSTR_INDIRECT_CLOSURE_BB | INSTR_JUMP_TAGGED_LOCAL => 3,
+        INSTR_INDIRECT_LOCAL_BB
+        | INSTR_INDIRECT_CLOSURE_BB
+        | INSTR_JUMP_TAGGED_LOCAL
+        | INSTR_JUMP_NEQ_LOCAL
+        | INSTR_JUMP_NEQ_LOCAL_IND => 3,
         INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => 2,
         INSTR_CALL_FAST_RTS0
         | INSTR_CALL_FAST_RTS1
@@ -665,7 +747,13 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_LOCAL_0..=INSTR_LOCAL_7
         | INSTR_INDIRECT_0
         | INSTR_INDIRECT_0_LOCAL_0
-        | INSTR_NO_OP => 1,
+        | INSTR_NO_OP
+        | INSTR_RESET_1
+        | INSTR_RESET_2
+        | INSTR_RESET_R_1
+        | INSTR_RESET_R_2
+        | INSTR_RESET_R_3 => 1,
+        INSTR_RESET_B => 2,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -746,10 +834,25 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_INDIRECT_0 => (1, 1, None, 0),
                 INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
                 INSTR_NO_OP => (0, 0, None, 0),
+                INSTR_RESET_1 => (0, 1, None, 0),
+                INSTR_RESET_2 => (0, 2, None, 0),
+                INSTR_RESET_B => {
+                    if pc >= bytecode.len() { return None; }
+                    let n = bytecode[pc] as i32;
+                    (0, n, None, 1)
+                }
+                INSTR_RESET_R_1 => (1, 2, None, 0),
+                INSTR_RESET_R_2 => (1, 3, None, 0),
+                INSTR_RESET_R_3 => (1, 4, None, 0),
                 INSTR_JUMP_TAGGED_LOCAL => {
                     if pc + 1 >= bytecode.len() { return None; }
                     let d = bytecode[pc] as usize;
                     (0, 0, Some(d), 2)
+                }
+                INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => {
+                    if pc + 2 >= bytecode.len() { return None; }
+                    let d = bytecode[pc] as usize;
+                    (0, 0, Some(d), 3)
                 }
                 INSTR_IS_TAGGED_LOCAL_B => {
                     if pc >= bytecode.len() { return None; }
@@ -899,8 +1002,6 @@ fn scan_branch_targets(
                 record_target(&mut targets, pc, depth)?;
             }
             INSTR_IS_TAGGED_LOCAL_B => {
-                // depth byte; pop nothing, push 1 (tagged bool from
-                // a tag-bit test on sp[depth]).
                 if pc >= bytecode.len() {
                     return Err(TranslateError::Truncated(pc));
                 }
@@ -910,6 +1011,22 @@ fn scan_branch_targets(
                     return Err(TranslateError::Underflow(pc - 2));
                 }
                 depth += 1;
+            }
+            INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => {
+                // [depth, want, off]; conditional branch, no stack
+                // effect (peek only). Both arms continue at same depth.
+                if pc + 2 >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let d = bytecode[pc] as usize;
+                let off = bytecode[pc + 2] as usize;
+                pc += 3;
+                if d >= depth {
+                    return Err(TranslateError::Underflow(pc - 4));
+                }
+                let taken = pc + off;
+                record_target(&mut targets, taken, depth)?;
+                record_target(&mut targets, pc, depth)?;
             }
             INSTR_INDIRECT_0 => {
                 if depth == 0 {
@@ -924,6 +1041,30 @@ fn scan_branch_targets(
                 depth += 1;
             }
             INSTR_NO_OP => {}
+            INSTR_RESET_1 => {
+                if depth == 0 { return Err(TranslateError::Underflow(pc - 1)); }
+                depth -= 1;
+            }
+            INSTR_RESET_2 => {
+                if depth < 2 { return Err(TranslateError::Underflow(pc - 1)); }
+                depth -= 2;
+            }
+            INSTR_RESET_B => {
+                if pc >= bytecode.len() { return Err(TranslateError::Truncated(pc)); }
+                let n = bytecode[pc] as usize;
+                pc += 1;
+                if depth < n { return Err(TranslateError::Underflow(pc - 2)); }
+                depth -= n;
+            }
+            INSTR_RESET_R_1 | INSTR_RESET_R_2 | INSTR_RESET_R_3 => {
+                let n = match op {
+                    INSTR_RESET_R_1 => 1,
+                    INSTR_RESET_R_2 => 2,
+                    _ => 3,
+                };
+                if depth < n + 1 { return Err(TranslateError::Underflow(pc - 1)); }
+                depth -= n;
+            }
             INSTR_CALL_FAST_RTS0
             | INSTR_CALL_FAST_RTS1
             | INSTR_CALL_FAST_RTS2
