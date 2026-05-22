@@ -84,11 +84,13 @@ Executing (cap 5000000 steps)…   # starts executing the re-loaded image
 `PolyML.shareCommonData` is still a no-op (deduplication-style
 optimization; safe to skip).
 
-Heap default is 2 GB; the Cheney-style copying GC in
-`crates/polyml-runtime/src/gc.rs` keeps the working set bounded
-to ~100 MB through the whole chain. Auto-triggered at 80% fullness
-(override with `POLYML_GC_THRESHOLD`); per-cycle log can be silenced
-with `POLYML_GC_QUIET=1`, full correctness audit with
+Heap default is 3 GB; the Cheney-style copying GC in
+`crates/polyml-runtime/src/gc.rs` allocates a scratch buffer the size
+of the alloc space each cycle, so peak RSS during the 7-stage chain
+runs ~6 GB (live + scratch). Working set after each cycle is much
+smaller (single-digit GB on this workload). Auto-triggered at 80%
+fullness (override with `POLYML_GC_THRESHOLD`); per-cycle log can be
+silenced with `POLYML_GC_QUIET=1`, full correctness audit with
 `POLYML_GC_AUDIT=1` (slow — checks for residual from-space pointers
 across all interpreter state after each collect).
 

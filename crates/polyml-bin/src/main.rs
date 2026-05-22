@@ -181,7 +181,10 @@ fn run_image(
     let image_mut_ptr = loaded.mutable.iter().next().map(|w| w as *const PolyWord);
     let image_mut_len = loaded.mutable.used_words();
     let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
-        .with_default_alloc_space(3 * 1024 * 1024 * 1024) // 24 GB heap default; GC bounds at ~100MB when on.
+        // 3 GB heap. With Cheney copying GC enabled this peaks ~6 GB
+        // RSS during a cycle (live + scratch). Bootstrap chain needs
+        // around this much; small one-shots stay well under.
+        .with_default_alloc_space(3 * 1024 * 1024 * 1024)
         .with_rts(rts);
     if let Some(p) = image_mut_ptr {
         interp = interp.with_image_mutable_root(p, image_mut_len);
