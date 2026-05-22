@@ -212,10 +212,13 @@ pub fn compile_with_consts(
         //    bound when RETURN_N is present.
         // When `infer_arg_count` bails early on an unknown opcode,
         // RETURN_N is the more accurate signal.
-        let from_peeks = infer_arg_count(bytecode, entry_pc).unwrap_or(0);
-        let from_return = arity_from_return_scan(bytecode).map_or(0, |n| n + 2);
-        let from_tail = arity_from_terminator_scan(bytecode, true).map_or(0, |n| n + 2);
-        from_peeks.max(from_return).max(from_tail)
+        // Use peek-depth inference for the function's OWN stack
+        // sizing. Don't fold in RETURN_N's N — that's the callee-arity
+        // signal, used by closure_arity_from_addr at CALL sites. A
+        // function that has RETURN_1 but no LOCAL_N peeks doesn't need
+        // any slots in its args_ptr (it just operates on stack-top
+        // values pushed by its own bytecode).
+        infer_arg_count(bytecode, entry_pc).unwrap_or(0)
     };
 
     // Declare the RTS trampoline import for this module. Signature:
@@ -1928,11 +1931,8 @@ fn scan_branch_targets(
     let arg_count = if prologue_arg_count > 0 || start_pc > 0 {
         prologue_arg_count
     } else {
-        // Mirror `compile_with_consts`: max of (peek-depth, RETURN_N + 2, TAIL_count - 2 + 2).
-        let from_peeks = infer_arg_count(bytecode, start_pc).unwrap_or(0);
-        let from_return = arity_from_return_scan(bytecode).map_or(0, |n| n + 2);
-        let from_tail = arity_from_terminator_scan(bytecode, true).map_or(0, |n| n + 2);
-        from_peeks.max(from_return).max(from_tail)
+        // Use peek-depth inference (matches compile_with_consts).
+        infer_arg_count(bytecode, start_pc).unwrap_or(0)
     };
     let mut depth: usize = arg_count;
     let mut pc = start_pc;

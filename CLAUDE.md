@@ -9,7 +9,7 @@ loop. See `PLAN.md` for the staged roadmap.
 
 ## Demo (Monday)
 
-Three things to show:
+Four things to show:
 
 ### 1. `poly run` executes the real PolyML bootstrap image
 
@@ -92,6 +92,27 @@ with `POLYML_GC_QUIET=1`, full correctness audit with
 `POLYML_GC_AUDIT=1` (slow — checks for residual from-space pointers
 across all interpreter state after each collect).
 
+### 4. HOL4 theorem-proving runs through our runtime
+
+```
+$ cargo test --release -p polyml-bin --test hol4_recon \
+    recon_via_checkpoint_proves_implication_self -- --nocapture
+... 90 seconds ...
+test recon_via_checkpoint_proves_implication_self ... ok
+```
+
+The test loads HOL4's kernel (Type, Term, Subst, Net, Thm) through
+`PolyML.use` into a basis-loaded checkpoint, then constructs and
+verifies 12 primitive HOL4 inferences (REFL, ASSUME, DISCH, MP,
+TRANS, SYM, EQ_MP, AP_TERM, BETA_CONV, ABS, MK_COMB, INST_TYPE) plus
+two derived theorems (transitivity of `==>`, Leibniz substitution).
+Every theorem object is constructed by HOL4's actual LCF-style
+kernel running on our Rust interpreter — not a simulation.
+
+The strict test (`assert_compile_clean` in `hol4_recon.rs`) rejects
+any `: error:` or `Static Errors` output during the load chain, so
+silent compile failures can't sneak past.
+
 ## Bootstrap image structure (important!)
 
 `vendor/polyml/bootstrap/bootstrap64.txt` is **Stage 0** — the bare
@@ -121,18 +142,39 @@ Consequences for testing:
 The `bootstrap_can_register_infix_plus_and_compute` test in
 `crates/polyml-bin/tests/cli_run.rs` exercises this path.
 
+## JIT status (58.45% coverage, executes end-to-end)
+
+The JIT translates bytecode to Cranelift IR. 58.45% of bootstrap
+code objects compile cleanly; coverage report via:
+
+    cargo test --release -p polyml-jit --test coverage_bootstrap -- --nocapture
+
+**The JIT actually executes** as of `b90ae00`:
+- `Interpreter::install_jit(code_obj_ptr, JitEntry)` registers a JIT'd
+  function in a cache.
+- `Interpreter::do_call` checks the cache; cache hit dispatches to
+  the native function instead of stepping bytecode.
+- Inside JIT'd code, `closure_call_trampoline` reads a thread-local
+  interpreter handle and routes nested CALLs back through
+  `jit_bridge::jit_dispatch_closure_call` — which itself checks
+  the cache, enabling JIT-to-JIT chaining.
+
+Measured speedup: **24.64x** for a small arithmetic function over
+the bytecode interpreter (`jit_speedup_bench.rs`).
+
+End-to-end validation test:
+`crates/polyml-jit/tests/jit_call_const_addr8_end_to_end.rs` —
+caller bytecode pushes 7, calls a JIT-cached closure via real
+`CALL_CONST_ADDR8`, gets 107 back.
+
 ## Open issues
 
-- **JIT closure trampoline is a stub**: `closure_call_trampoline`
-  in `crates/polyml-jit/src/lib.rs` returns TAGGED(0). Translation
-  of CALL_CONST_ADDR8/CALL_LOCAL_B succeeds (so coverage grows),
-  but JIT'd code can't actually be EXECUTED on real closures yet.
-
-- **JIT coverage ~9%**: `cargo test -p polyml-jit --test
-  coverage_bootstrap -- --nocapture` shows top blockers. After
-  CALL_CONST_ADDR8 was implemented, the next big ones are
-  TAIL_B_B (570 fns), RESET_R_B (445), RAISE_EX (392),
-  STACK_CONTAINER_B (241), and Cranelift verifier errors (647).
+- **Remaining JIT coverage gaps** (~41% of functions): allocation
+  paths (CLOSURE_B, STACK_CONTAINER_B, ALLOC_BYTE_MEM ~700 fns
+  need real heap-allocation trampolines), CFG widening for the
+  fall-through-deeper-than-recorded case (~190 fns), dynamic
+  CALL_CLOSURE arity (177 fns), and assorted niche opcodes
+  (CASE16, BLOCK_EQUAL_BYTE, MOVE_TO_CONTAINER_B).
 
 - **GC**: copying GC is in. The bump allocator behind it
   doesn't fragment; long-running programs stay under ~100 MB
