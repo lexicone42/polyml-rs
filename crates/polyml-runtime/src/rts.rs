@@ -31,6 +31,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use crate::poly_word::PolyWord;
 
@@ -38,6 +39,27 @@ use crate::poly_word::PolyWord;
 /// which RTS functions are on the critical path before they're really
 /// implemented.
 static RTS_TRACE: AtomicBool = AtomicBool::new(false);
+
+/// Command-line arguments visible to SML via `CommandLine.arguments()`.
+/// The CLI's `poly run` populates this before starting the interpreter;
+/// SML's `CommandLine.arguments` reaches us via
+/// `poly_get_commandline_arguments`. Defaults to empty if never set.
+static COMMAND_ARGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Replace the command-line argument list seen by SML's
+/// `CommandLine.arguments`. Pass the args you want the SML program to
+/// receive — typically the image path and anything after it
+/// (e.g. `-I /some/path`).
+pub fn set_command_args(args: Vec<String>) {
+    let mut g = COMMAND_ARGS.lock().expect("COMMAND_ARGS poisoned");
+    *g = args;
+}
+
+/// Read the current command-line args. Returns a clone so callers don't
+/// have to keep the mutex held while building SML-shaped values.
+pub fn get_command_args() -> Vec<String> {
+    COMMAND_ARGS.lock().expect("COMMAND_ARGS poisoned").clone()
+}
 
 /// Enable or disable RTS call tracing.
 pub fn set_rts_trace(on: bool) {
@@ -1014,39 +1036,32 @@ fn poly_thread_max_stack_size(_: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord
 ///   all wrapped in a byte object.
 #[allow(clippy::needless_pass_by_value)]
 fn poly_get_commandline_arguments(ctx: &mut RtsContext<'_>, _tid: PolyWord) -> PolyWord {
-    let Some(space) = ctx.alloc_space.as_mut() else {
-        return PolyWord::tagged(0);
-    };
-    // Allocate the string "poly": 1 length-prefix word + 1 word for 4 bytes.
-    let name = b"poly";
-    let str_words = 1 + name.len().div_ceil(std::mem::size_of::<usize>());
-    let str_obj = space.alloc(str_words);
-    // SAFETY: just allocated `str_words` words
-    unsafe {
-        crate::space::set_length_word(str_obj, str_words, crate::length_word::F_BYTE_OBJ);
-        // Length-prefix word: number of chars.
-        str_obj.add(0).write(PolyWord::from_bits(name.len()));
-        // Chars
-        let chars_ptr = str_obj.add(1).cast::<u8>();
-        std::ptr::copy_nonoverlapping(name.as_ptr(), chars_ptr, name.len());
-        // Zero-pad remaining bytes in the final word
-        let pad = str_words * std::mem::size_of::<usize>() - std::mem::size_of::<usize>() - name.len();
-        if pad > 0 {
-            std::ptr::write_bytes(chars_ptr.add(name.len()), 0, pad);
-        }
+    let mut args = get_command_args();
+    if args.is_empty() {
+        args.push("poly".to_string());
     }
-    let str_word = PolyWord::from_ptr(str_obj.cast_const());
+    build_string_list(ctx, &args)
+}
 
-    // Allocate cons cell [str, nil]. F_MUTABLE_BIT NOT set — this is an
-    // immutable list element.
-    let cons = space.alloc(2);
-    // SAFETY: just allocated 2 words
-    unsafe {
-        crate::space::set_length_word(cons, 2, 0); // ordinary word object
-        cons.add(0).write(str_word);
-        cons.add(1).write(PolyWord::tagged(0)); // nil tail
+/// Build an SML list-of-strings (`string list`) from a slice of Rust
+/// strings, allocating into the RTS context's alloc space.
+fn build_string_list(ctx: &mut RtsContext<'_>, strs: &[String]) -> PolyWord {
+    let mut tail = PolyWord::tagged(0); // nil
+    for s in strs.iter().rev() {
+        let str_word = alloc_poly_string(ctx, s.as_bytes());
+        let Some(space) = ctx.alloc_space.as_mut() else {
+            return PolyWord::tagged(0);
+        };
+        let cons = space.alloc(2);
+        // SAFETY: just allocated 2 words.
+        unsafe {
+            crate::space::set_length_word(cons, 2, 0);
+            cons.add(0).write(str_word);
+            cons.add(1).write(tail);
+        }
+        tail = PolyWord::from_ptr(cons.cast_const());
     }
-    PolyWord::from_ptr(cons.cast_const())
+    tail
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -2829,6 +2844,15 @@ mod tests {
     fn token_zero_is_unresolved() {
         let t = RtsTable::new();
         assert!(t.entry(0).is_none());
+    }
+
+    #[test]
+    fn set_command_args_round_trips() {
+        set_command_args(vec!["-I".to_string(), "/tmp".to_string()]);
+        let got = get_command_args();
+        assert_eq!(got, vec!["-I".to_string(), "/tmp".to_string()]);
+        // Reset so other tests don't see this state.
+        set_command_args(Vec::new());
     }
 
     fn ctx() -> RtsContext<'static> {

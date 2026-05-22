@@ -33,14 +33,27 @@ fn bootstrap_image() -> Option<PathBuf> {
 }
 
 fn run_with_stdin(stdin_data: &str, max_steps: u64) -> Result<(String, String), std::io::Error> {
+    run_with_stdin_and_args(stdin_data, max_steps, &[])
+}
+
+fn run_with_stdin_and_args(
+    stdin_data: &str,
+    max_steps: u64,
+    extra_args: &[&str],
+) -> Result<(String, String), std::io::Error> {
     let Some(image) = bootstrap_image() else {
         return Ok((String::new(), String::from("SKIP: bootstrap image not present")));
     };
-    let mut child = Command::new(poly_bin())
-        .arg("run")
+    let mut cmd = Command::new(poly_bin());
+    cmd.arg("run")
         .arg("--max-steps")
         .arg(max_steps.to_string())
-        .arg(&image)
+        .arg(&image);
+    if !extra_args.is_empty() {
+        cmd.arg("--");
+        cmd.args(extra_args);
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -137,6 +150,41 @@ fn bootstrap_can_register_infix_plus_and_compute() {
     assert!(
         !stdout.contains("Error-"),
         "expected no compiler errors, got: {stdout}"
+    );
+}
+
+/// `poly run img -- -I path` makes `path` visible to the SML side
+/// as a `CommandLine.argument`. `Bootstrap.use "file.sml"` then
+/// finds and loads it via `TextIO.openIn` (RTS file I/O subcodes 3/4)
+/// + `OS.Path.concat`. This is the foundation for "use" — without
+/// it, only stdin-piped programs can run.
+#[test]
+fn bootstrap_use_finds_relative_file_via_minus_i() {
+    // Write a tiny prelude that the SML can load.
+    let dir = std::env::temp_dir().join("polyml_rs_use_test");
+    let _ = std::fs::create_dir_all(&dir);
+    let prelude_path = dir.join("prelude.sml");
+    std::fs::write(
+        &prelude_path,
+        b"infix 6 +; RunCall.addOverload FixedInt.+ \"+\"; val x = 1 + 2;",
+    )
+    .unwrap();
+
+    let dir_str = dir.to_string_lossy().into_owned();
+    let stdin = "val () = Bootstrap.use \"prelude.sml\";\n";
+    let Ok((stdout, stderr)) = run_with_stdin_and_args(stdin, 10_000_000, &["-I", &dir_str]) else {
+        return;
+    };
+    if stdout.is_empty() {
+        return;
+    }
+    assert!(
+        stdout.contains("Use: prelude.sml"),
+        "expected 'Use: prelude.sml' marker, got stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Tagged(0)"),
+        "expected clean exit after Bootstrap.use, got stdout={stdout} stderr={stderr}"
     );
 }
 

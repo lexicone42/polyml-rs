@@ -58,6 +58,13 @@ enum Cmd {
         /// code object's hot PC range. Requires --profile.
         #[arg(long)]
         disasm_hottest: bool,
+        /// Extra arguments visible to the SML program via
+        /// `CommandLine.arguments()`. The bootstrap looks for `-I path`
+        /// in particular, so it can locate basis sources when
+        /// `Bootstrap.use "..."` is called with a relative path.
+        /// Pass these after a `--` separator: `poly run img.txt -- -I /tmp`.
+        #[arg(last = true)]
+        args: Vec<String>,
     },
 }
 
@@ -82,7 +89,8 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             profile,
             trace_rts,
             disasm_hottest,
-        } => run_image(image, *max_steps, *profile, *trace_rts, *disasm_hottest),
+            args,
+        } => run_image(image, *max_steps, *profile, *trace_rts, *disasm_hottest, args.clone()),
     }
 }
 
@@ -92,6 +100,7 @@ fn run_image(
     profile: bool,
     trace_rts: bool,
     disasm_hottest: bool,
+    extra_args: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let image = Image::parse(&bytes)?;
@@ -101,6 +110,12 @@ fn run_image(
         polyml_runtime::rts::set_rts_trace(true);
     }
     polyml_runtime::rts::clear_finish_requested();
+
+    // Plumb extra args through to SML's CommandLine.arguments().
+    // Upstream PolyML's `user_arg_strings` (= CommandLine.arguments) is
+    // everything after argv[0] except the image path itself. We pass
+    // through whatever came after `--`, matching that convention.
+    polyml_runtime::rts::set_command_args(extra_args);
 
     let rts = Arc::new(RtsTable::new());
     let (patched, missing) = patch_entry_points(&mut loaded, &rts);
