@@ -889,9 +889,12 @@ pub fn compile_with_consts(
         .module
         .declare_function(&name, Linkage::Export, &ctx.func.signature)
         .map_err(|e| JitError::Module(e.to_string()))?;
+    // Use the Debug formatter so verifier errors include their
+    // detailed messages (the Display impl summarises to "Verifier
+    // errors" which is useless for diagnosis).
     jit.module
         .define_function(func_id, &mut ctx)
-        .map_err(|e| JitError::Module(e.to_string()))?;
+        .map_err(|e| JitError::Module(format!("{e:?}")))?;
     jit.module.clear_context(&mut ctx);
     jit.module
         .finalize_definitions()

@@ -99,11 +99,20 @@ fn jit_coverage_on_bootstrap_code_objects() {
                     *blockers.entry("fell-off-end".into()).or_insert(0) += 1;
                 }
                 Err(translate::TranslateError::Jit(je)) => {
-                    // Truncate the message — Cranelift errors can be long
-                    // and we want them to group sensibly.
-                    let s = je.to_string();
-                    let short: String = s.chars().take(80).collect();
-                    *blockers.entry(format!("jit-internal: {short}")).or_insert(0) += 1;
+                    // Categorise by the verifier-error message body.
+                    // Cranelift's `VerifierError { message: ... }` field
+                    // is the human-readable diagnostic.
+                    let s = format!("{je}");
+                    let key = if let Some(start) = s.find("message: \"") {
+                        let after = &s[start + "message: \"".len()..];
+                        let end = after.find('"').unwrap_or(80);
+                        let msg: &str = &after[..end.min(80)];
+                        format!("verifier: {msg}")
+                    } else {
+                        let short: String = s.chars().take(80).collect();
+                        format!("jit: {short}")
+                    };
+                    *blockers.entry(key).or_insert(0) += 1;
                 }
             }
         });
