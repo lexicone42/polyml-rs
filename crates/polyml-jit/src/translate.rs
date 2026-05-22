@@ -47,6 +47,13 @@ const INSTR_FIXED_SUB: u8 = 0xab;
 const INSTR_FIXED_MULT: u8 = 0xac;
 const INSTR_EQUAL_WORD: u8 = 0xa0;
 const INSTR_LESS_SIGNED: u8 = 0xa2;
+const INSTR_LESS_UNSIGNED: u8 = 0xa3;
+const INSTR_LESS_EQ_SIGNED: u8 = 0xa4;
+const INSTR_LESS_EQ_UNSIGNED: u8 = 0xa5;
+const INSTR_GREATER_SIGNED: u8 = 0xa6;
+const INSTR_GREATER_UNSIGNED: u8 = 0xa7;
+const INSTR_GREATER_EQ_SIGNED: u8 = 0xa8;
+const INSTR_GREATER_EQ_UNSIGNED: u8 = 0xa9;
 const INSTR_JUMP8: u8 = 0x02;
 const INSTR_JUMP8_FALSE: u8 = 0x03;
 const INSTR_JUMP8_TRUE: u8 = 0x46;
@@ -103,6 +110,8 @@ const INSTR_RESET_R_3: u8 = 0x66;
 const INSTR_RESET_R_B: u8 = 0x27;
 const INSTR_CALL_LOCAL_B: u8 = 0x16;
 const INSTR_TAIL_B_B: u8 = 0x7b;
+const INSTR_LOAD_UNTAGGED: u8 = 0x08;
+const INSTR_STORE_ML_WORD: u8 = 0x05;
 const INSTR_CALL_CONST_ADDR8_0: u8 = 0x57;
 const INSTR_CALL_CONST_ADDR8_1: u8 = 0x58;
 const INSTR_CONST_ADDR8_8: u8 = 0x15;
@@ -617,6 +626,43 @@ pub fn compile_with_consts(
                     );
                     stack.push(val);
                 }
+                INSTR_LOAD_UNTAGGED => {
+                    // Pop index (tagged), peek base (data ptr).
+                    // Replace top with *(base + (index>>1) * 8).
+                    let index_tag = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let base = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let index = builder.ins().sshr_imm(index_tag, 1);
+                    let eight = builder.ins().iconst(int, 8);
+                    let off = builder.ins().imul(index, eight);
+                    let addr = builder.ins().iadd(base, off);
+                    let val = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        addr,
+                        0,
+                    );
+                    let last = stack.len() - 1;
+                    stack[last] = val;
+                }
+                INSTR_STORE_ML_WORD => {
+                    // Pop value, pop index, pop base; write base[index]=value;
+                    // push tagged(0).
+                    let to_store = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let index_tag = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let base = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let index = builder.ins().sshr_imm(index_tag, 1);
+                    let eight = builder.ins().iconst(int, 8);
+                    let off = builder.ins().imul(index, eight);
+                    let addr = builder.ins().iadd(base, off);
+                    builder.ins().store(
+                        cranelift::prelude::MemFlags::trusted(),
+                        to_store,
+                        addr,
+                        0,
+                    );
+                    let tag0 = builder.ins().iconst(int, tag(0));
+                    stack.push(tag0);
+                }
                 INSTR_INDIRECT_0_LOCAL_0 => {
                     // peek top (= LOCAL_0); load offset 0
                     if stack.is_empty() {
@@ -905,17 +951,32 @@ pub fn compile_with_consts(
                     let result = builder.ins().iadd(doubled, one);
                     stack.push(result);
                 }
-                INSTR_LESS_SIGNED => {
-                    // Interp: bin_op_cmp(|x, y| (y as isize) < (x as isize))
-                    // pop x, y; push tagged(1) if y < x else tagged(0).
+                INSTR_LESS_SIGNED
+                | INSTR_LESS_UNSIGNED
+                | INSTR_LESS_EQ_SIGNED
+                | INSTR_LESS_EQ_UNSIGNED
+                | INSTR_GREATER_SIGNED
+                | INSTR_GREATER_UNSIGNED
+                | INSTR_GREATER_EQ_SIGNED
+                | INSTR_GREATER_EQ_UNSIGNED => {
+                    let cc = match op {
+                        INSTR_LESS_SIGNED => IntCC::SignedLessThan,
+                        INSTR_LESS_UNSIGNED => IntCC::UnsignedLessThan,
+                        INSTR_LESS_EQ_SIGNED => IntCC::SignedLessThanOrEqual,
+                        INSTR_LESS_EQ_UNSIGNED => IntCC::UnsignedLessThanOrEqual,
+                        INSTR_GREATER_SIGNED => IntCC::SignedGreaterThan,
+                        INSTR_GREATER_UNSIGNED => IntCC::UnsignedGreaterThan,
+                        INSTR_GREATER_EQ_SIGNED => IntCC::SignedGreaterThanOrEqual,
+                        _ => IntCC::UnsignedGreaterThanOrEqual,
+                    };
                     let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
                     let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let cmp = builder.ins().icmp(IntCC::SignedLessThan, y, x);
+                    // Compute y CC x (since interp does `y OP x`).
+                    let cmp = builder.ins().icmp(cc, y, x);
                     let cmp64 = builder.ins().uextend(int, cmp);
                     let doubled = builder.ins().ishl_imm(cmp64, 1);
                     let one = builder.ins().iconst(int, 1);
-                    let result = builder.ins().iadd(doubled, one);
-                    stack.push(result);
+                    stack.push(builder.ins().iadd(doubled, one));
                 }
                 INSTR_FIXED_MULT => {
                     // Interp: result_n = x_n * y_n
@@ -1196,6 +1257,13 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_WORD_SHIFT_R_LOG
         | INSTR_EQUAL_WORD
         | INSTR_LESS_SIGNED
+        | INSTR_LESS_UNSIGNED
+        | INSTR_LESS_EQ_SIGNED
+        | INSTR_LESS_EQ_UNSIGNED
+        | INSTR_GREATER_SIGNED
+        | INSTR_GREATER_UNSIGNED
+        | INSTR_GREATER_EQ_SIGNED
+        | INSTR_GREATER_EQ_UNSIGNED
         | INSTR_LOCAL_0..=INSTR_LOCAL_11
         | INSTR_INDIRECT_0
         | INSTR_INDIRECT_1
@@ -1220,6 +1288,7 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_RESET_B | INSTR_RESET_R_B => 2,
         INSTR_SET_STACK_VAL_B => 2,
         INSTR_INDIRECT_B => 2,
+        INSTR_LOAD_UNTAGGED | INSTR_STORE_ML_WORD => 1,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -1462,6 +1531,8 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 | INSTR_INDIRECT_4
                 | INSTR_INDIRECT_5 => (1, 1, None, 0),
                 INSTR_INDIRECT_B => (1, 1, None, 1),
+                INSTR_LOAD_UNTAGGED => (1, 2, None, 0),  // pop idx, peek base; net -1+1 = 0
+                INSTR_STORE_ML_WORD => (1, 3, None, 0),  // pop val,idx,base; push 1; net -2
                 INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
                 INSTR_NO_OP => (0, 0, None, 0),
                 INSTR_RESET_1 => (0, 1, None, 0),
@@ -1534,7 +1605,11 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 | INSTR_WORD_ADD | INSTR_WORD_SUB | INSTR_WORD_MULT
                 | INSTR_WORD_AND | INSTR_WORD_OR | INSTR_WORD_XOR
                 | INSTR_WORD_SHIFT_LEFT | INSTR_WORD_SHIFT_R_LOG
-                | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED => (1, 2, None, 0),
+                | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED
+                | INSTR_LESS_UNSIGNED | INSTR_LESS_EQ_SIGNED
+                | INSTR_LESS_EQ_UNSIGNED | INSTR_GREATER_SIGNED
+                | INSTR_GREATER_UNSIGNED | INSTR_GREATER_EQ_SIGNED
+                | INSTR_GREATER_EQ_UNSIGNED => (1, 2, None, 0),
                 INSTR_SET_STACK_VAL_B => {
                     // Pops 1; writes into a stack slot below — depth
                     // unchanged net, but immediate consumes 1 byte.
@@ -1744,6 +1819,16 @@ fn scan_branch_targets(
                 }
                 // pop ptr, push field value: net 0.
             }
+            INSTR_LOAD_UNTAGGED => {
+                // Pop idx, peek base, push value. Net 0; min depth 2.
+                if depth < 2 { return Err(TranslateError::Underflow(pc - 1)); }
+                depth -= 1; // net effect (-2 +1)
+            }
+            INSTR_STORE_ML_WORD => {
+                // Pop val + idx + base, push tag(0). Net -2; min depth 3.
+                if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
+                depth -= 2;
+            }
             INSTR_INDIRECT_0_LOCAL_0 => {
                 if depth == 0 {
                     return Err(TranslateError::Underflow(pc - 1));
@@ -1865,7 +1950,11 @@ fn scan_branch_targets(
             | INSTR_WORD_ADD | INSTR_WORD_SUB | INSTR_WORD_MULT
             | INSTR_WORD_AND | INSTR_WORD_OR | INSTR_WORD_XOR
             | INSTR_WORD_SHIFT_LEFT | INSTR_WORD_SHIFT_R_LOG
-            | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED => {
+            | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED
+            | INSTR_LESS_UNSIGNED | INSTR_LESS_EQ_SIGNED
+            | INSTR_LESS_EQ_UNSIGNED | INSTR_GREATER_SIGNED
+            | INSTR_GREATER_UNSIGNED | INSTR_GREATER_EQ_SIGNED
+            | INSTR_GREATER_EQ_UNSIGNED => {
                 if depth < 2 {
                     return Err(TranslateError::Underflow(pc - 1));
                 }
