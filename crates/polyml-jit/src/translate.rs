@@ -119,6 +119,12 @@ const INSTR_TAIL_B_B: u8 = 0x7b;
 const INSTR_LOAD_UNTAGGED: u8 = 0x08;
 const INSTR_STORE_ML_WORD: u8 = 0x05;
 const INSTR_RAISE_EX: u8 = 0x10;
+const INSTR_ALLOC_REF: u8 = 0x06;
+const INSTR_CELL_LENGTH: u8 = 0x93;
+const INSTR_LOAD_ML_BYTE: u8 = 0xdc;
+const INSTR_LOAD_ML_WORD: u8 = 0x04;
+const INSTR_NOT_BOOLEAN: u8 = 0x91;
+const INSTR_IS_TAGGED: u8 = 0x92;
 const INSTR_SET_HANDLER8: u8 = 0x81;
 const INSTR_SET_HANDLER16: u8 = 0xf9;
 const INSTR_DELETE_HANDLER: u8 = 0xf1;
@@ -1096,6 +1102,106 @@ pub fn compile_with_consts(
                     // Pop the handler marker pushed by SET_HANDLER.
                     let _ = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
                 }
+                INSTR_CELL_LENGTH => {
+                    // peek ptr; replace top with tagged(length-word & LENGTH_MASK).
+                    // length word is at ptr - 8.
+                    let p = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let lw = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        p,
+                        -8,
+                    );
+                    // mask = 0x00ff_ffff_ffff_ffff (low 56 bits)
+                    let mask = builder.ins().iconst(int, 0x00ff_ffff_ffff_ffff_u64 as i64);
+                    let len = builder.ins().band(lw, mask);
+                    // tag: (len << 1) | 1
+                    let shifted = builder.ins().ishl_imm(len, 1);
+                    let one = builder.ins().iconst(int, 1);
+                    let tagged_v = builder.ins().bor(shifted, one);
+                    let last = stack.len() - 1;
+                    stack[last] = tagged_v;
+                }
+                INSTR_LOAD_ML_BYTE => {
+                    // Pop index (tagged), peek base, replace top with
+                    // tagged(*(base + (index>>1))).
+                    let index_tag = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let base = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let index = builder.ins().sshr_imm(index_tag, 1);
+                    let addr = builder.ins().iadd(base, index);
+                    let b = builder.ins().load(
+                        types::I8,
+                        cranelift::prelude::MemFlags::trusted(),
+                        addr,
+                        0,
+                    );
+                    let b64 = builder.ins().uextend(int, b);
+                    let shifted = builder.ins().ishl_imm(b64, 1);
+                    let one = builder.ins().iconst(int, 1);
+                    let tagged_v = builder.ins().bor(shifted, one);
+                    let last = stack.len() - 1;
+                    stack[last] = tagged_v;
+                }
+                INSTR_LOAD_ML_WORD => {
+                    // Pop index (tagged), peek base, replace top with
+                    // *(base + index*8). Result is a raw PolyWord (no
+                    // re-tagging).
+                    let index_tag = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let base = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let index = builder.ins().sshr_imm(index_tag, 1);
+                    let eight = builder.ins().iconst(int, 8);
+                    let off = builder.ins().imul(index, eight);
+                    let addr = builder.ins().iadd(base, off);
+                    let v = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        addr,
+                        0,
+                    );
+                    let last = stack.len() - 1;
+                    stack[last] = v;
+                }
+                INSTR_NOT_BOOLEAN => {
+                    // Pop v; push tag(1) if v == tag(0), else tag(0).
+                    // tagged(0) = 1; tagged(1) = 3. So:
+                    //   if v == 1: push 3 ; else push 1
+                    let v = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let tag0 = builder.ins().iconst(int, tag(0));
+                    let tag1 = builder.ins().iconst(int, tag(1));
+                    let is_false = builder.ins().icmp(IntCC::Equal, v, tag0);
+                    let result = builder.ins().select(is_false, tag1, tag0);
+                    stack.push(result);
+                }
+                INSTR_IS_TAGGED => {
+                    // Pop v; push tag(1) if v & 1 == 1, else tag(0).
+                    let v = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let one = builder.ins().iconst(int, 1);
+                    let lsb = builder.ins().band(v, one);
+                    let doubled = builder.ins().ishl_imm(lsb, 1);
+                    let result = builder.ins().iadd(doubled, one);
+                    stack.push(result);
+                }
+                INSTR_ALLOC_REF => {
+                    // Alloc 1-word mutable cell, init from top. Replaces
+                    // top with cell pointer (interp: peek init,
+                    // allocate, write, pop init, push pointer).
+                    let init = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift::prelude::StackSlotData::new(
+                            cranelift::prelude::StackSlotKind::ExplicitSlot,
+                            8,
+                            3,
+                        ),
+                    );
+                    builder.ins().stack_store(init, slot, 0);
+                    let vals_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    let n_v = builder.ins().iconst(types::I64, 1);
+                    let call_inst =
+                        builder.ins().call(alloc_func_ref, &[n_v, vals_ptr]);
+                    let result_val = builder.inst_results(call_inst)[0];
+                    let last = stack.len() - 1;
+                    stack[last] = result_val;
+                }
                 INSTR_TAIL_B_B => {
                     // tail_count + skip immediates. Per upstream
                     // `bytecode.cpp:387`, tail_count counts the
@@ -1382,7 +1488,9 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_RETURN_B => 2,
         INSTR_RETURN_W => 3,
         INSTR_TAIL_B_B => 3,
-        INSTR_RAISE_EX | INSTR_DELETE_HANDLER => 1,
+        INSTR_RAISE_EX | INSTR_DELETE_HANDLER | INSTR_ALLOC_REF
+        | INSTR_CELL_LENGTH | INSTR_LOAD_ML_BYTE | INSTR_LOAD_ML_WORD
+        | INSTR_NOT_BOOLEAN | INSTR_IS_TAGGED => 1,
         INSTR_SET_HANDLER8 => 2,
         INSTR_SET_HANDLER16 => 3,
         INSTR_JUMP16 | INSTR_JUMP_BACK16 => 3,
@@ -1745,6 +1853,11 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_SET_HANDLER8 => (1, 0, None, 1),
                 INSTR_SET_HANDLER16 => (1, 0, None, 2),
                 INSTR_DELETE_HANDLER => (0, 1, None, 0),
+                INSTR_ALLOC_REF => (1, 1, None, 0),  // peek init, push cell
+                INSTR_CELL_LENGTH => (1, 1, None, 0), // peek ptr, push len
+                INSTR_LOAD_ML_BYTE => (1, 2, None, 0), // pop idx, peek base, push byte
+                INSTR_LOAD_ML_WORD => (1, 2, None, 0), // pop idx, peek base, push word
+                INSTR_NOT_BOOLEAN | INSTR_IS_TAGGED => (1, 1, None, 0), // pop, push
                 _ => {
                     // Unknown opcode — stop walking but return what
                     // we inferred from the prefix we did understand.
@@ -1826,6 +1939,19 @@ fn scan_branch_targets(
             INSTR_CONST_10 => depth += 1,
             INSTR_LOCAL_0..=INSTR_LOCAL_11 => {
                 let d = (op - INSTR_LOCAL_0) as usize;
+                if d >= depth {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                depth += 1;
+            }
+            INSTR_LOCAL_12 | INSTR_LOCAL_13 | INSTR_LOCAL_14 | INSTR_LOCAL_15 => {
+                let d = match op {
+                    INSTR_LOCAL_12 => 12,
+                    INSTR_LOCAL_13 => 13,
+                    INSTR_LOCAL_14 => 14,
+                    INSTR_LOCAL_15 => 15,
+                    _ => unreachable!(),
+                };
                 if d >= depth {
                     return Err(TranslateError::Underflow(pc - 1));
                 }
@@ -2129,6 +2255,30 @@ fn scan_branch_targets(
                     return Err(TranslateError::Underflow(pc - 1));
                 }
                 depth -= 1;
+            }
+            INSTR_ALLOC_REF => {
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                // Replaces top; net 0.
+            }
+            INSTR_CELL_LENGTH => {
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                // Replaces top; net 0.
+            }
+            INSTR_LOAD_ML_BYTE | INSTR_LOAD_ML_WORD => {
+                if depth < 2 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                depth -= 1; // pop idx, peek base, push value; net -1
+            }
+            INSTR_NOT_BOOLEAN | INSTR_IS_TAGGED => {
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                // Pop, push: net 0.
             }
             INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3 => {
                 if depth == 0 {
