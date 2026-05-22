@@ -72,6 +72,30 @@ pub fn jit_dispatch_closure_call(
     // SAFETY: caller of `with_jit_interp` holds the borrow.
     let interp = unsafe { &mut *interp_ptr };
 
+    // Fast path: if the closure's code object has a JIT-cached
+    // entry, dispatch to it directly (no interpreter frame setup).
+    // This handles JIT-to-JIT calls without wasted interp work.
+    if !closure.is_data_ptr() {
+        return Err(InterpError::NotAClosure(closure));
+    }
+    let closure_ptr_word = closure.as_ptr::<PolyWord>();
+    // SAFETY: closure is a data pointer.
+    let code_word = unsafe { *closure_ptr_word };
+    let code_obj_addr = code_word.0;
+    if let Some(entry) = interp.jit_lookup(code_obj_addr) {
+        // Build args_ptr per JIT convention.
+        let mut args_buf: Vec<i64> = Vec::with_capacity(entry.arity_init);
+        for arg in args {
+            args_buf.push(arg.0 as i64);
+        }
+        while args_buf.len() < entry.arity_init {
+            args_buf.push(0);
+        }
+        // SAFETY: entry.func registered with matching ABI.
+        let result = unsafe { (entry.func)(args_buf.as_ptr()) };
+        return Ok(PolyWord::from_bits(result as usize));
+    }
+
     // Save state we restore on return.
     let saved = interp.jit_state_save();
 

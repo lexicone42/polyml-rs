@@ -45,17 +45,34 @@ pub unsafe extern "C" fn rts_trampoline(
 /// Closure-call trampoline. Signature must match what `translate.rs`
 /// declares: `(closure_word, n_args, args_ptr) -> i64`.
 ///
-/// Stub returns TAGGED(0) — real dispatch needs an Interpreter
-/// handle plumbed through. This lets `CALL_LOCAL_B` translate
-/// cleanly so coverage reports can grow; the resulting binary
-/// can't yet be safely *executed* on real closures.
+/// Real dispatch path: reads the thread-local interpreter handle
+/// set by `polyml_runtime::with_jit_interp`, then invokes
+/// `jit_dispatch_closure_call`. The dispatch may recurse into
+/// another JIT'd function (cache hit in `Interpreter::do_call`) or
+/// fall back to bytecode interpretation.
+///
+/// If the thread-local isn't set (e.g. JIT'd code being benchmarked
+/// in isolation), returns TAGGED(0) as a safe-ish fallback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn closure_call_trampoline(
-    _closure_word: i64,
-    _n_args: i64,
-    _args_ptr: *const i64,
+    closure_word: i64,
+    n_args: i64,
+    args_ptr: *const i64,
 ) -> i64 {
-    1
+    use polyml_runtime::PolyWord;
+    let closure = PolyWord::from_bits(closure_word as usize);
+    let n = n_args as usize;
+    let mut args: Vec<PolyWord> = Vec::with_capacity(n);
+    // SAFETY: caller (JIT'd code) guarantees args_ptr[0..n] is valid.
+    unsafe {
+        for i in 0..n {
+            args.push(PolyWord::from_bits(args_ptr.add(i).read() as usize));
+        }
+    }
+    match polyml_runtime::jit_dispatch_closure_call(closure, &args) {
+        Ok(v) => v.0 as i64,
+        Err(_) => 1, // TAGGED(0)
+    }
 }
 
 /// Tuple-alloc trampoline. `(n_words, values_ptr) -> i64` returning

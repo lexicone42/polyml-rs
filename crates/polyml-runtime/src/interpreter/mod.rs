@@ -316,6 +316,14 @@ impl Interpreter {
         self.jit_cache.insert(code_obj_ptr, entry);
     }
 
+    /// Look up a cached JIT entry for the given code-object address.
+    /// Used by `jit_bridge::jit_dispatch_closure_call` for the
+    /// JIT-to-JIT fast path.
+    #[must_use]
+    pub fn jit_lookup(&self, code_obj_ptr: usize) -> Option<JitEntry> {
+        self.jit_cache.get(&code_obj_ptr).copied()
+    }
+
     /// Enable per-step execution-profile collection. After this call,
     /// every `step()` records a visit to the current `(code_start,
     /// pc_offset)` and every `do_call()` records the target. Use
@@ -3296,9 +3304,24 @@ impl Interpreter {
             // Pop N args from the interpreter stack (they're now in
             // args_buf — the JIT'd function reads from there).
             self.sp += n;
+            // Set the thread-local interpreter pointer so any
+            // closure_call_trampoline / alloc_trampoline call from
+            // inside the JIT'd code can reach back into this
+            // interpreter via `jit_bridge`.
+            //
+            // We use a raw `*mut Interpreter` to avoid double-borrow.
+            // The thread-local guard restores the previous value on
+            // drop (including panic).
+            let self_ptr: *mut Interpreter = self;
+            let prev = crate::jit_bridge::JIT_INTERP.with(|c| {
+                let p = c.get();
+                c.set(self_ptr);
+                p
+            });
             // SAFETY: caller registered `entry.func` with a matching
             // ABI; args_buf has at least arity_init entries.
             let result_bits = unsafe { (entry.func)(args_buf.as_ptr()) };
+            crate::jit_bridge::JIT_INTERP.with(|c| c.set(prev));
             let result = PolyWord::from_bits(result_bits as usize);
             self.push(result)?;
             return Ok(());
