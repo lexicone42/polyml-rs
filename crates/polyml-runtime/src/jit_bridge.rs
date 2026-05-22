@@ -178,10 +178,18 @@ pub fn jit_dispatch_closure_call(
     let code_word = unsafe { *closure_ptr_word };
     let code_obj_addr = code_word.0;
     if let Some(entry) = interp.jit_lookup(code_obj_addr) {
-        // Build args_ptr per JIT convention.
+        // Build args_ptr per JIT convention. Slot N+1 must be the
+        // real closure pointer so `INDIRECT_CLOSURE_BN` doesn't
+        // null-deref (same pattern as `Interpreter::do_call`).
         let mut args_buf: Vec<i64> = Vec::with_capacity(entry.arity_init);
         for arg in args {
             args_buf.push(arg.0 as i64);
+        }
+        if args_buf.len() < entry.arity_init {
+            args_buf.push(0); // retPC placeholder
+        }
+        if args_buf.len() < entry.arity_init {
+            args_buf.push(closure.0 as i64); // real closure
         }
         while args_buf.len() < entry.arity_init {
             args_buf.push(0);

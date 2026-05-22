@@ -3297,16 +3297,30 @@ impl Interpreter {
             //   sp[0] = arg_{N-1}, ..., sp[N-1] = arg_0  (caller pushed)
             // The JIT expects args_ptr ordered:
             //   args_ptr[0] = arg_0, ..., args_ptr[N-1] = arg_{N-1},
-            //   args_ptr[N] = retPC placeholder,
-            //   args_ptr[N+1] = closure placeholder
-            // We synthesize the placeholders.
+            //   args_ptr[N]   = retPC slot (LOCAL_1 in SML — JIT'd code
+            //                   doesn't actually call back via this so 0
+            //                   is safe)
+            //   args_ptr[N+1] = closure slot (LOCAL_0 in SML — SML code
+            //                   accesses captures via
+            //                   `INDIRECT_CLOSURE_BN` which dereferences
+            //                   this, so it MUST be the real closure
+            //                   pointer to avoid a null deref)
             let n = entry.sml_arity;
             let mut args_buf: Vec<i64> = Vec::with_capacity(entry.arity_init);
             // arg_0 = sp[N-1], arg_1 = sp[N-2], ..., arg_{N-1} = sp[0]
             for i in (0..n).rev() {
                 args_buf.push(self.stack[self.sp + i].0 as i64);
             }
-            // Fill remaining slots (retPC + closure placeholders) with 0.
+            // Slot N: retPC placeholder (0).
+            if args_buf.len() < entry.arity_init {
+                args_buf.push(0);
+            }
+            // Slot N+1: REAL closure pointer (for INDIRECT_CLOSURE_BN).
+            if args_buf.len() < entry.arity_init {
+                args_buf.push(closure.0 as i64);
+            }
+            // Any further slots: 0 (shouldn't happen — arity_init is
+            // typically exactly N+2).
             while args_buf.len() < entry.arity_init {
                 args_buf.push(0);
             }
