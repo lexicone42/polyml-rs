@@ -51,6 +51,10 @@ const INSTR_JUMP8: u8 = 0x02;
 const INSTR_JUMP8_FALSE: u8 = 0x03;
 const INSTR_JUMP8_TRUE: u8 = 0x46;
 const INSTR_JUMP_BACK8: u8 = 0x1e;
+const INSTR_JUMP_BACK16: u8 = 0x20;
+const INSTR_JUMP16: u8 = 0xf7;
+const INSTR_JUMP16_FALSE: u8 = 0xf8;
+const INSTR_JUMP16_TRUE: u8 = 0x47;
 const INSTR_LOCAL_B: u8 = 0x22;
 const INSTR_LOCAL_0: u8 = 0x29;
 const INSTR_LOCAL_7: u8 = 0x30;
@@ -1004,12 +1008,23 @@ pub fn compile_with_consts(
                     builder.ins().return_(&[v]);
                     returned = true;
                 }
-                INSTR_JUMP8 => {
-                    if pc >= bytecode.len() {
-                        return Err(TranslateError::Truncated(pc));
-                    }
-                    let off = bytecode[pc] as usize;
-                    pc += 1;
+                INSTR_JUMP8 | INSTR_JUMP16 => {
+                    let off = if op == INSTR_JUMP8 {
+                        if pc >= bytecode.len() {
+                            return Err(TranslateError::Truncated(pc));
+                        }
+                        let o = bytecode[pc] as usize;
+                        pc += 1;
+                        o
+                    } else {
+                        if pc + 1 >= bytecode.len() {
+                            return Err(TranslateError::Truncated(pc));
+                        }
+                        let lo = bytecode[pc];
+                        let hi = bytecode[pc + 1];
+                        pc += 2;
+                        u16::from_le_bytes([lo, hi]) as usize
+                    };
                     let target_pc = pc + off;
                     let target_blk = *block_at.get(&target_pc)
                         .expect("target should be registered in pass 1");
@@ -1018,13 +1033,28 @@ pub fn compile_with_consts(
                     builder.ins().jump(target_blk, &args);
                     returned = true;
                 }
-                INSTR_JUMP_BACK8 => {
-                    if pc >= bytecode.len() {
-                        return Err(TranslateError::Truncated(pc));
-                    }
-                    let off = bytecode[pc] as usize;
-                    pc += 1;
-                    let target_pc = pc - off - 2;
+                INSTR_JUMP_BACK8 | INSTR_JUMP_BACK16 => {
+                    let (off, imm_size) = if op == INSTR_JUMP_BACK8 {
+                        if pc >= bytecode.len() {
+                            return Err(TranslateError::Truncated(pc));
+                        }
+                        let o = bytecode[pc] as usize;
+                        pc += 1;
+                        (o, 1usize)
+                    } else {
+                        if pc + 1 >= bytecode.len() {
+                            return Err(TranslateError::Truncated(pc));
+                        }
+                        let lo = bytecode[pc];
+                        let hi = bytecode[pc + 1];
+                        pc += 2;
+                        (u16::from_le_bytes([lo, hi]) as usize, 2usize)
+                    };
+                    // Mirror interp: pc_offset_signed(-((off + imm_size + 1)))
+                    // For BACK8: pc_offset_signed(-(off+2)). For BACK16:
+                    // pc_offset_signed(-(off+3)). Both put us back by
+                    // (off + opcode_total_len) bytes.
+                    let target_pc = pc - off - 1 - imm_size;
                     let target_blk = *block_at.get(&target_pc)
                         .expect("back-edge target should be registered in pass 1");
                     let args: Vec<BlockArg> =
@@ -1032,12 +1062,24 @@ pub fn compile_with_consts(
                     builder.ins().jump(target_blk, &args);
                     returned = true;
                 }
-                INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => {
-                    if pc >= bytecode.len() {
-                        return Err(TranslateError::Truncated(pc));
-                    }
-                    let off = bytecode[pc] as usize;
-                    pc += 1;
+                INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE
+                | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
+                    let off = if op == INSTR_JUMP8_FALSE || op == INSTR_JUMP8_TRUE {
+                        if pc >= bytecode.len() {
+                            return Err(TranslateError::Truncated(pc));
+                        }
+                        let o = bytecode[pc] as usize;
+                        pc += 1;
+                        o
+                    } else {
+                        if pc + 1 >= bytecode.len() {
+                            return Err(TranslateError::Truncated(pc));
+                        }
+                        let lo = bytecode[pc];
+                        let hi = bytecode[pc + 1];
+                        pc += 2;
+                        u16::from_le_bytes([lo, hi]) as usize
+                    };
                     let target_pc = pc + off;
                     let cond = stack.pop().ok_or(TranslateError::Underflow(pc - 2))?;
                     let target_blk = *block_at.get(&target_pc)
@@ -1047,7 +1089,9 @@ pub fn compile_with_consts(
                     let is_zero = builder.ins().icmp(IntCC::Equal, cond, zero);
                     let args: Vec<BlockArg> =
                         stack.iter().copied().map(BlockArg::from).collect();
-                    if op == INSTR_JUMP8_FALSE {
+                    let jump_on_zero =
+                        op == INSTR_JUMP8_FALSE || op == INSTR_JUMP16_FALSE;
+                    if jump_on_zero {
                         builder.ins().brif(is_zero, target_blk, &args, fall_blk, &args);
                     } else {
                         builder.ins().brif(is_zero, fall_blk, &args, target_blk, &args);
@@ -1171,6 +1215,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_RETURN_B => 2,
         INSTR_RETURN_W => 3,
         INSTR_TAIL_B_B => 3,
+        INSTR_JUMP16 | INSTR_JUMP_BACK16 => 3,
+        INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => 3,
         INSTR_RESET_B | INSTR_RESET_R_B => 2,
         INSTR_SET_STACK_VAL_B => 2,
         INSTR_INDIRECT_B => 2,
@@ -1495,7 +1541,9 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     (0, 1, None, 1)
                 }
                 INSTR_JUMP8 | INSTR_JUMP_BACK8 => (0, 0, None, 1),
+                INSTR_JUMP16 | INSTR_JUMP_BACK16 => (0, 0, None, 2),
                 INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => (0, 1, None, 1),
+                INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => (0, 1, None, 2),
                 INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3 => (0, 1, None, 0),
                 INSTR_RETURN_B => (0, 1, None, 1),
                 INSTR_RETURN_W => (0, 1, None, 2),
@@ -1867,40 +1915,24 @@ fn scan_branch_targets(
                 if depth == 0 { return Err(TranslateError::Underflow(pc - 3)); }
                 reachable = false;
             }
-            INSTR_JUMP8 => {
-                if pc >= bytecode.len() {
-                    return Err(TranslateError::Truncated(pc));
-                }
-                let off = bytecode[pc] as usize;
-                pc += 1;
+            INSTR_JUMP8 | INSTR_JUMP16 => {
+                let (off, imm_bytes) = read_jump_off(bytecode, &mut pc, op)?;
+                let _ = imm_bytes;
                 let target = pc + off;
                 record_target(&mut targets, target, depth)?;
                 reachable = false;
             }
-            INSTR_JUMP_BACK8 => {
-                if pc >= bytecode.len() {
-                    return Err(TranslateError::Truncated(pc));
+            INSTR_JUMP_BACK8 | INSTR_JUMP_BACK16 => {
+                let (off, imm_bytes) = read_jump_off(bytecode, &mut pc, op)?;
+                // Total opcode size = 1 + imm_bytes. Target = pc - off - opcode_total_len
+                let opcode_total_len = 1 + imm_bytes;
+                if pc < off + opcode_total_len {
+                    return Err(TranslateError::Unsupported { op, at: pc - opcode_total_len });
                 }
-                let off = bytecode[pc] as usize;
-                pc += 1;
-                // Our interpreter computes:
-                //   self.pc_offset_signed(-((off + 2) as isize))
-                // which corresponds to landing at pc - off - 2 in the
-                // "PC after immediate" frame. Equivalently the target
-                // is `(pc_post_imm) - off - 2`; with `pc` already
-                // advanced past both the opcode and the immediate,
-                // target = pc - off - 2.
-                if pc < off + 2 {
-                    return Err(TranslateError::Unsupported { op, at: pc - 2 });
-                }
-                let target = pc - off - 2;
-                // Validate: the depth at the target (recorded earlier
-                // during this same linear scan) must match the depth
-                // here, since both sides of the back-edge share the
-                // same Block.
+                let target = pc - off - opcode_total_len;
                 let expected = depth_at[target].ok_or(TranslateError::Unsupported {
                     op,
-                    at: pc - 2,
+                    at: pc - opcode_total_len,
                 })?;
                 if expected != depth {
                     return Err(TranslateError::Unsupported { op: 0xFE, at: target });
@@ -1908,20 +1940,15 @@ fn scan_branch_targets(
                 record_target(&mut targets, target, depth)?;
                 reachable = false;
             }
-            INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => {
-                if pc >= bytecode.len() {
-                    return Err(TranslateError::Truncated(pc));
-                }
-                let off = bytecode[pc] as usize;
-                pc += 1;
+            INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE
+            | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
+                let (off, _) = read_jump_off(bytecode, &mut pc, op)?;
                 if depth == 0 {
-                    return Err(TranslateError::Underflow(pc - 2));
+                    return Err(TranslateError::Underflow(pc));
                 }
                 let post_pop = depth - 1;
                 let taken = pc + off;
                 record_target(&mut targets, taken, post_pop)?;
-                // Fallthrough also a branch target (so both arms
-                // start with the same block-param shape).
                 record_target(&mut targets, pc, post_pop)?;
                 depth = post_pop;
             }
@@ -1931,6 +1958,35 @@ fn scan_branch_targets(
         }
     }
     Ok(targets)
+}
+
+/// Read a jump immediate: 1 byte for 8-bit variants, 2 bytes (LE)
+/// for 16-bit variants. Returns (offset_value, immediate_byte_count).
+fn read_jump_off(
+    bytecode: &[u8],
+    pc: &mut usize,
+    op: u8,
+) -> Result<(usize, usize), TranslateError> {
+    let wide = matches!(
+        op,
+        INSTR_JUMP16 | INSTR_JUMP_BACK16 | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE
+    );
+    if wide {
+        if *pc + 1 >= bytecode.len() {
+            return Err(TranslateError::Truncated(*pc));
+        }
+        let lo = bytecode[*pc];
+        let hi = bytecode[*pc + 1];
+        *pc += 2;
+        Ok((u16::from_le_bytes([lo, hi]) as usize, 2))
+    } else {
+        if *pc >= bytecode.len() {
+            return Err(TranslateError::Truncated(*pc));
+        }
+        let o = bytecode[*pc] as usize;
+        *pc += 1;
+        Ok((o, 1))
+    }
 }
 
 fn record_target(
