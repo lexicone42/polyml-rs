@@ -18,7 +18,9 @@ pub mod rts;
 pub mod space;
 
 pub use interpreter::{InterpError, Interpreter, JitEntry, StepResult};
-pub use jit_bridge::{with_jit_interp, jit_dispatch_closure_call, JIT_INTERP};
+pub use jit_bridge::{
+    jit_dispatch_alloc, jit_dispatch_closure_call, with_jit_interp, JIT_INTERP,
+};
 pub use loader::{load_image, LoadError, LoadedImage};
 pub use poly_word::PolyWord;
 pub use rts::{patch_entry_points, RtsFn, RtsTable};

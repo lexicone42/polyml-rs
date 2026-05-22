@@ -76,14 +76,25 @@ pub unsafe extern "C" fn closure_call_trampoline(
 }
 
 /// Tuple-alloc trampoline. `(n_words, values_ptr) -> i64` returning
-/// the new heap-object pointer (or TAGGED(0) for an empty tuple).
-/// Real impl will call into the interpreter's alloc space.
+/// the new heap-object pointer.
+///
+/// Routes through `polyml_runtime::jit_dispatch_alloc` which uses
+/// the thread-local interpreter handle set by `with_jit_interp`.
+/// If the handle isn't set (e.g. JIT'd code running in isolation
+/// outside an interpreter dispatch), returns TAGGED(0) as a safe
+/// fallback — the JIT'd code can still run, just produces a
+/// useless tuple value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn alloc_tuple_trampoline(
-    _n_words: i64,
-    _values_ptr: *const i64,
+    n_words: i64,
+    values_ptr: *const i64,
 ) -> i64 {
-    1
+    #[allow(clippy::cast_sign_loss)]
+    let n = n_words.max(0) as usize;
+    match polyml_runtime::jit_dispatch_alloc(n, 0, values_ptr) {
+        Some(ptr) => ptr as i64,
+        None => 1, // TAGGED(0)
+    }
 }
 
 use cranelift::prelude::*;

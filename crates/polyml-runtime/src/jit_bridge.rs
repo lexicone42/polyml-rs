@@ -50,6 +50,37 @@ pub fn with_jit_interp<R>(interp: &mut Interpreter, f: impl FnOnce() -> R) -> R 
     f()
 }
 
+/// Trampoline-callable: allocate an `n_words` tuple/ref/closure
+/// object in the interpreter's alloc space and copy `values_ptr[0..n]`
+/// into the body. Returns the heap pointer as raw bits.
+///
+/// `flags` is the length-word flag byte (e.g. 0 for ordinary tuple,
+/// 0x03 for closure, 0x01 for mutable). Default callers use 0.
+///
+/// # Safety
+/// `values_ptr` must point at `n_words` valid `PolyWord` bits.
+/// The thread-local interp must be set (via [`with_jit_interp`]).
+pub fn jit_dispatch_alloc(n_words: usize, flags: u8, values_ptr: *const i64) -> Option<u64> {
+    let interp_ptr = JIT_INTERP.with(|c| c.get());
+    if interp_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: caller invariant.
+    let interp = unsafe { &mut *interp_ptr };
+    let space = interp.jit_alloc_space_mut()?;
+    let body = space.try_alloc(n_words)?;
+    // SAFETY: body is a freshly-allocated n_words region; values_ptr
+    // contains n_words readable PolyWord bits.
+    unsafe {
+        crate::space::set_length_word(body, n_words, flags);
+        for i in 0..n_words {
+            let v = values_ptr.add(i).read();
+            body.add(i).write(PolyWord::from_bits(v as usize));
+        }
+    }
+    Some(body as u64)
+}
+
 /// Trampoline-callable: dispatch a closure call by setting up the
 /// interpreter's stack and running until the call's top-level
 /// return fires (sentinel retPC = 0).

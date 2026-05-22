@@ -324,6 +324,15 @@ impl Interpreter {
         self.jit_cache.get(&code_obj_ptr).copied()
     }
 
+    /// Mutable accessor to this interpreter's `alloc_space` for the
+    /// JIT-bridge trampolines. Returns `None` if no alloc space has
+    /// been configured (the JIT-`TUPLE` etc. paths will then fail
+    /// gracefully rather than UB).
+    #[doc(hidden)]
+    pub fn jit_alloc_space_mut(&mut self) -> Option<&mut MemorySpace> {
+        self.alloc_space.as_mut()
+    }
+
     /// Enable per-step execution-profile collection. After this call,
     /// every `step()` records a visit to the current `(code_start,
     /// pc_offset)` and every `do_call()` records the target. Use
