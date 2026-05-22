@@ -203,10 +203,19 @@ pub fn compile_with_consts(
     } else {
         // For the function's OWN stack-init depth we need the maximum
         // peek depth (the function may peek closure/retPC slots at
-        // LOCAL_N for N >= arity, which infer_arg_count's min-depth
-        // analysis captures correctly). RETURN_N gives only SML
-        // arity — insufficient for stack-init sizing.
-        infer_arg_count(bytecode, entry_pc).unwrap_or(0)
+        // LOCAL_N for N >= arity). Combine two sources:
+        //  - `infer_arg_count`: walks bytecode counting min-stack-
+        //    depth; over-counts mildly when the function uses
+        //    LOCAL_{>=arity} (which is the common case).
+        //  - `arity_from_return_scan + 2`: SML arity from RETURN_N
+        //    plus 2 (the closure + retPC slots). A reliable lower
+        //    bound when RETURN_N is present.
+        // When `infer_arg_count` bails early on an unknown opcode,
+        // RETURN_N is the more accurate signal.
+        let from_peeks = infer_arg_count(bytecode, entry_pc).unwrap_or(0);
+        let from_return = arity_from_return_scan(bytecode).map_or(0, |n| n + 2);
+        let from_tail = arity_from_terminator_scan(bytecode, true).map_or(0, |n| n + 2);
+        from_peeks.max(from_return).max(from_tail)
     };
 
     // Declare the RTS trampoline import for this module. Signature:
@@ -1671,6 +1680,15 @@ fn closure_arity_from_addr(addr: u64) -> Option<usize> {
 /// (we don't want to mis-scan past data); returns `None` in that
 /// case so the caller falls back to peek-depth inference.
 fn arity_from_return_scan(bytecode: &[u8]) -> Option<usize> {
+    arity_from_terminator_scan(bytecode, false)
+}
+
+/// As `arity_from_return_scan` but also considers `TAIL_B_B` as an
+/// arity hint. TAIL_B_B's `tail_count - 2` is the callee arity, not
+/// strictly this function's arity — but for self-tail-recursive
+/// functions (a common case for HOL4/ML), they coincide. This is
+/// used as a LOWER-BOUND hint when no `RETURN_N` is present.
+fn arity_from_terminator_scan(bytecode: &[u8], include_tail: bool) -> Option<usize> {
     let mut pc = 0;
     while pc < bytecode.len() {
         let op = bytecode[pc];
@@ -1687,8 +1705,12 @@ fn arity_from_return_scan(bytecode: &[u8]) -> Option<usize> {
                 let hi = *bytecode.get(pc + 2)?;
                 return Some(u16::from_le_bytes([lo, hi]) as usize);
             }
-            // TAIL_B_B is also a terminator but tail_count refers to
-            // the CALLEE's arity, not this function's. Skip it.
+            INSTR_TAIL_B_B if include_tail => {
+                let tc = *bytecode.get(pc + 1)? as usize;
+                if tc >= 2 {
+                    return Some(tc - 2);
+                }
+            }
             _ => {}
         }
         let step = opcode_total_len(bytecode, pc).ok()?;
@@ -1906,9 +1928,11 @@ fn scan_branch_targets(
     let arg_count = if prologue_arg_count > 0 || start_pc > 0 {
         prologue_arg_count
     } else {
-        // Must match `compile_with_consts`: peek-depth inference for
-        // the function's stack-init sizing.
-        infer_arg_count(bytecode, start_pc).unwrap_or(0)
+        // Mirror `compile_with_consts`: max of (peek-depth, RETURN_N + 2, TAIL_count - 2 + 2).
+        let from_peeks = infer_arg_count(bytecode, start_pc).unwrap_or(0);
+        let from_return = arity_from_return_scan(bytecode).map_or(0, |n| n + 2);
+        let from_tail = arity_from_terminator_scan(bytecode, true).map_or(0, |n| n + 2);
+        from_peeks.max(from_return).max(from_tail)
     };
     let mut depth: usize = arg_count;
     let mut pc = start_pc;
