@@ -205,6 +205,28 @@ pub struct Interpreter {
     /// hot path pays only a branch). Enable with
     /// [`enable_diagnostics`](Self::enable_diagnostics).
     diag: Option<DiagState>,
+    /// JIT cache: maps code-object pointer (as `usize`) to a JIT'd
+    /// native function. When `do_call`'s target is in this cache,
+    /// it dispatches to the JIT'd version instead of interpreting.
+    /// Empty = transparent fallthrough; never affects unjitted code.
+    jit_cache: std::collections::HashMap<usize, JitEntry>,
+}
+
+/// A cached JIT'd function with the metadata needed to invoke it
+/// using the interpreter's calling convention.
+#[derive(Clone, Copy)]
+pub struct JitEntry {
+    /// Native entry point. `extern "C" fn(args_ptr) -> raw_polyword`.
+    /// Matches `polyml_jit::translate::JitFn`.
+    pub func: unsafe extern "C" fn(*const i64) -> i64,
+    /// Inferred arg count (= the `args_ptr` length the JIT expects).
+    /// Typically `sml_arity + 2` to cover the closure + retPC slots
+    /// that `LOCAL_0`/`LOCAL_1` access.
+    pub arity_init: usize,
+    /// SML arity = number of args the call site pushed (excluding
+    /// the closure + retPC the CALL opcode pushes). RETURN_N pops
+    /// this many args after popping the result.
+    pub sml_arity: usize,
 }
 
 impl Interpreter {
@@ -237,6 +259,7 @@ impl Interpreter {
             rts: Arc::new(RtsTable::empty()),
             _owned_code: Some(code),
             diag: None,
+            jit_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -278,7 +301,19 @@ impl Interpreter {
             rts: Arc::new(RtsTable::empty()),
             _owned_code: None,
             diag: None,
+            jit_cache: std::collections::HashMap::new(),
         }
+    }
+
+    /// Install a JIT'd version of a code object's bytecode. When
+    /// `do_call`'s target closure has `code_obj_ptr` matching one
+    /// installed here, the interpreter dispatches to `entry.func`
+    /// instead of stepping through bytecode.
+    ///
+    /// `code_obj_ptr` is the heap address of the code object body
+    /// (= `closure[0]` cast to `*const PolyWord`).
+    pub fn install_jit(&mut self, code_obj_ptr: usize, entry: JitEntry) {
+        self.jit_cache.insert(code_obj_ptr, entry);
     }
 
     /// Enable per-step execution-profile collection. After this call,
@@ -706,6 +741,75 @@ impl Interpreter {
     pub fn test_seed_return_sentinel(&mut self) {
         // retPC = null pointer encoded as a PolyWord bit pattern.
         let _ = self.push(PolyWord::from_bits(0));
+    }
+
+    /// Test/debug API: invoke `do_call` from outside the crate. Used
+    /// to validate the JIT-dispatch fast path without needing a full
+    /// bytecode-emitting caller.
+    #[doc(hidden)]
+    pub fn test_invoke_do_call(&mut self, closure: PolyWord) -> Result<(), InterpError> {
+        self.do_call(closure)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_sp(&self) -> usize {
+        self.sp
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_peek_top(&self) -> PolyWord {
+        self.stack[self.sp]
+    }
+
+    /// JIT bridge: snapshot PC + code segment so a nested
+    /// `jit_dispatch_closure_call` can restore them after returning.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn jit_state_save(&self) -> (*const u8, *const u8, *const u8) {
+        (self.pc, self.code_start, self.code_end)
+    }
+
+    /// JIT bridge: restore PC + code segment from a snapshot.
+    #[doc(hidden)]
+    pub fn jit_state_restore(&mut self, snapshot: (*const u8, *const u8, *const u8)) {
+        let (pc, code_start, code_end) = snapshot;
+        self.pc = pc;
+        self.code_start = code_start;
+        self.code_end = code_end;
+    }
+
+    /// JIT bridge: switch the interpreter's PC + code segment bounds
+    /// to point at the start of `closure`'s code object. Reads
+    /// `closure[0]` (the code address) and derives the bytecode
+    /// boundary from the code object's length-word + trailing-
+    /// offset, the same way `from_code_object` does.
+    ///
+    /// # Errors
+    /// Returns `NotAClosure` if `closure` isn't a data pointer.
+    #[doc(hidden)]
+    pub fn jit_set_code_segment_to_closure(
+        &mut self,
+        closure: PolyWord,
+    ) -> Result<(), InterpError> {
+        if !closure.is_data_ptr() {
+            return Err(InterpError::NotAClosure(closure));
+        }
+        let closure_ptr = closure.as_ptr::<PolyWord>();
+        // SAFETY: caller-trusted closure.
+        let code_word = unsafe { *closure_ptr };
+        if !code_word.is_data_ptr() {
+            return Err(InterpError::NotAClosure(closure));
+        }
+        let code_obj = code_word.as_ptr::<PolyWord>();
+        // SAFETY: closure points at a valid code object.
+        let (consts_start, _) =
+            unsafe { crate::length_word::const_segment_for_code(code_obj) };
+        self.code_start = code_obj.cast::<u8>();
+        self.code_end = consts_start.cast::<u8>();
+        self.pc = self.code_start;
+        Ok(())
     }
 
     // ---- Stack primitives ----------------------------------------------
@@ -3158,6 +3262,46 @@ impl Interpreter {
                 eprintln!("  Current code: 0x{:016x}", self.code_start as usize);
             }
             return Err(InterpError::NotAClosure(closure));
+        }
+        // JIT fast path: if a JIT'd version of this closure's code
+        // object is installed, dispatch to it directly without
+        // setting up an interpreter frame. The JIT'd function reads
+        // its args from the current sp window, returns a PolyWord.
+        // We then unwind the call group (args + closure that the
+        // caller pushed, plus the retPC slot we'd ordinarily push)
+        // and push the result.
+        let closure_ptr_for_jit = closure.as_ptr::<PolyWord>();
+        // SAFETY: closure is a data pointer.
+        let code_word_for_jit = unsafe { *closure_ptr_for_jit };
+        let code_obj_ptr_for_jit = code_word_for_jit.0;
+        if let Some(entry) = self.jit_cache.get(&code_obj_ptr_for_jit).copied() {
+            // Build the JIT args array: args_ptr[0..arity_init].
+            // For SML arity N, the stack window at entry is:
+            //   sp[0] = arg_{N-1}, ..., sp[N-1] = arg_0  (caller pushed)
+            // The JIT expects args_ptr ordered:
+            //   args_ptr[0] = arg_0, ..., args_ptr[N-1] = arg_{N-1},
+            //   args_ptr[N] = retPC placeholder,
+            //   args_ptr[N+1] = closure placeholder
+            // We synthesize the placeholders.
+            let n = entry.sml_arity;
+            let mut args_buf: Vec<i64> = Vec::with_capacity(entry.arity_init);
+            // arg_0 = sp[N-1], arg_1 = sp[N-2], ..., arg_{N-1} = sp[0]
+            for i in (0..n).rev() {
+                args_buf.push(self.stack[self.sp + i].0 as i64);
+            }
+            // Fill remaining slots (retPC + closure placeholders) with 0.
+            while args_buf.len() < entry.arity_init {
+                args_buf.push(0);
+            }
+            // Pop N args from the interpreter stack (they're now in
+            // args_buf — the JIT'd function reads from there).
+            self.sp += n;
+            // SAFETY: caller registered `entry.func` with a matching
+            // ABI; args_buf has at least arity_init entries.
+            let result_bits = unsafe { (entry.func)(args_buf.as_ptr()) };
+            let result = PolyWord::from_bits(result_bits as usize);
+            self.push(result)?;
+            return Ok(());
         }
         // Save the *current* PC as the return address. By this point
         // we've already advanced past the call opcode and its immediates,

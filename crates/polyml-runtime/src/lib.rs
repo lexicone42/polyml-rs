@@ -10,13 +10,15 @@
 pub mod export;
 pub mod gc;
 pub mod interpreter;
+pub mod jit_bridge;
 pub mod length_word;
 pub mod loader;
 pub mod poly_word;
 pub mod rts;
 pub mod space;
 
-pub use interpreter::{InterpError, Interpreter, StepResult};
+pub use interpreter::{InterpError, Interpreter, JitEntry, StepResult};
+pub use jit_bridge::{with_jit_interp, jit_dispatch_closure_call, JIT_INTERP};
 pub use loader::{load_image, LoadError, LoadedImage};
 pub use poly_word::PolyWord;
 pub use rts::{patch_entry_points, RtsFn, RtsTable};
