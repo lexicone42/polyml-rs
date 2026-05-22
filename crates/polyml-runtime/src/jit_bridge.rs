@@ -50,6 +50,49 @@ pub fn with_jit_interp<R>(interp: &mut Interpreter, f: impl FnOnce() -> R) -> R 
     f()
 }
 
+/// Trampoline-callable: build a closure object. The closure layout
+/// is `[code_addr, capture_0, capture_1, ...]` where `code_addr`
+/// is copied from `src_closure[0]`. Length word is `n_captures + 1`
+/// with `F_CLOSURE_OBJ` flag.
+///
+/// # Safety
+/// `src_closure_word` must be a valid PolyWord-bits value pointing
+/// at a heap closure object. `captures_ptr` must point at
+/// `n_captures` valid PolyWord-bits values.
+pub fn jit_dispatch_closure_alloc(
+    n_captures: usize,
+    captures_ptr: *const i64,
+    src_closure_word: u64,
+) -> Option<u64> {
+    let interp_ptr = JIT_INTERP.with(|c| c.get());
+    if interp_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: caller invariant.
+    let interp = unsafe { &mut *interp_ptr };
+    let src = PolyWord::from_bits(src_closure_word as usize);
+    if !src.is_data_ptr() {
+        return None;
+    }
+    // SAFETY: source closure is a data pointer.
+    let code_addr_word = unsafe { *src.as_ptr::<PolyWord>() };
+    let space = interp.jit_alloc_space_mut()?;
+    let n_words = n_captures + 1;
+    let body = space.try_alloc(n_words)?;
+    // SAFETY: body has n_words slots; captures_ptr has n_captures valid words.
+    unsafe {
+        crate::space::set_length_word(body, n_words, crate::length_word::F_CLOSURE_OBJ);
+        // slot 0 = code address
+        body.write(code_addr_word);
+        // slots 1..n_captures+1 = captures
+        for i in 0..n_captures {
+            let cap = captures_ptr.add(i).read();
+            body.add(1 + i).write(PolyWord::from_bits(cap as usize));
+        }
+    }
+    Some(body as u64)
+}
+
 /// Trampoline-callable: allocate an `n_words` tuple/ref/closure
 /// object in the interpreter's alloc space and copy `values_ptr[0..n]`
 /// into the body. Returns the heap pointer as raw bits.

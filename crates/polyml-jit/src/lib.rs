@@ -75,6 +75,26 @@ pub unsafe extern "C" fn closure_call_trampoline(
     }
 }
 
+/// Closure-construction trampoline. `(n_captures, captures_ptr,
+/// src_closure_word) -> i64` returning the new closure pointer.
+///
+/// Used by JIT-translated `CLOSURE_B`: builds a heap closure whose
+/// slot 0 is the source closure's code address and slots 1..N are
+/// the captures.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn closure_alloc_trampoline(
+    n_captures: i64,
+    captures_ptr: *const i64,
+    src_closure_word: i64,
+) -> i64 {
+    #[allow(clippy::cast_sign_loss)]
+    let n = n_captures.max(0) as usize;
+    match polyml_runtime::jit_dispatch_closure_alloc(n, captures_ptr, src_closure_word as u64) {
+        Some(ptr) => ptr as i64,
+        None => 1,
+    }
+}
+
 /// Tuple-alloc trampoline. `(n_words, values_ptr) -> i64` returning
 /// the new heap-object pointer.
 ///
@@ -144,6 +164,10 @@ impl Jit {
         builder.symbol(
             "polyml_jit_alloc_tuple",
             alloc_tuple_trampoline as *const u8,
+        );
+        builder.symbol(
+            "polyml_jit_alloc_closure",
+            closure_alloc_trampoline as *const u8,
         );
         Ok(Self {
             module: JITModule::new(builder),

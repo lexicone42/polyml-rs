@@ -116,6 +116,7 @@ const INSTR_RESET_R_3: u8 = 0x66;
 const INSTR_RESET_R_B: u8 = 0x27;
 const INSTR_CALL_LOCAL_B: u8 = 0x16;
 const INSTR_TAIL_B_B: u8 = 0x7b;
+const INSTR_CLOSURE_B: u8 = 0xd0;
 const INSTR_LOAD_UNTAGGED: u8 = 0x08;
 const INSTR_STORE_ML_WORD: u8 = 0x05;
 const INSTR_RAISE_EX: u8 = 0x10;
@@ -276,6 +277,24 @@ pub fn compile_with_consts(
     let alloc_func_ref = jit
         .module
         .declare_func_in_func(alloc_func_id, &mut ctx.func);
+
+    // Closure-alloc trampoline: (n_captures, captures_ptr, src_closure) -> i64.
+    let mut closure_alloc_sig = jit.module.make_signature();
+    closure_alloc_sig.params.push(AbiParam::new(types::I64));
+    closure_alloc_sig.params.push(AbiParam::new(types::I64));
+    closure_alloc_sig.params.push(AbiParam::new(types::I64));
+    closure_alloc_sig.returns.push(AbiParam::new(types::I64));
+    let closure_alloc_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_alloc_closure",
+            Linkage::Import,
+            &closure_alloc_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let closure_alloc_ref = jit
+        .module
+        .declare_func_in_func(closure_alloc_id, &mut ctx.func);
 
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -1123,6 +1142,46 @@ pub fn compile_with_consts(
                     // Pop the handler marker pushed by SET_HANDLER.
                     let _ = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
                 }
+                INSTR_CLOSURE_B => {
+                    // Build a closure: pop N captures + 1 source closure
+                    // (= top, used for the code address), allocate
+                    // N+1-word closure, push pointer.
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let n_captures = bytecode[pc] as usize;
+                    pc += 1;
+                    if stack.len() < n_captures + 1 {
+                        return Err(TranslateError::Underflow(pc - 2));
+                    }
+                    let src_closure = stack.pop().unwrap();
+                    // Captures: pop into a buffer; arg[i] = popped i-th
+                    // (so captures[0] = first popped = topmost).
+                    let mut caps: Vec<Value> = Vec::with_capacity(n_captures);
+                    for _ in 0..n_captures {
+                        caps.push(stack.pop().unwrap());
+                    }
+                    // Store captures into a stack slot.
+                    let slot_size = std::cmp::max(8, (n_captures * 8) as u32);
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift::prelude::StackSlotData::new(
+                            cranelift::prelude::StackSlotKind::ExplicitSlot,
+                            slot_size,
+                            3,
+                        ),
+                    );
+                    for (i, v) in caps.iter().enumerate() {
+                        builder.ins().stack_store(*v, slot, (i * 8) as i32);
+                    }
+                    let caps_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    let n_v = builder.ins().iconst(types::I64, n_captures as i64);
+                    let call_inst = builder.ins().call(
+                        closure_alloc_ref,
+                        &[n_v, caps_ptr, src_closure],
+                    );
+                    let result_val = builder.inst_results(call_inst)[0];
+                    stack.push(result_val);
+                }
                 INSTR_CELL_LENGTH => {
                     // peek ptr; replace top with tagged(length-word & LENGTH_MASK).
                     // length word is at ptr - 8.
@@ -1509,6 +1568,7 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_RETURN_B => 2,
         INSTR_RETURN_W => 3,
         INSTR_TAIL_B_B => 3,
+        INSTR_CLOSURE_B => 2,
         INSTR_RAISE_EX | INSTR_DELETE_HANDLER | INSTR_ALLOC_REF
         | INSTR_CELL_LENGTH | INSTR_LOAD_ML_BYTE | INSTR_LOAD_ML_WORD
         | INSTR_NOT_BOOLEAN | INSTR_IS_TAGGED => 1,
@@ -1887,6 +1947,12 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_SET_HANDLER8 => (1, 0, None, 1),
                 INSTR_SET_HANDLER16 => (1, 0, None, 2),
                 INSTR_DELETE_HANDLER => (0, 1, None, 0),
+                INSTR_CLOSURE_B => {
+                    if pc >= bytecode.len() { return None; }
+                    let n = bytecode[pc] as i32;
+                    // Pops n_captures + 1 src closure, pushes 1.
+                    (1, n + 1, None, 1)
+                }
                 INSTR_ALLOC_REF => (1, 1, None, 0),  // peek init, push cell
                 INSTR_CELL_LENGTH => (1, 1, None, 0), // peek ptr, push len
                 INSTR_LOAD_ML_BYTE => (1, 2, None, 0), // pop idx, peek base, push byte
@@ -2296,6 +2362,18 @@ fn scan_branch_targets(
                     return Err(TranslateError::Underflow(pc - 1));
                 }
                 depth -= 1;
+            }
+            INSTR_CLOSURE_B => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let n = bytecode[pc] as usize;
+                pc += 1;
+                if depth < n + 1 {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
+                // pop n + 1, push 1 = net -n
+                depth -= n;
             }
             INSTR_ALLOC_REF => {
                 if depth == 0 {
