@@ -142,39 +142,46 @@ Consequences for testing:
 The `bootstrap_can_register_infix_plus_and_compute` test in
 `crates/polyml-bin/tests/cli_run.rs` exercises this path.
 
-## JIT status (58.45% coverage, executes end-to-end)
+## JIT status (60.12% translation, executes hand-crafted only)
 
-The JIT translates bytecode to Cranelift IR. 58.45% of bootstrap
-code objects compile cleanly; coverage report via:
+The JIT translates bytecode to Cranelift IR. 60.12% of real bootstrap
+code objects compile cleanly. Coverage report via:
 
     cargo test --release -p polyml-jit --test coverage_bootstrap -- --nocapture
 
-**The JIT actually executes** as of `b90ae00`:
-- `Interpreter::install_jit(code_obj_ptr, JitEntry)` registers a JIT'd
-  function in a cache.
-- `Interpreter::do_call` checks the cache; cache hit dispatches to
-  the native function instead of stepping bytecode.
-- Inside JIT'd code, `closure_call_trampoline` reads a thread-local
-  interpreter handle and routes nested CALLs back through
-  `jit_bridge::jit_dispatch_closure_call` — which itself checks
-  the cache, enabling JIT-to-JIT chaining.
+**Caveat: translation coverage != execution coverage.** Hand-crafted
+unit tests (~137 passing) cover individual opcodes correctly, but
+real SML compiler output combines them in ways the unit tests don't,
+and JIT'd-and-installed real bytecode tends to segfault during
+bootstrap. Bisection harness:
 
-Measured speedup: **24.64x** for a small arithmetic function over
-the bytecode interpreter (`jit_speedup_bench.rs`).
+    JIT_BOOTSTRAP_INSTALL=N cargo test --release -p polyml-jit --test jit_bootstrap_run
+
+install=23 works; install=24 crashes. Each diagnosed function reveals
+a different semantic gap (stack effect, capture layout, edge-case
+arithmetic, etc.). The 24x speedup on a small arithmetic function
+(`jit_speedup_bench.rs`) is real — but only for code that matches
+the unit tests' shape.
 
 End-to-end validation test:
 `crates/polyml-jit/tests/jit_call_const_addr8_end_to_end.rs` —
 caller bytecode pushes 7, calls a JIT-cached closure via real
-`CALL_CONST_ADDR8`, gets 107 back.
+`CALL_CONST_ADDR8`, gets 107 back. This works.
+
+Plumbing in place: `Interpreter::install_jit`, `do_call` JIT-cache
+check, `closure_call_trampoline` thread-local routing, JIT-to-JIT
+chaining via `jit_dispatch_closure_call`. All correct in isolation.
 
 ## Open issues
 
-- **Remaining JIT coverage gaps** (~41% of functions): allocation
-  paths (CLOSURE_B, STACK_CONTAINER_B, ALLOC_BYTE_MEM ~700 fns
-  need real heap-allocation trampolines), CFG widening for the
-  fall-through-deeper-than-recorded case (~190 fns), dynamic
-  CALL_CLOSURE arity (177 fns), and assorted niche opcodes
-  (CASE16, BLOCK_EQUAL_BYTE, MOVE_TO_CONTAINER_B).
+- **JIT execution semantics on real code**: see "JIT status" above.
+  Translation coverage is 60.12%; execution coverage is much less.
+  Each install bisection reveals a separate semantic gap.
+
+- **Remaining JIT translation gaps** (~40% of functions): CFG
+  widening for the fall-through-deeper-than-recorded case (~190
+  fns), dynamic CALL_CLOSURE arity (177 fns), and assorted niche
+  opcodes (CASE16, BLOCK_EQUAL_BYTE, MOVE_TO_CONTAINER_B).
 
 - **GC**: copying GC is in. The bump allocator behind it
   doesn't fragment; long-running programs stay under ~100 MB

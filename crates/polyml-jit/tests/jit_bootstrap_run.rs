@@ -16,7 +16,7 @@ use std::sync::Arc;
 use polyml_image::pexport::Image;
 use polyml_jit::{translate, Jit};
 use polyml_runtime::{
-    length_word, load_image, patch_entry_points, with_jit_interp,
+    length_word, load_image, patch_entry_points,
     Interpreter, JitEntry, MemorySpace, PolyWord, RtsTable, StepResult,
 };
 
@@ -70,7 +70,9 @@ fn jit_install_real_bootstrap_functions() {
             let full_body: &[u8] = unsafe {
                 std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes)
             };
-            if let Ok(jf) = translate::compile_with_consts(&mut jit, full_body, bytecode_len) {
+            if let Ok((jf, jit_arity_init)) =
+                translate::compile_with_consts_meta(&mut jit, full_body, bytecode_len)
+            {
                 jit_ok += 1;
                 // Only install when we have a CONFIDENT arity from
                 // RETURN_N. Functions that only TAIL_B_B don't tell
@@ -108,7 +110,10 @@ fn jit_install_real_bootstrap_functions() {
                     if mode == "small" && bytecode_len > 16 {
                         return;
                     }
-                    let arity_init = sml_arity + 2; // closure + retPC slots
+                    // arity_init MUST be >= JIT's internal arity_init
+                    // (the count of args_buf slots it reads at entry).
+                    // SML calling convention: closure + retPC = 2 extras.
+                    let arity_init = (sml_arity + 2).max(jit_arity_init);
                     entries.push((
                         body_start,
                         JitEntry {

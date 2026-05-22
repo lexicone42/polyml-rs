@@ -181,11 +181,33 @@ pub fn compile(jit: &mut Jit, bytecode: &[u8]) -> Result<JitFn, TranslateError> 
 /// object (bytecode followed by constants area + trailer), and
 /// `bytecode_end` is the byte offset where the bytecode opcodes
 /// stop. CONST_ADDR* reads land in `full_body[bytecode_end..]`.
+/// Same as [`compile_with_consts`] but also returns the JIT's
+/// inferred `arity_init` (how many slots it reads from `args_ptr`
+/// at entry). Callers installing the function in
+/// `Interpreter::install_jit` should ensure their JitEntry's
+/// `arity_init` is `>= this returned value`.
+pub fn compile_with_consts_meta(
+    jit: &mut Jit,
+    full_body: &[u8],
+    bytecode_end: usize,
+) -> Result<(JitFn, usize), TranslateError> {
+    let result = compile_with_consts_impl(jit, full_body, bytecode_end)?;
+    Ok(result)
+}
+
 pub fn compile_with_consts(
     jit: &mut Jit,
     full_body: &[u8],
     bytecode_end: usize,
 ) -> Result<JitFn, TranslateError> {
+    compile_with_consts_impl(jit, full_body, bytecode_end).map(|(f, _)| f)
+}
+
+fn compile_with_consts_impl(
+    jit: &mut Jit,
+    full_body: &[u8],
+    bytecode_end: usize,
+) -> Result<(JitFn, usize), TranslateError> {
     let bytecode = &full_body[..bytecode_end];
     let _full_body = full_body; // keep for CONST_ADDR reads below
     let mut ctx = jit.module.make_context();
@@ -1579,7 +1601,7 @@ pub fn compile_with_consts(
     let code_ptr = jit.module.get_finalized_function(func_id);
     // SAFETY: signature matches; JIT memory live while `jit` is.
     let f: JitFn = unsafe { std::mem::transmute(code_ptr) };
-    Ok(f)
+    Ok((f, arg_count))
 }
 
 /// PolyWord tagging: a small int `n` is represented as `2n + 1`.
