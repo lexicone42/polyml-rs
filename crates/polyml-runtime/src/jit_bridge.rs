@@ -50,6 +50,27 @@ pub fn with_jit_interp<R>(interp: &mut Interpreter, f: impl FnOnce() -> R) -> R 
     f()
 }
 
+/// Trampoline-callable: allocate `n_words` of uninitialized bytes
+/// with the given `flags` byte. Used by JIT'd `ALLOC_BYTE_MEM`.
+///
+/// The bytes are NOT initialized — the caller is expected to write
+/// them before reading (`STORE_ML_BYTE`/`STORE_ML_WORD`).
+pub fn jit_dispatch_alloc_bytes(n_words: usize, flags: u8) -> Option<u64> {
+    let interp_ptr = JIT_INTERP.with(|c| c.get());
+    if interp_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: caller invariant.
+    let interp = unsafe { &mut *interp_ptr };
+    let space = interp.jit_alloc_space_mut()?;
+    let body = space.try_alloc(n_words)?;
+    // SAFETY: just allocated n_words.
+    unsafe {
+        crate::space::set_length_word(body, n_words, flags);
+    }
+    Some(body as u64)
+}
+
 /// Trampoline-callable: build a closure object. The closure layout
 /// is `[code_addr, capture_0, capture_1, ...]` where `code_addr`
 /// is copied from `src_closure[0]`. Length word is `n_captures + 1`

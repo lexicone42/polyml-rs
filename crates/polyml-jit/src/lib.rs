@@ -75,6 +75,23 @@ pub unsafe extern "C" fn closure_call_trampoline(
     }
 }
 
+/// Byte-mem allocation trampoline. `(n_words, flags) -> i64`.
+/// Used by JIT'd `ALLOC_BYTE_MEM`. Body is uninitialized.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alloc_byte_mem_trampoline(
+    n_words: i64,
+    flags: i64,
+) -> i64 {
+    #[allow(clippy::cast_sign_loss)]
+    let n = n_words.max(0) as usize;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let f = (flags & 0xff) as u8;
+    match polyml_runtime::jit_dispatch_alloc_bytes(n, f) {
+        Some(ptr) => ptr as i64,
+        None => 1,
+    }
+}
+
 /// Closure-construction trampoline. `(n_captures, captures_ptr,
 /// src_closure_word) -> i64` returning the new closure pointer.
 ///
@@ -168,6 +185,10 @@ impl Jit {
         builder.symbol(
             "polyml_jit_alloc_closure",
             closure_alloc_trampoline as *const u8,
+        );
+        builder.symbol(
+            "polyml_jit_alloc_byte_mem",
+            alloc_byte_mem_trampoline as *const u8,
         );
         Ok(Self {
             module: JITModule::new(builder),

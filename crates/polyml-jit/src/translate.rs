@@ -117,6 +117,9 @@ const INSTR_RESET_R_B: u8 = 0x27;
 const INSTR_CALL_LOCAL_B: u8 = 0x16;
 const INSTR_TAIL_B_B: u8 = 0x7b;
 const INSTR_CLOSURE_B: u8 = 0xd0;
+const INSTR_ALLOC_BYTE_MEM: u8 = 0xbd;
+const INSTR_ALLOC_WORD_MEMORY: u8 = 0xda;
+const INSTR_STORE_UNTAGGED: u8 = 0x09;
 const INSTR_LOAD_UNTAGGED: u8 = 0x08;
 const INSTR_STORE_ML_WORD: u8 = 0x05;
 const INSTR_RAISE_EX: u8 = 0x10;
@@ -295,6 +298,23 @@ pub fn compile_with_consts(
     let closure_alloc_ref = jit
         .module
         .declare_func_in_func(closure_alloc_id, &mut ctx.func);
+
+    // alloc_byte_mem trampoline: (n_words, flags) -> i64.
+    let mut alloc_bytes_sig = jit.module.make_signature();
+    alloc_bytes_sig.params.push(AbiParam::new(types::I64));
+    alloc_bytes_sig.params.push(AbiParam::new(types::I64));
+    alloc_bytes_sig.returns.push(AbiParam::new(types::I64));
+    let alloc_bytes_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_alloc_byte_mem",
+            Linkage::Import,
+            &alloc_bytes_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let alloc_bytes_ref = jit
+        .module
+        .declare_func_in_func(alloc_bytes_id, &mut ctx.func);
 
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -1142,6 +1162,91 @@ pub fn compile_with_consts(
                     // Pop the handler marker pushed by SET_HANDLER.
                     let _ = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
                 }
+                INSTR_ALLOC_BYTE_MEM => {
+                    // Pop flags (top), peek length, allocate; REPLACE
+                    // top (= length) with the heap pointer.
+                    let flags = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let length = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let length_u = builder.ins().sshr_imm(length, 1);
+                    let flags_u = builder.ins().sshr_imm(flags, 1);
+                    let call_inst = builder.ins().call(
+                        alloc_bytes_ref,
+                        &[length_u, flags_u],
+                    );
+                    let result_val = builder.inst_results(call_inst)[0];
+                    let last = stack.len() - 1;
+                    stack[last] = result_val;
+                }
+                INSTR_ALLOC_WORD_MEMORY => {
+                    // Stack (top→bottom): init, flags, length, ...
+                    // Allocate `length` words with `flags`, fill with init,
+                    // pop length (= 3rd from top), push pointer.
+                    let init = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let flags = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let length = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let length_u = builder.ins().sshr_imm(length, 1);
+                    let flags_u = builder.ins().sshr_imm(flags, 1);
+                    // Allocate via byte_mem trampoline (uninitialized).
+                    let call_inst = builder.ins().call(
+                        alloc_bytes_ref,
+                        &[length_u, flags_u],
+                    );
+                    let result_val = builder.inst_results(call_inst)[0];
+                    // Initialize the body with `init` via stores in a loop.
+                    // For simplicity, emit a stack-slot fill via a constant
+                    // length loop. Since we don't have constant-length info,
+                    // emit a runtime memset-like loop using Cranelift.
+                    let zero = builder.ins().iconst(int, 0);
+                    let body_ptr = result_val;
+                    // Build a small loop: i = 0; while (i < length_u) { *(body+i*8) = init; i++; }
+                    let loop_header = builder.create_block();
+                    let loop_body = builder.create_block();
+                    let loop_exit = builder.create_block();
+                    builder.append_block_param(loop_header, int); // i
+                    builder.ins().jump(loop_header, &[BlockArg::from(zero)]);
+                    builder.switch_to_block(loop_header);
+                    let i = builder.block_params(loop_header)[0];
+                    let cond = builder.ins().icmp(IntCC::SignedLessThan, i, length_u);
+                    builder.ins().brif(cond, loop_body, &[], loop_exit, &[]);
+                    builder.switch_to_block(loop_body);
+                    let eight = builder.ins().iconst(int, 8);
+                    let off = builder.ins().imul(i, eight);
+                    let addr = builder.ins().iadd(body_ptr, off);
+                    builder.ins().store(
+                        cranelift::prelude::MemFlags::trusted(),
+                        init,
+                        addr,
+                        0,
+                    );
+                    let one = builder.ins().iconst(int, 1);
+                    let i_plus_1 = builder.ins().iadd(i, one);
+                    builder.ins().jump(loop_header, &[BlockArg::from(i_plus_1)]);
+                    builder.switch_to_block(loop_exit);
+                    builder.seal_block(loop_header);
+                    builder.seal_block(loop_body);
+                    builder.seal_block(loop_exit);
+                    stack.push(result_val);
+                }
+                INSTR_STORE_UNTAGGED => {
+                    // Pop raw (untagged), pop index (tagged), peek base.
+                    // Write base[index] = raw bits. Replace base with tag(0).
+                    let raw = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let index = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let base = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let raw_u = builder.ins().sshr_imm(raw, 1);
+                    let index_u = builder.ins().sshr_imm(index, 1);
+                    let eight = builder.ins().iconst(int, 8);
+                    let off = builder.ins().imul(index_u, eight);
+                    let addr = builder.ins().iadd(base, off);
+                    builder.ins().store(
+                        cranelift::prelude::MemFlags::trusted(),
+                        raw_u,
+                        addr,
+                        0,
+                    );
+                    let tag0 = builder.ins().iconst(int, tag(0));
+                    stack.push(tag0);
+                }
                 INSTR_CLOSURE_B => {
                     // Build a closure: pop N captures + 1 source closure
                     // (= top, used for the code address), allocate
@@ -1569,6 +1674,7 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_RETURN_W => 3,
         INSTR_TAIL_B_B => 3,
         INSTR_CLOSURE_B => 2,
+        INSTR_ALLOC_BYTE_MEM | INSTR_ALLOC_WORD_MEMORY | INSTR_STORE_UNTAGGED => 1,
         INSTR_RAISE_EX | INSTR_DELETE_HANDLER | INSTR_ALLOC_REF
         | INSTR_CELL_LENGTH | INSTR_LOAD_ML_BYTE | INSTR_LOAD_ML_WORD
         | INSTR_NOT_BOOLEAN | INSTR_IS_TAGGED => 1,
@@ -1952,6 +2058,19 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     let n = bytecode[pc] as i32;
                     // Pops n_captures + 1 src closure, pushes 1.
                     (1, n + 1, None, 1)
+                }
+                INSTR_ALLOC_BYTE_MEM => {
+                    // Pops flags, replaces top length with pointer. Net 0
+                    // on stack depth (but uses 2 values minimum).
+                    (1, 2, None, 0)
+                }
+                INSTR_ALLOC_WORD_MEMORY => {
+                    // Pops 3 (init, flags, length), pushes pointer. Net -2.
+                    (1, 3, None, 0)
+                }
+                INSTR_STORE_UNTAGGED => {
+                    // Pops 3 (raw, index, base), pushes tag(0). Net -2.
+                    (1, 3, None, 0)
                 }
                 INSTR_ALLOC_REF => (1, 1, None, 0),  // peek init, push cell
                 INSTR_CELL_LENGTH => (1, 1, None, 0), // peek ptr, push len
@@ -2374,6 +2493,20 @@ fn scan_branch_targets(
                 }
                 // pop n + 1, push 1 = net -n
                 depth -= n;
+            }
+            INSTR_ALLOC_BYTE_MEM => {
+                // Pop flags + peek length + replace top with pointer.
+                if depth < 2 { return Err(TranslateError::Underflow(pc - 1)); }
+                depth -= 1;
+            }
+            INSTR_ALLOC_WORD_MEMORY => {
+                // Pops 3 (init, flags, length), pushes pointer.
+                if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
+                depth -= 2;
+            }
+            INSTR_STORE_UNTAGGED => {
+                if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
+                depth -= 2;
             }
             INSTR_ALLOC_REF => {
                 if depth == 0 {
