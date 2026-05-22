@@ -98,6 +98,7 @@ const INSTR_RESET_R_2: u8 = 0x65;
 const INSTR_RESET_R_3: u8 = 0x66;
 const INSTR_RESET_R_B: u8 = 0x27;
 const INSTR_CALL_LOCAL_B: u8 = 0x16;
+const INSTR_TAIL_B_B: u8 = 0x7b;
 const INSTR_CALL_CONST_ADDR8_0: u8 = 0x57;
 const INSTR_CALL_CONST_ADDR8_1: u8 = 0x58;
 const INSTR_CONST_ADDR8_8: u8 = 0x15;
@@ -937,6 +938,54 @@ pub fn compile_with_consts(
                     builder.ins().return_(&[v]);
                     returned = true;
                 }
+                INSTR_TAIL_B_B => {
+                    // tail_count + skip immediates. Per upstream
+                    // `bytecode.cpp:387`, tail_count counts the
+                    // [retPC, closure, args] group at top; SML arity
+                    // is `tail_count - 2`. `skip` is the caller-
+                    // frame slots to drop below — irrelevant for our
+                    // JIT which returns directly to the trampoline.
+                    if pc + 1 >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let tail_count = bytecode[pc] as usize;
+                    pc += 1;
+                    let _skip = bytecode[pc] as usize;
+                    pc += 1;
+                    if tail_count < 2 {
+                        return Err(TranslateError::Unsupported { op, at: pc });
+                    }
+                    let n_args = tail_count - 2;
+                    if stack.len() < n_args + 1 {
+                        return Err(TranslateError::Underflow(pc));
+                    }
+                    let mut args_vec: Vec<Value> = Vec::with_capacity(n_args);
+                    for _ in 0..n_args {
+                        args_vec.push(stack.pop().unwrap());
+                    }
+                    let closure = stack.pop().unwrap();
+                    let slot_size = std::cmp::max(8, (n_args * 8) as u32);
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift::prelude::StackSlotData::new(
+                            cranelift::prelude::StackSlotKind::ExplicitSlot,
+                            slot_size,
+                            3,
+                        ),
+                    );
+                    for (i, v) in args_vec.iter().enumerate() {
+                        builder.ins().stack_store(*v, slot, (i * 8) as i32);
+                    }
+                    let args_ptr = builder.ins().stack_addr(types::I64, slot, 0);
+                    let n_args_v = builder.ins().iconst(types::I64, n_args as i64);
+                    let call_inst = builder.ins().call(
+                        closure_func_ref,
+                        &[closure, n_args_v, args_ptr],
+                    );
+                    let result_val = builder.inst_results(call_inst)[0];
+                    // Return the callee's result directly (= tail call).
+                    builder.ins().return_(&[result_val]);
+                    returned = true;
+                }
                 INSTR_RETURN_B => {
                     if pc >= bytecode.len() {
                         return Err(TranslateError::Truncated(pc));
@@ -1121,6 +1170,7 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_RETURN_3 => 1,
         INSTR_RETURN_B => 2,
         INSTR_RETURN_W => 3,
+        INSTR_TAIL_B_B => 3,
         INSTR_RESET_B | INSTR_RESET_R_B => 2,
         INSTR_SET_STACK_VAL_B => 2,
         INSTR_INDIRECT_B => 2,
@@ -1303,6 +1353,8 @@ fn arity_from_return_scan(bytecode: &[u8]) -> Option<usize> {
                 let hi = *bytecode.get(pc + 2)?;
                 return Some(u16::from_le_bytes([lo, hi]) as usize);
             }
+            // TAIL_B_B is also a terminator but tail_count refers to
+            // the CALLEE's arity, not this function's. Skip it.
             _ => {}
         }
         let step = opcode_total_len(bytecode, pc).ok()?;
@@ -1447,6 +1499,15 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3 => (0, 1, None, 0),
                 INSTR_RETURN_B => (0, 1, None, 1),
                 INSTR_RETURN_W => (0, 1, None, 2),
+                INSTR_TAIL_B_B => {
+                    // tail_count + skip; behaves like return (consumes
+                    // the call group + leaves nothing for fallthrough).
+                    if pc + 1 >= bytecode.len() { return None; }
+                    let n = bytecode[pc] as i32; // tail_count
+                    // SML arity = n - 2; pops that many + 1 closure.
+                    let consumed = (n - 1).max(0);
+                    (0, consumed, None, 2)
+                }
                 _ => {
                     // Unknown opcode — stop walking but return what
                     // we inferred from the prefix we did understand.
@@ -1772,6 +1833,21 @@ fn scan_branch_targets(
                     return Err(TranslateError::Underflow(pc - 2));
                 }
                 depth -= 1;
+            }
+            INSTR_TAIL_B_B => {
+                if pc + 1 >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let tc = bytecode[pc] as usize;
+                pc += 2; // tail_count + skip
+                if tc < 2 {
+                    return Err(TranslateError::Unsupported { op, at: pc - 3 });
+                }
+                let n_args = tc - 2;
+                if depth < n_args + 1 {
+                    return Err(TranslateError::Underflow(pc - 3));
+                }
+                reachable = false;
             }
             INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3 => {
                 if depth == 0 {
