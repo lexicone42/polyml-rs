@@ -78,7 +78,7 @@ enum Cmd {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
             eprintln!("poly: {e}");
             ExitCode::from(1)
@@ -86,10 +86,10 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match &cli.cmd {
-        Cmd::Inspect { image } => inspect(image),
-        Cmd::Load { image } => load(image),
+        Cmd::Inspect { image } => inspect(image).map(|()| ExitCode::SUCCESS),
+        Cmd::Load { image } => load(image).map(|()| ExitCode::SUCCESS),
         Cmd::Run {
             image,
             max_steps,
@@ -118,7 +118,7 @@ fn run_image(
     disasm_hottest: bool,
     extra_args: Vec<String>,
     use_file: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let image = Image::parse(&bytes)?;
     let mut loaded = load_image(&image)?;
@@ -208,22 +208,30 @@ fn run_image(
 
     println!();
     println!("Executed {steps} bytecode step(s).");
-    match outcome {
+    let exit_code: u8 = match &outcome {
         Ok(StepResult::Returned(v)) => {
             if v.is_tagged() {
+                let n = v.untag();
                 println!(
-                    "Result: Tagged({}) — clean return (exit code in PolyFinish convention)",
-                    v.untag()
+                    "Result: Tagged({n}) — clean return (exit code in PolyFinish convention)"
                 );
+                // SML's `OS.Process.exit` passes a small int that
+                // PolyML maps to the process exit code. Clamp into
+                // a u8 so unusual values don't wrap weirdly.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let code = n.clamp(0, 255) as u8;
+                code
             } else {
                 println!("Result: {v:?}");
+                0
             }
         }
         Ok(StepResult::Continue) => {
             println!("Hit step cap of {max_steps}. Bootstrap was still running.");
+            2
         }
         Ok(StepResult::Unimplemented { op, extended }) => {
-            let kind = if extended { "extended" } else { "base" };
+            let kind = if *extended { "extended" } else { "base" };
             println!("Stopped on unimplemented {kind} opcode 0x{op:02x}.");
             let (lo, hi, hex) = interp.pc_context_bytes(20);
             println!("  bytecode [{lo}..{hi}]: {hex}");
@@ -232,11 +240,13 @@ fn run_image(
             for (off, target) in recent.iter().enumerate() {
                 println!("    -{off:2}: 0x{target:016x}");
             }
+            3
         }
         Err(e) => {
             println!("Halted with error: {e}");
+            4
         }
-    }
+    };
 
     if let Some(d) = interp.take_diagnostics() {
         print_profile(&d);
@@ -244,7 +254,7 @@ fn run_image(
             dump_hottest_bytecode(&d);
         }
     }
-    Ok(())
+    Ok(ExitCode::from(exit_code))
 }
 
 /// `dup2(/dev/null, 0)` so future reads from stdin return EOF.
