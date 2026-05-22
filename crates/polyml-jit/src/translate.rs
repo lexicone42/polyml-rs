@@ -34,6 +34,15 @@ const INSTR_CONST_10: u8 = 0x40;
 const INSTR_CONST_INT_B: u8 = 0x28;
 const INSTR_RETURN_1: u8 = 0x42;
 const INSTR_FIXED_ADD: u8 = 0xaa;
+const INSTR_WORD_ADD: u8 = 0xb1;
+const INSTR_WORD_SUB: u8 = 0xb2;
+const INSTR_WORD_AND: u8 = 0xb7;
+const INSTR_WORD_OR: u8 = 0xb8;
+const INSTR_WORD_XOR: u8 = 0xb9;
+const INSTR_WORD_MULT: u8 = 0xb3;
+const INSTR_WORD_SHIFT_LEFT: u8 = 0xba;
+const INSTR_WORD_SHIFT_R_LOG: u8 = 0xbb;
+const INSTR_SET_STACK_VAL_B: u8 = 0x25;
 const INSTR_FIXED_SUB: u8 = 0xab;
 const INSTR_FIXED_MULT: u8 = 0xac;
 const INSTR_EQUAL_WORD: u8 = 0xa0;
@@ -61,6 +70,12 @@ const INSTR_ENTER_INT_ARM64: u8 = 0xe9;
 const INSTR_INDIRECT_LOCAL_BB: u8 = 0x21;
 const INSTR_INDIRECT_CLOSURE_BB: u8 = 0x54;
 const INSTR_INDIRECT_0: u8 = 0x35;
+const INSTR_INDIRECT_1: u8 = 0x36;
+const INSTR_INDIRECT_2: u8 = 0x37;
+const INSTR_INDIRECT_3: u8 = 0x38;
+const INSTR_INDIRECT_4: u8 = 0x39;
+const INSTR_INDIRECT_5: u8 = 0x3a;
+const INSTR_INDIRECT_B: u8 = 0x23;
 const INSTR_INDIRECT_0_LOCAL_0: u8 = 0xc6;
 const INSTR_NO_OP: u8 = 0x52;
 const INSTR_JUMP_TAGGED_LOCAL: u8 = 0xc4;
@@ -81,9 +96,14 @@ const INSTR_RESET_B: u8 = 0x26;
 const INSTR_RESET_R_1: u8 = 0x64;
 const INSTR_RESET_R_2: u8 = 0x65;
 const INSTR_RESET_R_3: u8 = 0x66;
+const INSTR_RESET_R_B: u8 = 0x27;
 const INSTR_CALL_LOCAL_B: u8 = 0x16;
 const INSTR_CALL_CONST_ADDR8_0: u8 = 0x57;
 const INSTR_CALL_CONST_ADDR8_1: u8 = 0x58;
+const INSTR_CONST_ADDR8_8: u8 = 0x15;
+const INSTR_CONST_ADDR16_8: u8 = 0x14;
+const INSTR_CALL_CONST_ADDR8_8: u8 = 0x17;
+const INSTR_CALL_CONST_ADDR16_8: u8 = 0x18;
 const INSTR_TUPLE_2: u8 = 0x69;
 const INSTR_TUPLE_3: u8 = 0x6a;
 const INSTR_TUPLE_4: u8 = 0x6b;
@@ -353,12 +373,26 @@ pub fn compile_with_consts(
                     }
                     stack.truncate(stack.len() - n);
                 }
-                INSTR_RESET_R_1 | INSTR_RESET_R_2 | INSTR_RESET_R_3 => {
-                    // Preserve top, drop N below it.
+                INSTR_RESET_R_1
+                | INSTR_RESET_R_2
+                | INSTR_RESET_R_3
+                | INSTR_RESET_R_B => {
+                    // Preserve top, drop N below it. For RESET_R_B, N
+                    // is a byte immediate; for the dedicated 1/2/3
+                    // variants N is encoded in the opcode.
                     let n = match op {
                         INSTR_RESET_R_1 => 1,
                         INSTR_RESET_R_2 => 2,
-                        _ => 3,
+                        INSTR_RESET_R_3 => 3,
+                        INSTR_RESET_R_B => {
+                            if pc >= bytecode.len() {
+                                return Err(TranslateError::Truncated(pc));
+                            }
+                            let v = bytecode[pc] as usize;
+                            pc += 1;
+                            v
+                        }
+                        _ => unreachable!(),
                     };
                     if stack.len() < n + 1 {
                         return Err(TranslateError::Underflow(pc - 1));
@@ -484,40 +518,30 @@ pub fn compile_with_consts(
                     let result_val = builder.inst_results(call_inst)[0];
                     stack.push(result_val);
                 }
-                INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => {
-                    if pc >= bytecode.len() {
-                        return Err(TranslateError::Truncated(pc));
-                    }
-                    let imm = bytecode[pc] as usize;
-                    pc += 1;
-                    let idx = if op == INSTR_CONST_ADDR8_0 { 3 } else { 4 };
-                    // read address (bytes from start of full_body):
-                    //   pc_after_imm + imm + idx * 8
-                    let read_at = pc + imm + idx * 8;
+                INSTR_CONST_ADDR8_0
+                | INSTR_CONST_ADDR8_1
+                | INSTR_CONST_ADDR8_8
+                | INSTR_CONST_ADDR16_8 => {
+                    let (byte_off, idx) =
+                        read_const_addr_operands(bytecode, &mut pc, op)?;
+                    let read_at = pc + byte_off + idx * 8;
                     if read_at + 8 > _full_body.len() {
-                        return Err(TranslateError::Unsupported { op, at: pc - 2 });
+                        return Err(TranslateError::Unsupported { op, at: pc });
                     }
                     let mut buf = [0u8; 8];
                     buf.copy_from_slice(&_full_body[read_at..read_at + 8]);
                     let val = i64::from_le_bytes(buf);
                     stack.push(builder.ins().iconst(int, val));
                 }
-                INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1 => {
-                    // Like CONST_ADDR8_*: resolve the closure pointer
-                    // from the const segment. Then determine the callee
-                    // arity by inspecting the closure → code object's
-                    // enter_int prologue at JIT-compile time. Finally
-                    // call the closure trampoline with the resolved
-                    // n_args.
-                    if pc >= bytecode.len() {
-                        return Err(TranslateError::Truncated(pc));
-                    }
-                    let imm = bytecode[pc] as usize;
-                    pc += 1;
-                    let idx = if op == INSTR_CALL_CONST_ADDR8_0 { 3 } else { 4 };
-                    let read_at = pc + imm + idx * 8;
+                INSTR_CALL_CONST_ADDR8_0
+                | INSTR_CALL_CONST_ADDR8_1
+                | INSTR_CALL_CONST_ADDR8_8
+                | INSTR_CALL_CONST_ADDR16_8 => {
+                    let (byte_off, idx) =
+                        read_const_addr_operands(bytecode, &mut pc, op)?;
+                    let read_at = pc + byte_off + idx * 8;
                     if read_at + 8 > _full_body.len() {
-                        return Err(TranslateError::Unsupported { op, at: pc - 2 });
+                        return Err(TranslateError::Unsupported { op, at: pc });
                     }
                     let mut buf = [0u8; 8];
                     buf.copy_from_slice(&_full_body[read_at..read_at + 8]);
@@ -557,10 +581,35 @@ pub fn compile_with_consts(
                     let result_val = builder.inst_results(call_inst)[0];
                     stack.push(result_val);
                 }
-                INSTR_INDIRECT_0 => {
-                    // top = ptr; replace top with ptr[0]
+                INSTR_INDIRECT_0
+                | INSTR_INDIRECT_1
+                | INSTR_INDIRECT_2
+                | INSTR_INDIRECT_3
+                | INSTR_INDIRECT_4
+                | INSTR_INDIRECT_5 => {
+                    let field = (op - INSTR_INDIRECT_0) as i32;
                     let base = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let val = builder.ins().load(int, cranelift::prelude::MemFlags::trusted(), base, 0);
+                    let val = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        base,
+                        field * 8,
+                    );
+                    stack.push(val);
+                }
+                INSTR_INDIRECT_B => {
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let field = bytecode[pc] as i32;
+                    pc += 1;
+                    let base = stack.pop().ok_or(TranslateError::Underflow(pc - 2))?;
+                    let val = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        base,
+                        field * 8,
+                    );
                     stack.push(val);
                 }
                 INSTR_INDIRECT_0_LOCAL_0 => {
@@ -743,6 +792,90 @@ pub fn compile_with_consts(
                     let one = builder.ins().iconst(int, 1);
                     let result = builder.ins().isub(sum, one);
                     stack.push(result);
+                }
+                INSTR_WORD_ADD => {
+                    // y + x - tag(0) = (y + x) - 1; same shape as FIXED_ADD.
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let sum = builder.ins().iadd(y, x);
+                    let one = builder.ins().iconst(int, 1);
+                    stack.push(builder.ins().isub(sum, one));
+                }
+                INSTR_WORD_SUB => {
+                    // y - x + 1
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let diff = builder.ins().isub(y, x);
+                    let one = builder.ins().iconst(int, 1);
+                    stack.push(builder.ins().iadd(diff, one));
+                }
+                INSTR_WORD_AND => {
+                    // (y & x); both tagged, low bit preserved.
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    stack.push(builder.ins().band(y, x));
+                }
+                INSTR_WORD_OR => {
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    stack.push(builder.ins().bor(y, x));
+                }
+                INSTR_WORD_XOR => {
+                    // y ^ x has the tag bit cleared (1^1=0); reinstate.
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let xor = builder.ins().bxor(y, x);
+                    let one = builder.ins().iconst(int, 1);
+                    stack.push(builder.ins().bor(xor, one));
+                }
+                INSTR_WORD_MULT => {
+                    // Interp: ((x>>1) * (y>>1)) << 1 | 1
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let xs = builder.ins().sshr_imm(x, 1);
+                    let ys = builder.ins().sshr_imm(y, 1);
+                    let prod = builder.ins().imul(xs, ys);
+                    let shifted = builder.ins().ishl_imm(prod, 1);
+                    let one = builder.ins().iconst(int, 1);
+                    stack.push(builder.ins().bor(shifted, one));
+                }
+                INSTR_WORD_SHIFT_LEFT | INSTR_WORD_SHIFT_R_LOG => {
+                    // Top is shift amount, below is value. Both tagged.
+                    // Untag shift via >>1, mask to 63. Untag value via >>1.
+                    // Shift, then retag.
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let one = builder.ins().iconst(int, 1);
+                    let mask63 = builder.ins().iconst(int, 63);
+                    let s_unt = builder.ins().sshr_imm(x, 1);
+                    let s_lim = builder.ins().band(s_unt, mask63);
+                    let v_unt = builder.ins().ushr_imm(y, 1);
+                    let shifted = if op == INSTR_WORD_SHIFT_LEFT {
+                        builder.ins().ishl(v_unt, s_lim)
+                    } else {
+                        builder.ins().ushr(v_unt, s_lim)
+                    };
+                    let retagged = builder.ins().ishl_imm(shifted, 1);
+                    stack.push(builder.ins().bor(retagged, one));
+                }
+                INSTR_SET_STACK_VAL_B => {
+                    // Pop top, write into sp[idx - 1]. idx is byte imm.
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let idx = bytecode[pc] as usize;
+                    pc += 1;
+                    if idx == 0 {
+                        return Err(TranslateError::Underflow(pc - 2));
+                    }
+                    let depth = idx - 1;
+                    let v = stack.pop().ok_or(TranslateError::Underflow(pc - 2))?;
+                    let stack_len = stack.len();
+                    if depth >= stack_len {
+                        return Err(TranslateError::Underflow(pc - 2));
+                    }
+                    let target_idx = stack_len - 1 - depth;
+                    stack[target_idx] = v;
                 }
                 INSTR_FIXED_SUB => {
                     // Interp: result_n = y_n - x_n
@@ -942,6 +1075,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_JUMP_NEQ_LOCAL_IND => 3,
         INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => 2,
         INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1 => 2,
+        INSTR_CONST_ADDR8_8 | INSTR_CALL_CONST_ADDR8_8 => 3,
+        INSTR_CONST_ADDR16_8 | INSTR_CALL_CONST_ADDR16_8 => 4,
         INSTR_CALL_FAST_RTS0
         | INSTR_CALL_FAST_RTS1
         | INSTR_CALL_FAST_RTS2
@@ -958,10 +1093,23 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_FIXED_ADD
         | INSTR_FIXED_SUB
         | INSTR_FIXED_MULT
+        | INSTR_WORD_ADD
+        | INSTR_WORD_SUB
+        | INSTR_WORD_MULT
+        | INSTR_WORD_AND
+        | INSTR_WORD_OR
+        | INSTR_WORD_XOR
+        | INSTR_WORD_SHIFT_LEFT
+        | INSTR_WORD_SHIFT_R_LOG
         | INSTR_EQUAL_WORD
         | INSTR_LESS_SIGNED
         | INSTR_LOCAL_0..=INSTR_LOCAL_11
         | INSTR_INDIRECT_0
+        | INSTR_INDIRECT_1
+        | INSTR_INDIRECT_2
+        | INSTR_INDIRECT_3
+        | INSTR_INDIRECT_4
+        | INSTR_INDIRECT_5
         | INSTR_INDIRECT_0_LOCAL_0
         | INSTR_NO_OP
         | INSTR_RESET_1
@@ -973,7 +1121,9 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_RETURN_3 => 1,
         INSTR_RETURN_B => 2,
         INSTR_RETURN_W => 3,
-        INSTR_RESET_B => 2,
+        INSTR_RESET_B | INSTR_RESET_R_B => 2,
+        INSTR_SET_STACK_VAL_B => 2,
+        INSTR_INDIRECT_B => 2,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -1017,6 +1167,50 @@ fn function_prologue(bytecode: &[u8]) -> (usize, usize) {
 /// — must trust that the addr came from a live code object's constant
 /// pool, which is true at JIT-compile time since the heap is frozen
 /// (no GC has run between load and translate).
+/// Parse the immediate operand(s) of CONST_ADDR / CALL_CONST_ADDR
+/// opcodes. Returns `(byte_off, constant_idx)` advanced past the
+/// immediates. The four variants encode the byte-offset and
+/// constant-pool index differently:
+///   - `*_ADDR8_0`: 1-byte off, fixed idx = 3
+///   - `*_ADDR8_1`: 1-byte off, fixed idx = 4
+///   - `*_ADDR8_8`: 1-byte off, 1-byte (idx - 3)
+///   - `*_ADDR16_8`: 2-byte off, 1-byte (idx - 3)
+fn read_const_addr_operands(
+    bytecode: &[u8],
+    pc: &mut usize,
+    op: u8,
+) -> Result<(usize, usize), TranslateError> {
+    let need_byte = |pc: &mut usize| -> Result<u8, TranslateError> {
+        if *pc >= bytecode.len() {
+            return Err(TranslateError::Truncated(*pc));
+        }
+        let b = bytecode[*pc];
+        *pc += 1;
+        Ok(b)
+    };
+    match op {
+        INSTR_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_0 => {
+            Ok((need_byte(pc)? as usize, 3))
+        }
+        INSTR_CONST_ADDR8_1 | INSTR_CALL_CONST_ADDR8_1 => {
+            Ok((need_byte(pc)? as usize, 4))
+        }
+        INSTR_CONST_ADDR8_8 | INSTR_CALL_CONST_ADDR8_8 => {
+            let off = need_byte(pc)? as usize;
+            let idx_minus_3 = need_byte(pc)? as usize;
+            Ok((off, idx_minus_3 + 3))
+        }
+        INSTR_CONST_ADDR16_8 | INSTR_CALL_CONST_ADDR16_8 => {
+            let lo = need_byte(pc)?;
+            let hi = need_byte(pc)?;
+            let off = u16::from_le_bytes([lo, hi]) as usize;
+            let idx_minus_3 = need_byte(pc)? as usize;
+            Ok((off, idx_minus_3 + 3))
+        }
+        _ => Err(TranslateError::Unsupported { op, at: *pc }),
+    }
+}
+
 /// Determine the arity of a closure whose address is `addr`.
 ///
 /// Two candidate layouts are tried:
@@ -1163,7 +1357,13 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     let d = bytecode[pc] as usize;
                     (1, 0, Some(d), 2)
                 }
-                INSTR_INDIRECT_0 => (1, 1, None, 0),
+                INSTR_INDIRECT_0
+                | INSTR_INDIRECT_1
+                | INSTR_INDIRECT_2
+                | INSTR_INDIRECT_3
+                | INSTR_INDIRECT_4
+                | INSTR_INDIRECT_5 => (1, 1, None, 0),
+                INSTR_INDIRECT_B => (1, 1, None, 1),
                 INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
                 INSTR_NO_OP => (0, 0, None, 0),
                 INSTR_RESET_1 => (0, 1, None, 0),
@@ -1176,6 +1376,12 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_RESET_R_1 => (1, 2, None, 0),
                 INSTR_RESET_R_2 => (1, 3, None, 0),
                 INSTR_RESET_R_3 => (1, 4, None, 0),
+                INSTR_RESET_R_B => {
+                    if pc >= bytecode.len() { return None; }
+                    let n = bytecode[pc] as i32;
+                    // Preserve top (= 0 net push/pop) plus drop n below.
+                    (1, n + 1, None, 1)
+                }
                 INSTR_JUMP_TAGGED_LOCAL => {
                     if pc + 1 >= bytecode.len() { return None; }
                     let d = bytecode[pc] as usize;
@@ -1192,7 +1398,12 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     (1, 0, Some(d), 1)
                 }
                 INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => (1, 0, None, 1),
-                INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1 => {
+                INSTR_CONST_ADDR8_8 => (1, 0, None, 2),
+                INSTR_CONST_ADDR16_8 => (1, 0, None, 3),
+                INSTR_CALL_CONST_ADDR8_0
+                | INSTR_CALL_CONST_ADDR8_1
+                | INSTR_CALL_CONST_ADDR8_8
+                | INSTR_CALL_CONST_ADDR16_8 => {
                     // Static arity inspection: we know the callee
                     // since the closure address is in the const pool,
                     // but `infer_arg_count` walks only the bytecode
@@ -1222,7 +1433,15 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     (1, n, None, 1)
                 }
                 INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
+                | INSTR_WORD_ADD | INSTR_WORD_SUB | INSTR_WORD_MULT
+                | INSTR_WORD_AND | INSTR_WORD_OR | INSTR_WORD_XOR
+                | INSTR_WORD_SHIFT_LEFT | INSTR_WORD_SHIFT_R_LOG
                 | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED => (1, 2, None, 0),
+                INSTR_SET_STACK_VAL_B => {
+                    // Pops 1; writes into a stack slot below — depth
+                    // unchanged net, but immediate consumes 1 byte.
+                    (0, 1, None, 1)
+                }
                 INSTR_JUMP8 | INSTR_JUMP_BACK8 => (0, 0, None, 1),
                 INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE => (0, 1, None, 1),
                 INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3 => (0, 1, None, 0),
@@ -1395,11 +1614,26 @@ fn scan_branch_targets(
                 record_target(&mut targets, taken, depth)?;
                 record_target(&mut targets, pc, depth)?;
             }
-            INSTR_INDIRECT_0 => {
+            INSTR_INDIRECT_0
+            | INSTR_INDIRECT_1
+            | INSTR_INDIRECT_2
+            | INSTR_INDIRECT_3
+            | INSTR_INDIRECT_4
+            | INSTR_INDIRECT_5 => {
                 if depth == 0 {
                     return Err(TranslateError::Underflow(pc - 1));
                 }
-                // peek+pop+push = net 0; actually pop top + push value
+                // pop ptr, push field value: net 0.
+            }
+            INSTR_INDIRECT_B => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                pc += 1;
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
+                // pop ptr, push field value: net 0.
             }
             INSTR_INDIRECT_0_LOCAL_0 => {
                 if depth == 0 {
@@ -1423,11 +1657,23 @@ fn scan_branch_targets(
                 if depth < n { return Err(TranslateError::Underflow(pc - 2)); }
                 depth -= n;
             }
-            INSTR_RESET_R_1 | INSTR_RESET_R_2 | INSTR_RESET_R_3 => {
+            INSTR_RESET_R_1
+            | INSTR_RESET_R_2
+            | INSTR_RESET_R_3
+            | INSTR_RESET_R_B => {
                 let n = match op {
                     INSTR_RESET_R_1 => 1,
                     INSTR_RESET_R_2 => 2,
-                    _ => 3,
+                    INSTR_RESET_R_3 => 3,
+                    INSTR_RESET_R_B => {
+                        if pc >= bytecode.len() {
+                            return Err(TranslateError::Truncated(pc));
+                        }
+                        let v = bytecode[pc] as usize;
+                        pc += 1;
+                        v
+                    }
+                    _ => unreachable!(),
                 };
                 if depth < n + 1 { return Err(TranslateError::Underflow(pc - 1)); }
                 depth -= n;
@@ -1471,32 +1717,31 @@ fn scan_branch_targets(
                 if depth < n { return Err(TranslateError::Underflow(pc - 1)); }
                 depth = depth - n + 1;
             }
-            INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => {
-                if pc >= bytecode.len() {
-                    return Err(TranslateError::Truncated(pc));
-                }
-                pc += 1;
+            INSTR_CONST_ADDR8_0
+            | INSTR_CONST_ADDR8_1
+            | INSTR_CONST_ADDR8_8
+            | INSTR_CONST_ADDR16_8 => {
+                let (_, _) = read_const_addr_operands(bytecode, &mut pc, op)?;
                 depth += 1;
             }
-            INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1 => {
-                if pc >= bytecode.len() {
-                    return Err(TranslateError::Truncated(pc));
-                }
-                let imm = bytecode[pc] as usize;
-                pc += 1;
-                let idx = if op == INSTR_CALL_CONST_ADDR8_0 { 3 } else { 4 };
-                let read_at = pc + imm + idx * 8;
+            INSTR_CALL_CONST_ADDR8_0
+            | INSTR_CALL_CONST_ADDR8_1
+            | INSTR_CALL_CONST_ADDR8_8
+            | INSTR_CALL_CONST_ADDR16_8 => {
+                let (byte_off, idx) =
+                    read_const_addr_operands(bytecode, &mut pc, op)?;
+                let read_at = pc + byte_off + idx * 8;
                 if read_at + 8 > full_body.len() {
-                    return Err(TranslateError::Unsupported { op, at: pc - 2 });
+                    return Err(TranslateError::Unsupported { op, at: pc });
                 }
                 let mut buf = [0u8; 8];
                 buf.copy_from_slice(&full_body[read_at..read_at + 8]);
                 let closure_addr = u64::from_le_bytes(buf);
                 let Some(n) = closure_arity_from_addr(closure_addr) else {
-                    return Err(TranslateError::Unsupported { op, at: pc - 2 });
+                    return Err(TranslateError::Unsupported { op, at: pc });
                 };
                 if depth < n {
-                    return Err(TranslateError::Underflow(pc - 2));
+                    return Err(TranslateError::Underflow(pc));
                 }
                 depth = depth - n + 1;
             }
@@ -1508,9 +1753,23 @@ fn scan_branch_targets(
                 depth += 1;
             }
             INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
+            | INSTR_WORD_ADD | INSTR_WORD_SUB | INSTR_WORD_MULT
+            | INSTR_WORD_AND | INSTR_WORD_OR | INSTR_WORD_XOR
+            | INSTR_WORD_SHIFT_LEFT | INSTR_WORD_SHIFT_R_LOG
             | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED => {
                 if depth < 2 {
                     return Err(TranslateError::Underflow(pc - 1));
+                }
+                depth -= 1;
+            }
+            INSTR_SET_STACK_VAL_B => {
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let _idx = bytecode[pc] as usize;
+                pc += 1;
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 2));
                 }
                 depth -= 1;
             }
