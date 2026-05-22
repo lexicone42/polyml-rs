@@ -89,6 +89,17 @@ fn jit_coverage_on_bootstrap_code_objects() {
                         shortest_ok_bytes = full_body[..bytecode_len].to_vec();
                     }
                 }
+                Err(translate::TranslateError::Unsupported { op, .. }) if op == 0xfd => {
+                    if shortest_jump_fail.as_ref().is_none_or(|(sz, ..)| bytecode_len < *sz) {
+                        shortest_jump_fail = Some((
+                            bytecode_len,
+                            full_body[..bytecode_len].to_vec(),
+                            max_bytes,
+                            "depth_mismatch (0xfd)".into(),
+                        ));
+                    }
+                    *blockers.entry("op 0xfd".into()).or_insert(0) += 1;
+                }
                 Err(translate::TranslateError::Unsupported { op, .. }) => {
                     *blockers.entry(format!("op 0x{op:02x}")).or_insert(0) += 1;
                 }

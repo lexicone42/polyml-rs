@@ -310,6 +310,15 @@ pub fn compile_with_consts(
             // block and re-seed the stack from the block params.
             if let Some(&target_blk) = block_at.get(&pc) {
                 if !returned {
+                    let expected = builder.block_params(target_blk).len();
+                    // Truncate to expected if we have more values
+                    // (matches pass-1's depth reconciliation).
+                    while stack.len() > expected {
+                        stack.pop();
+                    }
+                    if stack.len() < expected {
+                        return Err(TranslateError::Underflow(pc));
+                    }
                     let args: Vec<BlockArg> =
                         stack.iter().copied().map(BlockArg::from).collect();
                     builder.ins().jump(target_blk, &args);
@@ -1920,14 +1929,22 @@ fn scan_branch_targets(
             }
         } else if let Some(&recorded) = targets.get(&pc) {
             // Falling through into a recorded branch target. Pass 2
-            // will emit an implicit jump here passing the current
-            // stack as block args — the block was created with
-            // `recorded` params, so the stack depth MUST match the
-            // recorded depth. If it doesn't, that's a stack-tracking
-            // bug at the source of the original JUMP record (e.g.
-            // a wrong arity inference for a closure call between
-            // the JUMP and this fall-through).
-            if depth != recorded {
+            // emits an implicit jump here passing the current stack
+            // as block args — the block was created with `recorded`
+            // params. For a SOUND merge, the depth must match exactly.
+            //
+            // When they diverge, the cheapest correctness-preserving
+            // option is to TRUNCATE the stack to match `recorded`
+            // when fall-through has MORE values (the extras are
+            // dead at the merge point — well-formed SML compiler
+            // output ensures this), and bail when fall-through has
+            // FEWER values (we can't materialise extras).
+            #[allow(clippy::comparison_chain)]
+            if depth > recorded {
+                // Truncate to recorded; pass 2 will see the same
+                // depth and emit a clean jump.
+                depth = recorded;
+            } else if depth < recorded {
                 return Err(TranslateError::Unsupported { op: 0xFD, at: pc });
             }
         }
