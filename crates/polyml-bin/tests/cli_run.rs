@@ -153,6 +153,49 @@ fn bootstrap_can_register_infix_plus_and_compute() {
     );
 }
 
+/// `poly run img --use /path/to/file.sml` is the one-shot equivalent of
+/// `echo 'val () = Bootstrap.use "file.sml";' | poly run img -- -I /path/to`
+/// plus closing stdin so the bootstrap exits cleanly after running it.
+#[test]
+fn bootstrap_use_flag_runs_file_one_shot() {
+    let dir = std::env::temp_dir().join("polyml_rs_use_flag_test");
+    let _ = std::fs::create_dir_all(&dir);
+    let script = dir.join("script.sml");
+    std::fs::write(
+        &script,
+        b"infix 6 +; RunCall.addOverload FixedInt.+ \"+\"; val x = 21 + 21;",
+    )
+    .unwrap();
+
+    let Some(image) = bootstrap_image() else {
+        return;
+    };
+    let out = Command::new(poly_bin())
+        .arg("run")
+        .arg("--max-steps")
+        .arg("10000000")
+        .arg(&image)
+        .arg("--use")
+        .arg(&script)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "poly run --use failed: status={:?} stdout={} stderr={}",
+        out.status, stdout, stderr
+    );
+    assert!(
+        stdout.contains("Use: script.sml"),
+        "expected 'Use: script.sml' marker, got stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Tagged(0)"),
+        "expected clean exit, got stdout={stdout} stderr={stderr}"
+    );
+}
+
 /// `poly run img -- -I path` makes `path` visible to the SML side
 /// as a `CommandLine.argument`. `Bootstrap.use "file.sml"` then
 /// finds and loads it via `TextIO.openIn` (RTS file I/O subcodes 3/4)

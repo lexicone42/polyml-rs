@@ -92,29 +92,38 @@ with `POLYML_GC_QUIET=1`, full correctness audit with
 `POLYML_GC_AUDIT=1` (slow — checks for residual from-space pointers
 across all interpreter state after each collect).
 
-### 4. `Bootstrap.use "file.sml"` finds source files via `-I path`
+### 4. Run an SML file as a one-shot script
 
-`poly run` accepts trailing args after `--`, which become the SML
-program's `CommandLine.arguments()`. The bootstrap's `Bootstrap.use`
-scans these for `-I path` to resolve relative source filenames.
+`poly run --use file.sml` is the simplest "run this program" surface:
 
 ```
-$ cat > /tmp/prelude.sml <<'EOF'
+$ cat > /tmp/script.sml <<'EOF'
 infix 6 +;
 RunCall.addOverload FixedInt.+ "+";
-val twentyThree = 20 + 3;
+val answer = 21 + 21;
 EOF
-$ echo 'val () = Bootstrap.use "prelude.sml";' \
-    | ./target/release/poly run vendor/polyml/bootstrap/bootstrap64.txt \
-                                -- -I /tmp
-Use: prelude.sml
+$ ./target/release/poly run vendor/polyml/bootstrap/bootstrap64.txt \
+                              --use /tmp/script.sml
+Use: script.sml
 Result: Tagged(0) — clean return
 ```
 
-Internally: `PolyBasicIOGeneral` subcodes 3/4 open the file,
-subcodes 8/9 read it into an array, the bootstrap compiles it,
-and the resulting `val` is bound in the running environment.
-File I/O is real, end-to-end.
+Internally: the CLI synthesizes `val () = Bootstrap.use "script.sml";`
+to stdin, sets `CommandLine.arguments` to `["-I", "/tmp"]`, then
+redirects real stdin from `/dev/null` so the bootstrap REPL exits
+on EOF after the synthetic line is consumed. `PolyBasicIOGeneral`
+subcodes 3/4/8/9 do the actual file open + read.
+
+For more control, the long form is:
+
+```
+$ echo 'val () = Bootstrap.use "script.sml";' \
+    | ./target/release/poly run vendor/polyml/bootstrap/bootstrap64.txt \
+                                -- -I /tmp
+```
+
+The `-- ARGS` after the image populates `CommandLine.arguments()`
+for the SML side; useful for any SML program that scans args.
 
 ### 5. HOL4 theorem-proving runs through our runtime
 

@@ -61,6 +61,33 @@ pub fn get_command_args() -> Vec<String> {
     COMMAND_ARGS.lock().expect("COMMAND_ARGS poisoned").clone()
 }
 
+/// Bytes that synthetic stdin reads should consume before falling
+/// through to the real `std::io::stdin`. Populated by the CLI's
+/// `--use FILE` option so the SML side sees the
+/// `val () = Bootstrap.use "..."` line as its first input.
+static SYNTHETIC_STDIN: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+/// Append bytes to the synthetic-stdin queue. They will be read
+/// before any bytes from the real stdin.
+pub fn push_synthetic_stdin(text: String) {
+    let mut g = SYNTHETIC_STDIN.lock().expect("SYNTHETIC_STDIN poisoned");
+    g.extend_from_slice(text.as_bytes());
+}
+
+/// Read up to `dst.len()` bytes from the synthetic-stdin queue.
+/// Returns the number of bytes copied. If the queue is empty, returns
+/// 0 so the caller can fall through to the real stdin.
+fn read_synthetic_stdin(dst: &mut [u8]) -> usize {
+    let mut g = SYNTHETIC_STDIN.lock().expect("SYNTHETIC_STDIN poisoned");
+    let n = g.len().min(dst.len());
+    if n == 0 {
+        return 0;
+    }
+    dst[..n].copy_from_slice(&g[..n]);
+    g.drain(..n);
+    n
+}
+
 /// Enable or disable RTS call tracing.
 pub fn set_rts_trace(on: bool) {
     RTS_TRACE.store(on, Ordering::Relaxed);
@@ -2621,7 +2648,12 @@ fn read_array_from_stream(strm: PolyWord, arg: PolyWord) -> PolyWord {
     #[allow(clippy::cast_possible_truncation)]
     let fd = (fd_plus_one - 1) as i32;
     let n = if fd == 0 {
-        std::io::stdin().read(slice).unwrap_or(0)
+        let syn = read_synthetic_stdin(slice);
+        if syn > 0 {
+            syn
+        } else {
+            std::io::stdin().read(slice).unwrap_or(0)
+        }
     } else {
         // For non-stdio fds, reconstruct a File to read, then
         // immediately forget it so we don't close the fd.
@@ -2668,7 +2700,12 @@ fn read_string_from_stream(
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
     let fd = (fd_plus_one - 1) as i32;
     let n = if fd == 0 {
-        std::io::stdin().read(&mut buf).unwrap_or(0)
+        let syn = read_synthetic_stdin(&mut buf);
+        if syn > 0 {
+            syn
+        } else {
+            std::io::stdin().read(&mut buf).unwrap_or(0)
+        }
     } else {
         // Borrow the fd without taking ownership (= no close).
         use std::os::fd::{FromRawFd, IntoRawFd};

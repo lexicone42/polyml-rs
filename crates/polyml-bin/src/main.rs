@@ -65,6 +65,13 @@ enum Cmd {
         /// Pass these after a `--` separator: `poly run img.txt -- -I /tmp`.
         #[arg(last = true)]
         args: Vec<String>,
+        /// Execute the given SML source file as if the user piped
+        /// `val () = Bootstrap.use "<basename>";` to stdin. The
+        /// file's parent directory is automatically added as `-I`,
+        /// so the script doesn't need an explicit `--`-separated arg.
+        /// Mutually exclusive with reading SML from stdin.
+        #[arg(long, value_name = "FILE")]
+        r#use: Option<PathBuf>,
     },
 }
 
@@ -90,7 +97,16 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             trace_rts,
             disasm_hottest,
             args,
-        } => run_image(image, *max_steps, *profile, *trace_rts, *disasm_hottest, args.clone()),
+            r#use,
+        } => run_image(
+            image,
+            *max_steps,
+            *profile,
+            *trace_rts,
+            *disasm_hottest,
+            args.clone(),
+            r#use.clone(),
+        ),
     }
 }
 
@@ -101,6 +117,7 @@ fn run_image(
     trace_rts: bool,
     disasm_hottest: bool,
     extra_args: Vec<String>,
+    use_file: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let image = Image::parse(&bytes)?;
@@ -115,7 +132,31 @@ fn run_image(
     // Upstream PolyML's `user_arg_strings` (= CommandLine.arguments) is
     // everything after argv[0] except the image path itself. We pass
     // through whatever came after `--`, matching that convention.
-    polyml_runtime::rts::set_command_args(extra_args);
+    let mut all_args = extra_args;
+    // --use FILE expands to feeding `Bootstrap.use "<basename>";` via
+    // stdin and adding `-I <parent>` to CommandLine.arguments.
+    let synthetic_stdin: Option<String> = use_file.as_ref().map(|p| {
+        let parent = p.parent().filter(|d| !d.as_os_str().is_empty()).map_or_else(
+            || ".".to_string(),
+            |d| d.to_string_lossy().into_owned(),
+        );
+        let base = p.file_name().map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.to_string_lossy().into_owned());
+        if !all_args.iter().any(|a| a == "-I") {
+            all_args.push("-I".to_string());
+            all_args.push(parent);
+        }
+        format!("val () = Bootstrap.use \"{base}\";\n")
+    });
+    polyml_runtime::rts::set_command_args(all_args);
+    if let Some(sml) = &synthetic_stdin {
+        polyml_runtime::rts::push_synthetic_stdin(sml.clone());
+        // Replace process stdin with /dev/null so that once the
+        // synthetic-stdin queue drains, the bootstrap's read loop
+        // sees EOF and exits cleanly. Without this it'd block
+        // forever waiting for more input.
+        redirect_stdin_to_devnull();
+    }
 
     let rts = Arc::new(RtsTable::new());
     let (patched, missing) = patch_entry_points(&mut loaded, &rts);
@@ -204,6 +245,22 @@ fn run_image(
         }
     }
     Ok(())
+}
+
+/// `dup2(/dev/null, 0)` so future reads from stdin return EOF.
+/// Used by `--use` after pushing synthetic SML; the real stdin
+/// (whatever was attached at launch) is closed and replaced.
+fn redirect_stdin_to_devnull() {
+    use std::os::fd::AsRawFd;
+    let f = match std::fs::OpenOptions::new().read(true).open("/dev/null") {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let fd = f.as_raw_fd();
+    // SAFETY: dup2 takes two valid fds; 0 is always allocated.
+    unsafe {
+        libc::dup2(fd, 0);
+    }
 }
 
 #[allow(clippy::cast_possible_truncation)]

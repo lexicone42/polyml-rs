@@ -16,6 +16,7 @@ path = "src/main.rs"
 polyml-runtime = { workspace = true }
 polyml-image   = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
+libc = "0.2"
 
 [lints]
 workspace = true
