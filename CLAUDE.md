@@ -9,7 +9,7 @@ loop. See `PLAN.md` for the staged roadmap.
 
 ## Demo (Monday)
 
-Four things to show:
+Five things to show:
 
 ### 1. `poly run` executes the real PolyML bootstrap image
 
@@ -92,7 +92,31 @@ with `POLYML_GC_QUIET=1`, full correctness audit with
 `POLYML_GC_AUDIT=1` (slow — checks for residual from-space pointers
 across all interpreter state after each collect).
 
-### 4. HOL4 theorem-proving runs through our runtime
+### 4. `Bootstrap.use "file.sml"` finds source files via `-I path`
+
+`poly run` accepts trailing args after `--`, which become the SML
+program's `CommandLine.arguments()`. The bootstrap's `Bootstrap.use`
+scans these for `-I path` to resolve relative source filenames.
+
+```
+$ cat > /tmp/prelude.sml <<'EOF'
+infix 6 +;
+RunCall.addOverload FixedInt.+ "+";
+val twentyThree = 20 + 3;
+EOF
+$ echo 'val () = Bootstrap.use "prelude.sml";' \
+    | ./target/release/poly run vendor/polyml/bootstrap/bootstrap64.txt \
+                                -- -I /tmp
+Use: prelude.sml
+Result: Tagged(0) — clean return
+```
+
+Internally: `PolyBasicIOGeneral` subcodes 3/4 open the file,
+subcodes 8/9 read it into an array, the bootstrap compiles it,
+and the resulting `val` is bound in the running environment.
+File I/O is real, end-to-end.
+
+### 5. HOL4 theorem-proving runs through our runtime
 
 ```
 $ cargo test --release -p polyml-bin --test hol4_recon \
