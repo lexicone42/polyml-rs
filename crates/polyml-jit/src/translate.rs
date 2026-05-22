@@ -151,6 +151,11 @@ pub fn compile_with_consts(
     let arg_count = if prologue_arg_count > 0 || entry_pc > 0 {
         prologue_arg_count
     } else {
+        // For the function's OWN stack-init depth we need the maximum
+        // peek depth (the function may peek closure/retPC slots at
+        // LOCAL_N for N >= arity, which infer_arg_count's min-depth
+        // analysis captures correctly). RETURN_N gives only SML
+        // arity — insufficient for stack-init sizing.
         infer_arg_count(bytecode, entry_pc).unwrap_or(0)
     };
 
@@ -1033,10 +1038,6 @@ fn closure_arity_from_addr(addr: u64) -> Option<usize> {
     }
     // SAFETY: caller-trusted JIT-compile-time invariant.
     unsafe {
-        // Resolve the code-object pointer. Two candidate layouts:
-        //   (a) `addr` is a closure: closure[0] is the code-obj pointer
-        //   (b) `addr` is the code-obj pointer itself
-        // We try (a) first since our loader uses F_CLOSURE_OBJ.
         let closure_ptr = addr as *const usize;
         let candidate_a = closure_ptr.read();
         let code_obj = if candidate_a != 0 && candidate_a & 0x7 == 0 {
@@ -1044,30 +1045,76 @@ fn closure_arity_from_addr(addr: u64) -> Option<usize> {
         } else {
             addr as usize
         };
-        // Read the length-word of the code object to find body bytes.
-        // length-word is at code_obj - 8 (the word before body start).
         let lw_ptr = (code_obj as *const usize).sub(1);
         let lw = lw_ptr.read();
-        // `length_of(lw)` extracts the low 56 bits (n_words).
         let n_words = lw & 0x00ff_ffff_ffff_ffff;
         if n_words == 0 || n_words > (1 << 24) {
             return None;
         }
-        // Body slice covers n_words * 8 bytes starting at code_obj.
         let body_len_bytes = n_words * 8;
         let body =
             std::slice::from_raw_parts(code_obj as *const u8, body_len_bytes);
-        // Fast path: if there's an enter_int prologue, decode directly.
-        if body.len() >= 2 {
-            let b0 = body[0];
-            if b0 == INSTR_ENTER_INT_X86 || b0 == INSTR_ENTER_INT_ARM64 {
-                return Some((body[1] & 0x7f) as usize);
-            }
+        // Restrict scan to bytecode-only portion (not constants area).
+        let trailing_offset_word = body_len_bytes - 8;
+        let trailing_offset = i64::from_le_bytes(
+            body[trailing_offset_word..trailing_offset_word + 8]
+                .try_into()
+                .ok()?,
+        );
+        let cp_byte_off = (body_len_bytes as i64 + trailing_offset) as usize;
+        let bytecode_end = cp_byte_off.saturating_sub(8).min(body.len());
+        let bytecode = &body[..bytecode_end];
+        let b0 = bytecode.first().copied()?;
+        if b0 == INSTR_ENTER_INT_X86 || b0 == INSTR_ENTER_INT_ARM64 {
+            return Some((bytecode[1] & 0x7f) as usize);
         }
-        // Slow path: infer from LOCAL_N peeks in the code object's
-        // own bytecode prefix.
-        infer_arg_count(body, 0)
+        // Authoritative arity: scan the bytecode for any `RETURN_N`
+        // opcode. Per `bytecode.cpp`'s RETURN dispatch, the N suffix
+        // is the number of arg slots to drop below the result —
+        // i.e. exactly the function arity. LOCAL_N peeks aren't a
+        // reliable signal (closures access captures via LOCAL too).
+        if let Some(arity) = arity_from_return_scan(bytecode) {
+            return Some(arity);
+        }
+        // Fall back to peek-depth inference if no RETURN_N is found
+        // in a recognisable place.
+        infer_arg_count(bytecode, 0)
     }
+}
+
+/// Scan bytecode for any RETURN_N opcode and return its `N` (the
+/// number of args the function pops below its result on return).
+/// This is the authoritative arity: the SML compiler emits a
+/// RETURN_N that matches the function's declared arity, whereas
+/// LOCAL_N peeks can refer to either args or other stack values.
+///
+/// Walks one opcode at a time using `opcode_total_len` so immediates
+/// don't get misread as opcodes. Stops at the first unknown opcode
+/// (we don't want to mis-scan past data); returns `None` in that
+/// case so the caller falls back to peek-depth inference.
+fn arity_from_return_scan(bytecode: &[u8]) -> Option<usize> {
+    let mut pc = 0;
+    while pc < bytecode.len() {
+        let op = bytecode[pc];
+        match op {
+            INSTR_RETURN_1 => return Some(1),
+            INSTR_RETURN_2 => return Some(2),
+            INSTR_RETURN_3 => return Some(3),
+            INSTR_RETURN_B => {
+                let imm = *bytecode.get(pc + 1)?;
+                return Some(imm as usize);
+            }
+            INSTR_RETURN_W => {
+                let lo = *bytecode.get(pc + 1)?;
+                let hi = *bytecode.get(pc + 2)?;
+                return Some(u16::from_le_bytes([lo, hi]) as usize);
+            }
+            _ => {}
+        }
+        let step = opcode_total_len(bytecode, pc).ok()?;
+        pc += step;
+    }
+    None
 }
 
 fn function_entry_pc(bytecode: &[u8]) -> usize {
@@ -1217,11 +1264,11 @@ fn scan_branch_targets(
     // jump source.
     let mut depth_at: Vec<Option<usize>> = vec![None; bytecode.len()];
     let (start_pc, prologue_arg_count) = function_prologue(bytecode);
-    // If there's no enter-int prologue, infer arg count from peek
-    // patterns in the bytecode itself.
     let arg_count = if prologue_arg_count > 0 || start_pc > 0 {
         prologue_arg_count
     } else {
+        // Must match `compile_with_consts`: peek-depth inference for
+        // the function's stack-init sizing.
         infer_arg_count(bytecode, start_pc).unwrap_or(0)
     };
     let mut depth: usize = arg_count;
@@ -1240,6 +1287,18 @@ fn scan_branch_targets(
             } else {
                 pc += opcode_total_len(bytecode, pc)?;
                 continue;
+            }
+        } else if let Some(&recorded) = targets.get(&pc) {
+            // Falling through into a recorded branch target. Pass 2
+            // will emit an implicit jump here passing the current
+            // stack as block args — the block was created with
+            // `recorded` params, so the stack depth MUST match the
+            // recorded depth. If it doesn't, that's a stack-tracking
+            // bug at the source of the original JUMP record (e.g.
+            // a wrong arity inference for a closure call between
+            // the JUMP and this fall-through).
+            if depth != recorded {
+                return Err(TranslateError::Unsupported { op: 0xFD, at: pc });
             }
         }
         depth_at[pc] = Some(depth);

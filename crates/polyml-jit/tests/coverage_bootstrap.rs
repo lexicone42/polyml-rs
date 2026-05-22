@@ -51,6 +51,9 @@ fn jit_coverage_on_bootstrap_code_objects() {
 
     let mut jit = Jit::new().unwrap();
 
+    // Capture shortest "mismatched argument count" failure for offline trace.
+    let mut shortest_jump_fail: Option<(usize, Vec<u8>, usize, String)> = None;
+
     for space in [&loaded.immutable, &loaded.mutable, &loaded.code] {
         walk_code_objects(space, |code_obj_ptr, lw| {
             total += 1;
@@ -99,19 +102,33 @@ fn jit_coverage_on_bootstrap_code_objects() {
                     *blockers.entry("fell-off-end".into()).or_insert(0) += 1;
                 }
                 Err(translate::TranslateError::Jit(je)) => {
-                    // Categorise by the verifier-error message body.
-                    // Cranelift's `VerifierError { message: ... }` field
-                    // is the human-readable diagnostic.
                     let s = format!("{je}");
-                    let key = if let Some(start) = s.find("message: \"") {
+                    let msg = if let Some(start) = s.find("message: \"") {
                         let after = &s[start + "message: \"".len()..];
                         let end = after.find('"').unwrap_or(80);
-                        let msg: &str = &after[..end.min(80)];
-                        format!("verifier: {msg}")
+                        Some(&after[..end.min(80)])
                     } else {
-                        let short: String = s.chars().take(80).collect();
-                        format!("jit: {short}")
+                        None
                     };
+                    let key = match msg {
+                        Some(m) => format!("verifier: {m}"),
+                        None => {
+                            let short: String = s.chars().take(80).collect();
+                            format!("jit: {short}")
+                        }
+                    };
+                    // Capture the shortest function that fails with a
+                    // jump-arg-count mismatch, for offline trace.
+                    if msg.is_some_and(|m| m.contains("mismatched argument count")) {
+                        if shortest_jump_fail.as_ref().is_none_or(|(sz, ..)| bytecode_len < *sz) {
+                            shortest_jump_fail = Some((
+                                bytecode_len,
+                                full_body[..bytecode_len].to_vec(),
+                                max_bytes,
+                                s,
+                            ));
+                        }
+                    }
                     *blockers.entry(key).or_insert(0) += 1;
                 }
             }
@@ -123,6 +140,13 @@ fn jit_coverage_on_bootstrap_code_objects() {
     eprintln!("  JIT-compiled OK:     {ok} ({:.2}%)", 100.0 * ok as f64 / total as f64);
     if let Some(s) = shortest_ok {
         eprintln!("  shortest JIT'd bytecode: {s} bytes = {:?}", shortest_ok_bytes);
+    }
+    if let Some((sz, bytes, total_sz, msg)) = &shortest_jump_fail {
+        eprintln!(
+            "  shortest jump-mismatch fail: {sz} bytecode bytes (total {total_sz}):",
+        );
+        eprintln!("    bytes = {bytes:02x?}");
+        eprintln!("    msg head: {}", msg.chars().take(160).collect::<String>());
     }
     eprintln!("  top 10 blockers (first-failure reason per failing function):");
     let mut blockers_vec: Vec<(String, usize)> = blockers.into_iter().collect();
