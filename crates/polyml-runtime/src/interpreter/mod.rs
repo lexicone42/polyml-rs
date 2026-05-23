@@ -934,6 +934,7 @@ impl Interpreter {
         InterpError::PcOutOfBounds { offset, size }
     }
 
+    #[inline(always)]
     fn fetch_u8(&mut self) -> Result<u8, InterpError> {
         if self.pc >= self.code_end {
             return Err(self.pc_offset_for_err());
@@ -2485,20 +2486,46 @@ impl Interpreter {
         self.push_continue(v)
     }
 
+    /// RESET_R_N: pop top, drop n below it, push top back. Net effect
+    /// is "remove n stack slots while preserving the top value".
+    /// Fast path: read top, bump sp by n (with bounds check), write
+    /// top into new sp slot. Saves N pops.
+    ///
+    /// Bounds: need (n+1) items on stack at entry, i.e.,
+    /// `sp + n + 1 <= len()`, i.e., `new_sp < len()`.
+    #[inline(always)]
     fn reset(&mut self, n: usize) -> Result<StepResult, InterpError> {
-        let top = self.pop()?;
-        for _ in 0..n {
-            self.pop()?;
+        let Some(new_sp) = self.sp.checked_add(n) else {
+            return Err(InterpError::StackUnderflow);
+        };
+        if new_sp >= self.stack.len() {
+            return Err(InterpError::StackUnderflow);
         }
-        self.push_continue(top)
+        // SAFETY: sp <= new_sp < len(), so sp < len() too — both
+        // indices are valid.
+        unsafe {
+            let top = *self.stack.get_unchecked(self.sp);
+            *self.stack.get_unchecked_mut(new_sp) = top;
+        }
+        self.sp = new_sp;
+        Ok(StepResult::Continue)
     }
 
     /// Drop the top `n` items without preserving anything. The
     /// non-preserving variant of [`reset`](Self::reset).
+    /// Drop the top `n` items in one go: just bump sp by n (with
+    /// bounds check). The dropped PolyWord slots are left in the
+    /// stack as garbage — they'll get overwritten by the next push.
+    /// Hot path: RESET_1 is 3% of total dispatches.
+    #[inline(always)]
     fn drop_n(&mut self, n: usize) -> Result<StepResult, InterpError> {
-        for _ in 0..n {
-            self.pop()?;
+        let Some(new_sp) = self.sp.checked_add(n) else {
+            return Err(InterpError::StackUnderflow);
+        };
+        if new_sp > self.stack.len() {
+            return Err(InterpError::StackUnderflow);
         }
+        self.sp = new_sp;
         Ok(StepResult::Continue)
     }
 
