@@ -84,16 +84,18 @@ Executing (cap 5000000 steps)…   # starts executing the re-loaded image
 `PolyML.shareCommonData` is still a no-op (deduplication-style
 optimization; safe to skip).
 
-Heap default is 24 GB (3 billion words × 8 bytes; `with_default_alloc_space`
-takes a word count). At that size GC effectively never auto-triggers
-on the bootstrap workload (80% of 24 GB ≈ 19 GB) — the chain runs
-allocator-only and tops out around 10-15 GB RSS. The Cheney-style
-copying GC in `crates/polyml-runtime/src/gc.rs` is correct (12+
-clean cycles with `POLYML_GC_AUDIT=1` per commit 0a2862b) but only
-exercised on smaller heaps. Useful env vars: `POLYML_GC_THRESHOLD`
-overrides the 80% trigger; `POLYML_GC_QUIET=1` silences per-cycle
-log; `POLYML_GC_AUDIT=1` checks for residual from-space pointers
-across interpreter state after each collect (slow).
+Heap default is 1.6 GB (200M words × 8 bytes; `with_default_alloc_space`
+takes a *word* count — easy footgun). At that size the Cheney copying
+GC fires regularly (~18 cycles over the 7-stage chain, each retaining
+10-15M live words out of 167M), keeping peak RSS around 1.6 GB and
+letting the whole chain complete in ~33 minutes on a 6-core machine.
+A much larger heap (e.g. 24 GB) postpones GC past the bootstrap's
+working set, the chain accumulates without compaction, and the OOM
+killer takes the process out around stage 6 on a 32 GB machine.
+Useful env vars: `POLYML_GC_THRESHOLD` overrides the 80% trigger;
+`POLYML_GC_QUIET=1` silences per-cycle log; `POLYML_GC_AUDIT=1`
+checks for residual from-space pointers across interpreter state
+after each collect (slow — debugging aid).
 
 ### 4. Run an SML file as a one-shot script
 
