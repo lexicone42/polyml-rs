@@ -687,10 +687,20 @@ fn compile_with_consts_impl(
                     if read_at + 8 > _full_body.len() {
                         return Err(TranslateError::Unsupported { op, at: pc });
                     }
-                    let mut buf = [0u8; 8];
-                    buf.copy_from_slice(&_full_body[read_at..read_at + 8]);
-                    let val = i64::from_le_bytes(buf);
-                    stack.push(builder.ins().iconst(int, val));
+                    // Load the constant at RUNTIME from the code
+                    // object's constants pool. We can't bake the
+                    // value as iconst because GC moves the pointees
+                    // and updates the pool in place; a baked iconst
+                    // would become stale and crash on dereference.
+                    let abs_addr = _full_body.as_ptr() as i64 + read_at as i64;
+                    let base = builder.ins().iconst(int, abs_addr);
+                    let val = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        base,
+                        0,
+                    );
+                    stack.push(val);
                 }
                 INSTR_CALL_CONST_ADDR8_0
                 | INSTR_CALL_CONST_ADDR8_1

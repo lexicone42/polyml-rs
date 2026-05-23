@@ -160,12 +160,20 @@ fn jit_install_real_bootstrap_functions() {
     let skip_idx: Option<usize> = std::env::var("JIT_SKIP_IDX")
         .ok()
         .and_then(|s| s.parse().ok());
+    let only_idx: Option<usize> = std::env::var("JIT_ONLY_IDX")
+        .ok()
+        .and_then(|s| s.parse().ok());
     let dump_idx: Option<usize> = std::env::var("JIT_DUMP_IDX")
         .ok()
         .and_then(|s| s.parse().ok());
     let mut installed = 0usize;
     for (idx, (k, e)) in entries.into_iter().take(install_count).enumerate() {
         if Some(idx) == skip_idx { continue; }
+        if let Some(only) = only_idx
+            && idx != only
+        {
+            continue;
+        }
         if Some(idx) == dump_idx {
             // Dump the bytecode.
             unsafe {
