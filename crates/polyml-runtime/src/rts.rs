@@ -812,11 +812,38 @@ pub fn peek_bootstrap_tail_call() -> PolyWord {
 /// Read `POLYML_GC_THRESHOLD` env var as a 1-99 percentage; returns
 /// `None` if unset / invalid. The interpreter's step loop triggers
 /// GC when alloc-space fullness >= this percentage.
+///
+/// The env-var lookup is cached because this is called on every
+/// bytecode step (~14M calls/sec); a fresh `std::env::var` lookup
+/// per call goes through the libc env mutex and dominates the
+/// dispatch loop. We read the env once on first call, store the
+/// parsed value (or sentinel 0 = unset), and return from the cache
+/// on subsequent calls.
+///
+/// Sentinel values in `GC_THRESHOLD_CACHE`:
+///   0   = not yet initialised
+///   1   = env unset or invalid (caller falls back to default 80%)
+///   2-100 = parsed value `+ 1` (so 80% is stored as 81)
+static GC_THRESHOLD_CACHE: AtomicUsize = AtomicUsize::new(0);
+
 #[must_use]
 pub fn gc_threshold_percent() -> Option<u8> {
-    let s = std::env::var("POLYML_GC_THRESHOLD").ok()?;
-    let p: u8 = s.parse().ok()?;
-    if (1..=99).contains(&p) { Some(p) } else { None }
+    let cached = GC_THRESHOLD_CACHE.load(Ordering::Relaxed);
+    if cached == 0 {
+        let parsed = std::env::var("POLYML_GC_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse::<u8>().ok())
+            .filter(|p| (1..=99).contains(p));
+        let to_store = parsed.map_or(1, |p| usize::from(p) + 1);
+        GC_THRESHOLD_CACHE.store(to_store, Ordering::Relaxed);
+        return parsed;
+    }
+    if cached == 1 {
+        None
+    } else {
+        #[allow(clippy::cast_possible_truncation)]
+        Some((cached - 1) as u8)
+    }
 }
 
 /// Overwrite the bootstrap tail-call slot. Used by the GC to write

@@ -997,10 +997,10 @@ impl Interpreter {
         }
 
         let opcode_pc = self.pc;
-        #[allow(clippy::cast_possible_truncation)]
-        let off = self.pc_offset() as u32;
-        let code = self.code_start as usize;
         if let Some(d) = self.diag.as_mut() {
+            #[allow(clippy::cast_possible_truncation)]
+            let off = unsafe { self.pc.offset_from(self.code_start) as u32 };
+            let code = self.code_start as usize;
             d.total_steps += 1;
             *d.pc_visits.entry((code, off)).or_insert(0) += 1;
         }
