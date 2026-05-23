@@ -181,9 +181,13 @@ fn run_image(
     let image_mut_ptr = loaded.mutable.iter().next().map(|w| w as *const PolyWord);
     let image_mut_len = loaded.mutable.used_words();
     let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
-        // 3 GB heap. With Cheney copying GC enabled this peaks ~6 GB
-        // RSS during a cycle (live + scratch). Bootstrap chain needs
-        // around this much; small one-shots stay well under.
+        // 3 billion words = 24 GB heap. `with_default_alloc_space`'s
+        // param is in WORDS, not bytes — easy to misread.
+        // With this much heap, GC effectively never auto-triggers
+        // on the bootstrap workload (80% of 24 GB = 19.2 GB) and the
+        // bootstrap accumulates without compaction. Smaller heaps
+        // (200M words = ~1.6 GB) let GC fire and keep peak RSS down,
+        // but the working set has to fit in 80% of whatever you pick.
         .with_default_alloc_space(3 * 1024 * 1024 * 1024)
         .with_rts(rts);
     if let Some(p) = image_mut_ptr {
