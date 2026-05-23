@@ -62,8 +62,32 @@ build uses to bootstrap itself.
 
 Stage 7's `PolyML.export(fileName, root)` is wired up to
 [`polyml_runtime::export::snapshot`] + [`Image::write`] and writes
-a real pexport text file. **The bootstrap loop is closed
-end-to-end:**
+a real pexport text file. **The full bootstrap loop closes
+end-to-end into a working SML REPL:**
+
+```
+$ cd vendor/polyml/
+$ ../../target/release/poly run --max-steps 200000000000 \
+      bootstrap/bootstrap64.txt < bootstrap/Stage1.sml
+# ... 33 minutes of self-compilation ...
+******Writing object code******
+Result: Tagged(0) — clean return
+
+$ ls -l polyexport
+-rw-r--r-- 13248269  (13 MB, 453K objects)
+
+$ echo "fun fact 0 = 1 | fact n = n * fact(n-1); fact 10;" \
+    | ../../target/release/poly run --max-steps 500000000 polyexport
+Poly/ML 5.9.2 Release (Git version polyml-rs)
+> val fact = fn: int -> int
+> val it = 3628800: int
+Result: Tagged(0) — clean return
+```
+
+That's a real SML REPL — type inference, recursive functions,
+higher-order functions, lists — running an image our Rust runtime
+self-bootstrapped from `bootstrap64.txt`. The simpler "load only,
+trivial root" form also works:
 
 ```
 $ cat > /tmp/quick.sml <<'EOF'
@@ -72,13 +96,8 @@ val () = PolyML.export("/tmp/my_export", fn () => ());
 EOF
 $ cd vendor/polyml
 $ ../../target/release/poly run bootstrap/bootstrap64.txt < /tmp/quick.sml
-# ... loads all 94 basis files, writes the pexport snapshot ...
-Result: Tagged(0)
-$ ../../target/release/poly load /tmp/my_export
-Loaded /tmp/my_export
-  root closure -> code object, len=11 bytes=88, is_code=true
 $ ../../target/release/poly run /tmp/my_export
-Executing (cap 5000000 steps)…   # starts executing the re-loaded image
+# starts executing the re-loaded image
 ```
 
 `PolyML.shareCommonData` is still a no-op (deduplication-style
