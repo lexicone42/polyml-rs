@@ -69,7 +69,7 @@ end-to-end into a working SML REPL:**
 $ cd vendor/polyml/
 $ ../../target/release/poly run --max-steps 200000000000 \
       bootstrap/bootstrap64.txt < bootstrap/Stage1.sml
-# ... ~7 minutes of self-compilation ...
+# ... ~5 minutes of self-compilation ...
 ******Writing object code******
 Result: Tagged(0) — clean return
 
@@ -107,7 +107,7 @@ Heap default is 1.6 GB (200M words × 8 bytes; `with_default_alloc_space`
 takes a *word* count — easy footgun). At that size the Cheney copying
 GC fires regularly (~18 cycles over the 7-stage chain, each retaining
 10-15M live words out of 167M), keeping peak RSS around 1.6 GB and
-letting the whole chain complete in ~7 minutes on a 6-core machine.
+letting the whole chain complete in ~5 minutes on a 6-core machine.
 A much larger heap (e.g. 24 GB) postpones GC past the bootstrap's
 working set, the chain accumulates without compaction, and the OOM
 killer takes the process out around stage 6 on a 32 GB machine.
