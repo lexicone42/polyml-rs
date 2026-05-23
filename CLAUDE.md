@@ -154,7 +154,7 @@ for the SML side; useful for any SML program that scans args.
 ```
 $ cargo test --release -p polyml-bin --test hol4_recon \
     recon_via_checkpoint_proves_implication_self -- --nocapture
-... 19 seconds ...
+... 15 seconds ...
 test recon_via_checkpoint_proves_implication_self ... ok
 ```
 
@@ -198,6 +198,34 @@ Consequences for testing:
 
 The `bootstrap_can_register_infix_plus_and_compute` test in
 `crates/polyml-bin/tests/cli_run.rs` exercises this path.
+
+## Performance
+
+The bytecode interpreter dispatch loop went through ~8x of perf
+work in May 2026. Current state (5.9 GHz Intel, single core):
+
+| Workload                              | Time   | Steps    | Steps/sec |
+|---------------------------------------|--------|----------|-----------|
+| Simple bootstrap (no stage1)          | 0.1s   | 1.1M     | 11M       |
+| Basis load (`Bootstrap.use "basis/build.sml"`) | 20s | 1.8B | 90M |
+| Full 7-stage chain                    | 5min   | 27.7B    | 92M       |
+| HOL4 kernel + 14 inferences proof     | 15s    | ?        | ?         |
+
+Two structural fixes account for most of the gain:
+1. `gc_threshold_percent()` cached in `AtomicUsize` — was reading
+   env var on every step → 6.2x.
+2. Pre-computed `gc_trigger_words` from `cap * threshold / 100`,
+   plus `#[inline(always)]` + `get_unchecked` on push/pop/peek/
+   reset/drop_n → 1.35x more.
+
+Use `poly run --profile <image>` to dump hot opcodes / hot code
+objects. Top-20 hottest opcodes is invaluable for finding the next
+target — the env-var-cache fix came from "wait, LOCAL_N is 17%
+combined; what's actually slow in that path?"
+
+Next-hottest opcodes (post-fix) are INDIRECT_LOCAL_B0/B1 (~7%)
+and the JUMP family (~6%). Diminishing returns — each is already
+~3 instructions of useful work.
 
 ## JIT status (60.12% translation, executes hand-crafted only)
 
