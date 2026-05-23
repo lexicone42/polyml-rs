@@ -138,7 +138,7 @@ fn jit_install_real_bootstrap_functions() {
     let image_mut_ptr = loaded.mutable.iter().next().map(|w| w as *const PolyWord);
     let image_mut_len = loaded.mutable.used_words();
     let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
-        .with_default_alloc_space(64 * 1024 * 1024)
+        .with_default_alloc_space_words(64 * 1024 * 1024)
         .with_rts(rts);
     if let Some(p) = image_mut_ptr {
         interp = interp.with_image_mutable_root(p, image_mut_len);

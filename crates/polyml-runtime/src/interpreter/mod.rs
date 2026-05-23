@@ -370,10 +370,38 @@ impl Interpreter {
     }
 
     /// Convenience: attach a freshly-created mutable allocation space
-    /// of the given word capacity.
+    /// sized in WORDS. A `PolyWord` is 8 bytes, so e.g. 200 million
+    /// words is 1.6 GB. Use this when sizing from a known word count;
+    /// use [`Self::with_default_alloc_space_bytes`] when sizing from a
+    /// memory budget.
     #[must_use]
-    pub fn with_default_alloc_space(self, capacity_words: usize) -> Self {
+    pub fn with_default_alloc_space_words(self, capacity_words: usize) -> Self {
         self.with_alloc_space(MemorySpace::new(capacity_words, SpaceKind::Mutable))
+    }
+
+    /// Convenience: attach a freshly-created mutable allocation space
+    /// sized in BYTES. Rounded down to a whole number of `PolyWord`
+    /// slots (8 bytes each). Use this when sizing from a memory
+    /// budget; use [`Self::with_default_alloc_space_words`] when
+    /// sizing from a known word count.
+    #[must_use]
+    pub fn with_default_alloc_space_bytes(self, capacity_bytes: usize) -> Self {
+        let capacity_words = capacity_bytes / std::mem::size_of::<crate::PolyWord>();
+        self.with_default_alloc_space_words(capacity_words)
+    }
+
+    /// **Deprecated:** the unit was implicit (words), which has
+    /// caused misreads — `with_default_alloc_space(3 * 1024 * 1024 * 1024)`
+    /// looks like 3 GB but is actually 3 billion words = 24 GB.
+    /// Use [`Self::with_default_alloc_space_words`] or
+    /// [`Self::with_default_alloc_space_bytes`] instead.
+    #[must_use]
+    #[deprecated(
+        since = "0.0.1",
+        note = "ambiguous unit; use `with_default_alloc_space_words` or `with_default_alloc_space_bytes`"
+    )]
+    pub fn with_default_alloc_space(self, capacity_words: usize) -> Self {
+        self.with_default_alloc_space_words(capacity_words)
     }
 
     /// Add a mutable image space to scan as a GC root. Pointers from

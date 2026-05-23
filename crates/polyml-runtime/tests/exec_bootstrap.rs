@@ -85,7 +85,7 @@ fn step_bootstrap_entry_as_far_as_possible() {
     let mut interp = unsafe { Interpreter::from_code_object(8192, code_obj_ptr) }
         // 64 MB of allocator space — bootstrap allocates a lot and we
         // have no GC yet.
-        .with_default_alloc_space(8 * 1024 * 1024)
+        .with_default_alloc_space_words(8 * 1024 * 1024)
         .with_rts(rts);
     interp.test_seed_return_sentinel();
     interp.test_seed_top(root_closure_word);

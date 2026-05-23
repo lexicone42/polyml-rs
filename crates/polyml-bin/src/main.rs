@@ -181,13 +181,11 @@ fn run_image(
     let image_mut_ptr = loaded.mutable.iter().next().map(|w| w as *const PolyWord);
     let image_mut_len = loaded.mutable.used_words();
     let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
-        // 200M words = 1.6 GB heap. `with_default_alloc_space`'s
-        // param is in WORDS, not bytes — easy to misread.
-        // This is small enough that GC auto-triggers (at 80% = 1.3 GB)
-        // and keeps peak RSS bounded. The bootstrap working set fits
-        // comfortably. With a 24 GB heap, GC never fires and the
-        // bootstrap OOMs around stage 6 on a 32 GB machine.
-        .with_default_alloc_space(200 * 1024 * 1024)
+        // 1.6 GB heap (200M words). Small enough that GC auto-fires
+        // at 80% = 1.3 GB and keeps peak RSS bounded. With a much
+        // bigger heap (24 GB), GC never fires and the bootstrap OOMs
+        // around stage 6 on a 32 GB machine.
+        .with_default_alloc_space_bytes(1_600 * 1024 * 1024)
         .with_rts(rts);
     if let Some(p) = image_mut_ptr {
         interp = interp.with_image_mutable_root(p, image_mut_len);

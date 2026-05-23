@@ -53,7 +53,7 @@ fn dump_stack_at_hot_loop_entry() {
     let root_closure_word = PolyWord::from_ptr(loaded1.root);
     let code_obj_ptr = unsafe { *loaded1.root }.as_ptr::<PolyWord>();
     let mut interp1 = unsafe { Interpreter::from_code_object(8192, code_obj_ptr) }
-        .with_default_alloc_space(8 * 1024 * 1024)
+        .with_default_alloc_space_words(8 * 1024 * 1024)
         .with_rts(rts1)
         .enable_diagnostics();
     interp1.test_seed_return_sentinel();
@@ -83,7 +83,7 @@ fn dump_stack_at_hot_loop_entry() {
     let root_closure_word2 = PolyWord::from_ptr(loaded2.root);
     let code_obj_ptr2 = unsafe { *loaded2.root }.as_ptr::<PolyWord>();
     let mut interp2 = unsafe { Interpreter::from_code_object(8192, code_obj_ptr2) }
-        .with_default_alloc_space(8 * 1024 * 1024)
+        .with_default_alloc_space_words(8 * 1024 * 1024)
         .with_rts(rts2)
         .enable_diagnostics();
     interp2.test_seed_return_sentinel();
@@ -152,7 +152,7 @@ fn profile_bootstrap_hot_pcs() {
     let code_obj_ptr = code_obj.as_ptr::<PolyWord>();
 
     let mut interp = unsafe { Interpreter::from_code_object(8192, code_obj_ptr) }
-        .with_default_alloc_space(8 * 1024 * 1024)
+        .with_default_alloc_space_words(8 * 1024 * 1024)
         .with_rts(rts)
         .enable_diagnostics();
     interp.test_seed_return_sentinel();
