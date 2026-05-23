@@ -340,6 +340,13 @@ fn print_profile(d: &DiagState) {
     for (code, cnt) in d.hot_call_targets(10) {
         println!("  code=0x{code:016x}  calls={cnt:10}");
     }
+    println!();
+    println!("Top 20 hottest opcodes:");
+    for (op, cnt) in d.hot_opcodes(20) {
+        #[allow(clippy::cast_precision_loss)]
+        let pct = 100.0 * cnt as f64 / total;
+        println!("  op=0x{op:02x}  count={cnt:12}  ({pct:5.1}%)");
+    }
 }
 
 fn inspect(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {

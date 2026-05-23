@@ -169,6 +169,13 @@ pub struct Interpreter {
     /// (closures, tuples, refs). `None` means the interpreter will
     /// trap `InterpError::NoAllocator` on any allocation op.
     alloc_space: Option<MemorySpace>,
+    /// Pre-computed GC threshold in words (= `alloc_space.capacity *
+    /// threshold_percent / 100`). 0 = "never auto-GC", set when
+    /// either `alloc_space` is None or `POLYML_GC_THRESHOLD` is
+    /// configured to a value outside (1..=99). On every step we
+    /// compare `alloc_space.used_words()` against this; cheaper than
+    /// the previous `used * 100 >= cap * thresh`.
+    gc_trigger_words: usize,
     /// "Handler register" — index into `stack` where the most-recent
     /// exception-handler frame sits. `stack.len()` (past-the-end)
     /// means no handler in scope.
@@ -250,6 +257,7 @@ impl Interpreter {
             code_end: end,
             frames: Vec::new(),
             alloc_space: None,
+            gc_trigger_words: 0,
             handler_sp: stack_capacity, // past-the-end = no handler
             handler_frames_depth: Vec::new(),
             exception_packet: None,
@@ -292,6 +300,7 @@ impl Interpreter {
             code_end: end,
             frames: Vec::new(),
             alloc_space: None,
+            gc_trigger_words: 0,
             handler_sp: stack_capacity,
             handler_frames_depth: Vec::new(),
             exception_packet: None,
@@ -365,7 +374,12 @@ impl Interpreter {
     /// Builder pattern; returns the interpreter for chaining.
     #[must_use]
     pub fn with_alloc_space(mut self, space: MemorySpace) -> Self {
+        let cap = space.capacity_words();
         self.alloc_space = Some(space);
+        let thresh = usize::from(crate::rts::gc_threshold_percent().unwrap_or(80));
+        // gc_trigger_words = cap * thresh / 100. Saturate at 0 if
+        // cap is so large that the multiply would overflow.
+        self.gc_trigger_words = cap.checked_mul(thresh).map_or(0, |x| x / 100);
         self
     }
 
@@ -859,31 +873,43 @@ impl Interpreter {
 
     // ---- Stack primitives ----------------------------------------------
 
+    #[inline(always)]
     fn push(&mut self, w: PolyWord) -> Result<(), InterpError> {
         if self.sp == 0 {
             return Err(InterpError::StackOverflow);
         }
         self.sp -= 1;
-        self.stack[self.sp] = w;
+        // SAFETY: sp is now in [0, len()) since we checked sp != 0 above
+        // and decremented; stack is a fixed-size Box<[PolyWord]>.
+        unsafe {
+            *self.stack.get_unchecked_mut(self.sp) = w;
+        }
         Ok(())
     }
 
+    #[inline(always)]
     fn pop(&mut self) -> Result<PolyWord, InterpError> {
         if self.sp >= self.stack.len() {
             return Err(InterpError::StackUnderflow);
         }
-        let w = self.stack[self.sp];
+        // SAFETY: sp < len(); stack is a fixed Box<[PolyWord]>.
+        let w = unsafe { *self.stack.get_unchecked(self.sp) };
         self.sp += 1;
         Ok(w)
     }
 
+    #[inline(always)]
     fn peek(&self, depth: usize) -> Result<PolyWord, InterpError> {
-        let idx = self
-            .sp
-            .checked_add(depth)
-            .filter(|i| *i < self.stack.len())
-            .ok_or(InterpError::StackUnderflow)?;
-        Ok(self.stack[idx])
+        // Hot path. `checked_add + filter + ok_or + bounds check on
+        // indexing` was three branches; collapse to one.
+        let Some(idx) = self.sp.checked_add(depth) else {
+            return Err(InterpError::StackUnderflow);
+        };
+        if idx >= self.stack.len() {
+            return Err(InterpError::StackUnderflow);
+        }
+        // SAFETY: idx < len() checked just above.
+        Ok(unsafe { *self.stack.get_unchecked(idx) })
     }
 
     // ---- PC primitives -------------------------------------------------
@@ -976,35 +1002,36 @@ impl Interpreter {
             return Ok(StepResult::Returned(PolyWord::tagged(code)));
         }
 
-        // Auto-GC: trigger at the configured fullness threshold.
-        // POLYML_GC_THRESHOLD overrides; default is 80%.
-        // POLYML_GC_QUIET=1 suppresses the per-cycle log line.
-        let thresh = crate::rts::gc_threshold_percent().unwrap_or(80) as usize;
-        if let Some(space) = self.alloc_space.as_ref() {
-            let used = space.used_words();
-            let cap = space.capacity_words();
-            if cap > 0 && used * 100 >= cap * thresh {
-                let before = used;
-                let stack_depth = self.stack_height();
-                let new_used = self.gc().unwrap_or(before);
-                if std::env::var("POLYML_GC_QUIET").is_err() {
-                    eprintln!(
-                        "  GC: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
-                        if before > 0 { (new_used * 100) / before } else { 0 }
-                    );
-                }
+        // Auto-GC: trigger when alloc_space.used reaches the
+        // pre-computed threshold. Trigger is 0 when no alloc_space or
+        // when POLYML_GC_THRESHOLD selects "disable GC" — either way
+        // `used >= 0` would always be true if used == 0, so we also
+        // guard on `gc_trigger_words > 0`.
+        if self.gc_trigger_words > 0
+            && let Some(used) = self.alloc_space.as_ref().map(MemorySpace::used_words)
+            && used >= self.gc_trigger_words
+        {
+            let before = used;
+            let stack_depth = self.stack_height();
+            let new_used = self.gc().unwrap_or(before);
+            if std::env::var("POLYML_GC_QUIET").is_err() {
+                eprintln!(
+                    "  GC: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
+                    if before > 0 { (new_used * 100) / before } else { 0 }
+                );
             }
         }
 
         let opcode_pc = self.pc;
+        let op = self.fetch_u8()?;
         if let Some(d) = self.diag.as_mut() {
             #[allow(clippy::cast_possible_truncation)]
-            let off = unsafe { self.pc.offset_from(self.code_start) as u32 };
+            let off = unsafe { opcode_pc.offset_from(self.code_start) as u32 };
             let code = self.code_start as usize;
             d.total_steps += 1;
             *d.pc_visits.entry((code, off)).or_insert(0) += 1;
+            d.opcode_counts[op as usize] += 1;
         }
-        let op = self.fetch_u8()?;
         if crate::rts::is_traced() {
             eprintln!(
                 "  [{:5}] op=0x{op:02x} sp_depth={} top={:?}",
@@ -2446,11 +2473,13 @@ impl Interpreter {
 
     // ---- Helpers ------------------------------------------------------
 
+    #[inline(always)]
     fn push_continue(&mut self, w: PolyWord) -> Result<StepResult, InterpError> {
         self.push(w)?;
         Ok(StepResult::Continue)
     }
 
+    #[inline(always)]
     fn dup_local(&mut self, depth: usize) -> Result<StepResult, InterpError> {
         let v = self.peek(depth)?;
         self.push_continue(v)
