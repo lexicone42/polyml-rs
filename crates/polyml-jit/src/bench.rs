@@ -108,12 +108,20 @@ fn straight_line_add_program(n: usize) -> Vec<u8> {
     bc
 }
 
+// JIT functions with a RETURN_N now load the SML call-frame slots
+// (arg_count = sml_arity + 2) from args_ptr. These hand-crafted tests
+// don't have args, but the JIT still loads 3 slots (0+2 = arity 0,
+// or 1+2 for RETURN_1). Pass a small zero-initialized buffer so the
+// JIT's loads don't null-deref.
+const ARGS_DUMMY: [i64; 16] = [0; 16];
+
 #[test]
 fn jit_matches_interp_for_addition_chain() {
     let bc = straight_line_add_program(50);
     let mut jit = Jit::new().unwrap();
     let jit_fn = compile(&mut jit, &bc).unwrap();
-    assert_eq!(untag(unsafe { jit_fn(std::ptr::null()) }), 50);
+    let args_dummy = ARGS_DUMMY;
+    assert_eq!(untag(unsafe { jit_fn(args_dummy.as_ptr()) }), 50);
     assert_eq!(untag(interp(&bc)), 50);
 }
 
@@ -130,7 +138,8 @@ fn jit_matches_interp_for_mult_chain() {
     ];
     let mut jit = Jit::new().unwrap();
     let jit_fn = compile(&mut jit, &bc).unwrap();
-    assert_eq!(untag(unsafe { jit_fn(std::ptr::null()) }), 32);
+    let args_dummy = ARGS_DUMMY;
+    assert_eq!(untag(unsafe { jit_fn(args_dummy.as_ptr()) }), 32);
     assert_eq!(untag(interp(&bc)), 32);
 }
 
@@ -140,9 +149,10 @@ fn jit_speedup_over_micro_interpreter() {
     let bc = straight_line_add_program(1000);
     let mut jit = Jit::new().unwrap();
     let jit_fn = compile(&mut jit, &bc).unwrap();
+    let args_dummy = ARGS_DUMMY;
 
     // Sanity-check both return 1000.
-    assert_eq!(untag(unsafe { jit_fn(std::ptr::null()) }), 1000);
+    assert_eq!(untag(unsafe { jit_fn(args_dummy.as_ptr()) }), 1000);
     assert_eq!(untag(interp(&bc)), 1000);
 
     let iters = 100_000;
@@ -150,7 +160,7 @@ fn jit_speedup_over_micro_interpreter() {
     let t0 = std::time::Instant::now();
     let mut sink = 0i64;
     for _ in 0..iters {
-        sink = sink.wrapping_add(unsafe { jit_fn(std::ptr::null()) });
+        sink = sink.wrapping_add(unsafe { jit_fn(args_dummy.as_ptr()) });
     }
     let jit_elapsed = t0.elapsed();
 

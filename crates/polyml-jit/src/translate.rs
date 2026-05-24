@@ -224,28 +224,7 @@ fn compile_with_consts_impl(
     let targets = scan_branch_targets(bytecode, full_body)?;
 
     let (entry_pc, prologue_arg_count) = function_prologue(bytecode);
-    let arg_count = if prologue_arg_count > 0 || entry_pc > 0 {
-        prologue_arg_count
-    } else {
-        // For the function's OWN stack-init depth we need the maximum
-        // peek depth (the function may peek closure/retPC slots at
-        // LOCAL_N for N >= arity). Combine two sources:
-        //  - `infer_arg_count`: walks bytecode counting min-stack-
-        //    depth; over-counts mildly when the function uses
-        //    LOCAL_{>=arity} (which is the common case).
-        //  - `arity_from_return_scan + 2`: SML arity from RETURN_N
-        //    plus 2 (the closure + retPC slots). A reliable lower
-        //    bound when RETURN_N is present.
-        // When `infer_arg_count` bails early on an unknown opcode,
-        // RETURN_N is the more accurate signal.
-        // Use peek-depth inference for the function's OWN stack
-        // sizing. Don't fold in RETURN_N's N — that's the callee-arity
-        // signal, used by closure_arity_from_addr at CALL sites. A
-        // function that has RETURN_1 but no LOCAL_N peeks doesn't need
-        // any slots in its args_ptr (it just operates on stack-top
-        // values pushed by its own bytecode).
-        infer_arg_count(bytecode, entry_pc).unwrap_or(0)
-    };
+    let arg_count = compute_arg_count(bytecode, entry_pc, prologue_arg_count);
 
     // Declare the RTS trampoline import for this module. Signature:
     //   fn(stub: i64, n_args: i64, args_ptr: i64) -> i64
@@ -1593,6 +1572,17 @@ fn compile_with_consts_impl(
     }
 
     let name = jit.fresh_name("polyml_jit_translated");
+    if std::env::var("JIT_DUMP_IR").is_ok() {
+        let head: Vec<String> = full_body[..bytecode_end.min(full_body.len())]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        eprintln!(
+            "=== JIT IR for {name} (bytecode_end={bytecode_end}, arg_count={arg_count}) ===\nbytecode = [{}]\n{}",
+            head.join(" "),
+            ctx.func.display()
+        );
+    }
     let func_id = jit
         .module
         .declare_function(&name, Linkage::Export, &ctx.func.signature)
@@ -2133,6 +2123,26 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
     Some((-min_depth).max(0) as usize)
 }
 
+/// Compute the JIT-internal arg_count for a bytecode body.
+/// Must be kept in sync between scan_branch_targets (pass 1) and
+/// compile_with_consts_impl (pass 2).
+fn compute_arg_count(bytecode: &[u8], entry_pc: usize, prologue_arg_count: usize) -> usize {
+    if prologue_arg_count > 0 || entry_pc > 0 {
+        return prologue_arg_count;
+    }
+    // (a) max-peek-depth inference (covers functions that peek
+    //     closure/retPC slots via LOCAL_N).
+    let inferred = infer_arg_count(bytecode, entry_pc).unwrap_or(0);
+    // (b) SML calling-convention reservation: sml_arity + 2 (retPC
+    //     + closure). The JIT-internal stack model uses depth-from-
+    //     stack-top peeks, which only matches SML semantics if the
+    //     JIT loads the SAME N slots that SML's stack frame contains
+    //     at entry. Without this, INDIRECT_CLOSURE_BN with depth >=
+    //     arity reads the wrong value at runtime.
+    let from_return = arity_from_return_scan(bytecode).map_or(0, |a| a + 2);
+    inferred.max(from_return)
+}
+
 fn scan_branch_targets(
     bytecode: &[u8],
     full_body: &[u8],
@@ -2145,12 +2155,7 @@ fn scan_branch_targets(
     // jump source.
     let mut depth_at: Vec<Option<usize>> = vec![None; bytecode.len()];
     let (start_pc, prologue_arg_count) = function_prologue(bytecode);
-    let arg_count = if prologue_arg_count > 0 || start_pc > 0 {
-        prologue_arg_count
-    } else {
-        // Use peek-depth inference (matches compile_with_consts).
-        infer_arg_count(bytecode, start_pc).unwrap_or(0)
-    };
+    let arg_count = compute_arg_count(bytecode, start_pc, prologue_arg_count);
     let mut depth: usize = arg_count;
     let mut pc = start_pc;
     let mut reachable = true;
@@ -2683,10 +2688,12 @@ mod tests {
         (t - 1) >> 1
     }
 
-    /// Call a JitFn with no SML args (null pointer suffices for
-    /// functions that don't read from `args_ptr`).
+    /// Call a JitFn with no SML args. Functions with a RETURN_N now
+    /// have an SML-style call frame (the JIT loads sml_arity+2 slots),
+    /// so pass a small zero buffer instead of null.
     fn call0(f: JitFn) -> i64 {
-        unsafe { f(std::ptr::null()) }
+        let args = [0i64; 8];
+        unsafe { f(args.as_ptr()) }
     }
 
     /// Call a JitFn with the given SML args.
@@ -2743,12 +2750,16 @@ mod tests {
 
     #[test]
     fn translate_lone_return1_is_identity_function() {
-        // Bare RETURN_1 = "return arg 0". The arg-inference pass
-        // figures out the function takes 1 arg.
-        let bc = vec![INSTR_RETURN_1];
+        // SML "identity function for arity 1": push arg_0 (= LOCAL_2
+        // in the SML call frame [arg, retPC, closure]) then RETURN_1.
+        // The JIT loads arity+2 = 3 slots from args_ptr now.
+        let bc = vec![
+            0x2b, // INSTR_LOCAL_2
+            INSTR_RETURN_1,
+        ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        let args = [tag(99)];
+        let args = [tag(99), 0, 0];
         let result = call_with(f, &args);
         assert_eq!(untag(result), 99);
     }

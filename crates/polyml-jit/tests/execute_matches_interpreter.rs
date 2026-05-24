@@ -124,22 +124,27 @@ fn jit_and_interp_agree_on_arg_times_3_plus_7() {
 #[test]
 fn jit_zero_arg_function_returns_constant() {
     // No-arg function: CONST_1; RETURN_1. Inferred arity 0.
+    // But RETURN_1 makes the JIT load sml_arity+2 = 3 slots per
+    // the SML calling convention, so pass a zero buffer.
     let bc = vec![INSTR_CONST_1, INSTR_RETURN_1];
     let mut jit = Jit::new().unwrap();
     let f = translate::compile(&mut jit, &bc).expect("translate");
-    let result = unsafe { f(std::ptr::null()) };
+    let args = [0i64; 8];
+    let result = unsafe { f(args.as_ptr()) };
     assert_eq!(untag(result), 1);
 }
 
-/// Sanity: confirm that for a tail of LOCAL_0 (peek-of-top), arity
-/// inference picks 1 — and a single arg passed via the args array
-/// is returned.
+/// Under the SML calling convention, the JIT loads sml_arity + 2
+/// slots from args_ptr (the args + retPC + closure). LOCAL_0 reads
+/// sp[0] = the topmost element = the closure slot. To read the
+/// first arg in an arity-1 frame, use LOCAL_2.
 #[test]
-fn jit_local_0_is_arg_for_arity_1_inference() {
-    let bc = vec![INSTR_LOCAL_0, INSTR_RETURN_1];
+fn jit_local_2_is_first_arg_in_arity_1_frame() {
+    let bc = vec![INSTR_LOCAL_2, INSTR_RETURN_1];
     let mut jit = Jit::new().unwrap();
     let f = translate::compile(&mut jit, &bc).expect("translate");
-    let args = [tag(77)];
+    // SML frame: [arg_0, retPC, closure].
+    let args = [tag(77), 0, 0];
     let result = unsafe { f(args.as_ptr()) };
-    assert_eq!(untag(result), 77, "LOCAL_0 should read args[0]");
+    assert_eq!(untag(result), 77, "LOCAL_2 should read args[0]");
 }
