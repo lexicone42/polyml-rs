@@ -3376,6 +3376,19 @@ impl Interpreter {
         let code_word_for_jit = unsafe { *closure_ptr_for_jit };
         let code_obj_ptr_for_jit = code_word_for_jit.0;
         if let Some(entry) = self.jit_cache.get(&code_obj_ptr_for_jit).copied() {
+            if std::env::var("JIT_TRACE_CALLS").is_ok() {
+                let arg0 = if entry.sml_arity > 0 {
+                    self.stack[self.sp + entry.sml_arity - 1].0
+                } else {
+                    0
+                };
+                eprintln!(
+                    "JIT call: code_obj=0x{code_obj_ptr_for_jit:016x} sml_arity={} sp_depth={} closure=0x{:016x} arg_0=0x{arg0:016x}",
+                    entry.sml_arity,
+                    self.stack.len() - self.sp,
+                    closure.0,
+                );
+            }
             // Build the JIT args array: args_ptr[0..arity_init].
             // For SML arity N, the stack window at entry is:
             //   sp[0] = arg_{N-1}, ..., sp[N-1] = arg_0  (caller pushed)
@@ -3429,6 +3442,9 @@ impl Interpreter {
             // ABI; args_buf has at least arity_init entries.
             let result_bits = unsafe { (entry.func)(args_buf.as_ptr()) };
             crate::jit_bridge::JIT_INTERP.with(|c| c.set(prev));
+            if std::env::var("JIT_TRACE_CALLS").is_ok() {
+                eprintln!("  → returned 0x{:016x}", result_bits as u64);
+            }
             let result = PolyWord::from_bits(result_bits as usize);
             self.push(result)?;
             return Ok(());

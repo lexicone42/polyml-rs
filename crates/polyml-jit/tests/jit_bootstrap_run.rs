@@ -81,7 +81,7 @@ fn jit_install_real_bootstrap_functions() {
                 // the right arity we'd pop the wrong number of args
                 // and the caller's stack ends up corrupt.
                 if let Some(sml_arity) =
-                    arity_from_return_scan(&full_body[..bytecode_len])
+                    translate::arity_from_return_scan_pub(&full_body[..bytecode_len])
                 {
                     if sml_arity > 32 {
                         return;

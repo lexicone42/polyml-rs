@@ -1870,6 +1870,14 @@ fn closure_arity_from_addr(addr: u64) -> Option<usize> {
 /// don't get misread as opcodes. Stops at the first unknown opcode
 /// (we don't want to mis-scan past data); returns `None` in that
 /// case so the caller falls back to peek-depth inference.
+/// SML arity from RETURN_N: walks bytecode opcode-aware (skipping
+/// immediates) to find the first `RETURN_N`. Used internally by the
+/// JIT to set per-function calling-convention size; also exposed for
+/// testing harnesses that need the same correct scan.
+pub fn arity_from_return_scan_pub(bytecode: &[u8]) -> Option<usize> {
+    arity_from_terminator_scan(bytecode, false)
+}
+
 fn arity_from_return_scan(bytecode: &[u8]) -> Option<usize> {
     arity_from_terminator_scan(bytecode, false)
 }
