@@ -227,35 +227,47 @@ Next-hottest opcodes (post-fix) are INDIRECT_LOCAL_B0/B1 (~7%)
 and the JUMP family (~6%). Diminishing returns — each is already
 ~3 instructions of useful work.
 
-## JIT status (60.12% translation, executes hand-crafted only)
+## JIT status (60% translation, executes real bytecode)
 
-The JIT translates bytecode to Cranelift IR. 60.12% of real bootstrap
+The JIT translates bytecode to Cranelift IR. ~60% of real bootstrap
 code objects compile cleanly. Coverage report via:
 
     cargo test --release -p polyml-jit --test coverage_bootstrap -- --nocapture
 
-**Caveat: translation coverage != execution coverage.** Hand-crafted
-unit tests (~137 passing) cover individual opcodes correctly, but
-real SML compiler output combines them in ways the unit tests don't,
-and JIT'd-and-installed real bytecode tends to segfault during
-bootstrap. Bisection harness:
+**Major breakthrough (commit af7c578)**: the JIT now correctly
+executes real bytecode from the bootstrap image. Previously, the
+`infer_arg_count` heuristic used the JIT's depth-from-stack-top
+model, which didn't match the SML calling convention's layout
+([arg, retPC, closure] at function entry). A function with
+`INDIRECT_CLOSURE_B0 depth=1` would correctly read the closure in
+the interpreter but the WRONG slot in the JIT. Fix: any function
+with `RETURN_N` is an SML function and must load `sml_arity + 2`
+slots from args_ptr. See `compute_arg_count` in translate.rs.
+
+Verification via the bisection harness:
 
     JIT_BOOTSTRAP_INSTALL=N cargo test --release -p polyml-jit --test jit_bootstrap_run
 
-install=23 works; install=24 crashes. Each diagnosed function reveals
-a different semantic gap (stack effect, capture layout, edge-case
-arithmetic, etc.). The 24x speedup on a small arithmetic function
-(`jit_speedup_bench.rs`) is real — but only for code that matches
-the unit tests' shape.
+Installing all 1947 JIT entries runs cleanly for ~2.2M bytecode
+steps before hitting a separate `StackOverflow` bug (different
+issue; not yet diagnosed). Pre-fix: install=24 SEGV'd immediately.
+
+Debug aids: set `JIT_DUMP_IR=1` to print every translated function's
+Cranelift IR before compilation; `JIT_ONLY_IDX=N` to install only
+the N-th JIT entry by walk order.
 
 End-to-end validation test:
 `crates/polyml-jit/tests/jit_call_const_addr8_end_to_end.rs` —
 caller bytecode pushes 7, calls a JIT-cached closure via real
-`CALL_CONST_ADDR8`, gets 107 back. This works.
+`CALL_CONST_ADDR8`, gets 107 back.
 
-Plumbing in place: `Interpreter::install_jit`, `do_call` JIT-cache
-check, `closure_call_trampoline` thread-local routing, JIT-to-JIT
-chaining via `jit_dispatch_closure_call`. All correct in isolation.
+Plumbing: `Interpreter::install_jit`, `do_call` JIT-cache check,
+`closure_call_trampoline` thread-local routing, JIT-to-JIT chaining
+via `jit_dispatch_closure_call`. The major remaining work is
+diagnosing the StackOverflow that fires when ALL entries are
+installed — most likely an arity-mismatch between JIT-internal
+arg_count and install_jit's recorded arity_init in a specific
+function pattern.
 
 ## Open issues
 
