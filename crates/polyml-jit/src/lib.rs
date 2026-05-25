@@ -46,6 +46,24 @@ pub fn install_all_jit_entries(
     let mut jit_ok = 0usize;
     let mut installed = 0usize;
 
+    // Bisection support: env vars to narrow the install set.
+    //   JIT_INSTALL_LIMIT=N — install only first N functions
+    //   JIT_INSTALL_SKIP=N,M,K — skip these install indices (comma list)
+    //   JIT_INSTALL_VERBOSE=1 — print each install with its index
+    let install_limit: Option<usize> = std::env::var("JIT_INSTALL_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let skip_indices: std::collections::HashSet<usize> = std::env::var("JIT_INSTALL_SKIP")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .filter_map(|x| x.trim().parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let verbose = std::env::var("JIT_INSTALL_VERBOSE").is_ok();
+    let mut install_idx = 0usize;
+
     fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(
         space: &MemorySpace,
         mut f: F,
@@ -134,6 +152,22 @@ pub fn install_all_jit_entries(
             const INSTR_ALLOC_REF_OP: u8 = 0x06;
             const INSTR_ALLOC_BYTE_MEM_OP: u8 = 0xbd;
             const INSTR_ALLOC_WORD_MEM_OP: u8 = 0xda;
+            // CONST_ADDR and CALL_CONST_ADDR variants load from a
+            // PC-relative absolute address baked into the JIT code.
+            // While the load itself is dynamic (GC-updated pointers
+            // are seen fresh), if the code object holding the JIT
+            // entry has its const pool moved, the baked absolute
+            // address becomes stale.
+            // Bisection narrowed first failure to entry #27 which
+            // uses CALL_CONST_ADDR8_0/1.
+            const INSTR_CONST_ADDR8_0_OP: u8 = 0x55;
+            const INSTR_CONST_ADDR8_1_OP: u8 = 0x56;
+            const INSTR_CONST_ADDR8_8_OP: u8 = 0x15;
+            const INSTR_CONST_ADDR16_8_OP: u8 = 0x14;
+            const INSTR_CALL_CONST_ADDR8_0_OP: u8 = 0x57;
+            const INSTR_CALL_CONST_ADDR8_1_OP: u8 = 0x58;
+            const INSTR_CALL_CONST_ADDR8_8_OP: u8 = 0x17;
+            const INSTR_CALL_CONST_ADDR16_8_OP: u8 = 0x18;
             let bc = &full_body[..bytecode_len];
             if bc.iter().any(|&b| {
                 b == INSTR_CALL_LOCAL_B_OP
@@ -145,10 +179,48 @@ pub fn install_all_jit_entries(
                     || b == INSTR_ALLOC_REF_OP
                     || b == INSTR_ALLOC_BYTE_MEM_OP
                     || b == INSTR_ALLOC_WORD_MEM_OP
+                    || b == INSTR_CONST_ADDR8_0_OP
+                    || b == INSTR_CONST_ADDR8_1_OP
+                    || b == INSTR_CONST_ADDR8_8_OP
+                    || b == INSTR_CONST_ADDR16_8_OP
+                    || b == INSTR_CALL_CONST_ADDR8_0_OP
+                    || b == INSTR_CALL_CONST_ADDR8_1_OP
+                    || b == INSTR_CALL_CONST_ADDR8_8_OP
+                    || b == INSTR_CALL_CONST_ADDR16_8_OP
             }) {
                 return;
             }
+            // Bisection: check limit + skip set BEFORE incrementing
+            // the install index (so we count consistently).
+            if let Some(lim) = install_limit
+                && install_idx >= lim
+            {
+                install_idx += 1;
+                return;
+            }
+            if skip_indices.contains(&install_idx) {
+                install_idx += 1;
+                return;
+            }
             let arity_init = sml_arity + 2;
+            if verbose {
+                eprintln!(
+                    "  install[{install_idx:4}]: code_obj=0x{body_start:016x} sml_arity={sml_arity} arity_init={arity_init}"
+                );
+            }
+            // Dump bytecode for a specific install index.
+            if let Ok(s) = std::env::var("JIT_INSTALL_DUMP_IDX")
+                && let Ok(want_idx) = s.parse::<usize>()
+                && install_idx == want_idx
+            {
+                let bc = &full_body[..bytecode_len];
+                let hex: Vec<String> = bc.iter().map(|b| format!("{b:02x}")).collect();
+                eprintln!(
+                    "  install[{install_idx}] BYTECODE ({} bytes): {}",
+                    bc.len(),
+                    hex.join(" ")
+                );
+            }
             interp.install_jit(
                 body_start,
                 JitEntry {
@@ -158,6 +230,7 @@ pub fn install_all_jit_entries(
                 },
             );
             installed += 1;
+            install_idx += 1;
         });
     }
     (total, jit_ok, installed)
