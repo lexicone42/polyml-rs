@@ -227,47 +227,62 @@ Next-hottest opcodes (post-fix) are INDIRECT_LOCAL_B0/B1 (~7%)
 and the JUMP family (~6%). Diminishing returns — each is already
 ~3 instructions of useful work.
 
-## JIT status (60% translation, executes real bytecode)
+## JIT status (60% translation, all 2094 entries install cleanly)
 
 The JIT translates bytecode to Cranelift IR. ~60% of real bootstrap
 code objects compile cleanly. Coverage report via:
 
     cargo test --release -p polyml-jit --test coverage_bootstrap -- --nocapture
 
-**Major breakthrough (commit af7c578)**: the JIT now correctly
-executes real bytecode from the bootstrap image. Previously, the
-`infer_arg_count` heuristic used the JIT's depth-from-stack-top
-model, which didn't match the SML calling convention's layout
-([arg, retPC, closure] at function entry). A function with
-`INDIRECT_CLOSURE_B0 depth=1` would correctly read the closure in
-the interpreter but the WRONG slot in the JIT. Fix: any function
-with `RETURN_N` is an SML function and must load `sml_arity + 2`
-slots from args_ptr. See `compute_arg_count` in translate.rs.
+**Three breakthroughs landed today** (commits af7c578, 9c43ee5, 3c5197b):
+
+1. **arity mismatch** (af7c578): `infer_arg_count` used the JIT's
+   depth-from-stack-top model, but SML's call frame is
+   `[arg, retPC, closure]` (3 slots). Functions with
+   `INDIRECT_CLOSURE_B0 depth=1` read the wrong slot. Fixed by
+   taking `max(infer, sml_arity + 2)` as JIT-internal arg_count.
+
+2. **CLOSURE_B order** (9c43ee5): JIT was popping src closure
+   FIRST then captures. Upstream `CREATE_CLOSURE` pops captures
+   first (top → slot N), then peeks src. Swap fixed.
+
+3. **JIT-↔-interp recursion** (3c5197b): nested JIT calls inside
+   JIT'd code (via the trampoline) added Rust call frames. Deeply
+   recursive bootstrap code (entry [52] + its mutually-recursive
+   callees) blew the 8 MB OS thread stack. Gated nested fast paths
+   on `JIT_INTERP` / `JIT_DEPTH` so recursion stays on the
+   interpreter's managed PolyWord stack.
 
 Verification via the bisection harness:
 
     JIT_BOOTSTRAP_INSTALL=N cargo test --release -p polyml-jit --test jit_bootstrap_run
 
-Installing all 1947 JIT entries runs cleanly for ~2.2M bytecode
-steps before hitting a separate `StackOverflow` bug (different
-issue; not yet diagnosed). Pre-fix: install=24 SEGV'd immediately.
+Installing ALL 2094 JIT entries runs the simple bootstrap cleanly
+in 1,111,155 steps (Tagged(0)). Pre-session: install=24 SEGV'd
+immediately. Today's three fixes unlocked the entire JIT path.
 
-Debug aids: set `JIT_DUMP_IR=1` to print every translated function's
-Cranelift IR before compilation; `JIT_ONLY_IDX=N` to install only
-the N-th JIT entry by walk order.
+**Caveats:**
+- Only the OUTERMOST JIT dispatch (from interpreter's CALL opcode
+  into a JIT-cached function) takes the fast path. Nested calls
+  fall through to the interpreter. Bumping `MAX_JIT_DEPTH > 0` in
+  `jit_bridge.rs` re-enables nested JIT-to-JIT, but there's a
+  separate SEGV bug in that path (visible at install=53 with
+  MAX_JIT_DEPTH=4096) that needs diagnosing first.
+- The full 7-stage chain isn't yet exercised with JIT installs;
+  the simple `poly run image.txt` workload is what runs cleanly.
+
+Debug aids: `JIT_DUMP_IR=1` (Cranelift IR per function),
+`JIT_TRACE_CALLS=1` (per-dispatch trace), `JIT_ONLY_IDX=N` (install
+just one entry).
 
 End-to-end validation test:
 `crates/polyml-jit/tests/jit_call_const_addr8_end_to_end.rs` —
-caller bytecode pushes 7, calls a JIT-cached closure via real
+caller pushes 7, calls JIT-cached closure via real
 `CALL_CONST_ADDR8`, gets 107 back.
 
-Plumbing: `Interpreter::install_jit`, `do_call` JIT-cache check,
-`closure_call_trampoline` thread-local routing, JIT-to-JIT chaining
-via `jit_dispatch_closure_call`. The major remaining work is
-diagnosing the StackOverflow that fires when ALL entries are
-installed — most likely an arity-mismatch between JIT-internal
-arg_count and install_jit's recorded arity_init in a specific
-function pattern.
+Plumbing: `Interpreter::install_jit`, `do_call` JIT-cache check
+(gated by `!inside_jit`), `closure_call_trampoline` thread-local
+routing, `jit_dispatch_closure_call` (with `MAX_JIT_DEPTH` cap).
 
 ## Open issues
 
