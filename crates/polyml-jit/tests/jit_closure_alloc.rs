@@ -32,31 +32,31 @@ fn jit_closure_b_builds_real_closure() {
     // Looking at our impl: `let src_closure = stack.pop().unwrap();
     // for _ in 0..n_captures { caps.push(stack.pop().unwrap()); }`
     // So top = src_closure, below = captures (with captures[0] = first popped,
-    // = second from top originally). Stack layout from top: [src, cap_0, cap_1, ...].
+    // CLOSURE_B semantics (per upstream libpolyml/bytecode.cpp
+    // CREATE_CLOSURE): pop N captures from top in order (first pop →
+    // slot N, last pop → slot 1), then PEEK src (now top) and copy
+    // its slot 0 (code addr) as the new closure's slot 0.
     //
-    // Actually re-reading: src is popped FIRST, so it WAS at top. Then captures
-    // popped IN ORDER means caps[0] = next-popped = was-second-from-top.
+    // So stack BEFORE CLOSURE_B (top → bottom):
+    //   cap_N  (top — will go to slot N)
+    //   cap_{N-1}
+    //   ...
+    //   cap_1
+    //   src   (bottom of group — provides code addr)
     //
-    // So at CLOSURE_B time stack should be (top→bottom): [src, cap_0, cap_1, ..., cap_{N-1}].
-    // For SML calling convention, this means we push captures FIRST then src closure.
+    // Bytecode pattern: push src first, then push captures cap_1..cap_N.
     //
-    // For N=1 capture: push cap_0, then push src.
-    //
-    // Bytecode:
-    //   LOCAL_2  ; push arg_0 (the capture value); sp[2] = arg_0
-    //   LOCAL_3  ; push arg_1 (the src closure); now sp[3] = arg_1
-    //   CLOSURE_B 1
-    //   RETURN_1
-    //
-    // Hmm wait LOCAL_M reads sp[M] relative to current sp. At entry:
-    //   sp[0]=closure, sp[1]=retPC, sp[2]=arg_1, sp[3]=arg_0  (2-arg func)
-    // After LOCAL_2: sp[0]=arg_1 (newly pushed), so original arg_0 is at sp[4].
-    //
-    // To get arg_0 first: LOCAL_3 (= arg_0). Then arg_1: LOCAL_3 again (shifted).
+    // For our 2-arg test (sml_arity=2):
+    //   At entry: sp[0]=closure, sp[1]=retPC, sp[2]=arg_1, sp[3]=arg_0
+    //   We want src=arg_1, capture=arg_0.
+    //   - LOCAL_2 → push arg_1 (now sp top, stack shifted)
+    //   - LOCAL_4 → push arg_0 (reads original sp[3] after the shift)
+    //   - CLOSURE_B 1 → pops arg_0 as cap_1, peeks arg_1 as src.
+    const INSTR_LOCAL_4: u8 = 0x2d;
 
     let bc = vec![
-        INSTR_LOCAL_3, // push arg_0 (= capture); sp[3] = arg_0
-        INSTR_LOCAL_3, // push arg_1 (= src closure); after shift
+        INSTR_LOCAL_2, // push arg_1 (= src closure)
+        INSTR_LOCAL_4, // push arg_0 (= capture); reads original sp[3]
         INSTR_CLOSURE_B,
         1,
         INSTR_RETURN_1,

@@ -1259,9 +1259,30 @@ fn compile_with_consts_impl(
                     stack.push(tag0);
                 }
                 INSTR_CLOSURE_B => {
-                    // Build a closure: pop N captures + 1 source closure
-                    // (= top, used for the code address), allocate
-                    // N+1-word closure, push pointer.
+                    // Build a closure. Upstream semantics (per
+                    // libpolyml/bytecode.cpp CREATE_CLOSURE):
+                    //   - Loop pops N captures from top, writing to
+                    //     slots N, N-1, ..., 1 in that order.
+                    //   - After capture pops, src is now on top.
+                    //     Copy its slot 0 (code addr) to slot 0 of
+                    //     new closure.
+                    //
+                    // So stack layout BEFORE the opcode (top → bot):
+                    //   cap_N (top, → slot N)
+                    //   cap_{N-1}
+                    //   ...
+                    //   cap_1 (→ slot 1)
+                    //   src
+                    //
+                    // Pop N captures first, THEN src. The trampoline
+                    // (jit_dispatch_closure_alloc) writes captures
+                    // in the order it receives them: captures_ptr[0]
+                    // → slot 1, captures_ptr[1] → slot 2, etc.
+                    // So we need caps_buf[i] = the value that maps
+                    // to slot i+1 — i.e., caps_buf[0] = cap_1, etc.
+                    // That means we should pop cap_N first and put it
+                    // at caps_buf[N-1], cap_1 last and put it at
+                    // caps_buf[0]. (Reverse iteration on store.)
                     if pc >= bytecode.len() {
                         return Err(TranslateError::Truncated(pc));
                     }
@@ -1270,14 +1291,18 @@ fn compile_with_consts_impl(
                     if stack.len() < n_captures + 1 {
                         return Err(TranslateError::Underflow(pc - 2));
                     }
-                    let src_closure = stack.pop().unwrap();
-                    // Captures: pop into a buffer; arg[i] = popped i-th
-                    // (so captures[0] = first popped = topmost).
+                    // Pop captures first (top → first popped). Pop
+                    // order: cap_N, cap_{N-1}, ..., cap_1.
                     let mut caps: Vec<Value> = Vec::with_capacity(n_captures);
                     for _ in 0..n_captures {
                         caps.push(stack.pop().unwrap());
                     }
-                    // Store captures into a stack slot.
+                    // Now src is on top.
+                    let src_closure = stack.pop().unwrap();
+                    // Store captures into a stack slot in
+                    // trampoline-expected order: slot[i] = cap_{i+1}.
+                    // caps[0] = cap_N (first popped). caps[N-1] = cap_1.
+                    // So slot[N-1] = caps[0], slot[0] = caps[N-1].
                     let slot_size = std::cmp::max(8, (n_captures * 8) as u32);
                     let slot = builder.create_sized_stack_slot(
                         cranelift::prelude::StackSlotData::new(
@@ -1287,7 +1312,8 @@ fn compile_with_consts_impl(
                         ),
                     );
                     for (i, v) in caps.iter().enumerate() {
-                        builder.ins().stack_store(*v, slot, (i * 8) as i32);
+                        let slot_byte_off = ((n_captures - 1 - i) * 8) as i32;
+                        builder.ins().stack_store(*v, slot, slot_byte_off);
                     }
                     let caps_ptr = builder.ins().stack_addr(types::I64, slot, 0);
                     let n_v = builder.ins().iconst(types::I64, n_captures as i64);
