@@ -848,6 +848,30 @@ impl Interpreter {
         (self.pc, self.code_start, self.code_end)
     }
 
+    #[doc(hidden)]
+    pub fn peek_pc_for_debug(&self) -> *const u8 {
+        self.pc
+    }
+
+    #[doc(hidden)]
+    pub fn peek_sp_for_debug(&self) -> usize {
+        self.sp
+    }
+
+    #[doc(hidden)]
+    pub fn peek_stack_for_debug(&self, idx: usize) -> usize {
+        if idx < self.stack.len() {
+            self.stack[idx].0
+        } else {
+            0
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn peek_code_seg_for_debug(&self) -> (*const u8, *const u8) {
+        (self.code_start, self.code_end)
+    }
+
     /// JIT bridge: restore PC + code segment from a snapshot.
     #[doc(hidden)]
     pub fn jit_state_restore(&mut self, snapshot: (*const u8, *const u8, *const u8)) {
@@ -3402,17 +3426,30 @@ impl Interpreter {
         if !inside_jit
             && let Some(entry) = self.jit_cache.get(&code_obj_ptr_for_jit).copied() {
             if std::env::var("JIT_TRACE_CALLS").is_ok() {
-                let arg0 = if entry.sml_arity > 0 {
-                    self.stack[self.sp + entry.sml_arity - 1].0
-                } else {
-                    0
-                };
+                let mut arg_dump = String::new();
+                for i in (0..entry.sml_arity).rev() {
+                    let v = self.stack[self.sp + i].0;
+                    arg_dump.push_str(&format!(" arg_{}=0x{v:016x}",
+                        entry.sml_arity - 1 - i));
+                }
                 eprintln!(
-                    "JIT call: code_obj=0x{code_obj_ptr_for_jit:016x} sml_arity={} sp_depth={} closure=0x{:016x} arg_0=0x{arg0:016x}",
+                    "JIT call: code_obj=0x{code_obj_ptr_for_jit:016x} sml_arity={} arity_init={} sp_depth={} closure=0x{:016x}{arg_dump}",
                     entry.sml_arity,
+                    entry.arity_init,
                     self.stack.len() - self.sp,
                     closure.0,
                 );
+                if std::env::var("JIT_TRACE_CALLS_BC").is_ok() {
+                    let bc_ptr = code_obj_ptr_for_jit as *const u8;
+                    let bc_len = 96usize;
+                    let bytes: Vec<u8> = (0..bc_len)
+                        .map(|i| unsafe { *bc_ptr.add(i) })
+                        .collect();
+                    let hex = bytes.iter().take(80)
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>().join(" ");
+                    eprintln!("  bytecode head: {hex}");
+                }
             }
             // Build the JIT args array: args_ptr[0..arity_init].
             // For SML arity N, the stack window at entry is:
@@ -3427,25 +3464,67 @@ impl Interpreter {
             //                   `INDIRECT_CLOSURE_BN` which dereferences
             //                   this, so it MUST be the real closure
             //                   pointer to avoid a null deref)
+            // Build args_buf to match SML's stack-frame semantics.
+            // SML interp's stack at callee entry (top to bottom):
+            //   sp[0]      = closure
+            //   sp[1]      = retPC
+            //   sp[2..N+1] = args (top arg at sp[2], deepest at sp[N+1])
+            //   sp[N+2..]  = older caller-frame items
+            //
+            // JIT compile-time stack mirrors this: stack[i] reads the
+            // SML position sp[arity_init - 1 - i]. So args_buf layout
+            // must be:
+            //   args_buf[0]                = sp[arity_init-1] = deepest older
+            //   ...
+            //   args_buf[arity_init-N-3]   = sp[N+2]          = top older
+            //   args_buf[arity_init-N-2]   = sp[N+1]          = arg_0
+            //   ...
+            //   args_buf[arity_init-3]     = sp[2]            = arg_{N-1}
+            //   args_buf[arity_init-2]     = sp[1]            = retPC slot (0)
+            //   args_buf[arity_init-1]     = sp[0]            = closure
+            //
+            // When arity_init == N+2 (common case), there are no older
+            // items and the layout is the same as before. When the JIT
+            // translator infers arity_init > N+2 (because the bytecode
+            // reads LOCAL_K for K > N+1), we populate the extra slots
+            // from interp.stack[interp.sp + n + j] — which is what
+            // SML interp would have at those positions.
             let n = entry.sml_arity;
-            let mut args_buf: Vec<i64> = Vec::with_capacity(entry.arity_init);
-            // arg_0 = sp[N-1], arg_1 = sp[N-2], ..., arg_{N-1} = sp[0]
-            for i in (0..n).rev() {
-                args_buf.push(self.stack[self.sp + i].0 as i64);
+            let arity_init = entry.arity_init;
+            assert!(arity_init >= n + 2, "arity_init must include retPC + closure slots");
+            let extra_older = arity_init - n - 2;
+            let mut args_buf: Vec<i64> = vec![0; arity_init];
+            // Older items: args_buf[0..extra_older-1].
+            // args_buf[i] = sp[arity_init - 1 - i] (in SML terms).
+            // After do_call's pop (sp += n), interp.stack[interp.sp + j]
+            // would be SML's sp[N + 2 + j] (since CALL popped closure
+            // already, and we're about to pop the args). But we want
+            // to read BEFORE the pop, so it's interp.stack[interp.sp + n + j].
+            for i in 0..extra_older {
+                let sml_sp_pos = arity_init - 1 - i; // = N + 2 + (extra_older - 1 - i)
+                let j = sml_sp_pos - (n + 2);        // older-stack index from top
+                let stack_pos = self.sp + n + j;
+                args_buf[i] = if stack_pos < self.stack.len() {
+                    self.stack[stack_pos].0 as i64
+                } else {
+                    0
+                };
             }
-            // Slot N: retPC placeholder (0).
-            if args_buf.len() < entry.arity_init {
-                args_buf.push(0);
+            // SML args: args_buf[extra_older..extra_older+N-1].
+            // args_buf[extra_older + i] = arg_i = sp[N+1-i] (in SML) = interp.stack[interp.sp + (N-1-i)]
+            for i in 0..n {
+                let stack_pos = self.sp + (n - 1 - i);
+                args_buf[extra_older + i] = self.stack[stack_pos].0 as i64;
             }
-            // Slot N+1: REAL closure pointer (for INDIRECT_CLOSURE_BN).
-            if args_buf.len() < entry.arity_init {
-                args_buf.push(closure.0 as i64);
-            }
-            // Any further slots: 0 (shouldn't happen — arity_init is
-            // typically exactly N+2).
-            while args_buf.len() < entry.arity_init {
-                args_buf.push(0);
-            }
+            // retPC slot: placeholder 0. JIT'd code that reads this
+            // (via LOCAL_K mapping to it) gets 0 instead of SML's real
+            // retPC — functions that DEREF this value through indirect
+            // ops can SEGV. We avoid that by refusing to install such
+            // functions in `install_all_jit_entries` (= functions with
+            // jit_arity_init > sml_arity + 2).
+            args_buf[arity_init - 2] = 0;
+            // Closure slot.
+            args_buf[arity_init - 1] = closure.0 as i64;
             // Pop N args from the interpreter stack (they're now in
             // args_buf — the JIT'd function reads from there).
             self.sp += n;
@@ -3554,8 +3633,48 @@ impl Interpreter {
     /// result. If retPC is null, we're returning from the top-level
     /// frame — yield StepResult::Returned(result).
     fn do_return(&mut self, return_count: usize) -> Result<StepResult, InterpError> {
+        // Diagnostic: peek the entire frame before popping, so we can
+        // see if the stack is misaligned (retPC not a code pointer).
+        let pre_dump = std::env::var("JIT_TRACE_RETURNS").is_ok() && {
+            let sp = self.sp;
+            let depth = self.stack.len().saturating_sub(sp);
+            let need = 3 + return_count;
+            if depth >= need {
+                let result_peek = self.stack[sp].0;
+                let closure_peek = self.stack[sp + 1].0;
+                let ret_pc_peek = self.stack[sp + 2].0;
+                !(self.code_start as usize <= ret_pc_peek
+                    && ret_pc_peek < self.code_end as usize)
+                    && {
+                        // Probably bad — dump frame.
+                        eprintln!(
+                            "  do_return PRE-POP: ret_count={return_count} \
+                             cur_code=[0x{:016x}..0x{:016x}] sp_depth={} \
+                             stack[sp..sp+need]:",
+                            self.code_start as usize,
+                            self.code_end as usize,
+                            depth,
+                        );
+                        for i in 0..need.min(depth) {
+                            let v = self.stack[sp + i].0;
+                            let label = match i {
+                                0 => "result",
+                                1 => "closure",
+                                2 => "retPC",
+                                _ => "arg",
+                            };
+                            eprintln!("    sp[{i:2}] = 0x{v:016x}  ({label})");
+                        }
+                        let _ = (result_peek, closure_peek);
+                        true
+                    }
+            } else {
+                false
+            }
+        };
+        let _ = pre_dump;
         let result = self.pop()?;        // top: result
-        let _closure = self.pop()?;       // closure
+        let closure = self.pop()?;        // closure
         let ret_pc_word = self.pop()?;    // retPC
         for _ in 0..return_count {
             self.pop()?;                  // args
@@ -3574,6 +3693,32 @@ impl Interpreter {
             .frames
             .pop()
             .ok_or(InterpError::StackUnderflow)?;
+
+        // Diagnostic: if the retPC isn't in the caller's code segment,
+        // something corrupted the stack. Print a detailed dump so we
+        // can trace the source. Gated on JIT_TRACE_RETURNS to avoid
+        // noise in normal runs.
+        if std::env::var("JIT_TRACE_RETURNS").is_ok()
+            && !(caller_start as usize <= ret_pc_bits
+                && ret_pc_bits < caller_end as usize)
+        {
+            eprintln!(
+                "  do_return: BAD retPC! ret_count={return_count} ret_pc=0x{ret_pc_bits:016x} \
+                 caller_segment=[0x{:016x}..0x{:016x}] closure=0x{:016x} \
+                 result=0x{:016x} frames_depth={}",
+                caller_start as usize,
+                caller_end as usize,
+                closure.0,
+                result.0,
+                self.frames.len(),
+            );
+            // Print 5 most recent CALL targets.
+            let recent = self.recent_call_targets_snapshot();
+            eprintln!("  recent CALL targets (newest first):");
+            for (i, t) in recent.iter().enumerate().take(5) {
+                eprintln!("    -{i}: 0x{t:016x}");
+            }
+        }
         self.code_start = caller_start;
         self.code_end = caller_end;
         self.pc = ret_pc_bits as *const u8;

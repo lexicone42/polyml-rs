@@ -226,12 +226,21 @@ fn run_image(
     interp.test_seed_top(root_closure_word);
 
     println!("Executing (cap {max_steps} steps)…");
+    let checkpoint_every: u64 = std::env::var("POLY_CHECKPOINT_EVERY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let mut steps = 0u64;
     let outcome = loop {
         if steps >= max_steps {
             break Ok::<_, polyml_runtime::InterpError>(StepResult::Continue);
         }
         steps += 1;
+        if checkpoint_every != 0 && steps % checkpoint_every == 0 {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "  [checkpoint] steps={steps}");
+            let _ = std::io::stderr().flush();
+        }
         match interp.step() {
             Ok(StepResult::Continue) => {}
             Ok(other) => break Ok(other),

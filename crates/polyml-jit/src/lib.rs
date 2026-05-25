@@ -96,7 +96,34 @@ pub fn install_all_jit_entries(
             if sml_arity > 32 {
                 return;
             }
-            let arity_init = (sml_arity + 2).max(jit_arity_init);
+            // Skip functions whose inferred JIT arity exceeds
+            // sml_arity + 2 (= closure + retPC + args). These
+            // functions read positions BELOW the entry frame — i.e.,
+            // they peek into the caller's "older stack" via LOCAL_K.
+            // Our do_call's args_buf layout doesn't fully model this:
+            // older slots are zero-padded, which causes LOCAL_K to
+            // read 0 where SML's interp has real values. Subsequent
+            // deref of these zeros → SEGV. Skipping → these functions
+            // run in the interp, behavior matches.
+            if jit_arity_init > sml_arity + 2 {
+                return;
+            }
+            // Skip functions that contain CALL_LOCAL_B (0x16) — their
+            // peek-don't-pop calling convention pushes closure_orig
+            // into the call group, which our trampoline path doesn't
+            // model perfectly. Easier to just let the interp handle
+            // them than to risk wrong arg counts → bad retPCs.
+            //
+            // Also skip TAIL_B_B (0x7b) for similar reasons —
+            // its retPC reuse semantics can leak placeholder values
+            // when the call group originated from JIT'd code.
+            const INSTR_CALL_LOCAL_B_OP: u8 = 0x16;
+            const INSTR_TAIL_B_B_OP: u8 = 0x7b;
+            let bc = &full_body[..bytecode_len];
+            if bc.iter().any(|&b| b == INSTR_CALL_LOCAL_B_OP || b == INSTR_TAIL_B_B_OP) {
+                return;
+            }
+            let arity_init = sml_arity + 2;
             interp.install_jit(
                 body_start,
                 JitEntry {
@@ -221,11 +248,31 @@ pub unsafe extern "C" fn closure_call_trampoline(
     use polyml_runtime::PolyWord;
     let closure = PolyWord::from_bits(closure_word as usize);
     let n = n_args as usize;
+    // Diagnostic dump (gated): visible when chasing trampoline-call
+    // arg layout issues.
+    if std::env::var("JIT_TRAMP_DUMP_ARGS").is_ok() {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(),
+            "  closure_call_trampoline: closure=0x{closure_word:016x} n_args={n}",
+        );
+        for i in 0..n {
+            let v = unsafe { args_ptr.add(i).read() };
+            let _ = writeln!(std::io::stderr(),
+                "    raw_slot[{i}] = 0x{v:016x}",
+            );
+        }
+        let _ = std::io::stderr().flush();
+    }
     let mut args: Vec<PolyWord> = Vec::with_capacity(n);
     // SAFETY: caller (JIT'd code) guarantees args_ptr[0..n] is valid.
+    // Reverse on read to match jit_dispatch_closure_call's contract
+    // (`args[0]` is SML's arg_0 = deepest in pushed block). JIT stored
+    // slot[0] = first popped = top of SML = SML's arg_{N-1}, so we
+    // reverse to put arg_0 at args[0].
     unsafe {
         for i in 0..n {
-            args.push(PolyWord::from_bits(args_ptr.add(i).read() as usize));
+            let v = args_ptr.add(n - 1 - i).read();
+            args.push(PolyWord::from_bits(v as usize));
         }
     }
     match polyml_runtime::jit_dispatch_closure_call(closure, &args) {

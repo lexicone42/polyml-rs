@@ -275,7 +275,66 @@ pub fn jit_dispatch_closure_call(
     interp.test_seed_top(closure);
     interp.jit_set_code_segment_to_closure(closure)?;
 
+    let trace_step = std::env::var("JIT_TRAMP_STEP_TRACE").is_ok();
+    let trace_each = std::env::var("JIT_TRAMP_STEP_ALL").is_ok();
+    let mut inner_steps = 0u64;
+    if trace_step {
+        use std::io::Write;
+        let (cs, ce) = interp.peek_code_seg_for_debug();
+        let len = (ce as usize).saturating_sub(cs as usize).min(64);
+        let bytes: Vec<u8> = (0..len)
+            .map(|i| unsafe { *cs.add(i) })
+            .collect();
+        let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+        let _ = writeln!(std::io::stderr(),
+            "    [tramp ENTER] code=0x{:016x} len={len} bytes: {hex}",
+            cs as usize,
+        );
+        // Dump stack top 12 items at entry
+        let sp = interp.peek_sp_for_debug();
+        for i in 0..12usize {
+            let val = interp.peek_stack_for_debug(sp + i);
+            let _ = writeln!(std::io::stderr(),
+                "    [tramp ENTER stack] sp[{i:2}] = 0x{val:016x}",
+            );
+        }
+        let _ = std::io::stderr().flush();
+    }
     let result = loop {
+        if trace_step {
+            inner_steps += 1;
+            let should_print =
+                trace_each || inner_steps <= 10 || inner_steps % 100 == 0;
+            if should_print {
+                use std::io::Write;
+                let pc = interp.peek_pc_for_debug() as usize;
+                let (cs, ce) = interp.peek_code_seg_for_debug();
+                let opcode_byte: i64 = if pc >= cs as usize && pc < ce as usize {
+                    let b: u8 = unsafe { *(pc as *const u8) };
+                    b as i64
+                } else {
+                    -1
+                };
+                let sp = interp.peek_sp_for_debug();
+                // Dump next 4 bytes (immediates) for context
+                let next_bytes: Vec<String> = (1..=4)
+                    .map(|i| {
+                        if pc + i < ce as usize {
+                            let b = unsafe { *((pc + i) as *const u8) };
+                            format!("{b:02x}")
+                        } else {
+                            "--".into()
+                        }
+                    })
+                    .collect();
+                let _ = writeln!(std::io::stderr(),
+                    "    [tramp step {inner_steps}] sp={sp:5} pc_off=0x{:04x} op=0x{opcode_byte:02x} next={}",
+                    pc.saturating_sub(cs as usize),
+                    next_bytes.join(" "),
+                );
+                let _ = std::io::stderr().flush();
+            }
+        }
         match interp.step() {
             Ok(StepResult::Continue) => continue,
             Ok(StepResult::Returned(v)) => break v,
