@@ -114,13 +114,38 @@ pub fn install_all_jit_entries(
             // model perfectly. Easier to just let the interp handle
             // them than to risk wrong arg counts → bad retPCs.
             //
-            // Also skip TAIL_B_B (0x7b) for similar reasons —
-            // its retPC reuse semantics can leak placeholder values
-            // when the call group originated from JIT'd code.
+            // Also skip TAIL_B_B (0x7b) for similar reasons.
+            //
+            // Also skip RAISE_EX (0x10) — JIT translates it as
+            // "return TAGGED(0)" instead of raising, so a function
+            // whose exception path returns TAGGED(0) will silently
+            // propagate that to the caller, which may then deref it
+            // (= SEGV at next STORE/INDIRECT).
+            //
+            // Also skip SET_HANDLER (0x12/0x13) — same exception class.
+            // Filter opcodes whose translation/semantics our JIT
+            // doesn't fully model.
             const INSTR_CALL_LOCAL_B_OP: u8 = 0x16;
             const INSTR_TAIL_B_B_OP: u8 = 0x7b;
+            const INSTR_RAISE_EX_OP: u8 = 0x10;
+            const INSTR_SET_HANDLER8_OP: u8 = 0x81;
+            const INSTR_SET_HANDLER16_OP: u8 = 0xf9;
+            const INSTR_CLOSURE_B_OP: u8 = 0xd0;
+            const INSTR_ALLOC_REF_OP: u8 = 0x06;
+            const INSTR_ALLOC_BYTE_MEM_OP: u8 = 0xbd;
+            const INSTR_ALLOC_WORD_MEM_OP: u8 = 0xda;
             let bc = &full_body[..bytecode_len];
-            if bc.iter().any(|&b| b == INSTR_CALL_LOCAL_B_OP || b == INSTR_TAIL_B_B_OP) {
+            if bc.iter().any(|&b| {
+                b == INSTR_CALL_LOCAL_B_OP
+                    || b == INSTR_TAIL_B_B_OP
+                    || b == INSTR_RAISE_EX_OP
+                    || b == INSTR_SET_HANDLER8_OP
+                    || b == INSTR_SET_HANDLER16_OP
+                    || b == INSTR_CLOSURE_B_OP
+                    || b == INSTR_ALLOC_REF_OP
+                    || b == INSTR_ALLOC_BYTE_MEM_OP
+                    || b == INSTR_ALLOC_WORD_MEM_OP
+            }) {
                 return;
             }
             let arity_init = sml_arity + 2;
@@ -277,7 +302,15 @@ pub unsafe extern "C" fn closure_call_trampoline(
     }
     match polyml_runtime::jit_dispatch_closure_call(closure, &args) {
         Ok(v) => v.0 as i64,
-        Err(_) => 1, // TAGGED(0)
+        Err(e) => {
+            if std::env::var("JIT_TRAMP_PANIC_ON_ERR").is_ok() {
+                eprintln!(
+                    "  closure_call_trampoline ERR: closure=0x{closure_word:016x} n_args={n} err={e:?}"
+                );
+                std::process::abort();
+            }
+            1 // TAGGED(0)
+        }
     }
 }
 

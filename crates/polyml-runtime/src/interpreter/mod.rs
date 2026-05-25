@@ -1413,6 +1413,31 @@ impl Interpreter {
                 let to_store = self.pop()?;
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
+                // Diagnostic: catch bad bases (non-pointer or below
+                // mapped memory) and dump context. Gated on env var.
+                if std::env::var("JIT_TRACE_STORES").is_ok() {
+                    let b = base.0;
+                    let suspicious = b < 0x1000 || (b & 0x1) != 0;
+                    if suspicious {
+                        eprintln!(
+                            "  STORE_ML_WORD BAD: base=0x{b:016x} index={index} to_store=0x{:016x} cur_code=0x{:016x} frames_depth={}",
+                            to_store.0,
+                            self.code_start as usize,
+                            self.frames.len(),
+                        );
+                        let recent = self.recent_call_targets_snapshot();
+                        for (i, t) in recent.iter().enumerate().take(5) {
+                            eprintln!("    recent call -{i}: 0x{t:016x}");
+                        }
+                        // Stack window
+                        let n = std::cmp::min(8, self.stack.len().saturating_sub(self.sp));
+                        for d in 0..n {
+                            let w = self.stack[self.sp + d];
+                            eprintln!("    sp[{d:2}] = {w:?}");
+                        }
+                        std::process::abort();
+                    }
+                }
                 let p = base.as_ptr::<PolyWord>().cast_mut();
                 // SAFETY: caller emits valid offsets; base is mutable
                 unsafe { p.add(index).write(to_store) };
