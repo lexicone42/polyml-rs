@@ -227,14 +227,63 @@ Next-hottest opcodes (post-fix) are INDIRECT_LOCAL_B0/B1 (~7%)
 and the JUMP family (~6%). Diminishing returns — each is already
 ~3 instructions of useful work.
 
-## JIT status (60% translation, 2094 entries installable, runs partial)
+## JIT status — bootstrap completes end-to-end with selective install
 
-`poly run --jit image.txt` installs every JIT-translatable code
-object and dispatches via the JIT cache. Simple bootstrap gets
-~132,000 bytecode steps through (out of ~1.1M needed) before hitting
-PcOutOfBounds — a downstream bug where some JIT'd function returns
-a value later misinterpreted as a return PC. Diagnosed via
-`JIT_TRACE_CALLS=1`. Remaining work to fix.
+`poly run --jit image.txt` installs JIT-translatable code objects
+whose opcodes we trust, then dispatches via the JIT cache. The
+simple bootstrap (`bootstrap64.txt` alone) now runs to completion:
+1,110,404 steps, Tagged(0) clean return (vs baseline 1,111,155
+without JIT). 326 of 2,719 translated entries installed; 108 JIT
+calls fired across the run.
+
+The opcodes we currently SKIP at install time (`install_all_jit_entries`
+in `polyml-jit/src/lib.rs`):
+- CALL_LOCAL_B (0x16), TAIL_B_B (0x7b) — peek-don't-pop calling
+  conventions our trampoline path doesn't fully model.
+- RAISE_EX (0x10), SET_HANDLER8/16 (0x81/0xf9) — exception
+  handling: JIT translates RAISE as "return TAGGED(0)", which
+  silently propagates wrong values to callers.
+- CLOSURE_B (0xd0), ALLOC_REF/BYTE_MEM/WORD_MEM (0x06/0xbd/0xda)
+  — complex alloc translations.
+- CONST_ADDR8_0/1/8 (0x55/0x56/0x15), CONST_ADDR16_8 (0x14),
+  CALL_CONST_ADDR variants (0x57/0x58/0x17/0x18) — JIT bakes an
+  absolute address into the generated code, which may go stale
+  after GC relocates code objects.
+- Functions where `jit_arity_init > sml_arity + 2` — these read
+  caller's "older stack" positions, not yet handled fully.
+
+Bisection harness env vars (in `install_all_jit_entries`):
+- `JIT_INSTALL_LIMIT=N` — install only the first N entries.
+- `JIT_INSTALL_SKIP=N,M,K` — skip specific install indices.
+- `JIT_INSTALL_VERBOSE=1` — print every install line.
+- `JIT_INSTALL_DUMP_IDX=N` — dump bytecode of install index N.
+
+The fixes that unlocked this (commit `598f312` after `1d2c524` and
+`e6a8280`):
+1. `do_call`'s args_buf layout populates older-slot positions when
+   arity_init > sml_arity + 2 (matches SML stack semantics).
+2. `closure_call_trampoline` reverses args (same pattern as
+   `rts_trampoline`) so `args[0]` = SML's arg_0 = deepest pushed.
+3. Install filter skips functions whose JIT translation we don't
+   yet trust.
+
+Next steps to bring installed count back up:
+1. Diagnose the CONST_ADDR translation. Bisection (commit `598f312`
+   message) suggests stale baked addresses after GC. Fix it and
+   re-enable those opcodes.
+2. Build a differential tester (run a single function in both JIT
+   and interp, compare results) to find further bugs systematically.
+3. Tackle the CALL_LOCAL_B / TAIL_B_B / exception classes.
+
+Diagnostic env vars added during this work:
+- `POLY_CHECKPOINT_EVERY=N` — main loop prints step count every N.
+- `JIT_TRACE_RETURNS=1` — `do_return` dumps frame on bad retPC.
+- `JIT_TRAMP_DUMP_ARGS=1` — `closure_call_trampoline` logs raw args.
+- `JIT_TRAMP_STEP_TRACE=1` (+ optional `JIT_TRAMP_STEP_ALL=1`) —
+  per-step trace inside trampoline runs.
+- `JIT_TRACE_CALLS_BC=1` — extend JIT call trace with bytecode head.
+- `JIT_TRAMP_PANIC_ON_ERR=1` — abort on trampoline error.
+- `JIT_TRACE_STORES=1` — `STORE_ML_WORD` dumps on suspicious base.
 
 
 
