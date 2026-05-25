@@ -227,7 +227,16 @@ Next-hottest opcodes (post-fix) are INDIRECT_LOCAL_B0/B1 (~7%)
 and the JUMP family (~6%). Diminishing returns — each is already
 ~3 instructions of useful work.
 
-## JIT status (60% translation, all 2094 entries install cleanly)
+## JIT status (60% translation, 2094 entries installable, runs partial)
+
+`poly run --jit image.txt` installs every JIT-translatable code
+object and dispatches via the JIT cache. Simple bootstrap gets
+~132,000 bytecode steps through (out of ~1.1M needed) before hitting
+PcOutOfBounds — a downstream bug where some JIT'd function returns
+a value later misinterpreted as a return PC. Diagnosed via
+`JIT_TRACE_CALLS=1`. Remaining work to fix.
+
+
 
 The JIT translates bytecode to Cranelift IR. ~60% of real bootstrap
 code objects compile cleanly. Coverage report via:
