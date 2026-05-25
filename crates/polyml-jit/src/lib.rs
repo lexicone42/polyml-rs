@@ -24,22 +24,181 @@ pub mod translate;
 #[cfg(test)]
 mod bench;
 
-/// Trampoline that JIT'd code calls to dispatch CALL_FAST_RTS<N>.
-/// Signature must match what `translate.rs` declares for the
-/// extern symbol — `(stub: i64, n_args: i64, args: *const i64)
-/// -> i64`. For now this is a placeholder that returns TAGGED(0);
-/// real interpreter dispatch needs RTS-table access (a thread-local
-/// or context pointer threaded through).
+/// Walk all code objects in a [`polyml_runtime::LoadedImage`],
+/// JIT-translate each one that the translator accepts, and install
+/// every successful translation in the given interpreter's JIT
+/// cache. Returns `(total_code_objects, jit_translated, installed)`.
+///
+/// Uses the same logic as `jit_bootstrap_run.rs` (the bisection test)
+/// but with no filters: every translatable function gets installed
+/// at the recommended `arity_init`.
+///
+/// # Safety
+/// Reads code-object bytes from the loaded image — caller must ensure
+/// the image is loaded and code spaces are populated.
+pub fn install_all_jit_entries(
+    jit: &mut Jit,
+    loaded: &polyml_runtime::LoadedImage,
+    interp: &mut polyml_runtime::Interpreter,
+) -> (usize, usize, usize) {
+    use polyml_runtime::{length_word, JitEntry, MemorySpace, PolyWord};
+    let mut total = 0usize;
+    let mut jit_ok = 0usize;
+    let mut installed = 0usize;
+
+    fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(
+        space: &MemorySpace,
+        mut f: F,
+    ) {
+        let mut i = 0usize;
+        let used = space.used_words();
+        let Some(base) = space.iter().next().map(|w| w as *const PolyWord) else {
+            return;
+        };
+        while i < used {
+            let lw = unsafe { *base.add(i) };
+            let n = length_word::length_of(lw);
+            if n == 0 || i + 1 + n > used {
+                break;
+            }
+            let body = unsafe { base.add(i + 1) };
+            if length_word::is_code_object(lw) {
+                f(body, lw);
+            }
+            i += 1 + n;
+        }
+    }
+
+    for space in [&loaded.immutable, &loaded.mutable, &loaded.code] {
+        walk_code_objects(space, |code_obj_ptr, lw| {
+            total += 1;
+            let n_words = length_word::length_of(lw);
+            let (cp, _count) = unsafe { length_word::const_segment_for_code(code_obj_ptr) };
+            let body_start = code_obj_ptr as usize;
+            let cp_start = cp as usize;
+            let bytecode_len = cp_start
+                .saturating_sub(body_start)
+                .saturating_sub(std::mem::size_of::<usize>());
+            let max_bytes = n_words * std::mem::size_of::<usize>();
+            let bytecode_len = bytecode_len.min(max_bytes);
+            let full_body: &[u8] =
+                unsafe { std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes) };
+            let Ok((jf, jit_arity_init)) =
+                translate::compile_with_consts_meta(jit, full_body, bytecode_len)
+            else {
+                return;
+            };
+            jit_ok += 1;
+            let Some(sml_arity) = translate::arity_from_return_scan_pub(&full_body[..bytecode_len])
+            else {
+                return;
+            };
+            if sml_arity > 32 {
+                return;
+            }
+            let arity_init = (sml_arity + 2).max(jit_arity_init);
+            interp.install_jit(
+                body_start,
+                JitEntry {
+                    func: jf,
+                    arity_init,
+                    sml_arity,
+                },
+            );
+            installed += 1;
+        });
+    }
+    (total, jit_ok, installed)
+}
+
+/// Trampoline that JIT'd code calls to dispatch `CALL_FAST_RTS<N>`.
+/// Signature must match what `translate.rs` declares for the extern
+/// symbol — `(stub: i64, n_args: i64, args: *const i64) -> i64`.
+///
+/// Looks up the RTS function via the thread-local interpreter handle
+/// (set by `do_call` when invoking JIT'd code), invokes it, and
+/// returns the result as raw PolyWord bits.
+///
+/// On any failure (thread-local unset, unresolved entry, alloc-space
+/// missing) returns `1` = TAGGED(0) — safer than UB; the JIT'd code
+/// downstream may misbehave, but at least we don't deref garbage.
+///
+/// # Arg layout
+/// `args` is the JIT-emitted args buffer; `args[0]` = first popped
+/// from stack top = LAST pushed = (per the interpreter convention)
+/// LAST C-side arg. Reverse before calling the RTS function so
+/// `rts_args[0]` matches the interpreter's `args[0]` (= threadId
+/// for `rtsCallFullN`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rts_trampoline(
-    _stub_word: i64,
-    _n_args: i64,
-    _args: *const i64,
+    stub_word: i64,
+    n_args: i64,
+    args: *const i64,
 ) -> i64 {
-    // Tagged(0). Once we wire up Interpreter::rts_call this becomes
-    // the dispatch entry; for the moment any JIT'd RTS call returns
-    // unit, which compiles cleanly even if it'd execute wrong.
-    1
+    use polyml_runtime::{
+        rts::{RtsContext, RtsFn},
+        PolyWord, JIT_INTERP,
+    };
+
+    let interp_ptr = JIT_INTERP.with(|c| c.get());
+    if interp_ptr.is_null() {
+        return 1; // TAGGED(0)
+    }
+    // SAFETY: JIT_INTERP non-null = caller of with_jit_interp holds
+    // the borrow for this call.
+    let interp = unsafe { &mut *interp_ptr };
+
+    // stub_word is the raw PolyWord bits of an EntryPoint object.
+    // Word 0 holds the RTS dispatch token (= entry index + 1).
+    let stub = PolyWord::from_bits(stub_word as usize);
+    if !stub.is_data_ptr() {
+        return 1;
+    }
+    let token = unsafe { *stub.as_ptr::<PolyWord>() }.0;
+
+    // Resolve the entry.
+    let Some(entry) = interp.rts_table().entry(token).cloned() else {
+        return 1;
+    };
+    let n = n_args as usize;
+    if entry.func.arity() != n {
+        return 1;
+    }
+
+    // Read N args from the JIT's buffer. JIT stored slot[0] = first
+    // popped = top of stack = LAST C arg. Reverse on read.
+    #[allow(clippy::cast_sign_loss)]
+    let mut rts_args: [PolyWord; 5] = [PolyWord::ZERO; 5];
+    for i in 0..n {
+        // SAFETY: caller (JIT'd code) guarantees args[0..n] is valid.
+        let v = unsafe { *args.add(i) };
+        // JIT slot[i] = (n-1-i)-th C arg.
+        rts_args[n - 1 - i] = PolyWord::from_bits(v as usize);
+    }
+
+    // Dispatch.
+    let rts_ref = interp.rts_table_arc();
+    let mut ctx = RtsContext {
+        alloc_space: interp.jit_alloc_space_mut(),
+        raised_exception: None,
+        rts: Some(&rts_ref),
+    };
+    let result = match entry.func {
+        RtsFn::Arity0(f) => f(&mut ctx),
+        RtsFn::Arity1(f) => f(&mut ctx, rts_args[0]),
+        RtsFn::Arity2(f) => f(&mut ctx, rts_args[0], rts_args[1]),
+        RtsFn::Arity3(f) => f(&mut ctx, rts_args[0], rts_args[1], rts_args[2]),
+        RtsFn::Arity4(f) => f(&mut ctx, rts_args[0], rts_args[1], rts_args[2], rts_args[3]),
+        RtsFn::Arity5(f) => f(
+            &mut ctx,
+            rts_args[0],
+            rts_args[1],
+            rts_args[2],
+            rts_args[3],
+            rts_args[4],
+        ),
+    };
+    result.0 as i64
 }
 
 /// Closure-call trampoline. Signature must match what `translate.rs`

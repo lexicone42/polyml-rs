@@ -72,6 +72,12 @@ enum Cmd {
         /// Mutually exclusive with reading SML from stdin.
         #[arg(long, value_name = "FILE")]
         r#use: Option<PathBuf>,
+        /// Install every JIT-translatable code object from the image
+        /// in the interpreter's JIT cache before running. Speeds up
+        /// CALL dispatch into JIT'd code (subject to the
+        /// `MAX_JIT_DEPTH` cap on nested JIT dispatch).
+        #[arg(long)]
+        jit: bool,
     },
 }
 
@@ -98,6 +104,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             disasm_hottest,
             args,
             r#use,
+            jit,
         } => run_image(
             image,
             *max_steps,
@@ -106,6 +113,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             *disasm_hottest,
             args.clone(),
             r#use.clone(),
+            *jit,
         ),
     }
 }
@@ -118,6 +126,7 @@ fn run_image(
     disasm_hottest: bool,
     extra_args: Vec<String>,
     use_file: Option<PathBuf>,
+    install_jit: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let image = Image::parse(&bytes)?;
@@ -181,11 +190,17 @@ fn run_image(
     let image_mut_ptr = loaded.mutable.iter().next().map(|w| w as *const PolyWord);
     let image_mut_len = loaded.mutable.used_words();
     let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
-        // 1.6 GB heap (200M words). Small enough that GC auto-fires
-        // at 80% = 1.3 GB and keeps peak RSS bounded. With a much
-        // bigger heap (24 GB), GC never fires and the bootstrap OOMs
-        // around stage 6 on a 32 GB machine.
-        .with_default_alloc_space_bytes(1_600 * 1024 * 1024)
+        // 1.6 GB heap. Small enough that GC auto-fires at 80% = 1.3 GB
+        // and keeps peak RSS bounded. Bigger heaps (24 GB) postpone GC
+        // past the bootstrap's working set and OOM around stage 6.
+        // With --jit, use a smaller heap matching the jit_bootstrap_run
+        // test setup; the bigger heap exposed a JIT-related divergence
+        // that needs separate investigation.
+        .with_default_alloc_space_bytes(if install_jit {
+            512 * 1024 * 1024
+        } else {
+            1_600 * 1024 * 1024
+        })
         .with_rts(rts);
     if let Some(p) = image_mut_ptr {
         interp = interp.with_image_mutable_root(p, image_mut_len);
@@ -193,6 +208,20 @@ fn run_image(
     if profile {
         interp = interp.enable_diagnostics();
     }
+    if install_jit {
+        let mut jit = polyml_jit::Jit::new()
+            .map_err(|e| format!("jit init: {e}"))?;
+        let (total, jit_ok, installed) =
+            polyml_jit::install_all_jit_entries(&mut jit, &loaded, &mut interp);
+        println!(
+            "  JIT: {jit_ok}/{total} code objects translated ({:.1}%), {installed} installed",
+            100.0 * jit_ok as f64 / total as f64
+        );
+        // Leak `jit` so its compiled code memory outlives this scope —
+        // the interpreter holds function pointers into it.
+        Box::leak(Box::new(jit));
+    }
+
     interp.test_seed_return_sentinel();
     interp.test_seed_top(root_closure_word);
 

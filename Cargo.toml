@@ -38,6 +38,7 @@ missing_const_for_fn = "allow"
 [workspace.dependencies]
 polyml-runtime = { path = "crates/polyml-runtime" }
 polyml-image   = { path = "crates/polyml-image" }
+polyml-jit     = { path = "crates/polyml-jit" }
 
 # Profile tuning: dev builds should be fast; release should be optimized
 # but with overflow checks for debugging miscompilation.

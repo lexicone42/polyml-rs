@@ -195,16 +195,14 @@ fn jit_install_real_bootstrap_functions() {
     // Phase C: run with the JIT-bridge thread-local set, so trampolines
     // can call back. Cap steps so we don't loop forever if there's a bug.
     //
-    // We set the thread-local via a raw pointer dance to avoid borrow
-    // conflict between with_jit_interp and the loop.
+    // IMPORTANT: do NOT pre-set JIT_INTERP. The `Interpreter::do_call`
+    // dispatch gates the JIT-cache fast path on `inside_jit =
+    // JIT_INTERP set`. Pre-setting JIT_INTERP would effectively
+    // disable JIT execution and silently make the bootstrap pass
+    // without testing the JIT path. The trampolines transiently set
+    // JIT_INTERP via do_call's RAII guard so callbacks work.
     let max_steps = 10_000_000u64;
     let mut steps = 0u64;
-    let interp_ptr: *mut Interpreter = &mut interp;
-    let prev = polyml_runtime::JIT_INTERP.with(|c| {
-        let p = c.get();
-        c.set(interp_ptr);
-        p
-    });
     let outcome = loop {
         if steps >= max_steps {
             break Ok::<_, polyml_runtime::InterpError>(StepResult::Continue);
@@ -215,7 +213,6 @@ fn jit_install_real_bootstrap_functions() {
             other => break other,
         }
     };
-    polyml_runtime::JIT_INTERP.with(|c| c.set(prev));
 
     eprintln!("ran {steps} steps, outcome: {outcome:?}");
 

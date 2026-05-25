@@ -342,6 +342,24 @@ impl Interpreter {
         self.alloc_space.as_mut()
     }
 
+    /// Read-only accessor to this interpreter's RTS table. Used by the
+    /// JIT `rts_trampoline` to look up entries by token.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rts_table(&self) -> &RtsTable {
+        &self.rts
+    }
+
+    /// Clone the `Arc<RtsTable>` (cheap) for code paths that need
+    /// to hold a reference past a `&mut self` borrow of the
+    /// interpreter — e.g. building an `RtsContext` whose `rts` field
+    /// outlives the borrow used to grab `alloc_space`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rts_table_arc(&self) -> Arc<RtsTable> {
+        self.rts.clone()
+    }
+
     /// Enable per-step execution-profile collection. After this call,
     /// every `step()` records a visit to the current `(code_start,
     /// pc_offset)` and every `do_call()` records the target. Use
