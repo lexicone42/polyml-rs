@@ -3375,7 +3375,14 @@ impl Interpreter {
         // SAFETY: closure is a data pointer.
         let code_word_for_jit = unsafe { *closure_ptr_for_jit };
         let code_obj_ptr_for_jit = code_word_for_jit.0;
-        if let Some(entry) = self.jit_cache.get(&code_obj_ptr_for_jit).copied() {
+        // JIT-cache fast path. Skip when already inside a JIT call
+        // (JIT_INTERP set) to avoid Rust stack growth via JIT-↔-interp
+        // ping-pong. The interpreter's managed PolyWord stack handles
+        // recursion fine — but a Rust frame per nested call would
+        // exhaust the OS thread stack on bootstrap-scale workloads.
+        let inside_jit = !crate::jit_bridge::JIT_INTERP.with(|c| c.get()).is_null();
+        if !inside_jit
+            && let Some(entry) = self.jit_cache.get(&code_obj_ptr_for_jit).copied() {
             if std::env::var("JIT_TRACE_CALLS").is_ok() {
                 let arg0 = if entry.sml_arity > 0 {
                     self.stack[self.sp + entry.sml_arity - 1].0

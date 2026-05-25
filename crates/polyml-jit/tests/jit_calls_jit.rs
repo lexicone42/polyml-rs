@@ -58,7 +58,16 @@ fn interp_dispatches_to_first_jit_function() {
 /// Verify the trampoline-driven dispatch path: install a JIT'd
 /// "add 100" in the interpreter's cache, then invoke it via
 /// `jit_dispatch_closure_call` (the function our trampoline calls).
+///
+/// NOTE: this test exercised the JIT-to-JIT fast path. After
+/// commit (this) we disabled that path by default (MAX_JIT_DEPTH=0)
+/// to avoid OS thread stack overflow on deeply recursive bootstrap
+/// code AND a separate SEGV bug. The test now goes through the
+/// interpreter loop, which doesn't have the right setup for a
+/// hand-built fake closure (no real code object). Ignored until
+/// MAX_JIT_DEPTH is bumped back > 0.
 #[test]
+#[ignore = "JIT-to-JIT fast path disabled (MAX_JIT_DEPTH=0); see jit_bridge.rs"]
 fn jit_bridge_dispatches_into_cached_jit() {
     // Build the inner function: 1-arg add-100.
     let bc = vec![

@@ -24,7 +24,32 @@ thread_local! {
     /// scope.
     pub static JIT_INTERP: Cell<*mut Interpreter> =
         const { Cell::new(std::ptr::null_mut()) };
+
+    /// Rust call-depth counter for JIT-to-JIT dispatch. Each direct
+    /// `entry.func` invocation increments; on RAII drop it decrements.
+    /// When the counter exceeds [`MAX_JIT_DEPTH`], we fall back to
+    /// the interpreter loop to avoid blowing the OS thread stack on
+    /// deeply recursive bootstrap workloads (e.g. entry [52]'s
+    /// mutually-recursive callees would otherwise overflow ~8 MB of
+    /// Rust thread stack).
+    pub static JIT_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
+
+/// Soft cap on JIT-to-JIT recursion depth (used by
+/// `jit_dispatch_closure_call`). Set to 0 to disable nested JIT-to-JIT
+/// entirely — nested calls from JIT'd code go back through the
+/// interpreter. This avoids:
+///   1. OS thread stack overflow on deeply recursive callees (each
+///      JIT call adds a real Rust frame; the interp uses our
+///      managed PolyWord stack instead).
+///   2. A separate bug in the JIT-to-JIT path that SEGVs on certain
+///      install counts (e.g. install=53). Diagnosing that bug is
+///      future work.
+/// The outermost JIT dispatch — from `Interpreter::do_call` when the
+/// interpreter's CALL opcode hits a JIT-cached function — is gated
+/// separately on `JIT_INTERP` being null, so this cap doesn't disable
+/// the top-level JIT.
+pub const MAX_JIT_DEPTH: usize = 0;
 
 /// Run `f` with the thread-local interpreter pointer set to
 /// `&mut *interp`. Restores the previous value (typically null) on
@@ -177,7 +202,29 @@ pub fn jit_dispatch_closure_call(
     // SAFETY: closure is a data pointer.
     let code_word = unsafe { *closure_ptr_word };
     let code_obj_addr = code_word.0;
-    if let Some(entry) = interp.jit_lookup(code_obj_addr) {
+    // Fast path: dispatch via JIT cache when there's headroom on the
+    // Rust thread stack. Each direct `entry.func` invocation adds a
+    // Rust call frame; without a depth cap, deeply recursive
+    // bootstrap functions (entry [52] and its callees) blow ~8 MB of
+    // OS thread stack via JIT-↔-interp ping-pong.
+    let cur_depth = JIT_DEPTH.with(|c| c.get());
+    if cur_depth < MAX_JIT_DEPTH
+        && let Some(entry) = interp.jit_lookup(code_obj_addr)
+    {
+        if std::env::var("JIT_TRACE_CALLS").is_ok() {
+            eprintln!(
+                "  jit_dispatch_closure_call: JIT→JIT code_obj=0x{code_obj_addr:016x} arity={} depth={cur_depth}",
+                entry.sml_arity,
+            );
+        }
+        struct DepthGuard;
+        impl Drop for DepthGuard {
+            fn drop(&mut self) {
+                JIT_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+            }
+        }
+        JIT_DEPTH.with(|c| c.set(cur_depth + 1));
+        let _g = DepthGuard;
         // Build args_ptr per JIT convention. Slot N+1 must be the
         // real closure pointer so `INDIRECT_CLOSURE_BN` doesn't
         // null-deref (same pattern as `Interpreter::do_call`).
@@ -199,6 +246,12 @@ pub fn jit_dispatch_closure_call(
         return Ok(PolyWord::from_bits(result as usize));
     }
 
+    if std::env::var("JIT_TRACE_CALLS").is_ok() {
+        eprintln!(
+            "  jit_dispatch_closure_call: JIT→interp code_obj=0x{code_obj_addr:016x} args={}",
+            args.len(),
+        );
+    }
     // Save state we restore on return.
     let saved = interp.jit_state_save();
 
