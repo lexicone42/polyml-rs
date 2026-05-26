@@ -152,14 +152,11 @@ pub fn install_all_jit_entries(
             const INSTR_ALLOC_REF_OP: u8 = 0x06;
             const INSTR_ALLOC_BYTE_MEM_OP: u8 = 0xbd;
             const INSTR_ALLOC_WORD_MEM_OP: u8 = 0xda;
-            // CONST_ADDR and CALL_CONST_ADDR variants load from a
-            // PC-relative absolute address baked into the JIT code.
-            // While the load itself is dynamic (GC-updated pointers
-            // are seen fresh), if the code object holding the JIT
-            // entry has its const pool moved, the baked absolute
-            // address becomes stale.
-            // Bisection narrowed first failure to entry #27 which
-            // uses CALL_CONST_ADDR8_0/1.
+            // CONST_ADDR and CALL_CONST_ADDR families both still have
+            // a bug. The runtime-load fix in translate.rs for
+            // CALL_CONST_ADDR was necessary but not sufficient.
+            // Investigating further — for now, keep all variants
+            // filtered.
             const INSTR_CONST_ADDR8_0_OP: u8 = 0x55;
             const INSTR_CONST_ADDR8_1_OP: u8 = 0x56;
             const INSTR_CONST_ADDR8_8_OP: u8 = 0x15;

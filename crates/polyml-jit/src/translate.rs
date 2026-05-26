@@ -693,12 +693,14 @@ fn compile_with_consts_impl(
                     }
                     let mut buf = [0u8; 8];
                     buf.copy_from_slice(&_full_body[read_at..read_at + 8]);
-                    let closure_addr = u64::from_le_bytes(buf);
+                    let closure_addr_at_compile_time = u64::from_le_bytes(buf);
                     // Static arity inspection: deref closure → code obj
                     // → first two bytes (0xff/0xe9, arity|0x80). If the
                     // prologue isn't recognisable, bail to the
                     // interpreter rather than guess arity.
-                    let Some(n_args) = closure_arity_from_addr(closure_addr) else {
+                    let Some(n_args) =
+                        closure_arity_from_addr(closure_addr_at_compile_time)
+                    else {
                         return Err(TranslateError::Unsupported { op, at: pc - 2 });
                     };
                     if stack.len() < n_args {
@@ -708,7 +710,27 @@ fn compile_with_consts_impl(
                     for _ in 0..n_args {
                         args_vec.push(stack.pop().unwrap());
                     }
-                    let closure_v = builder.ins().iconst(int, closure_addr as i64);
+                    // Load the CLOSURE POINTER at runtime from the
+                    // code object's constants pool. The compile-time
+                    // value is used only for static arity inspection
+                    // (above); the runtime call must dereference the
+                    // current pool entry, which may have been updated
+                    // by GC since JIT compile time.
+                    //
+                    // Bug found: when this was an `iconst`, code that
+                    // GC'd between JIT compile + first call dispatched
+                    // to a stale pointer. Bisection (commits e6a8280,
+                    // 1d2c524, 598f312, 3d21be5) narrowed to entry #27
+                    // which uses CALL_CONST_ADDR8_0; this fix unblocks
+                    // it without needing the install-time filter.
+                    let abs_addr = _full_body.as_ptr() as i64 + read_at as i64;
+                    let base = builder.ins().iconst(int, abs_addr);
+                    let closure_v = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        base,
+                        0,
+                    );
                     let slot_size = std::cmp::max(8, (n_args * 8) as u32);
                     let slot = builder.create_sized_stack_slot(
                         cranelift::prelude::StackSlotData::new(
