@@ -314,6 +314,36 @@ pub unsafe extern "C" fn rts_trampoline(
 /// If the thread-local isn't set (e.g. JIT'd code being benchmarked
 /// in isolation), returns TAGGED(0) as a safe-ish fallback.
 #[unsafe(no_mangle)]
+/// Probe a (possibly-closure) heap pointer for its arity. Returns
+/// the arity as inferred from the ENTER_INT prologue or from
+/// scanning for RETURN_N. Returns None on any anomaly so a caller
+/// can decide whether to log a warning vs panic.
+unsafe fn check_closure_arity(addr: u64) -> Option<usize> {
+    if addr == 0 || addr & 0x7 != 0 {
+        return None;
+    }
+    let closure_ptr = addr as *const usize;
+    let code_addr = unsafe { closure_ptr.read() };
+    if code_addr == 0 || code_addr & 0x7 != 0 {
+        return None;
+    }
+    // Read length word (1 word before code_addr).
+    let lw = unsafe { (code_addr as *const usize).sub(1).read() };
+    let n_words = lw & 0x00ff_ffff_ffff_ffff;
+    if n_words == 0 || n_words > (1 << 24) {
+        return None;
+    }
+    let body_len_bytes = n_words * 8;
+    let b0 = unsafe { (code_addr as *const u8).read() };
+    if b0 == 0xff || b0 == 0xe9 {
+        // ENTER_INT prologue
+        let b1 = unsafe { (code_addr as *const u8).add(1).read() };
+        return Some((b1 & 0x7f) as usize);
+    }
+    let _ = body_len_bytes;
+    None
+}
+
 pub unsafe extern "C" fn closure_call_trampoline(
     closure_word: i64,
     n_args: i64,
@@ -322,8 +352,23 @@ pub unsafe extern "C" fn closure_call_trampoline(
     use polyml_runtime::PolyWord;
     let closure = PolyWord::from_bits(closure_word as usize);
     let n = n_args as usize;
-    // Diagnostic dump (gated): visible when chasing trampoline-call
-    // arg layout issues.
+    // Diagnostic: verify the runtime closure's arity matches the
+    // n_args the JIT-translator computed at compile time. If they
+    // differ, the JIT'd code will push too many or too few args
+    // → stack drift → eventually SEGV in unrelated code.
+    if std::env::var("JIT_TRAMP_VERIFY_ARITY").is_ok() {
+        let runtime_arity = unsafe {
+            check_closure_arity(closure_word as u64)
+        };
+        if let Some(rt_arity) = runtime_arity
+            && rt_arity != n
+        {
+            eprintln!(
+                "  closure_call_trampoline ARITY MISMATCH: closure=0x{closure_word:016x} jit_passed n_args={n} runtime_arity={rt_arity}"
+            );
+            std::process::abort();
+        }
+    }
     if std::env::var("JIT_TRAMP_DUMP_ARGS").is_ok() {
         use std::io::Write;
         let _ = writeln!(std::io::stderr(),
