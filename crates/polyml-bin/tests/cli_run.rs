@@ -41,17 +41,31 @@ fn run_with_stdin_and_args(
     max_steps: u64,
     extra_args: &[&str],
 ) -> Result<(String, String), std::io::Error> {
+    run_with_stdin_args_and_jit(stdin_data, max_steps, extra_args, false, None)
+}
+
+fn run_with_stdin_args_and_jit(
+    stdin_data: &str,
+    max_steps: u64,
+    extra_args: &[&str],
+    with_jit: bool,
+    cwd: Option<&std::path::Path>,
+) -> Result<(String, String), std::io::Error> {
     let Some(image) = bootstrap_image() else {
         return Ok((String::new(), String::from("SKIP: bootstrap image not present")));
     };
     let mut cmd = Command::new(poly_bin());
-    cmd.arg("run")
-        .arg("--max-steps")
-        .arg(max_steps.to_string())
-        .arg(&image);
+    cmd.arg("run").arg("--max-steps").arg(max_steps.to_string());
+    if with_jit {
+        cmd.arg("--jit");
+    }
+    cmd.arg(&image);
     if !extra_args.is_empty() {
         cmd.arg("--");
         cmd.args(extra_args);
+    }
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
     }
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -250,5 +264,71 @@ fn bootstrap_polyml_print_emits_output() {
     assert!(
         stdout.contains("Tagged(0)"),
         "expected clean exit after PolyML.print, got: {stdout}"
+    );
+}
+
+/// Regression test for `--jit` breaking basis loading. The simple
+/// bootstrap + HOL4-via-checkpoint tests don't catch this because
+/// they don't exercise the `Bootstrap.use "basis/..."` path. Stage1
+/// basis load was silently broken by a CONST_ADDR install
+/// regression that the other tests passed cleanly.
+///
+/// This test loads a small section of basis (just InitialBasis +
+/// PolyMLException) with --jit. If basis fails to load (= 'Error-'
+/// or missing structures), the JIT install regressed something on
+/// the basis-load path.
+#[test]
+fn bootstrap_jit_loads_initial_basis() {
+    let polyml_dir = workspace_root().join("vendor/polyml");
+    if !polyml_dir.join("basis/InitialBasis.ML").exists() {
+        eprintln!("SKIP: vendor/polyml not present");
+        return;
+    }
+    // The shortest meaningful sequence: load just a couple of basis
+    // files and check no compile errors. PolyMLException.sml is the
+    // file where the CONST_ADDR regression manifested (line 22
+    // referenced CommandLine which wasn't yet declared).
+    //
+    // Run from vendor/polyml so basis/ paths resolve.
+    let sml = "\
+val () = Bootstrap.use \"basis/InitialBasis.ML\";\n\
+val () = Bootstrap.use \"basis/Universal.ML\";\n\
+val () = Bootstrap.use \"basis/General.sml\";\n\
+val () = Bootstrap.use \"basis/LibrarySupport.sml\";\n\
+val () = Bootstrap.use \"basis/PolyMLException.sml\";\n\
+PolyML.print \"BASIS_LOAD_OK\";\n";
+    let Ok((stdout, stderr)) = run_with_stdin_args_and_jit(
+        sml,
+        200_000_000_000,
+        &[],
+        true, // --jit
+        Some(&polyml_dir),
+    ) else {
+        return;
+    };
+    let combined = format!("{stdout}\n---STDERR---\n{stderr}");
+    if combined.trim().is_empty() {
+        eprintln!("SKIP: empty output");
+        return;
+    }
+    let errs: Vec<&str> = combined
+        .lines()
+        .filter(|l| {
+            l.starts_with("Error-")
+                || l.contains("has not been declared")
+                || l.contains("Static Errors")
+        })
+        .take(10)
+        .collect();
+    assert!(
+        errs.is_empty(),
+        "basis load with --jit emitted compile errors:\n{}\n\n---output tail---\n{}",
+        errs.join("\n"),
+        combined.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        combined.contains("BASIS_LOAD_OK"),
+        "missing BASIS_LOAD_OK sentinel. Output tail:\n{}",
+        combined.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
     );
 }
