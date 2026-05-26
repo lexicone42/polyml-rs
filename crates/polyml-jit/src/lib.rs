@@ -106,7 +106,9 @@ pub fn install_all_jit_entries(
                     Ok(t) => t,
                     Err(e) => {
                         if std::env::var("JIT_LOG_TRANSLATE_ERRORS").is_ok() {
-                            let hex: Vec<String> = full_body[..bytecode_len.min(32)]
+                            let dump_len: usize = std::env::var("JIT_LOG_BC_LEN")
+                                .ok().and_then(|s| s.parse().ok()).unwrap_or(32);
+                            let hex: Vec<String> = full_body[..bytecode_len.min(dump_len)]
                                 .iter().map(|b| format!("{b:02x}")).collect();
                             eprintln!(
                                 "  jit_translate err: code_obj=0x{body_start:016x} bytecode_len={bytecode_len} bc={} err={e:?}",
@@ -159,16 +161,29 @@ pub fn install_all_jit_entries(
             //   bootstrap + HOL4 cleanly. +239 functions installed.
             //
             // Going from 326 → 611 installed by removing the safe ones.
+            const INSTR_CONST_ADDR8_0_OP: u8 = 0x55;
+            const INSTR_CONST_ADDR8_1_OP: u8 = 0x56;
+            const INSTR_CONST_ADDR8_8_OP: u8 = 0x15;
+            const INSTR_CONST_ADDR16_8_OP: u8 = 0x14;
             const INSTR_CALL_CONST_ADDR8_0_OP: u8 = 0x57;
             const INSTR_CALL_CONST_ADDR8_1_OP: u8 = 0x58;
             const INSTR_CALL_CONST_ADDR8_8_OP: u8 = 0x17;
             const INSTR_CALL_CONST_ADDR16_8_OP: u8 = 0x18;
             const INSTR_CALL_LOCAL_B_OP: u8 = 0x16;
             const INSTR_TAIL_B_B_OP: u8 = 0x7b;
+            // REGRESSION FOUND: re-enabling CONST_ADDR (load) breaks
+            // Stage1 basis load. Specifically entry #207 (a wrapper
+            // for CALL_FAST_RTS4) — when JIT'd, the basis can't load
+            // even though simple bootstrap + HOL4 still pass.
+            // Re-filter CONST_ADDR (load) until properly diagnosed.
             let bc = &full_body[..bytecode_len];
             if bc.iter().any(|&b| {
                 b == INSTR_CALL_LOCAL_B_OP
                     || b == INSTR_TAIL_B_B_OP
+                    || b == INSTR_CONST_ADDR8_0_OP
+                    || b == INSTR_CONST_ADDR8_1_OP
+                    || b == INSTR_CONST_ADDR8_8_OP
+                    || b == INSTR_CONST_ADDR16_8_OP
                     || b == INSTR_CALL_CONST_ADDR8_0_OP
                     || b == INSTR_CALL_CONST_ADDR8_1_OP
                     || b == INSTR_CALL_CONST_ADDR8_8_OP

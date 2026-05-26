@@ -2361,8 +2361,21 @@ fn scan_branch_targets(
             }
         }
         depth_at[pc] = Some(depth);
+        if std::env::var("JIT_DEBUG_SCAN").is_ok() {
+            eprintln!("  scan: pc={pc} depth={depth} op=0x{:02x}", bytecode[pc]);
+        }
         let op = bytecode[pc];
         pc += 1;
+        // NOTE on CASE16 (0x0a) translation limit: when bytecode after a
+        // CASE16 has case-targets that are NOT also jump-target sentinels
+        // (= the SML compiler emits jumps that fall-through code to case
+        // targets), our linear scan tracks depth as if executing the
+        // intervening code, but the case-target enters at CASE16's
+        // post-pop depth (depth-1). Truncating fall-through depth to
+        // recorded depth (above) hides this — subsequent LOCAL_K reads
+        // then fail with Underflow. Functions with such patterns won't
+        // translate. Fix would require per-case branch walking, not
+        // linear scan.
         match op {
             INSTR_CONST_0..=INSTR_CONST_4 => depth += 1,
             INSTR_CONST_10 => depth += 1,
