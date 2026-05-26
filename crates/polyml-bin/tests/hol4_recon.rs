@@ -107,10 +107,12 @@ fn checkpoint_path() -> Option<PathBuf> {
 
 fn run_through_checkpoint(sml: &str, max_steps: u64) -> Option<(String, i32)> {
     let ckpt = checkpoint_path()?;
-    let mut child = Command::new(poly_bin())
-        .arg("run")
-        .arg("--max-steps")
-        .arg(max_steps.to_string())
+    let mut cmd = Command::new(poly_bin());
+    cmd.arg("run").arg("--max-steps").arg(max_steps.to_string());
+    if std::env::var("HOL4_TEST_JIT").is_ok() {
+        cmd.arg("--jit");
+    }
+    let mut child = cmd
         .arg(&ckpt)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

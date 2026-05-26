@@ -196,11 +196,7 @@ fn run_image(
         // With --jit, use a smaller heap matching the jit_bootstrap_run
         // test setup; the bigger heap exposed a JIT-related divergence
         // that needs separate investigation.
-        .with_default_alloc_space_bytes(if install_jit {
-            512 * 1024 * 1024
-        } else {
-            1_600 * 1024 * 1024
-        })
+        .with_default_alloc_space_bytes(1_600 * 1024 * 1024)
         .with_rts(rts);
     if let Some(p) = image_mut_ptr {
         interp = interp.with_image_mutable_root(p, image_mut_len);
