@@ -316,8 +316,8 @@ pub unsafe extern "C" fn rts_trampoline(
 #[unsafe(no_mangle)]
 /// Probe a (possibly-closure) heap pointer for its arity. Returns
 /// the arity as inferred from the ENTER_INT prologue or from
-/// scanning for RETURN_N. Returns None on any anomaly so a caller
-/// can decide whether to log a warning vs panic.
+/// scanning the bytecode for RETURN_N. Returns None on any anomaly
+/// so a caller can decide whether to log a warning vs panic.
 unsafe fn check_closure_arity(addr: u64) -> Option<usize> {
     if addr == 0 || addr & 0x7 != 0 {
         return None;
@@ -340,8 +340,22 @@ unsafe fn check_closure_arity(addr: u64) -> Option<usize> {
         let b1 = unsafe { (code_addr as *const u8).add(1).read() };
         return Some((b1 & 0x7f) as usize);
     }
-    let _ = body_len_bytes;
-    None
+    // Fallback: scan bytecode for first RETURN_N. Use the same
+    // arity_from_return_scan logic that the translator uses.
+    let body =
+        unsafe { std::slice::from_raw_parts(code_addr as *const u8, body_len_bytes) };
+    // The const pool starts at body[body_len_bytes - 8] + body_len_bytes
+    // (trailing-offset is signed, negative). Restrict scan to bytecode.
+    let trailing_offset_word = body_len_bytes.checked_sub(8)?;
+    let trailing_offset = i64::from_le_bytes(
+        body[trailing_offset_word..trailing_offset_word + 8]
+            .try_into()
+            .ok()?,
+    );
+    let cp_byte_off = (body_len_bytes as i64 + trailing_offset) as usize;
+    let bytecode_end = cp_byte_off.saturating_sub(8).min(body.len());
+    let bytecode = &body[..bytecode_end];
+    crate::translate::arity_from_return_scan_pub(bytecode)
 }
 
 pub unsafe extern "C" fn closure_call_trampoline(
