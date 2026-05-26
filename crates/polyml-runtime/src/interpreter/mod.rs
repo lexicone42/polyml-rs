@@ -3450,6 +3450,11 @@ impl Interpreter {
         let inside_jit = !crate::jit_bridge::JIT_INTERP.with(|c| c.get()).is_null();
         if !inside_jit
             && let Some(entry) = self.jit_cache.get(&code_obj_ptr_for_jit).copied() {
+            if let Some(d) = self.diag.as_mut() {
+                *d.jit_call_hits.entry(code_obj_ptr_for_jit).or_insert(0) += 1;
+                // Also count toward total call_targets (for compare).
+                *d.call_targets.entry(code_obj_ptr_for_jit).or_insert(0) += 1;
+            }
             if std::env::var("JIT_TRACE_CALLS").is_ok() {
                 let mut arg_dump = String::new();
                 for i in (0..entry.sml_arity).rev() {

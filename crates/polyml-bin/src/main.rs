@@ -370,9 +370,63 @@ fn print_profile(d: &DiagState) {
         println!("  code=0x{code:016x}  steps={cnt:10}  ({pct:5.1}%)");
     }
     println!();
-    println!("Top 10 CALL targets (most-entered functions):");
+    let total_calls = d.total_calls();
+    let total_jit_hits = d.total_jit_hits();
+    println!(
+        "Top 10 CALL targets (most-entered functions) — total calls={total_calls}, JIT hits={total_jit_hits} ({:.1}%):",
+        if total_calls > 0 { 100.0 * total_jit_hits as f64 / total_calls as f64 } else { 0.0 }
+    );
     for (code, cnt) in d.hot_call_targets(10) {
-        println!("  code=0x{code:016x}  calls={cnt:10}");
+        let jit_hits = d.jit_call_hits.get(&code).copied().unwrap_or(0);
+        let jit_pct = if cnt > 0 { 100.0 * jit_hits as f64 / cnt as f64 } else { 0.0 };
+        let marker = if jit_hits > 0 { "[JIT]" } else { "     " };
+        println!(
+            "  {marker} code=0x{code:016x}  calls={cnt:10}  jit_hits={jit_hits:10}  ({jit_pct:5.1}%)"
+        );
+        // Bytecode head dump for non-JIT'd hot functions —
+        // shows which blocked opcode is making it un-installable.
+        if jit_hits == 0 {
+            // Read up to 40 bytes of bytecode at this code address.
+            // SAFETY: code is a CALL target = code object body start,
+            // so reading some bytes is safe (memory mapped).
+            let bytes: Vec<u8> = (0..40)
+                .map(|i| unsafe { *(code as *const u8).add(i) })
+                .collect();
+            let hex = bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            // Identify the first "interesting" opcode that's likely
+            // blocking JIT install (one of the filtered ones).
+            let blockers: &[(u8, &str)] = &[
+                (0x16, "CALL_LOCAL_B"),
+                (0x7b, "TAIL_B_B"),
+                (0x57, "CALL_CONST_ADDR8_0"),
+                (0x58, "CALL_CONST_ADDR8_1"),
+                (0x17, "CALL_CONST_ADDR8_8"),
+                (0x18, "CALL_CONST_ADDR16_8"),
+            ];
+            let blocker = bytes
+                .iter()
+                .find_map(|b| blockers.iter().find(|(op, _)| *op == *b).map(|(_, n)| *n))
+                .unwrap_or("(no obvious blocker; may be untranslatable opcode)");
+            println!("         bc[0..40]: {hex}");
+            println!("         likely blocker: {blocker}");
+        }
+    }
+    println!();
+    println!("Top 10 JIT-cache hits (functions actually accelerated):");
+    for (code, cnt) in d.hot_jit_calls(10) {
+        let total_for_code = d.call_targets.get(&code).copied().unwrap_or(0);
+        let coverage = if total_for_code > 0 {
+            100.0 * cnt as f64 / total_for_code as f64
+        } else {
+            0.0
+        };
+        println!(
+            "  code=0x{code:016x}  jit_hits={cnt:10}  total_calls={total_for_code:10}  coverage={coverage:5.1}%"
+        );
     }
     println!();
     println!("Top 20 hottest opcodes:");

@@ -15,8 +15,13 @@ pub struct DiagState {
     /// Visit counts keyed by `(code_start_addr, pc_offset)`.
     pub pc_visits: HashMap<(usize, u32), u64>,
     /// CALL count keyed by target code-object address (= what we
-    /// jumped INTO via CALL_CLOSURE etc.).
+    /// jumped INTO via CALL_CLOSURE etc.). Counts BOTH JIT-cache
+    /// hits and interp-only dispatches.
     pub call_targets: HashMap<usize, u64>,
+    /// JIT-cache HIT counts (subset of `call_targets`). When the
+    /// `--jit` flag is on, do_call's JIT path increments this each
+    /// time a JIT-installed entry is dispatched.
+    pub jit_call_hits: HashMap<usize, u64>,
     /// Cumulative count of step()s observed.
     pub total_steps: u64,
     /// Per-opcode dispatch counts. Indexed by opcode byte. Useful for
@@ -30,6 +35,7 @@ impl Default for DiagState {
         Self {
             pc_visits: HashMap::new(),
             call_targets: HashMap::new(),
+            jit_call_hits: HashMap::new(),
             total_steps: 0,
             opcode_counts: [0; 256],
         }
@@ -68,6 +74,29 @@ impl DiagState {
         v.sort_unstable_by_key(|(_, c)| std::cmp::Reverse(*c));
         v.truncate(n);
         v
+    }
+
+    /// Top-N JIT-cache hits (functions dispatched via the JIT cache).
+    /// A subset of `hot_call_targets` — comparing the two reveals
+    /// which hot functions miss the JIT (= filtered or untranslated).
+    #[must_use]
+    pub fn hot_jit_calls(&self, n: usize) -> Vec<(usize, u64)> {
+        let mut v: Vec<_> = self.jit_call_hits.iter().map(|(k, c)| (*k, *c)).collect();
+        v.sort_unstable_by_key(|(_, c)| std::cmp::Reverse(*c));
+        v.truncate(n);
+        v
+    }
+
+    /// Total number of JIT-cache hits across all installed entries.
+    #[must_use]
+    pub fn total_jit_hits(&self) -> u64 {
+        self.jit_call_hits.values().sum()
+    }
+
+    /// Total number of CALL dispatches (both JIT and interp).
+    #[must_use]
+    pub fn total_calls(&self) -> u64 {
+        self.call_targets.values().sum()
     }
 
     /// Top-N opcodes by dispatch count. Returns (opcode_byte, count).
