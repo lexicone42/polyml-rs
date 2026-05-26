@@ -240,24 +240,40 @@ end-to-end:
 - All 6 HOL4 tests pass with JIT enabled (kernel construction,
   primitive inference rules, derived theorems)
 
-326 of 2,719 translated entries installed (the rest are filtered
+611 of 2,723 translated entries installed (the rest are filtered
 because of known translation bugs in specific opcodes).
 
 The opcodes we currently SKIP at install time (`install_all_jit_entries`
 in `polyml-jit/src/lib.rs`):
 - CALL_LOCAL_B (0x16), TAIL_B_B (0x7b) — peek-don't-pop calling
   conventions our trampoline path doesn't fully model.
-- RAISE_EX (0x10), SET_HANDLER8/16 (0x81/0xf9) — exception
-  handling: JIT translates RAISE as "return TAGGED(0)", which
-  silently propagates wrong values to callers.
-- CLOSURE_B (0xd0), ALLOC_REF/BYTE_MEM/WORD_MEM (0x06/0xbd/0xda)
-  — complex alloc translations.
-- CONST_ADDR8_0/1/8 (0x55/0x56/0x15), CONST_ADDR16_8 (0x14),
-  CALL_CONST_ADDR variants (0x57/0x58/0x17/0x18) — JIT bakes an
-  absolute address into the generated code, which may go stale
-  after GC relocates code objects.
-- Functions where `jit_arity_init > sml_arity + 2` — these read
-  caller's "older stack" positions, not yet handled fully.
+- CALL_CONST_ADDR variants (0x57/0x58/0x17/0x18) — translation
+  loads closure pointer at runtime, but the call still SEGVs
+  downstream in unisolated cases.
+
+Now SAFE (re-enabled, no regressions):
+- RAISE_EX (0x10), SET_HANDLER8/16 (0x81/0xf9), CLOSURE_B (0xd0),
+  ALLOC_REF/BYTE_MEM/WORD_MEM (0x06/0xbd/0xda)
+- CONST_ADDR (load) variants 0x55/0x56/0x15/0x14
+- CASE16 (0x0a) — translation added (jump table → Cranelift
+  br_table), 4 new functions translate; some still fail with
+  `Underflow` (downstream depth tracking through CASE16 branches
+  needs more work).
+- Functions where `jit_arity_init > sml_arity + 2` — args_buf
+  layout fix in do_call handles older-slot positions correctly.
+
+## JIT execution profile
+
+`poly run --jit --profile <image>` adds:
+- Per-function JIT cache hit count
+- Identifies hottest un-JIT'd functions
+- Names the likely blocker opcode for each
+
+On the simple bootstrap: only 3.8% of all CALL dispatches hit the
+JIT cache. The hot path is mostly in functions filtered by
+CALL_LOCAL_B (2 of top 10), CASE16 (3), CALL_CONST_ADDR (1),
+TAIL_B_B (1), STACK_CONTAINER_B (1). Fixing those is the next
+real perf lever.
 
 Bisection harness env vars (in `install_all_jit_entries`):
 - `JIT_INSTALL_LIMIT=N` — install only the first N entries.
