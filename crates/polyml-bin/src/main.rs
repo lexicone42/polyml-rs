@@ -406,6 +406,9 @@ fn print_profile(d: &DiagState) {
                 (0x58, "CALL_CONST_ADDR8_1"),
                 (0x17, "CALL_CONST_ADDR8_8"),
                 (0x18, "CALL_CONST_ADDR16_8"),
+                // Untranslated opcodes:
+                (0x0a, "CASE16 (untranslated)"),
+                (0x0e, "STACK_CONTAINER_B (untranslated)"),
             ];
             let blocker = bytes
                 .iter()
