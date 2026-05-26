@@ -55,6 +55,7 @@ const INSTR_GREATER_UNSIGNED: u8 = 0xa7;
 const INSTR_GREATER_EQ_SIGNED: u8 = 0xa8;
 const INSTR_GREATER_EQ_UNSIGNED: u8 = 0xa9;
 const INSTR_JUMP8: u8 = 0x02;
+const INSTR_CASE16: u8 = 0x0a;
 const INSTR_JUMP8_FALSE: u8 = 0x03;
 const INSTR_JUMP8_TRUE: u8 = 0x46;
 const INSTR_JUMP_BACK8: u8 = 0x1e;
@@ -1577,6 +1578,94 @@ fn compile_with_consts_impl(
                     builder.ins().jump(target_blk, &args);
                     returned = true;
                 }
+                INSTR_CASE16 => {
+                    // CASE16 = jump table. Layout:
+                    //   [0x0a] [arg1 u16 LE] [arg1 u16 LE entries]
+                    // Selector popped, untagged, used as index. If in
+                    // [0, arg1): jump to table_start + table[u].
+                    // Else: jump to default (table_start + arg1*2).
+                    if pc + 1 >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let arg1 = u16::from_le_bytes([bytecode[pc], bytecode[pc + 1]]) as usize;
+                    pc += 2;
+                    let table_start = pc;
+                    let selector =
+                        stack.pop().ok_or(TranslateError::Underflow(pc - 3))?;
+                    // Untag: arith shift right by 1.
+                    let untagged = builder.ins().sshr_imm(selector, 1);
+                    // Default block (out-of-range).
+                    let default_target = table_start + arg1 * 2;
+                    let default_blk = *block_at
+                        .get(&default_target)
+                        .expect("CASE16 default target should be registered in pass 1");
+                    // Build per-case blocks list for br_table.
+                    let mut case_blks: Vec<cranelift::prelude::Block> =
+                        Vec::with_capacity(arg1);
+                    for i in 0..arg1 {
+                        let entry_pos = table_start + i * 2;
+                        if entry_pos + 1 >= bytecode.len() {
+                            return Err(TranslateError::Truncated(entry_pos));
+                        }
+                        let off = u16::from_le_bytes([
+                            bytecode[entry_pos],
+                            bytecode[entry_pos + 1],
+                        ]) as usize;
+                        let target = table_start + off;
+                        let blk = *block_at.get(&target).expect(
+                            "CASE16 case target should be registered in pass 1",
+                        );
+                        case_blks.push(blk);
+                    }
+                    // Cranelift br_table requires "leaf" blocks per case
+                    // (no extra args). Since our blocks take stack args,
+                    // we emit per-case trampoline blocks that jump to
+                    // the real block with the current stack.
+                    let stack_args: Vec<BlockArg> =
+                        stack.iter().copied().map(BlockArg::from).collect();
+                    // Create a leaf block per unique target that does
+                    // `jump real_blk(args)`.
+                    let make_leaf = |builder: &mut FunctionBuilder, target: cranelift::prelude::Block| -> cranelift::prelude::Block {
+                        let leaf = builder.create_block();
+                        builder.switch_to_block(leaf);
+                        builder.ins().jump(target, &stack_args);
+                        leaf
+                    };
+                    // Save current block so we restore.
+                    let cur_blk = builder.current_block().expect("must be in a block");
+                    let leaves: Vec<cranelift::prelude::Block> = case_blks
+                        .iter()
+                        .map(|&blk| {
+                            let leaf = builder.create_block();
+                            builder.switch_to_block(leaf);
+                            builder.ins().jump(blk, &stack_args);
+                            leaf
+                        })
+                        .collect();
+                    let default_leaf = {
+                        let leaf = builder.create_block();
+                        builder.switch_to_block(leaf);
+                        builder.ins().jump(default_blk, &stack_args);
+                        leaf
+                    };
+                    let _ = make_leaf;
+                    // Back to current block for emitting br_table.
+                    builder.switch_to_block(cur_blk);
+                    // Build JumpTable for br_table.
+                    let default_call = builder.func.dfg.block_call(default_leaf, &[]);
+                    let case_calls: Vec<_> = leaves
+                        .iter()
+                        .map(|&b| builder.func.dfg.block_call(b, &[]))
+                        .collect();
+                    let jtd = cranelift::prelude::JumpTableData::new(
+                        default_call,
+                        &case_calls,
+                    );
+                    let jt = builder.create_jump_table(jtd);
+                    builder.ins().br_table(untagged, jt);
+                    pc = table_start + arg1 * 2;
+                    returned = true;
+                }
                 INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE
                 | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
                     let off = if op == INSTR_JUMP8_FALSE || op == INSTR_JUMP8_TRUE {
@@ -1674,6 +1763,16 @@ fn tag(n: i64) -> i64 {
 fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
     if pc >= bc.len() {
         return Err(TranslateError::Truncated(pc));
+    }
+    // CASE16 (0x0a) has a variable-length jump table inline:
+    //   [op] [arg1 u16 LE] [N=arg1 jump-offsets, each u16 LE]
+    // Total length = 1 + 2 + arg1*2.
+    if bc[pc] == 0x0a {
+        if pc + 2 >= bc.len() {
+            return Err(TranslateError::Truncated(pc));
+        }
+        let arg1 = u16::from_le_bytes([bc[pc + 1], bc[pc + 2]]) as usize;
+        return Ok(1 + 2 + arg1 * 2);
     }
     Ok(match bc[pc] {
         INSTR_CONST_INT_B
@@ -2690,6 +2789,47 @@ fn scan_branch_targets(
                 record_target(&mut targets, taken, post_pop)?;
                 record_target(&mut targets, pc, post_pop)?;
                 depth = post_pop;
+            }
+            INSTR_CASE16 => {
+                // CASE16 = jump-table opcode:
+                //   [0x0a] [arg1 u16 LE] [arg1 entries of u16 LE each]
+                // Selector popped from stack. After pop, depth-1.
+                // arg1 = number of in-range case entries.
+                // table_start = position after the arg1 word.
+                // - If selector in [0, arg1): jump to
+                //   table_start + (table[selector] as i16 ext).
+                //   Upstream uses unsigned u16 add.
+                // - Default (out of range): jump to
+                //   table_start + arg1*2.
+                if pc + 1 >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let arg1 = u16::from_le_bytes([bytecode[pc], bytecode[pc + 1]]) as usize;
+                pc += 2;
+                let table_start = pc;
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc));
+                }
+                let post_pop = depth - 1;
+                // Register the default target (= one byte past the
+                // table, which is table_start + arg1*2).
+                let default_target = table_start + arg1 * 2;
+                record_target(&mut targets, default_target, post_pop)?;
+                // Register each case entry's target.
+                for i in 0..arg1 {
+                    let entry_pos = table_start + i * 2;
+                    if entry_pos + 1 >= bytecode.len() {
+                        return Err(TranslateError::Truncated(entry_pos));
+                    }
+                    let off = u16::from_le_bytes([
+                        bytecode[entry_pos],
+                        bytecode[entry_pos + 1],
+                    ]) as usize;
+                    let target = table_start + off;
+                    record_target(&mut targets, target, post_pop)?;
+                }
+                pc = table_start + arg1 * 2;
+                reachable = false;
             }
             _ => {
                 return Err(TranslateError::Unsupported { op, at: pc - 1 });

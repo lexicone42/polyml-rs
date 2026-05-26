@@ -101,11 +101,21 @@ pub fn install_all_jit_entries(
             let bytecode_len = bytecode_len.min(max_bytes);
             let full_body: &[u8] =
                 unsafe { std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes) };
-            let Ok((jf, jit_arity_init)) =
-                translate::compile_with_consts_meta(jit, full_body, bytecode_len)
-            else {
-                return;
-            };
+            let (jf, jit_arity_init) =
+                match translate::compile_with_consts_meta(jit, full_body, bytecode_len) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        if std::env::var("JIT_LOG_TRANSLATE_ERRORS").is_ok() {
+                            let hex: Vec<String> = full_body[..bytecode_len.min(32)]
+                                .iter().map(|b| format!("{b:02x}")).collect();
+                            eprintln!(
+                                "  jit_translate err: code_obj=0x{body_start:016x} bytecode_len={bytecode_len} bc={} err={e:?}",
+                                hex.join(" ")
+                            );
+                        }
+                        return;
+                    }
+                };
             jit_ok += 1;
             let Some(sml_arity) = translate::arity_from_return_scan_pub(&full_body[..bytecode_len])
             else {
