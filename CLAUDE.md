@@ -227,14 +227,21 @@ Next-hottest opcodes (post-fix) are INDIRECT_LOCAL_B0/B1 (~7%)
 and the JUMP family (~6%). Diminishing returns — each is already
 ~3 instructions of useful work.
 
-## JIT status — bootstrap completes end-to-end with selective install
+## JIT status — runs the full pipeline end-to-end
 
 `poly run --jit image.txt` installs JIT-translatable code objects
-whose opcodes we trust, then dispatches via the JIT cache. The
-simple bootstrap (`bootstrap64.txt` alone) now runs to completion:
-1,110,404 steps, Tagged(0) clean return (vs baseline 1,111,155
-without JIT). 326 of 2,719 translated entries installed; 108 JIT
-calls fired across the run.
+whose opcodes we trust, then dispatches via the JIT cache. Verified
+end-to-end:
+- Simple bootstrap (1,110,404 steps, Tagged(0))
+- Full Stage1 7-stage chain (27,676,346,761 steps, Tagged(0), writes
+  polyexport)
+- Re-loading the JIT-built polyexport: works as a real SML REPL
+  (`fact 10` returns `3628800: int`)
+- All 6 HOL4 tests pass with JIT enabled (kernel construction,
+  primitive inference rules, derived theorems)
+
+326 of 2,719 translated entries installed (the rest are filtered
+because of known translation bugs in specific opcodes).
 
 The opcodes we currently SKIP at install time (`install_all_jit_entries`
 in `polyml-jit/src/lib.rs`):
