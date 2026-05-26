@@ -583,8 +583,14 @@ fn compile_with_consts_impl(
                 }
                 INSTR_CALL_LOCAL_B => {
                     // [N]: closure is at sp[N]; the N args above it
-                    // are the call args. Pop both, call trampoline,
-                    // push result.
+                    // are the call args. Upstream PEEKS the closure
+                    // (no sp++) before jumping to CALL_CLOSURE. After
+                    // the call returns, the closure remains on stack
+                    // below the result. Net stack delta: -N + 1.
+                    //
+                    // bytecode.cpp:445-449:
+                    //   closure = (sp[*pc++]).w().AsObjPtr();
+                    //   goto CALL_CLOSURE;
                     if pc >= bytecode.len() {
                         return Err(TranslateError::Truncated(pc));
                     }
@@ -597,7 +603,9 @@ fn compile_with_consts_impl(
                     for _ in 0..n_args {
                         args_vec.push(stack.pop().unwrap());
                     }
-                    let closure = stack.pop().unwrap();
+                    // PEEK closure (don't pop); it stays on stack so
+                    // subsequent LOCAL_K offsets match the interpreter.
+                    let closure = *stack.last().unwrap();
                     let slot_size = std::cmp::max(8, (n_args * 8) as u32);
                     let slot = builder.create_sized_stack_slot(
                         cranelift::prelude::StackSlotData::new(
@@ -1788,9 +1796,10 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_INDIRECT_CLOSURE_B2 => 2,
         INSTR_INDIRECT_LOCAL_BB
         | INSTR_INDIRECT_CLOSURE_BB
-        | INSTR_JUMP_TAGGED_LOCAL
-        | INSTR_JUMP_NEQ_LOCAL
-        | INSTR_JUMP_NEQ_LOCAL_IND => 3,
+        | INSTR_JUMP_TAGGED_LOCAL => 3,
+        // JUMP_NEQ_LOCAL{_IND}: 1 opcode + 3 imm (depth, want, off).
+        // bytecode.cpp lines 552-560 (jumpNEqLocal): pc += 3.
+        INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => 4,
         INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 => 2,
         INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1 => 2,
         INSTR_CONST_ADDR8_8 | INSTR_CALL_CONST_ADDR8_8 => 3,
@@ -2193,7 +2202,9 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_CALL_LOCAL_B => {
                     if pc >= bytecode.len() { return None; }
                     let n = bytecode[pc] as i32;
-                    (1, n + 1, None, 1)
+                    // Pop N args, peek closure at depth N (still there
+                    // after call), push 1 result. Net depth: -N + 1.
+                    (1, n, Some(n as usize), 1)
                 }
                 INSTR_TUPLE_2 => (1, 2, None, 0),
                 INSTR_TUPLE_3 => (1, 3, None, 0),
@@ -2575,7 +2586,9 @@ fn scan_branch_targets(
                 if depth < n + 1 {
                     return Err(TranslateError::Underflow(pc - 2));
                 }
-                depth = depth - n - 1 + 1;
+                // PEEK closure: pop N args, push 1 result. Closure
+                // stays. Net: -N + 1 (was -N before fix).
+                depth = depth - n + 1;
             }
             INSTR_TUPLE_2 | INSTR_TUPLE_3 | INSTR_TUPLE_4 | INSTR_TUPLE_B => {
                 let n = match op {

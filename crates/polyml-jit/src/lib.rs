@@ -142,9 +142,11 @@ pub fn install_all_jit_entries(
             // fully model.
             //
             // Currently blocked:
-            // - CALL_LOCAL_B (0x16): peek-don't-pop calling convention
-            //   pushes closure_orig into the call group; our trampoline
-            //   path doesn't model that perfectly.
+            // - CALL_LOCAL_B (0x16): the translation is now correct
+            //   (peeks closure, depth = -N + 1) but re-enabling still
+            //   hangs on bootstrap. Possible secondary bug (sub-call
+            //   inside the CALL_LOCAL_B target wedges). Diagnosed
+            //   via install bisection (idx 17 alone hangs).
             // - TAIL_B_B (0x7b): similar issue (re-enabling breaks the
             //   basis-loaded HOL4 workload).
             // - CALL_CONST_ADDR (0x57/0x58/0x17/0x18): the runtime-load
