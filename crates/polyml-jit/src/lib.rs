@@ -129,30 +129,26 @@ pub fn install_all_jit_entries(
             // Filter opcodes whose translations our JIT doesn't
             // fully model.
             //
+            // Currently blocked:
             // - CALL_LOCAL_B (0x16): peek-don't-pop calling convention
             //   pushes closure_orig into the call group; our trampoline
             //   path doesn't model that perfectly.
-            // - TAIL_B_B (0x7b): similar issue (tested empirically —
-            //   re-enabling breaks the basis-loaded HOL4 workload).
-            // - CONST_ADDR (0x55/0x56/0x15/0x14) and CALL_CONST_ADDR
-            //   (0x57/0x58/0x17/0x18): re-enabling breaks the simple
-            //   bootstrap when interaction with other JIT'd entries
-            //   triggers a SEGV. Translation in translate.rs was
-            //   updated to load the const-pool value at runtime (vs
-            //   baking iconst), but still has a secondary bug.
+            // - TAIL_B_B (0x7b): similar issue (re-enabling breaks the
+            //   basis-loaded HOL4 workload).
+            // - CALL_CONST_ADDR (0x57/0x58/0x17/0x18): the runtime-load
+            //   fix in translate.rs was needed for some entries, but
+            //   when CALL_CONST_ADDR functions interact with each
+            //   other (multiple installed), bootstrap SEGVs at a
+            //   downstream STORE_ML_WORD. Bug unisolated.
             //
-            // Previously-filtered opcodes that turned out to be SAFE
-            // (verified by removing them from the filter, install
-            // count went up, and HOL4 + bootstrap still passed):
+            // Verified SAFE (re-enabled without regressions):
             // - CLOSURE_B (0xd0), ALLOC_REF/BYTE_MEM/WORD_MEM
-            //   (0x06/0xbd/0xda)
-            // - RAISE_EX (0x10), SET_HANDLER8/16 (0x81/0xf9)
+            //   (0x06/0xbd/0xda), RAISE_EX (0x10),
+            //   SET_HANDLER8/16 (0x81/0xf9)
+            // - CONST_ADDR (load) 0x55/0x56/0x15/0x14 — passes
+            //   bootstrap + HOL4 cleanly. +239 functions installed.
             //
-            // Going from 326 → 372 installed by removing those.
-            const INSTR_CONST_ADDR8_0_OP: u8 = 0x55;
-            const INSTR_CONST_ADDR8_1_OP: u8 = 0x56;
-            const INSTR_CONST_ADDR8_8_OP: u8 = 0x15;
-            const INSTR_CONST_ADDR16_8_OP: u8 = 0x14;
+            // Going from 326 → 611 installed by removing the safe ones.
             const INSTR_CALL_CONST_ADDR8_0_OP: u8 = 0x57;
             const INSTR_CALL_CONST_ADDR8_1_OP: u8 = 0x58;
             const INSTR_CALL_CONST_ADDR8_8_OP: u8 = 0x17;
@@ -163,10 +159,6 @@ pub fn install_all_jit_entries(
             if bc.iter().any(|&b| {
                 b == INSTR_CALL_LOCAL_B_OP
                     || b == INSTR_TAIL_B_B_OP
-                    || b == INSTR_CONST_ADDR8_0_OP
-                    || b == INSTR_CONST_ADDR8_1_OP
-                    || b == INSTR_CONST_ADDR8_8_OP
-                    || b == INSTR_CONST_ADDR16_8_OP
                     || b == INSTR_CALL_CONST_ADDR8_0_OP
                     || b == INSTR_CALL_CONST_ADDR8_1_OP
                     || b == INSTR_CALL_CONST_ADDR8_8_OP
