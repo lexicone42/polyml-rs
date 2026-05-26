@@ -171,24 +171,41 @@ pub fn install_all_jit_entries(
             const INSTR_CALL_CONST_ADDR16_8_OP: u8 = 0x18;
             const INSTR_CALL_LOCAL_B_OP: u8 = 0x16;
             const INSTR_TAIL_B_B_OP: u8 = 0x7b;
-            // REGRESSION FOUND: re-enabling CONST_ADDR (load) breaks
-            // Stage1 basis load. Specifically entry #207 (a wrapper
-            // for CALL_FAST_RTS4) — when JIT'd, the basis can't load
-            // even though simple bootstrap + HOL4 still pass.
-            // Re-filter CONST_ADDR (load) until properly diagnosed.
+            // CALL_FAST_RTS variants: 0x83..=0x88.
+            const INSTR_CALL_FAST_RTS_BASE: u8 = 0x83;
+            const INSTR_CALL_FAST_RTS_LAST: u8 = 0x88;
             let bc = &full_body[..bytecode_len];
-            if bc.iter().any(|&b| {
-                b == INSTR_CALL_LOCAL_B_OP
-                    || b == INSTR_TAIL_B_B_OP
-                    || b == INSTR_CONST_ADDR8_0_OP
-                    || b == INSTR_CONST_ADDR8_1_OP
-                    || b == INSTR_CONST_ADDR8_8_OP
-                    || b == INSTR_CONST_ADDR16_8_OP
-                    || b == INSTR_CALL_CONST_ADDR8_0_OP
+            let has_call_local_b = bc.contains(&INSTR_CALL_LOCAL_B_OP);
+            let has_tail_b_b = bc.contains(&INSTR_TAIL_B_B_OP);
+            let has_call_const_addr = bc.iter().any(|&b| {
+                b == INSTR_CALL_CONST_ADDR8_0_OP
                     || b == INSTR_CALL_CONST_ADDR8_1_OP
                     || b == INSTR_CALL_CONST_ADDR8_8_OP
                     || b == INSTR_CALL_CONST_ADDR16_8_OP
-            }) {
+            });
+            // The CONST_ADDR (load) regression on Stage1 basis load was
+            // a CONST_ADDR-loaded RTS stub passed to CALL_FAST_RTS. The
+            // CONST_ADDR load itself isn't broken, but the RTS path
+            // somehow misbehaves when JIT'd. Until that's diagnosed,
+            // only skip CONST_ADDR functions whose bytecode ALSO
+            // contains a CALL_FAST_RTS — leaving plain const-load
+            // patterns (e.g., loading a constant for a comparison)
+            // available to JIT.
+            let has_const_addr = bc.iter().any(|&b| {
+                b == INSTR_CONST_ADDR8_0_OP
+                    || b == INSTR_CONST_ADDR8_1_OP
+                    || b == INSTR_CONST_ADDR8_8_OP
+                    || b == INSTR_CONST_ADDR16_8_OP
+            });
+            let has_call_fast_rts = bc
+                .iter()
+                .any(|&b| (INSTR_CALL_FAST_RTS_BASE..=INSTR_CALL_FAST_RTS_LAST).contains(&b));
+            let const_addr_rts_wrapper = has_const_addr && has_call_fast_rts;
+            if has_call_local_b
+                || has_tail_b_b
+                || has_call_const_addr
+                || const_addr_rts_wrapper
+            {
                 return;
             }
             // Bisection: check limit + skip set BEFORE incrementing
