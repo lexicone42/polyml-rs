@@ -762,7 +762,14 @@ fn compile_with_consts_impl(
                 }
                 INSTR_LOAD_UNTAGGED => {
                     // Pop index (tagged), peek base (data ptr).
-                    // Replace top with *(base + (index>>1) * 8).
+                    // Load *(base + (index>>1) * 8), TAG the result
+                    // (2*v + 1), and replace top.
+                    //
+                    // Upstream wraps in TAGGED — code that uses the
+                    // result via INDIRECT/CALL strips the tag and
+                    // treats as raw bits. Missing the TAG was a real
+                    // semantic bug found via basis/PolyMLException.sml
+                    // load-time bisection.
                     let index_tag = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
                     let base = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
                     let index = builder.ins().sshr_imm(index_tag, 1);
@@ -775,8 +782,12 @@ fn compile_with_consts_impl(
                         addr,
                         0,
                     );
+                    // TAG: 2*val + 1
+                    let doubled = builder.ins().ishl_imm(val, 1);
+                    let one = builder.ins().iconst(int, 1);
+                    let tagged = builder.ins().iadd(doubled, one);
                     let last = stack.len() - 1;
-                    stack[last] = val;
+                    stack[last] = tagged;
                 }
                 INSTR_STORE_ML_WORD => {
                     // Pop value, pop index, pop base; write base[index]=value;
