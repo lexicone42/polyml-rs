@@ -126,37 +126,29 @@ pub fn install_all_jit_entries(
             if jit_arity_init > sml_arity + 2 {
                 return;
             }
-            // Skip functions that contain CALL_LOCAL_B (0x16) — their
-            // peek-don't-pop calling convention pushes closure_orig
-            // into the call group, which our trampoline path doesn't
-            // model perfectly. Easier to just let the interp handle
-            // them than to risk wrong arg counts → bad retPCs.
+            // Filter opcodes whose translations our JIT doesn't
+            // fully model.
             //
-            // Also skip TAIL_B_B (0x7b) for similar reasons.
+            // - CALL_LOCAL_B (0x16): peek-don't-pop calling convention
+            //   pushes closure_orig into the call group; our trampoline
+            //   path doesn't model that perfectly.
+            // - TAIL_B_B (0x7b): similar issue (tested empirically —
+            //   re-enabling breaks the basis-loaded HOL4 workload).
+            // - CONST_ADDR (0x55/0x56/0x15/0x14) and CALL_CONST_ADDR
+            //   (0x57/0x58/0x17/0x18): re-enabling breaks the simple
+            //   bootstrap when interaction with other JIT'd entries
+            //   triggers a SEGV. Translation in translate.rs was
+            //   updated to load the const-pool value at runtime (vs
+            //   baking iconst), but still has a secondary bug.
             //
-            // Also skip RAISE_EX (0x10) — JIT translates it as
-            // "return TAGGED(0)" instead of raising, so a function
-            // whose exception path returns TAGGED(0) will silently
-            // propagate that to the caller, which may then deref it
-            // (= SEGV at next STORE/INDIRECT).
+            // Previously-filtered opcodes that turned out to be SAFE
+            // (verified by removing them from the filter, install
+            // count went up, and HOL4 + bootstrap still passed):
+            // - CLOSURE_B (0xd0), ALLOC_REF/BYTE_MEM/WORD_MEM
+            //   (0x06/0xbd/0xda)
+            // - RAISE_EX (0x10), SET_HANDLER8/16 (0x81/0xf9)
             //
-            // Also skip SET_HANDLER (0x12/0x13) — same exception class.
-            // Filter opcodes whose translation/semantics our JIT
-            // doesn't fully model.
-            const INSTR_CALL_LOCAL_B_OP: u8 = 0x16;
-            const INSTR_TAIL_B_B_OP: u8 = 0x7b;
-            const INSTR_RAISE_EX_OP: u8 = 0x10;
-            const INSTR_SET_HANDLER8_OP: u8 = 0x81;
-            const INSTR_SET_HANDLER16_OP: u8 = 0xf9;
-            const INSTR_CLOSURE_B_OP: u8 = 0xd0;
-            const INSTR_ALLOC_REF_OP: u8 = 0x06;
-            const INSTR_ALLOC_BYTE_MEM_OP: u8 = 0xbd;
-            const INSTR_ALLOC_WORD_MEM_OP: u8 = 0xda;
-            // CONST_ADDR and CALL_CONST_ADDR families both still have
-            // a bug. The runtime-load fix in translate.rs for
-            // CALL_CONST_ADDR was necessary but not sufficient.
-            // Investigating further — for now, keep all variants
-            // filtered.
+            // Going from 326 → 372 installed by removing those.
             const INSTR_CONST_ADDR8_0_OP: u8 = 0x55;
             const INSTR_CONST_ADDR8_1_OP: u8 = 0x56;
             const INSTR_CONST_ADDR8_8_OP: u8 = 0x15;
@@ -165,17 +157,12 @@ pub fn install_all_jit_entries(
             const INSTR_CALL_CONST_ADDR8_1_OP: u8 = 0x58;
             const INSTR_CALL_CONST_ADDR8_8_OP: u8 = 0x17;
             const INSTR_CALL_CONST_ADDR16_8_OP: u8 = 0x18;
+            const INSTR_CALL_LOCAL_B_OP: u8 = 0x16;
+            const INSTR_TAIL_B_B_OP: u8 = 0x7b;
             let bc = &full_body[..bytecode_len];
             if bc.iter().any(|&b| {
                 b == INSTR_CALL_LOCAL_B_OP
                     || b == INSTR_TAIL_B_B_OP
-                    || b == INSTR_RAISE_EX_OP
-                    || b == INSTR_SET_HANDLER8_OP
-                    || b == INSTR_SET_HANDLER16_OP
-                    || b == INSTR_CLOSURE_B_OP
-                    || b == INSTR_ALLOC_REF_OP
-                    || b == INSTR_ALLOC_BYTE_MEM_OP
-                    || b == INSTR_ALLOC_WORD_MEM_OP
                     || b == INSTR_CONST_ADDR8_0_OP
                     || b == INSTR_CONST_ADDR8_1_OP
                     || b == INSTR_CONST_ADDR8_8_OP
