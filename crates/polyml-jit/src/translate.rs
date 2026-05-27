@@ -151,7 +151,8 @@ const INSTR_TUPLE_B: u8 = 0x68;
 pub enum TranslateError {
     #[error("truncated bytecode at offset {0}")]
     Truncated(usize),
-    #[error("unsupported opcode 0x{op:02x} at offset {at}")]
+    #[error("unsupported opcode 0x{op:02x} ({}) at offset {at}",
+        polyml_runtime::interpreter::disasm::opcode_name(*op))]
     Unsupported { op: u8, at: usize },
     #[error("stack underflow at offset {0} (no value to pop)")]
     Underflow(usize),

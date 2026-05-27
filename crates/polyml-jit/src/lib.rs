@@ -112,7 +112,7 @@ pub fn install_all_jit_entries(
                             let hex: Vec<String> = full_body[..bytecode_len.min(dump_len)]
                                 .iter().map(|b| format!("{b:02x}")).collect();
                             eprintln!(
-                                "  jit_translate err: code_obj=0x{body_start:016x} bytecode_len={bytecode_len} bc={} err={e:?}",
+                                "  jit_translate err: code_obj=0x{body_start:016x} bytecode_len={bytecode_len} bc={} err={e}",
                                 hex.join(" ")
                             );
                         }
