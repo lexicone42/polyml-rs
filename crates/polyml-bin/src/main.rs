@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -100,6 +101,12 @@ enum Cmd {
         /// is run under both modes with no args; mismatches printed.
         #[arg(long)]
         scan: bool,
+        /// Scan with subprocess isolation: each (idx, arg) test runs
+        /// in a child process. SEGV from one function doesn't kill
+        /// the parent. Slower (~1s per spawn) but actually finds bugs.
+        /// Use with DIFF_SCAN_LIMIT=N to bound runtime.
+        #[arg(long)]
+        scan_isolated: bool,
         /// Select the Nth installed function (use with `--list` first
         /// to find an interesting one).
         #[arg(long)]
@@ -163,21 +170,28 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             image,
             list,
             scan,
+            scan_isolated,
             idx,
             code_obj,
             args,
             raw_args,
             closure,
-        } => diff_command(
-            image,
-            *list,
-            *scan,
-            *idx,
-            code_obj.as_deref(),
-            args,
-            *raw_args,
-            closure.as_deref(),
-        ),
+        } => {
+            if *scan_isolated {
+                scan_isolated_command(image)
+            } else {
+                diff_command(
+                    image,
+                    *list,
+                    *scan,
+                    *idx,
+                    code_obj.as_deref(),
+                    args,
+                    *raw_args,
+                    closure.as_deref(),
+                )
+            }
+        }
     }
 }
 
@@ -759,6 +773,128 @@ fn parse_hex_addr(s: &str) -> Result<usize, Box<dyn std::error::Error>> {
     let trimmed = s.trim().trim_start_matches("0x").trim_start_matches("0X");
     usize::from_str_radix(trimmed, 16)
         .map_err(|e| format!("bad hex address '{s}': {e}").into())
+}
+
+/// Spawn `poly diff <image> --idx N --args V` per test, capturing
+/// exit codes to detect SEGVs without killing the parent. Each
+/// spawn pays ~1.5s image-load overhead — slow but rock-solid.
+///
+/// Caps per `DIFF_SCAN_LIMIT` (default 50 to bound interactive
+/// runtime). Each function is tested with 6 different tagged-int
+/// args. Divergences are reported with full output.
+fn scan_isolated_command(
+    image_path: &PathBuf,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use std::process::{Command, Stdio};
+
+    // First: load the image in this process just to enumerate idx
+    // count. We need to know HOW MANY entries there are.
+    let bytes = std::fs::read(image_path)?;
+    let image = Image::parse(&bytes)?;
+    let mut loaded = load_image(&image)?;
+    let rts = Arc::new(RtsTable::new());
+    polyml_runtime::rts::clear_finish_requested();
+    let _ = patch_entry_points(&mut loaded, &rts);
+    let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
+    let mut interp = unsafe { Interpreter::from_code_object(64 * 1024, code_obj_ptr) }
+        .with_default_alloc_space_bytes(256 * 1024 * 1024)
+        .with_rts(rts.clone());
+    let mut jit = polyml_jit::Jit::new()?;
+    let _ = polyml_jit::install_all_jit_entries(&mut jit, &loaded, &mut interp);
+    let mut entries = interp.jit_cache_entries();
+    entries.sort_by_key(|(p, _)| *p);
+    let total = entries.len();
+    drop(interp); // release before subprocesses
+    drop(jit);
+    eprintln!("Found {total} installed entries; starting isolated scan");
+
+    let limit: usize = std::env::var("DIFF_SCAN_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+    let arg_values: &[i64] = &[0, 1, -1, 42, 100, 1000];
+
+    let exe = std::env::current_exe()?;
+    let mut tested = 0usize;
+    let mut matched = 0usize;
+    let mut segv = 0usize;
+    let mut timeout_n = 0usize;
+    let mut other = 0usize;
+    let mut diverged: Vec<(usize, i64, String)> = Vec::new();
+
+    let scan_start = std::time::Instant::now();
+    'outer: for idx in 0..limit.min(total) {
+        for &arg in arg_values {
+            // Try with sml_arity copies of the same arg. We don't
+            // know the arity without re-loading, but the diff
+            // subcommand handles the mismatch by erroring.
+            // Use --args=VAL syntax so negative values aren't parsed
+            // as flag prefixes by clap.
+            let arg_eq = format!("--args={arg}");
+            let output = Command::new(&exe)
+                .args([
+                    "diff",
+                    image_path.to_str().unwrap(),
+                    "--idx",
+                    &idx.to_string(),
+                    &arg_eq,
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()?;
+            tested += 1;
+            let rc = output.status.code();
+            let signal = output.status.signal();
+            match (rc, signal) {
+                (Some(0), _) => matched += 1,
+                (Some(2), _) => {
+                    let combined = format!(
+                        "STDOUT:\n{}\nSTDERR:\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                    diverged.push((idx, arg, combined));
+                    eprintln!("  idx={idx:4} arg={arg:7} → DIVERGENCE");
+                }
+                (None, Some(11)) | (Some(139), _) => segv += 1,
+                (None, _) if output.status.success() => other += 1,
+                (Some(124), _) => timeout_n += 1,
+                _ => other += 1,
+            }
+            // Print progress every 50 tests.
+            if tested % 50 == 0 {
+                eprintln!(
+                    "  progress: {tested} tested, {matched} match, {} diverge, {segv} segv, {timeout_n} timeout ({}s)",
+                    diverged.len(),
+                    scan_start.elapsed().as_secs(),
+                );
+            }
+            // Stop early if scan is taking too long.
+            if scan_start.elapsed().as_secs() > 600 {
+                eprintln!("scan: exceeded 10-min budget, stopping");
+                break 'outer;
+            }
+        }
+    }
+    let elapsed = scan_start.elapsed();
+    println!(
+        "Isolated scan: tested {tested} in {:.1}s — matched {matched}, \
+         diverged {}, SEGV {segv}, timeout {timeout_n}, other {other}",
+        elapsed.as_secs_f64(),
+        diverged.len(),
+    );
+    if !diverged.is_empty() {
+        println!("\n--- Divergences ---");
+        for (idx, arg, output) in &diverged {
+            println!("=== idx={idx} arg={arg} ===");
+            println!("{output}");
+        }
+    }
+    if diverged.is_empty() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(2))
+    }
 }
 
 /// Static heuristic: scan a function's first 64 bytes for opcodes
