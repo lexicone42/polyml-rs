@@ -333,6 +333,21 @@ impl Interpreter {
         self.jit_cache.get(&code_obj_ptr).copied()
     }
 
+    /// Iterate all installed (code_obj_ptr, JitEntry) pairs. Used by
+    /// the differential tester to enumerate testable functions.
+    /// Order is HashMap-iteration order (not insertion order).
+    pub fn jit_cache_entries(&self) -> Vec<(usize, JitEntry)> {
+        self.jit_cache.iter().map(|(k, v)| (*k, *v)).collect()
+    }
+
+    /// Clear all installed JIT entries. Used by the differential
+    /// tester to ensure interp runs don't dispatch back into JIT
+    /// via the cache (which would defeat the comparison purpose
+    /// and let JIT bugs hang the interp run).
+    pub fn jit_cache_clear(&mut self) {
+        self.jit_cache.clear();
+    }
+
     /// Mutable accessor to this interpreter's `alloc_space` for the
     /// JIT-bridge trampolines. Returns `None` if no alloc space has
     /// been configured (the JIT-`TUPLE` etc. paths will then fail
@@ -806,6 +821,15 @@ impl Interpreter {
         let _ = self.push(w);
     }
 
+    /// Reset the stack to empty (sp = stack.len()). Used by the
+    /// differential tester to run multiple distinct calls on the
+    /// same interpreter without re-loading the image.
+    pub fn reset_stack(&mut self) {
+        self.sp = self.stack.len();
+        self.frames.clear();
+        self.handler_sp = 0;
+    }
+
     /// Test/debug API: push a synthetic return-to-top sentinel onto
     /// the stack so the interpreter can be used inside a hand-built
     /// call frame.
@@ -879,6 +903,23 @@ impl Interpreter {
         self.pc = pc;
         self.code_start = code_start;
         self.code_end = code_end;
+    }
+
+    /// Set PC + code segment bounds directly from a code-object
+    /// pointer (= the heap address of the bytecode body). Like
+    /// `jit_set_code_segment_to_closure` but skips the closure
+    /// indirection. Used by the differential tester to enter a
+    /// function chosen from `jit_cache_entries`.
+    ///
+    /// # Safety
+    /// `code_obj_ptr` must point at a valid PolyML code object.
+    pub unsafe fn set_code_segment_to_code_obj(&mut self, code_obj_ptr: usize) {
+        let code_obj = code_obj_ptr as *const PolyWord;
+        let (consts_start, _) =
+            unsafe { crate::length_word::const_segment_for_code(code_obj) };
+        self.code_start = code_obj.cast::<u8>();
+        self.code_end = consts_start.cast::<u8>();
+        self.pc = self.code_start;
     }
 
     /// JIT bridge: switch the interpreter's PC + code segment bounds

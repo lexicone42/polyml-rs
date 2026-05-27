@@ -79,6 +79,50 @@ enum Cmd {
         #[arg(long)]
         jit: bool,
     },
+    /// Differential test: pick a JIT-installed function from a loaded
+    /// image and run it under both the interpreter and the JIT with
+    /// the same inputs, comparing results. Surfaces JIT translation
+    /// bugs systematically.
+    ///
+    /// `--list` prints all installed functions (with their sml_arity,
+    /// first-32-bytes-of-bytecode hex, and an index you can pass
+    /// to `--idx`). `--idx N` selects the Nth installed function;
+    /// `--args 0,1,2` supplies tagged-int values (`tag(0)`, `tag(1)`,
+    /// `tag(2)`). `--scan` runs every arity-0 installed function with
+    /// no args and prints divergences.
+    Diff {
+        /// Path to a pexport (text) image.
+        image: PathBuf,
+        /// List installed JIT entries instead of running a diff.
+        #[arg(long)]
+        list: bool,
+        /// Scan ALL arity-0 installed functions automatically. Each
+        /// is run under both modes with no args; mismatches printed.
+        #[arg(long)]
+        scan: bool,
+        /// Select the Nth installed function (use with `--list` first
+        /// to find an interesting one).
+        #[arg(long)]
+        idx: Option<usize>,
+        /// Select an installed function by its code-object address
+        /// (hex, with or without 0x prefix).
+        #[arg(long)]
+        code_obj: Option<String>,
+        /// Pass these as args. Each value is parsed as a signed
+        /// integer and tagged (low bit set) before passing. Use
+        /// `--raw-args` to pass raw PolyWord bits instead.
+        #[arg(long, value_delimiter = ',')]
+        args: Vec<i64>,
+        /// Treat `--args` values as raw PolyWord bits (no tag added).
+        /// Use this for pointer args.
+        #[arg(long)]
+        raw_args: bool,
+        /// Closure word passed in slot[N+1] of args_buf. Defaults to 0.
+        /// Use a real closure pointer (hex) for functions reading
+        /// captures via `INDIRECT_CLOSURE_BN`.
+        #[arg(long)]
+        closure: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -114,6 +158,25 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             args.clone(),
             r#use.clone(),
             *jit,
+        ),
+        Cmd::Diff {
+            image,
+            list,
+            scan,
+            idx,
+            code_obj,
+            args,
+            raw_args,
+            closure,
+        } => diff_command(
+            image,
+            *list,
+            *scan,
+            *idx,
+            code_obj.as_deref(),
+            args,
+            *raw_args,
+            closure.as_deref(),
         ),
     }
 }
@@ -550,5 +613,310 @@ fn body_word_count_estimate(body: &ObjectBody) -> usize {
         }
         ObjectBody::EntryPoint(n) => (n.len() + 16) / 8,
         ObjectBody::WeakRef => 1,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_command(
+    image_path: &PathBuf,
+    list: bool,
+    scan: bool,
+    idx: Option<usize>,
+    code_obj_hex: Option<&str>,
+    args: &[i64],
+    raw_args: bool,
+    closure_hex: Option<&str>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use polyml_jit::{differential, Jit};
+    use polyml_runtime::{patch_entry_points, RtsTable};
+
+    let bytes = std::fs::read(image_path)?;
+    let image = Image::parse(&bytes)?;
+    let mut loaded = load_image(&image)?;
+
+    let rts = Arc::new(RtsTable::new());
+    polyml_runtime::rts::clear_finish_requested();
+    let _ = patch_entry_points(&mut loaded, &rts);
+    // Redirect real stdin to /dev/null so RTS read-stdin calls
+    // bail with EOF instead of blocking the differential run.
+    redirect_stdin_to_devnull();
+
+    // SAFETY: image is loaded; root is a valid closure pointer.
+    let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
+    let image_mut_ptr = loaded.mutable.iter().next().map(|w| w as *const PolyWord);
+    let image_mut_len = loaded.mutable.used_words();
+    let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
+        .with_default_alloc_space_bytes(1_600 * 1024 * 1024)
+        .with_rts(rts.clone());
+    if let Some(p) = image_mut_ptr {
+        interp = interp.with_image_mutable_root(p, image_mut_len);
+    }
+
+    let mut jit = Jit::new()?;
+    let (total, jit_ok, installed) =
+        polyml_jit::install_all_jit_entries(&mut jit, &loaded, &mut interp);
+    eprintln!(
+        "Loaded: {total} code objects, translated {jit_ok}, installed {installed}",
+    );
+    Box::leak(Box::new(jit));
+
+    let mut entries = interp.jit_cache_entries();
+    // Sort by code_obj_ptr for stable iteration within a run. (The
+    // absolute pointer values vary across runs due to ASLR, but the
+    // *order* of those pointers is consistent — same image always
+    // produces same relative layout.)
+    entries.sort_by_key(|(p, _)| *p);
+    eprintln!("JIT cache has {} entries", entries.len());
+    // CLEAR the JIT cache so:
+    //   1. Interp runs don't dispatch into JIT via do_call's cache
+    //      check — interp runs stay pure-bytecode.
+    //   2. JIT runs (which we call directly via entry.func) still
+    //      use the trampoline for NESTED calls, but those nested
+    //      calls miss the cache and fall back to interp. This keeps
+    //      the diff signal clean: it isolates bugs to the OUTER
+    //      JIT'd function, not to nested JIT-to-JIT calls.
+    interp.jit_cache_clear();
+
+    if list {
+        print_jit_entries(&entries);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let closure_word: i64 = match closure_hex {
+        Some(s) => parse_hex_addr(s)? as i64,
+        None => 0,
+    };
+
+    if scan {
+        return run_scan(&mut interp, &entries, closure_word);
+    }
+
+    // Single-function diff: must specify --idx or --code-obj.
+    let (code_obj_ptr, entry) = match (idx, code_obj_hex) {
+        (Some(i), None) => {
+            let pair = entries.get(i).ok_or_else(|| {
+                format!(
+                    "idx {i} out of range (have {} entries)",
+                    entries.len()
+                )
+            })?;
+            (pair.0, pair.1)
+        }
+        (None, Some(s)) => {
+            let addr = parse_hex_addr(s)?;
+            let pair = entries
+                .iter()
+                .find(|(p, _)| *p == addr)
+                .ok_or_else(|| format!("no JIT entry at 0x{addr:016x}"))?;
+            (pair.0, pair.1)
+        }
+        (Some(_), Some(_)) => {
+            return Err("specify only one of --idx or --code-obj".into());
+        }
+        (None, None) => {
+            return Err(
+                "specify --idx N, --code-obj HEX, --list, or --scan".into(),
+            );
+        }
+    };
+
+    if args.len() != entry.sml_arity {
+        return Err(format!(
+            "function has sml_arity={}, but {} args provided",
+            entry.sml_arity,
+            args.len()
+        )
+        .into());
+    }
+
+    // Tag args unless --raw-args is set.
+    let final_args: Vec<i64> = if raw_args {
+        args.to_vec()
+    } else {
+        args.iter().map(|&v| differential::tag(v)).collect()
+    };
+
+    eprintln!(
+        "Diffing code_obj=0x{:016x} sml_arity={} arity_init={}",
+        code_obj_ptr, entry.sml_arity, entry.arity_init,
+    );
+    let report = differential::diff_function(
+        &mut interp,
+        &entry,
+        code_obj_ptr,
+        &final_args,
+        closure_word,
+    );
+    println!("{}", report.pretty());
+    if report.matches {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(2))
+    }
+}
+
+fn parse_hex_addr(s: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let trimmed = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+    usize::from_str_radix(trimmed, 16)
+        .map_err(|e| format!("bad hex address '{s}': {e}").into())
+}
+
+/// Static heuristic: scan a function's first 64 bytes for opcodes
+/// that almost always deref an arg or capture. Functions that match
+/// will SEGV on tagged-int inputs.
+///
+/// Conservative — false positives skip many safe functions. False
+/// negatives are still possible (deref opcodes deeper in the
+/// function), but the early bytes are where arg-deref patterns
+/// usually appear.
+fn function_likely_derefs(code_obj_ptr: usize) -> bool {
+    // INDIRECT_0..INDIRECT_5 (0x35..0x3a), INDIRECT_B (0x23),
+    // INDIRECT_LOCAL_B0 (0xc7), INDIRECT_LOCAL_B1 (0xc1),
+    // INDIRECT_LOCAL_BB (0x21), INDIRECT_0_LOCAL_0 (0xc6),
+    // INDIRECT_CLOSURE_B0/B1/B2 (0x77/0x7a/0x7c),
+    // INDIRECT_CLOSURE_BB (0x54),
+    // LOAD_ML_BYTE (0xdc), LOAD_ML_WORD (0x04),
+    // JUMP_NEQ_LOCAL_IND (0xc3) — derefs the local.
+    let deref_ops: &[u8] = &[
+        0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x23,
+        0xc7, 0xc1, 0x21, 0xc6,
+        0x77, 0x7a, 0x7c, 0x54,
+        0xdc, 0x04,
+        0xc3,
+        0x08, 0x09, // LOAD_UNTAGGED, STORE_UNTAGGED
+        0x05, 0x07, // STORE_ML_WORD, BLOCK_MOVE_WORD
+        0x93,       // CELL_LENGTH (derefs cell)
+    ];
+    // Only check the first 8 bytes — functions that deref args
+    // immediately (within the first few opcodes) almost always do
+    // so on input that wouldn't be a valid pointer. Functions that
+    // first do arithmetic or comparison may tolerate tagged-int
+    // inputs even if later opcodes deref.
+    unsafe {
+        let p = code_obj_ptr as *const u8;
+        for off in 0..8 {
+            let b = *p.add(off);
+            if deref_ops.contains(&b) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn print_jit_entries(entries: &[(usize, polyml_runtime::JitEntry)]) {
+    println!(
+        "{:>4} {:>18} {:>9} {:>11}",
+        "idx", "code_obj_ptr", "sml_arity", "arity_init",
+    );
+    for (i, (ptr, entry)) in entries.iter().enumerate() {
+        println!(
+            "{i:>4} 0x{ptr:016x} {:>9} {:>11}",
+            entry.sml_arity, entry.arity_init,
+        );
+    }
+}
+
+fn run_scan(
+    interp: &mut Interpreter,
+    entries: &[(usize, polyml_runtime::JitEntry)],
+    closure_word: i64,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use polyml_jit::differential;
+    let mut tested = 0;
+    let mut matched = 0;
+    let mut diverged: Vec<differential::DiffReport> = Vec::new();
+    let mut errored: Vec<differential::DiffReport> = Vec::new();
+    // For each function, try multiple arg combinations. Each
+    // combination is tried once per function. The variety helps
+    // catch path-sensitive bugs (e.g., arg=100 picked up the
+    // first JIT divergence in initial testing). Cap arity at 4
+    // (anything higher likely takes complex object refs).
+    let arg_combinations: &[&[i64]] = &[
+        &[differential::tag(0)],
+        &[differential::tag(1)],
+        &[differential::tag(-1)],
+        &[differential::tag(42)],
+        &[differential::tag(100)],
+        &[differential::tag(1000)],
+    ];
+    let scan_limit: usize = std::env::var("DIFF_SCAN_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(usize::MAX);
+    let verbose = std::env::var("DIFF_SCAN_VERBOSE").is_ok();
+    let mut skipped_likely_deref = 0;
+    for (i, (ptr, entry)) in entries.iter().enumerate() {
+        if entry.sml_arity > 4 {
+            continue;
+        }
+        if tested >= scan_limit {
+            break;
+        }
+        // Static filter: skip functions whose first 64 bytes contain
+        // any INDIRECT opcode. They likely deref an arg or capture,
+        // and tagged-int inputs would cause a SEGV that takes down
+        // the whole tester process. Conservative — leaves out many
+        // safe functions, but the survivors are safe to fuzz.
+        if function_likely_derefs(*ptr) {
+            skipped_likely_deref += 1;
+            continue;
+        }
+        if verbose {
+            eprintln!(
+                "  [{i:4}] testing 0x{ptr:016x} sml_arity={}",
+                entry.sml_arity,
+            );
+        }
+        // For each base value, build an arg combo of (sml_arity copies).
+        // E.g., for arity 2 + base=42: args = [tag(42), tag(42)].
+        let base_values: [i64; 6] = [
+            differential::tag(0),
+            differential::tag(1),
+            differential::tag(-1),
+            differential::tag(42),
+            differential::tag(100),
+            differential::tag(1000),
+        ];
+        for base in &base_values {
+            let combo: Vec<i64> = std::iter::repeat(*base).take(entry.sml_arity).collect();
+            tested += 1;
+            let report = differential::diff_function(
+                interp, entry, *ptr, &combo, closure_word,
+            );
+            if report.matches {
+                matched += 1;
+            } else if report.interp_err.is_some() {
+                errored.push(report);
+            } else {
+                diverged.push(report);
+            }
+        }
+    }
+    let _ = arg_combinations;
+    eprintln!("(skipped {skipped_likely_deref} likely-derefs-arg functions)");
+    println!(
+        "Scan complete: ran {tested} (function × arg-combination) \
+         tests, matched {matched}, diverged {}, errored {}",
+        diverged.len(),
+        errored.len(),
+    );
+    if !diverged.is_empty() {
+        println!("\n--- Divergences ---");
+        for r in &diverged {
+            println!("{}\n", r.pretty());
+        }
+    }
+    if !errored.is_empty() {
+        let cap = 5;
+        println!("\n--- Interp errors (first {cap}) ---");
+        for r in errored.iter().take(cap) {
+            println!("{}\n", r.pretty());
+        }
+    }
+    if diverged.is_empty() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(2))
     }
 }

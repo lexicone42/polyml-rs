@@ -20,6 +20,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod translate;
+pub mod differential;
 
 #[cfg(test)]
 mod bench;
