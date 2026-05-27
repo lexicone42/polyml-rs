@@ -764,6 +764,181 @@ fn recon_via_checkpoint_executes_kernel() {
     assert!(out.contains("p_var name = p"), "kernel didn't run. Output:\n{out}");
 }
 
+/// SML prelude that loads enough of HOL4 to expose the kernel
+/// `Thm`, `Term`, `Type`, `Subst`, `KernelSig` modules. Used by
+/// tests that exercise theorem proving via the kernel.
+///
+/// Mirrors the inline prelude in
+/// `recon_via_checkpoint_proves_implication_self` — extracted here
+/// so additional kernel-using tests don't have to duplicate it.
+fn hol4_kernel_prelude(hol: &std::path::Path) -> String {
+    let pm = format!("{}/src/portableML", hol.display());
+    let pk = format!("{}/src/prekernel", hol.display());
+    let k0 = format!("{}/src/0", hol.display());
+    let tp = format!("{}/tools-poly/poly", hol.display());
+    let hfs = format!("{}/tools/Holmake/hfs", hol.display());
+    let hpoly = format!("{}/tools/Holmake/poly", hol.display());
+    let thm = format!("{}/src/thm", hol.display());
+    format!(
+        "fun PMu f = PolyML.use (\"{pm}/\" ^ f);\n\
+         fun PKu f = PolyML.use (\"{pk}/\" ^ f);\n\
+         fun K0u f = PolyML.use (\"{k0}/\" ^ f);\n\
+         fun TPu f = PolyML.use (\"{tp}/\" ^ f);\n\
+         fun H f = PolyML.use (\"{hfs}/\" ^ f);\n\
+         fun HP f = PolyML.use (\"{hpoly}/\" ^ f);\n\
+         fun Tu f = PolyML.use (\"{thm}/\" ^ f);\n\
+         structure Systeml = struct\n\
+           val HOLDIR = \"\"; val release = \"polyml-rs\"; val version = 0;\n\
+         end;\n\
+         structure Path = OS.Path;\n\
+         PMu \"quotation_dtype.sml\"; PMu \"poly/PrettyImpl.sml\";\n\
+         PMu \"poly/Exn.sig\"; PMu \"poly/Exn.sml\";\n\
+         PMu \"Uref.sig\"; PMu \"Uref.sml\";\n\
+         PMu \"UTF8.sig\"; PMu \"UTF8.sml\";\n\
+         PMu \"HOLPP.sig\"; PMu \"HOLPP.sml\";\n\
+         PMu \"OldPP.sig\"; PMu \"OldPP.sml\";\n\
+         PMu \"poly/Arbnumcore.sig\"; PMu \"poly/Arbnumcore.sml\";\n\
+         PMu \"Arbnum.sig\"; PMu \"Arbnum.sml\";\n\
+         H \"HOLFS_dtype.sml\";\n\
+         H \"HFS_NameMunge.sig\"; HP \"HFS_NameMunge.sml\";\n\
+         H \"HOLFileSys.sig\"; H \"HOLFileSys.sml\";\n\
+         PMu \"poly/MD5.sig\"; PMu \"poly/MD5.sml\";\n\
+         PMu \"poly/Susp.sig\"; PMu \"poly/Susp.sml\";\n\
+         PMu \"poly/Thread_Attributes.sml\"; PMu \"poly/Thread_Data.sml\";\n\
+         PMu \"poly/Unsynchronized.sml\"; PMu \"poly/ConcIsaLib.sml\";\n\
+         PMu \"poly/Multithreading.sml\"; PMu \"poly/Synchronized.sml\";\n\
+         PMu \"HOLquotation.sig\"; PMu \"HOLquotation.sml\";\n\
+         PMu \"poly/MLSYSPortable.sml\";\n\
+         PMu \"Portable.sig\"; PMu \"Portable.sml\";\n\
+         PMu \"Redblackmap.sig\"; PMu \"Redblackmap.sml\";\n\
+         PMu \"Redblackset.sig\"; PMu \"Redblackset.sml\";\n\
+         PMu \"HOLset.sig\"; PMu \"HOLset.sml\";\n\
+         PMu \"Table.sml\"; PMu \"Symtab.sml\"; PMu \"Inttab.sml\";\n\
+         PMu \"locn.sig\"; PMu \"locn.sml\";\n\
+         PMu \"poly/CoreReplVARS.sml\";\n\
+         PMu \"poly/concurrent/Sref.sig\"; PMu \"poly/concurrent/Sref.sml\";\n\
+         PKu \"Feedback_dtype.sml\";\n\
+         PKu \"Globals.sig\"; PKu \"Globals.sml\";\n\
+         PKu \"Feedback.sig\"; PKu \"Feedback.sml\";\n\
+         PKu \"Lib.sig\"; PKu \"Lib.sml\";\n\
+         PKu \"Count.sig\"; PKu \"Count.sml\";\n\
+         PKu \"Nonce.sig\"; PKu \"Nonce.sml\";\n\
+         PKu \"Dep.sig\"; PKu \"Dep.sml\";\n\
+         PKu \"Tag.sig\"; PKu \"Tag.sml\";\n\
+         TPu \"Binarymap.sig\"; TPu \"Binarymap.sml\";\n\
+         TPu \"Listsort.sig\"; TPu \"Listsort.sml\";\n\
+         PKu \"KernelSig.sig\"; PKu \"KernelSig.sml\";\n\
+         PKu \"FinalType-sig.sml\"; PKu \"FinalTerm-sig.sml\";\n\
+         PKu \"FinalThm-sig.sml\"; PKu \"FinalNet-sig.sml\";\n\
+         PKu \"FinalTag-sig.sml\";\n\
+         TPu \"Binaryset.sig\"; TPu \"Binaryset.sml\";\n\
+         PMu \"UnicodeChars.sig\"; PMu \"UnicodeChars.sml\";\n\
+         PKu \"Lexis.sig\"; PKu \"Lexis.sml\";\n\
+         K0u \"Subst.sig\"; K0u \"Subst.sml\";\n\
+         K0u \"KernelTypes.sml\";\n\
+         K0u \"Type.sig\"; K0u \"Type.sml\";\n\
+         K0u \"Term.sig\"; K0u \"Term.sml\";\n\
+         Tu \"Compute.sig\"; Tu \"Compute.sml\";\n\
+         Tu \"std-thmsig.ML\"; Tu \"std-thm.ML\";\n",
+    )
+}
+
+/// Build a longer equational chain via a user-defined `EQ_TRANS_LIST`
+/// tactic, then verify the resulting theorem structure.
+///
+/// Concretely:
+/// 1. Define `EQ_TRANS_LIST : thm list -> thm` that folds `Thm.TRANS`
+///    over a list of equality theorems.
+/// 2. Build the assumptions `a=b`, `b=c`, `c=d`, `d=e` over bool vars.
+/// 3. Apply the tactic to get `[a=b, b=c, c=d, d=e] |- a=e`.
+/// 4. Sanity-check: the result's LHS is `a`, RHS is `e`, and it has
+///    exactly 4 hypotheses (one per ASSUMEd link).
+///
+/// This is a "user code on top of the kernel" demo — the SML test
+/// itself extends the kernel with a higher-order tactic and uses
+/// it to prove a theorem of arbitrary chain length. Same pattern
+/// as HOL4's `tactics/` build on top of `kernel/`.
+#[test]
+#[ignore = "slow: needs /tmp/basis_loaded checkpoint (~3-5 min)"]
+fn recon_via_checkpoint_proves_4link_eq_chain() {
+    let Some(_) = checkpoint_path() else {
+        eprintln!("SKIP: /tmp/basis_loaded not present");
+        return;
+    };
+    if hol4_dir().is_none() {
+        eprintln!("SKIP: vendor/hol4 not present");
+        return;
+    }
+    let hol = hol4_dir().unwrap();
+    let prelude = hol4_kernel_prelude(&hol);
+    let test_block = "\
+val bool_ty = Type.mk_type(\"bool\", []);\n\
+val a = Term.mk_var(\"a\", bool_ty);\n\
+val b = Term.mk_var(\"b\", bool_ty);\n\
+val c = Term.mk_var(\"c\", bool_ty);\n\
+val d = Term.mk_var(\"d\", bool_ty);\n\
+val e = Term.mk_var(\"e\", bool_ty);\n\
+val ab = Term.prim_mk_eq bool_ty a b;\n\
+val bc = Term.prim_mk_eq bool_ty b c;\n\
+val cd = Term.prim_mk_eq bool_ty c d;\n\
+val de = Term.prim_mk_eq bool_ty d e;\n\
+(* User-defined tactic: fold Thm.TRANS over a list of equalities.\n\
+   Empty list raises; singleton is identity; chain is left-folded. *)\n\
+fun EQ_TRANS_LIST [] = raise Fail \"EQ_TRANS_LIST: empty\"\n\
+  | EQ_TRANS_LIST [th] = th\n\
+  | EQ_TRANS_LIST (th1 :: th2 :: rest) =\n\
+      EQ_TRANS_LIST (Thm.TRANS th1 th2 :: rest);\n\
+val links = [Thm.ASSUME ab, Thm.ASSUME bc, Thm.ASSUME cd, Thm.ASSUME de];\n\
+val chain = EQ_TRANS_LIST links;\n\
+val (lhs_c, rhs_c, _) = Term.dest_eq_ty (Thm.concl chain);\n\
+val n_hyps = List.length (Thm.hyp chain);\n\
+val () = print (\"CHAIN4_LHS_A: \" ^ Bool.toString (Term.aconv lhs_c a) ^ \"\\n\");\n\
+val () = print (\"CHAIN4_RHS_E: \" ^ Bool.toString (Term.aconv rhs_c e) ^ \"\\n\");\n\
+val () = print (\"CHAIN4_HYPS: \" ^ Int.toString n_hyps ^ \"\\n\");\n\
+(* Now apply SYM to the chain — should give |- e = a with same hyps. *)\n\
+val chain_sym = Thm.SYM chain;\n\
+val (lhs_s, rhs_s, _) = Term.dest_eq_ty (Thm.concl chain_sym);\n\
+val () = print (\"CHAIN4_SYM_LHS_E: \" ^ Bool.toString (Term.aconv lhs_s e) ^ \"\\n\");\n\
+val () = print (\"CHAIN4_SYM_RHS_A: \" ^ Bool.toString (Term.aconv rhs_s a) ^ \"\\n\");\n\
+(* Compose: chain THEN chain_sym should give |- a = a, but TRANS-ing\n\
+   them goes through (a=e) THEN (e=a), yielding (a=a) with 4 hyps. *)\n\
+val round_trip = Thm.TRANS chain chain_sym;\n\
+val (lhs_rt, rhs_rt, _) = Term.dest_eq_ty (Thm.concl round_trip);\n\
+val () = print (\"ROUND_TRIP_A: \" ^ Bool.toString (Term.aconv lhs_rt a)\n\
+              ^ \" \" ^ Bool.toString (Term.aconv rhs_rt a)\n\
+              ^ \" hyps=\" ^ Int.toString (List.length (Thm.hyp round_trip)) ^ \"\\n\");\n\
+print \"CHAIN_PROOF_OK\\n\";\n";
+    let driver = format!("{prelude}{test_block}");
+    let Some((out, _)) = run_through_checkpoint(&driver, 100_000_000_000) else {
+        panic!("subprocess failure");
+    };
+    assert_compile_clean(&out, "CHAIN_PROOF_OK");
+    assert!(
+        out.contains("CHAIN4_LHS_A: true"),
+        "chain LHS should be `a`. Output:\n{out}"
+    );
+    assert!(
+        out.contains("CHAIN4_RHS_E: true"),
+        "chain RHS should be `e`. Output:\n{out}"
+    );
+    assert!(
+        out.contains("CHAIN4_HYPS: 4"),
+        "chain should have 4 hypotheses (one per ASSUMEd link). Output:\n{out}"
+    );
+    assert!(
+        out.contains("CHAIN4_SYM_LHS_E: true"),
+        "SYM(chain) LHS should be `e`. Output:\n{out}"
+    );
+    assert!(
+        out.contains("CHAIN4_SYM_RHS_A: true"),
+        "SYM(chain) RHS should be `a`. Output:\n{out}"
+    );
+    assert!(
+        out.contains("ROUND_TRIP_A: true true hyps=4"),
+        "round trip should give |- a=a from same 4 hyps. Output:\n{out}"
+    );
+}
+
 #[test]
 #[ignore = "slow: loads HOL4 source through full basis (~3-5 min)"]
 fn recon_compiles_simple_buffer() {
