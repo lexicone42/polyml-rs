@@ -142,11 +142,22 @@ pub fn install_all_jit_entries(
             // fully model.
             //
             // Currently blocked:
-            // - CALL_LOCAL_B (0x16): the translation is now correct
-            //   (peeks closure, depth = -N + 1) but re-enabling still
-            //   hangs on bootstrap. Possible secondary bug (sub-call
-            //   inside the CALL_LOCAL_B target wedges). Diagnosed
-            //   via install bisection (idx 17 alone hangs).
+            // - CALL_LOCAL_B (0x16): the translation peeks the closure
+            //   correctly (depth = -N + 1 when callee arity == N) but
+            //   the actual bug is deeper: `CALL_LOCAL_B N` can be
+            //   called with N > callee's true arity. The compiler
+            //   over-pushes args and uses LOCAL_K on the leftover
+            //   slots after the call. Without RUNTIME arity discovery
+            //   (we only know N at translate time, not the closure
+            //   target's actual arity), the JIT can't compute the
+            //   correct post-call stack depth, and subsequent LOCAL_K
+            //   reads land on the wrong slots. The translation
+            //   semantics are right; the model is incomplete. To
+            //   unblock: trampoline must return both result AND
+            //   leftover-count so JIT can adjust its compile-time
+            //   stack. Diagnosed at install_idx=17 in bootstrap64
+            //   (function recursively calls itself via CALL_LOCAL_B 8
+            //   while having sml_arity=3).
             // - TAIL_B_B (0x7b): similar issue (re-enabling breaks the
             //   basis-loaded HOL4 workload).
             // - CALL_CONST_ADDR (0x57/0x58/0x17/0x18): the runtime-load
