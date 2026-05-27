@@ -128,6 +128,8 @@ const INSTR_ALLOC_REF: u8 = 0x06;
 const INSTR_CELL_LENGTH: u8 = 0x93;
 const INSTR_LOAD_ML_BYTE: u8 = 0xdc;
 const INSTR_LOAD_ML_WORD: u8 = 0x04;
+const INSTR_BLOCK_MOVE_WORD: u8 = 0x07;
+const INSTR_PUSH_HANDLER: u8 = 0x78;
 const INSTR_NOT_BOOLEAN: u8 = 0x91;
 const INSTR_IS_TAGGED: u8 = 0x92;
 const INSTR_SET_HANDLER8: u8 = 0x81;
@@ -317,6 +319,26 @@ fn compile_with_consts_impl(
     let alloc_bytes_ref = jit
         .module
         .declare_func_in_func(alloc_bytes_id, &mut ctx.func);
+
+    // block_move_word trampoline: (src, src_off, dest, dest_off, length) -> i64.
+    let mut block_move_sig = jit.module.make_signature();
+    block_move_sig.params.push(AbiParam::new(types::I64));
+    block_move_sig.params.push(AbiParam::new(types::I64));
+    block_move_sig.params.push(AbiParam::new(types::I64));
+    block_move_sig.params.push(AbiParam::new(types::I64));
+    block_move_sig.params.push(AbiParam::new(types::I64));
+    block_move_sig.returns.push(AbiParam::new(types::I64));
+    let block_move_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_block_move_word",
+            Linkage::Import,
+            &block_move_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let block_move_ref = jit
+        .module
+        .declare_func_in_func(block_move_id, &mut ctx.func);
 
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -847,6 +869,52 @@ fn compile_with_consts_impl(
                     let base = *stack.last().unwrap();
                     let val = builder.ins().load(int, cranelift::prelude::MemFlags::trusted(), base, 0);
                     stack.push(val);
+                }
+                INSTR_PUSH_HANDLER => {
+                    // Push the current handler_sp onto the stack. Used
+                    // by exception handler setup: the OLD handler is
+                    // saved here so SET_HANDLER can install a new one
+                    // and RAISE_EX can restore it. Our JIT doesn't
+                    // model handler state, so push 0 as a sentinel.
+                    // Functions that actually USE this value via
+                    // exception flow will misbehave — but since
+                    // RAISE_EX is already a stub, those functions are
+                    // already broken; we're just allowing translation
+                    // for the (much more common) no-exception path.
+                    let zero = builder.ins().iconst(int, 0);
+                    stack.push(zero);
+                }
+                INSTR_BLOCK_MOVE_WORD => {
+                    // Interpreter (bytecode.cpp::blockMoveWord):
+                    //   length = pop().untag()
+                    //   dest_off = pop().untag()
+                    //   dest = pop().as_ptr()
+                    //   src_off = pop().untag()
+                    //   src = peek(0).as_ptr()
+                    //   memcpy(src+src_off, dest+dest_off, length words)
+                    //   pop()  (the src that was peeked)
+                    //   push tagged(0)
+                    //
+                    // Net stack delta: -4. We pop 4 + peek 1 (= top is
+                    // src), call trampoline with all 5 raw values, then
+                    // pop src and push tagged 0.
+                    if stack.len() < 5 {
+                        return Err(TranslateError::Underflow(pc - 1));
+                    }
+                    let length_tag = stack.pop().unwrap();
+                    let dest_off_tag = stack.pop().unwrap();
+                    let dest = stack.pop().unwrap();
+                    let src_off_tag = stack.pop().unwrap();
+                    let src = stack.pop().unwrap(); // POP (was peek in interp)
+                    let length = builder.ins().sshr_imm(length_tag, 1);
+                    let dest_off = builder.ins().sshr_imm(dest_off_tag, 1);
+                    let src_off = builder.ins().sshr_imm(src_off_tag, 1);
+                    let _call = builder.ins().call(
+                        block_move_ref,
+                        &[src, src_off, dest, dest_off, length],
+                    );
+                    let tag0 = builder.ins().iconst(int, tag(0));
+                    stack.push(tag0);
                 }
                 INSTR_INDIRECT_LOCAL_BB => {
                     // depth, slot (each 1 byte)
@@ -1875,6 +1943,7 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_SET_STACK_VAL_B => 2,
         INSTR_INDIRECT_B => 2,
         INSTR_LOAD_UNTAGGED | INSTR_STORE_ML_WORD => 1,
+        INSTR_BLOCK_MOVE_WORD | INSTR_PUSH_HANDLER => 1,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -2144,6 +2213,9 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_INDIRECT_B => (1, 1, None, 1),
                 INSTR_LOAD_UNTAGGED => (1, 2, None, 0),  // pop idx, peek base; net -1+1 = 0
                 INSTR_STORE_ML_WORD => (1, 3, None, 0),  // pop val,idx,base; push 1; net -2
+                // pop length,dest_off,dest,src_off,src; push 1. Net -4.
+                INSTR_BLOCK_MOVE_WORD => (1, 5, None, 0),
+                INSTR_PUSH_HANDLER => (1, 0, None, 0), // push handler sentinel; +1.
                 INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
                 INSTR_NO_OP => (0, 0, None, 0),
                 INSTR_RESET_1 => (0, 1, None, 0),
@@ -2521,6 +2593,16 @@ fn scan_branch_targets(
                 // Pop val + idx + base, push tag(0). Net -2; min depth 3.
                 if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
                 depth -= 2;
+            }
+            INSTR_BLOCK_MOVE_WORD => {
+                // Pop length, dest_off, dest, src_off; peek src; memcpy;
+                // pop src; push tag(0). Net -4; min depth 5.
+                if depth < 5 { return Err(TranslateError::Underflow(pc - 1)); }
+                depth -= 4;
+            }
+            INSTR_PUSH_HANDLER => {
+                // Push current handler_sp (we use 0 sentinel). Net +1.
+                depth += 1;
             }
             INSTR_INDIRECT_0_LOCAL_0 => {
                 if depth == 0 {
