@@ -19,3 +19,6 @@ Thumbs.db
 # Local rust-toolchain override (don't leak local overrides)
 .rust-toolchain.toml.local
 vendor/hol4/
+
+# Claude Code tool state
+.claude/
