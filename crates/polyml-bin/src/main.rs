@@ -97,6 +97,11 @@ enum Cmd {
         /// List installed JIT entries instead of running a diff.
         #[arg(long)]
         list: bool,
+        /// When listing, only show entries whose first-32-bytes hex
+        /// matches this substring (e.g., "16 08" finds functions
+        /// containing CALL_LOCAL_B 8). Stable across runs.
+        #[arg(long)]
+        bc_grep: Option<String>,
         /// Scan ALL arity-0 installed functions automatically. Each
         /// is run under both modes with no args; mismatches printed.
         #[arg(long)]
@@ -169,6 +174,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Cmd::Diff {
             image,
             list,
+            bc_grep,
             scan,
             scan_isolated,
             idx,
@@ -183,6 +189,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 diff_command(
                     image,
                     *list,
+                    bc_grep.as_deref(),
                     *scan,
                     *idx,
                     code_obj.as_deref(),
@@ -634,6 +641,7 @@ fn body_word_count_estimate(body: &ObjectBody) -> usize {
 fn diff_command(
     image_path: &PathBuf,
     list: bool,
+    bc_grep: Option<&str>,
     scan: bool,
     idx: Option<usize>,
     code_obj_hex: Option<&str>,
@@ -692,7 +700,7 @@ fn diff_command(
     interp.jit_cache_clear();
 
     if list {
-        print_jit_entries(&entries);
+        print_jit_entries(&entries, bc_grep);
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -940,16 +948,40 @@ fn function_likely_derefs(code_obj_ptr: usize) -> bool {
     false
 }
 
-fn print_jit_entries(entries: &[(usize, polyml_runtime::JitEntry)]) {
+fn print_jit_entries(
+    entries: &[(usize, polyml_runtime::JitEntry)],
+    bc_grep: Option<&str>,
+) {
     println!(
-        "{:>4} {:>18} {:>9} {:>11}",
-        "idx", "code_obj_ptr", "sml_arity", "arity_init",
+        "{:>4} {:>18} {:>9} {:>11}  {}",
+        "idx", "code_obj_ptr", "sml_arity", "arity_init", "bc[0..32]",
     );
+    let mut matched = 0;
     for (i, (ptr, entry)) in entries.iter().enumerate() {
+        // Read first 32 bytes of bytecode as a stable function
+        // fingerprint. The absolute pointer varies across runs
+        // (ASLR), but the bytecode head is invariant for a given
+        // image. `--bc-grep "16 08"` finds CALL_LOCAL_B 8 functions.
+        let bc_head: String = unsafe {
+            let p = *ptr as *const u8;
+            (0..32)
+                .map(|k| format!("{:02x}", *p.add(k)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if let Some(pat) = bc_grep {
+            if !bc_head.contains(pat) {
+                continue;
+            }
+        }
         println!(
-            "{i:>4} 0x{ptr:016x} {:>9} {:>11}",
+            "{i:>4} 0x{ptr:016x} {:>9} {:>11}  {bc_head}",
             entry.sml_arity, entry.arity_init,
         );
+        matched += 1;
+    }
+    if let Some(pat) = bc_grep {
+        eprintln!("({matched} entries match bytecode-grep pattern \"{pat}\")");
     }
 }
 
