@@ -80,6 +80,28 @@ enum Cmd {
         #[arg(long)]
         jit: bool,
     },
+    /// Disassemble a code object's bytecode into human-readable
+    /// opcode mnemonics. Either specify `--idx N` to pick the Nth
+    /// JIT-installed entry, `--code-obj 0x...` to point at a
+    /// specific address, or `--bc-grep PATTERN` to find by pattern.
+    Disasm {
+        /// Path to a pexport image.
+        image: PathBuf,
+        /// Pick the Nth installed JIT entry (use `poly diff <img>
+        /// --list` to enumerate first).
+        #[arg(long)]
+        idx: Option<usize>,
+        /// Pick a specific code-object by hex address.
+        #[arg(long)]
+        code_obj: Option<String>,
+        /// Find the first entry whose first-32-bytes hex contains
+        /// this substring.
+        #[arg(long)]
+        bc_grep: Option<String>,
+        /// Cap disassembled instructions at this count.
+        #[arg(long, default_value_t = 200)]
+        max: usize,
+    },
     /// Differential test: pick a JIT-installed function from a loaded
     /// image and run it under both the interpreter and the JIT with
     /// the same inputs, comparing results. Surfaces JIT translation
@@ -170,6 +192,9 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             args.clone(),
             r#use.clone(),
             *jit,
+        ),
+        Cmd::Disasm { image, idx, code_obj, bc_grep, max } => disasm_command(
+            image, *idx, code_obj.as_deref(), bc_grep.as_deref(), *max,
         ),
         Cmd::Diff {
             image,
@@ -397,6 +422,8 @@ fn redirect_stdin_to_devnull() {
 
 #[allow(clippy::cast_possible_truncation)]
 fn dump_hottest_bytecode(d: &DiagState) {
+    use polyml_runtime::interpreter::disasm;
+
     let Some((hot_code, total)) = d.hot_code_objects(1).into_iter().next() else {
         return;
     };
@@ -413,21 +440,32 @@ fn dump_hottest_bytecode(d: &DiagState) {
     println!(
         "--- Hottest code object disassembly (steps={total}, offsets {lo}..={hi}) ---"
     );
-    let code_ptr = hot_code as *const u8;
-    for pc in lo..=win_end {
-        // SAFETY: code object is live for the program's lifetime.
-        let b = unsafe { *code_ptr.add(pc) };
+    // Read a slice covering [lo, win_end+8) — extra padding so the
+    // last opcode's immediates don't get truncated. SAFETY: the code
+    // object is live for the program's lifetime.
+    let read_len = win_end + 8 - lo;
+    let bc = unsafe {
+        let p = (hot_code as *const u8).add(lo);
+        std::slice::from_raw_parts(p, read_len)
+    };
+    // Walk opcode boundaries instead of byte boundaries.
+    let mut local_pc = 0;
+    while local_pc < (win_end - lo) {
+        let abs_pc = lo + local_pc;
+        let d_op = disasm::decode(bc, local_pc);
+        let step = d_op.total_len.max(1);
         let visits = d
             .pc_visits
-            .get(&(hot_code, pc as u32))
+            .get(&(hot_code, abs_pc as u32))
             .copied()
             .unwrap_or(0);
-        let marker = if visits > 0 {
-            format!("  [×{visits}]")
-        } else {
-            String::new()
-        };
-        println!("  +{pc:4}: 0x{b:02x}{marker}");
+        let marker = if visits > 0 { format!("  [×{visits}]") } else { String::new() };
+        let imm = d_op.imm_text.as_deref().unwrap_or("");
+        println!(
+            "  +{abs_pc:4}: 0x{:02x} {:<22} {imm}{marker}",
+            d_op.op, d_op.mnemonic,
+        );
+        local_pc += step;
     }
 }
 
@@ -781,6 +819,101 @@ fn parse_hex_addr(s: &str) -> Result<usize, Box<dyn std::error::Error>> {
     let trimmed = s.trim().trim_start_matches("0x").trim_start_matches("0X");
     usize::from_str_radix(trimmed, 16)
         .map_err(|e| format!("bad hex address '{s}': {e}").into())
+}
+
+/// Disassemble a code object's bytecode into pretty-printed
+/// `pc: opcode mnemonic immediate` rows. Selects target via --idx,
+/// --code-obj, or --bc-grep.
+fn disasm_command(
+    image_path: &PathBuf,
+    idx: Option<usize>,
+    code_obj_hex: Option<&str>,
+    bc_grep: Option<&str>,
+    max: usize,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use polyml_runtime::interpreter::disasm;
+
+    let bytes = std::fs::read(image_path)?;
+    let image = Image::parse(&bytes)?;
+    let mut loaded = load_image(&image)?;
+    let rts = Arc::new(RtsTable::new());
+    polyml_runtime::rts::clear_finish_requested();
+    let _ = patch_entry_points(&mut loaded, &rts);
+    let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
+    let mut interp = unsafe { Interpreter::from_code_object(64 * 1024, code_obj_ptr) }
+        .with_default_alloc_space_bytes(256 * 1024 * 1024)
+        .with_rts(rts.clone());
+    let mut jit = polyml_jit::Jit::new()?;
+    let _ = polyml_jit::install_all_jit_entries(&mut jit, &loaded, &mut interp);
+    let mut entries = interp.jit_cache_entries();
+    entries.sort_by_key(|(p, _)| *p);
+
+    let (ptr, entry) = match (idx, code_obj_hex, bc_grep) {
+        (Some(i), None, None) => {
+            let pair = entries.get(i).ok_or_else(|| {
+                format!("idx {i} out of range (have {} entries)", entries.len())
+            })?;
+            (pair.0, pair.1)
+        }
+        (None, Some(s), None) => {
+            let addr = parse_hex_addr(s)?;
+            entries.iter().find(|(p, _)| *p == addr)
+                .copied()
+                .ok_or_else(|| format!("no JIT entry at 0x{addr:016x}"))?
+        }
+        (None, None, Some(pat)) => {
+            let found = entries.iter().find(|(p, _)| {
+                let bc_head: String = unsafe {
+                    let bp = *p as *const u8;
+                    (0..32).map(|k| format!("{:02x}", *bp.add(k)))
+                        .collect::<Vec<_>>().join(" ")
+                };
+                bc_head.contains(pat)
+            });
+            *found.ok_or_else(|| format!("no entry matching bc-grep '{pat}'"))?
+        }
+        _ => return Err(
+            "specify exactly one of --idx, --code-obj, or --bc-grep".into()
+        ),
+    };
+
+    // Determine bytecode length from the code object's const-pool boundary.
+    // SAFETY: ptr is a JIT-installed code-obj pointer, so length-word is at
+    // ptr-8 per PolyML's heap layout.
+    let bytecode: &[u8] = unsafe {
+        let cp = polyml_runtime::length_word::const_segment_for_code(
+            ptr as *const PolyWord
+        ).0;
+        let body_start = ptr;
+        let cp_start = cp as usize;
+        let bytecode_len = cp_start
+            .saturating_sub(body_start)
+            .saturating_sub(std::mem::size_of::<usize>());
+        std::slice::from_raw_parts(body_start as *const u8, bytecode_len)
+    };
+
+    println!(
+        "Disassembly: code_obj=0x{ptr:016x}, sml_arity={}, arity_init={}, bytecode_len={}",
+        entry.sml_arity, entry.arity_init, bytecode.len(),
+    );
+    println!("{:>5}  {:>4} {:<22} {}", "pc", "op", "mnemonic", "operands");
+    let decoded = disasm::disassemble(bytecode);
+    for (pc, d) in decoded.iter().take(max) {
+        let imm = d.imm_text.as_deref().unwrap_or("");
+        println!(
+            "{pc:>5}: {:>4} {:<22} {imm}",
+            format!("{:02x}", d.op),
+            d.mnemonic,
+        );
+    }
+    if decoded.len() > max {
+        println!(
+            "... ({} more instructions; use --max {} to see all)",
+            decoded.len() - max,
+            decoded.len(),
+        );
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Spawn `poly diff <image> --idx N --args V` per test, capturing

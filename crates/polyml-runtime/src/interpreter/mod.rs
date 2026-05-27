@@ -83,6 +83,7 @@
 #![allow(clippy::wildcard_imports)]
 
 pub mod diag;
+pub mod disasm;
 pub mod opcodes;
 
 use diag::DiagState;
