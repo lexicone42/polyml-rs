@@ -508,6 +508,31 @@ pub unsafe extern "C" fn block_move_word_trampoline(
     1 // TAGGED(0)
 }
 
+/// Byte-block move trampoline. Same shape as block_move_word_trampoline
+/// but operates on bytes. `length` is in bytes; pointer arithmetic
+/// advances by 1 per index. Used by JIT'd `BLOCK_MOVE_BYTE`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn block_move_byte_trampoline(
+    src_word: i64,
+    src_off: i64,
+    dest_word: i64,
+    dest_off: i64,
+    length: i64,
+) -> i64 {
+    use polyml_runtime::PolyWord;
+    let src = PolyWord::from_bits(src_word as usize).as_ptr::<u8>();
+    let dest_pw = PolyWord::from_bits(dest_word as usize).as_ptr::<u8>();
+    let dest = dest_pw.cast_mut();
+    #[allow(clippy::cast_sign_loss)]
+    let src_o = src_off.max(0) as usize;
+    #[allow(clippy::cast_sign_loss)]
+    let dest_o = dest_off.max(0) as usize;
+    #[allow(clippy::cast_sign_loss)]
+    let len = length.max(0) as usize;
+    unsafe { std::ptr::copy(src.add(src_o), dest.add(dest_o), len) };
+    1 // TAGGED(0)
+}
+
 /// Byte-mem allocation trampoline. `(n_words, flags) -> i64`.
 /// Used by JIT'd `ALLOC_BYTE_MEM`. Body is uninitialized.
 #[unsafe(no_mangle)]
@@ -626,6 +651,10 @@ impl Jit {
         builder.symbol(
             "polyml_jit_block_move_word",
             block_move_word_trampoline as *const u8,
+        );
+        builder.symbol(
+            "polyml_jit_block_move_byte",
+            block_move_byte_trampoline as *const u8,
         );
         Ok(Self {
             module: JITModule::new(builder),

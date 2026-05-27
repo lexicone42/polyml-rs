@@ -128,7 +128,9 @@ const INSTR_ALLOC_REF: u8 = 0x06;
 const INSTR_CELL_LENGTH: u8 = 0x93;
 const INSTR_LOAD_ML_BYTE: u8 = 0xdc;
 const INSTR_LOAD_ML_WORD: u8 = 0x04;
+const INSTR_STORE_ML_BYTE: u8 = 0xe4;
 const INSTR_BLOCK_MOVE_WORD: u8 = 0x07;
+const INSTR_BLOCK_MOVE_BYTE: u8 = 0xec;
 const INSTR_PUSH_HANDLER: u8 = 0x78;
 const INSTR_NOT_BOOLEAN: u8 = 0x91;
 const INSTR_IS_TAGGED: u8 = 0x92;
@@ -340,6 +342,19 @@ fn compile_with_consts_impl(
     let block_move_ref = jit
         .module
         .declare_func_in_func(block_move_id, &mut ctx.func);
+
+    // block_move_byte: same signature as block_move_word.
+    let block_move_byte_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_block_move_byte",
+            Linkage::Import,
+            &block_move_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let block_move_byte_ref = jit
+        .module
+        .declare_func_in_func(block_move_byte_id, &mut ctx.func);
 
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -862,6 +877,31 @@ fn compile_with_consts_impl(
                     let tag0 = builder.ins().iconst(int, tag(0));
                     stack.push(tag0);
                 }
+                INSTR_STORE_ML_BYTE => {
+                    // Same shape as STORE_ML_WORD, but index is in
+                    // bytes (no *8 scaling) and store is 1 byte.
+                    // Mirrors interpreter:
+                    //   to_store = pop().untag() as u8
+                    //   index = pop().untag()
+                    //   base = peek(0).as_ptr::<u8>()
+                    //   *(base + index) = to_store
+                    //   pop()  // the peeked base
+                    //   push tag(0)
+                    let to_store_tag = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let index_tag = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let base = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let index = builder.ins().sshr_imm(index_tag, 1);
+                    let addr = builder.ins().iadd(base, index);
+                    let val_u8 = builder.ins().sshr_imm(to_store_tag, 1);
+                    builder.ins().istore8(
+                        cranelift::prelude::MemFlags::trusted(),
+                        val_u8,
+                        addr,
+                        0,
+                    );
+                    let tag0 = builder.ins().iconst(int, tag(0));
+                    stack.push(tag0);
+                }
                 INSTR_INDIRECT_0_LOCAL_0 => {
                     // peek top (= LOCAL_0); load offset 0
                     if stack.is_empty() {
@@ -885,20 +925,21 @@ fn compile_with_consts_impl(
                     let zero = builder.ins().iconst(int, 0);
                     stack.push(zero);
                 }
-                INSTR_BLOCK_MOVE_WORD => {
-                    // Interpreter (bytecode.cpp::blockMoveWord):
+                INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE => {
+                    // Interpreter (bytecode.cpp::blockMoveWord/Byte):
                     //   length = pop().untag()
                     //   dest_off = pop().untag()
                     //   dest = pop().as_ptr()
                     //   src_off = pop().untag()
                     //   src = peek(0).as_ptr()
-                    //   memcpy(src+src_off, dest+dest_off, length words)
+                    //   memcpy(src+src_off, dest+dest_off, length units)
                     //   pop()  (the src that was peeked)
                     //   push tagged(0)
                     //
-                    // Net stack delta: -4. We pop 4 + peek 1 (= top is
-                    // src), call trampoline with all 5 raw values, then
-                    // pop src and push tagged 0.
+                    // Net stack delta: -4. Difference between word and
+                    // byte: trampoline ptr type (PolyWord vs u8) so
+                    // `add` advances by 8 or 1 per index. The JIT just
+                    // picks the right trampoline.
                     if stack.len() < 5 {
                         return Err(TranslateError::Underflow(pc - 1));
                     }
@@ -910,8 +951,13 @@ fn compile_with_consts_impl(
                     let length = builder.ins().sshr_imm(length_tag, 1);
                     let dest_off = builder.ins().sshr_imm(dest_off_tag, 1);
                     let src_off = builder.ins().sshr_imm(src_off_tag, 1);
+                    let func_ref = if op == INSTR_BLOCK_MOVE_WORD {
+                        block_move_ref
+                    } else {
+                        block_move_byte_ref
+                    };
                     let _call = builder.ins().call(
-                        block_move_ref,
+                        func_ref,
                         &[src, src_off, dest, dest_off, length],
                     );
                     let tag0 = builder.ins().iconst(int, tag(0));
@@ -1943,8 +1989,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_RESET_B | INSTR_RESET_R_B => 2,
         INSTR_SET_STACK_VAL_B => 2,
         INSTR_INDIRECT_B => 2,
-        INSTR_LOAD_UNTAGGED | INSTR_STORE_ML_WORD => 1,
-        INSTR_BLOCK_MOVE_WORD | INSTR_PUSH_HANDLER => 1,
+        INSTR_LOAD_UNTAGGED | INSTR_STORE_ML_WORD | INSTR_STORE_ML_BYTE => 1,
+        INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE | INSTR_PUSH_HANDLER => 1,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -2214,8 +2260,9 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_INDIRECT_B => (1, 1, None, 1),
                 INSTR_LOAD_UNTAGGED => (1, 2, None, 0),  // pop idx, peek base; net -1+1 = 0
                 INSTR_STORE_ML_WORD => (1, 3, None, 0),  // pop val,idx,base; push 1; net -2
+                INSTR_STORE_ML_BYTE => (1, 3, None, 0),  // same shape; byte store
                 // pop length,dest_off,dest,src_off,src; push 1. Net -4.
-                INSTR_BLOCK_MOVE_WORD => (1, 5, None, 0),
+                INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE => (1, 5, None, 0),
                 INSTR_PUSH_HANDLER => (1, 0, None, 0), // push handler sentinel; +1.
                 INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
                 INSTR_NO_OP => (0, 0, None, 0),
@@ -2595,7 +2642,12 @@ fn scan_branch_targets(
                 if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
                 depth -= 2;
             }
-            INSTR_BLOCK_MOVE_WORD => {
+            INSTR_STORE_ML_BYTE => {
+                // Same shape as STORE_ML_WORD: pop val+idx+base, push tag(0).
+                if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
+                depth -= 2;
+            }
+            INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE => {
                 // Pop length, dest_off, dest, src_off; peek src; memcpy;
                 // pop src; push tag(0). Net -4; min depth 5.
                 if depth < 5 { return Err(TranslateError::Underflow(pc - 1)); }
