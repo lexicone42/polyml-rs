@@ -122,6 +122,7 @@ const INSTR_RESET_R_3: u8 = 0x66;
 const INSTR_RESET_R_B: u8 = 0x27;
 const INSTR_CALL_LOCAL_B: u8 = 0x16;
 const INSTR_CALL_CLOSURE: u8 = 0x0c;
+const INSTR_LDEXC: u8 = 0x6d;
 const INSTR_TAIL_B_B: u8 = 0x7b;
 const INSTR_CLOSURE_B: u8 = 0xd0;
 const INSTR_ALLOC_BYTE_MEM: u8 = 0xbd;
@@ -1228,6 +1229,17 @@ fn compile_with_consts_impl(
                     let call = builder.ins().call(get_tid_ref, &[]);
                     let result = builder.inst_results(call)[0];
                     stack.push(result);
+                }
+                INSTR_LDEXC => {
+                    // Push the current exception packet. Our JIT
+                    // doesn't model exception_packet state, and our
+                    // RAISE_EX is itself a stub that just returns
+                    // TAGGED(0). For consistency, push TAGGED(0) here
+                    // too — code that reads LDEXC outside an exception
+                    // handler context gets the correct value (no
+                    // exception).
+                    let zero = builder.ins().iconst(int, tag(0));
+                    stack.push(zero);
                 }
                 INSTR_ALLOC_MUT_CLOSURE_B => {
                     // [N]: allocate mut closure of N+1 words, slot 0 =
@@ -2417,9 +2429,9 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         // Container opcodes: op + 1 imm byte = 2 total.
         INSTR_STACK_CONTAINER_B | INSTR_MOVE_TO_CONTAINER_B
             | INSTR_INDIRECT_CONTAINER_B => 2,
-        // LOCK, CLEAR_MUTABLE, CELL_FLAGS, GET_THREAD_ID: no imm.
+        // LOCK, CLEAR_MUTABLE, CELL_FLAGS, GET_THREAD_ID, LDEXC: no imm.
         INSTR_LOCK | INSTR_CLEAR_MUTABLE | INSTR_CELL_FLAGS
-            | INSTR_GET_THREAD_ID => 1,
+            | INSTR_GET_THREAD_ID | INSTR_LDEXC => 1,
         // ALLOC_MUT_CLOSURE_B, MOVE_TO_MUT_CLOSURE_B: op + 1 imm.
         INSTR_ALLOC_MUT_CLOSURE_B | INSTR_MOVE_TO_MUT_CLOSURE_B => 2,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
@@ -2721,6 +2733,10 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 }
                 INSTR_GET_THREAD_ID => {
                     // Push pointer. Net +1.
+                    (1, 0, None, 0)
+                }
+                INSTR_LDEXC => {
+                    // Push exception packet (stub tagged 0). Net +1.
                     (1, 0, None, 0)
                 }
                 INSTR_ALLOC_MUT_CLOSURE_B => {
@@ -3168,6 +3184,10 @@ fn scan_branch_targets(
             }
             INSTR_GET_THREAD_ID => {
                 // Push allocated pointer. Net +1.
+                depth += 1;
+            }
+            INSTR_LDEXC => {
+                // Push current exception packet (tagged 0 stub). Net +1.
                 depth += 1;
             }
             INSTR_ALLOC_MUT_CLOSURE_B => {
