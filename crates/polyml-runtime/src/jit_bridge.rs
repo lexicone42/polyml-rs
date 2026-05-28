@@ -308,8 +308,15 @@ pub fn jit_dispatch_closure_call(
         while args_buf.len() < entry.arity_init {
             args_buf.push(0);
         }
-        // SAFETY: entry.func registered with matching ABI.
-        let result = unsafe { (entry.func)(args_buf.as_ptr()) };
+        // SAFETY: entry.func registered with matching ABI. sp_in
+        // and stack_base are reserved for Phase-2 of the stack-
+        // pointer refactor; current code ignores them.
+        #[allow(clippy::cast_possible_wrap)]
+        let sp_in_i64 = interp.jit_current_sp() as i64;
+        let stack_base = interp.jit_stack_base_mut() as i64;
+        let result = unsafe {
+            (entry.func)(args_buf.as_ptr(), sp_in_i64, stack_base)
+        };
         return Ok(PolyWord::from_bits(result as usize));
     }
 

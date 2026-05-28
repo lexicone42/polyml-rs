@@ -178,17 +178,33 @@ pub enum TranslateError {
     Jit(#[from] JitError),
 }
 
-/// Compile a `bytecode` sequence into a native function that takes
-/// no arguments and returns an `i64` (the raw PolyWord). Uses the
-/// shared `jit` environment so the compiled bytes outlive the
-/// returned pointer for as long as the `Jit` does.
 /// Signature of every JIT'd function:
-///   `extern "C" fn(args: *const i64) -> i64`
-/// The caller passes a pointer to an array of `arg_count` PolyWords
-/// (one per SML arg) — for 0-arg functions the pointer is unused
-/// (still must be a valid pointer; pass null is undefined). The
-/// return value is the result PolyWord.
-pub type JitFn = unsafe extern "C" fn(args: *const i64) -> i64;
+///   `extern "C" fn(args: *const i64, sp_in: i64, stack_base: i64) -> i64`
+///
+/// - `args` — pointer to a `[i64; arity_init]` buffer holding the
+///   SML args + retPC sentinel + closure (current ABI; used by
+///   the register-backed translator to load function args at entry).
+/// - `sp_in` — initial value of `interp.sp` at function entry, i.e.,
+///   the SML stack pointer (an INDEX into `interp.stack`, NOT a byte
+///   offset). Reserved for a future memory-backed translator that
+///   spills to the interp stack on dynamic-arity calls. Currently
+///   ignored by all JIT'd functions.
+/// - `stack_base` — `interp.stack.as_mut_ptr() as i64`. Used together
+///   with `sp_in` for memory-backed translation; currently ignored.
+///
+/// Returns the result PolyWord (raw i64 bits). The interp stack
+/// pointer `interp.sp` is NOT modified by the current translator —
+/// callers (`do_call`) update it after consuming the return value.
+///
+/// Phase-1 of the real-stack-pointer refactor (2026-05-28): the two
+/// new params are plumbed through every call site but unused. Phase
+/// 2 will use them to enable CALL_CLOSURE and other dynamic-shape
+/// opcodes.
+pub type JitFn = unsafe extern "C" fn(
+    args: *const i64,
+    sp_in: i64,
+    stack_base: i64,
+) -> i64;
 
 /// Compile bytecode where the bytecode portion is the entire slice
 /// (no constant pool accessible). CONST_ADDR* opcodes will fail
@@ -233,7 +249,13 @@ fn compile_with_consts_impl(
     let mut ctx = jit.module.make_context();
     let mut func_builder_ctx = FunctionBuilderContext::new();
     let int = types::I64;
-    // Signature: takes one pointer (treated as i64), returns one i64.
+    // Signature (see `JitFn` doc): three i64 params, one i64 return.
+    //   p0 = args ptr
+    //   p1 = sp_in (interp stack pointer at entry; reserved for
+    //        Phase-2 memory-backed translation)
+    //   p2 = stack_base (interp.stack.as_mut_ptr() as i64; reserved)
+    ctx.func.signature.params.push(AbiParam::new(int));
+    ctx.func.signature.params.push(AbiParam::new(int));
     ctx.func.signature.params.push(AbiParam::new(int));
     ctx.func.signature.returns.push(AbiParam::new(int));
 
@@ -447,6 +469,11 @@ fn compile_with_consts_impl(
 
         builder.switch_to_block(entry);
         let args_ptr = builder.block_params(entry)[0];
+        // p1 (sp_in) and p2 (stack_base) are unused by Phase-1 code
+        // generation; suppress unused-block-arg warnings by binding
+        // them with `_`. Phase-2 translation will read these.
+        let _sp_in = builder.block_params(entry)[1];
+        let _stack_base = builder.block_params(entry)[2];
 
         // Compile-time stack of in-IR values; the position in this
         // Vec corresponds to the SML stack position. `push` is just
@@ -3489,12 +3516,12 @@ mod tests {
     /// so pass a small zero buffer instead of null.
     fn call0(f: JitFn) -> i64 {
         let args = [0i64; 8];
-        unsafe { f(args.as_ptr()) }
+        unsafe { f(args.as_ptr(), 0, 0) }
     }
 
     /// Call a JitFn with the given SML args.
     fn call_with(f: JitFn, args: &[i64]) -> i64 {
-        unsafe { f(args.as_ptr()) }
+        unsafe { f(args.as_ptr(), 0, 0) }
     }
 
     #[test]

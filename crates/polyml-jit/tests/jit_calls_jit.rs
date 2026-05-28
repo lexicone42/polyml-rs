@@ -35,7 +35,7 @@ fn untag(t: i64) -> i64 {
 /// + closure placeholders).
 fn call_jit_arity1(jit_fn: translate::JitFn, arg0: i64) -> i64 {
     let args = [arg0, 0i64, 0i64];
-    unsafe { jit_fn(args.as_ptr()) }
+    unsafe { jit_fn(args.as_ptr(), 0, 0) }
 }
 
 #[test]

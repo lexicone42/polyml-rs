@@ -92,7 +92,7 @@ fn jit_closure_b_builds_real_closure() {
         0,
     ];
     let result = polyml_runtime::with_jit_interp(&mut interp, || unsafe {
-        jit_fn(args.as_ptr())
+        jit_fn(args.as_ptr(), 0, 0)
     });
 
     let result_word = PolyWord::from_bits(result as usize);

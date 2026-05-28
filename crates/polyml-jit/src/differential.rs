@@ -210,8 +210,11 @@ fn run_under_jit(entry: &JitEntry, args: &[i64], closure_word: i64) -> i64 {
         args_buf[entry.arity_init - 1] = closure_word;
     }
     // SAFETY: caller-supplied JitEntry registered with matching ABI;
-    // args_buf has exactly arity_init slots.
-    unsafe { (entry.func)(args_buf.as_ptr()) }
+    // args_buf has exactly arity_init slots. The diff tester runs
+    // JIT'd code in isolation (no interp stack involved), so we pass
+    // sp_in=0 and stack_base=null. Phase-1 generated code ignores
+    // both; Phase-2 won't run here because JIT_INTERP isn't set.
+    unsafe { (entry.func)(args_buf.as_ptr(), 0, 0) }
 }
 
 fn run_under_interp(

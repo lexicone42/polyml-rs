@@ -53,7 +53,7 @@ fn jit_allocates_tuple_via_real_trampoline() {
     // alloc_tuple_trampoline can reach the live interpreter.
     let args = [tag(42), 0i64, 0i64];
     let result = polyml_runtime::with_jit_interp(&mut interp, || unsafe {
-        jit_fn(args.as_ptr())
+        jit_fn(args.as_ptr(), 0, 0)
     });
 
     // The result should be a heap pointer (not tagged).

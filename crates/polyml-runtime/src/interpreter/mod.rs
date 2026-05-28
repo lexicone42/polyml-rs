@@ -224,9 +224,15 @@ pub struct Interpreter {
 /// using the interpreter's calling convention.
 #[derive(Clone, Copy)]
 pub struct JitEntry {
-    /// Native entry point. `extern "C" fn(args_ptr) -> raw_polyword`.
-    /// Matches `polyml_jit::translate::JitFn`.
-    pub func: unsafe extern "C" fn(*const i64) -> i64,
+    /// Native entry point. ABI (matches `polyml_jit::translate::JitFn`):
+    ///   `extern "C" fn(args_ptr, sp_in, stack_base) -> raw_polyword`
+    /// where `args_ptr` is a `[i64; arity_init]` buffer, `sp_in` is
+    /// the initial `interp.sp` value, and `stack_base` is
+    /// `interp.stack.as_mut_ptr() as i64`. The two trailing params
+    /// are reserved for the memory-backed translator (Phase 2 of the
+    /// stack-pointer refactor); currently ignored by all generated
+    /// code. Callers must still pass valid values.
+    pub func: unsafe extern "C" fn(*const i64, i64, i64) -> i64,
     /// Inferred arg count (= the `args_ptr` length the JIT expects).
     /// Typically `sml_arity + 2` to cover the closure + retPC slots
     /// that `LOCAL_0`/`LOCAL_1` access.
@@ -347,6 +353,23 @@ impl Interpreter {
     /// and let JIT bugs hang the interp run).
     pub fn jit_cache_clear(&mut self) {
         self.jit_cache.clear();
+    }
+
+    /// JIT bridge: current value of the SML stack pointer (sp).
+    /// Passed to JIT entries as `sp_in` per the new ABI. The JIT
+    /// trampoline path also uses this to dispatch into already-
+    /// installed JIT'd code (see `jit_bridge::jit_dispatch_closure_call`).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn jit_current_sp(&self) -> usize { self.sp }
+
+    /// JIT bridge: base address of the SML stack as a mutable raw
+    /// pointer. Combined with `jit_current_sp()` it lets JIT'd code
+    /// read/write `interp.stack[sp..]` directly. Reserved for Phase-2
+    /// of the stack-pointer refactor.
+    #[doc(hidden)]
+    pub fn jit_stack_base_mut(&mut self) -> *mut PolyWord {
+        self.stack.as_mut_ptr()
     }
 
     /// Mutable accessor to this interpreter's `alloc_space` for the
@@ -3615,8 +3638,20 @@ impl Interpreter {
                 p
             });
             // SAFETY: caller registered `entry.func` with a matching
-            // ABI; args_buf has at least arity_init entries.
-            let result_bits = unsafe { (entry.func)(args_buf.as_ptr()) };
+            // ABI; args_buf has at least arity_init entries. The two
+            // trailing params (sp_in, stack_base) are reserved for
+            // the Phase-2 memory-backed translator; currently ignored
+            // by all generated code but must be passed validly.
+            #[allow(clippy::cast_possible_wrap)]
+            let sp_in_i64 = self.sp as i64;
+            let stack_base = self.stack.as_mut_ptr() as i64;
+            let result_bits = unsafe {
+                (entry.func)(
+                    args_buf.as_ptr(),
+                    sp_in_i64,
+                    stack_base,
+                )
+            };
             crate::jit_bridge::JIT_INTERP.with(|c| c.set(prev));
             if std::env::var("JIT_TRACE_CALLS").is_ok() {
                 eprintln!("  → returned 0x{:016x}", result_bits as u64);

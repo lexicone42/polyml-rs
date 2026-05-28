@@ -48,7 +48,7 @@ fn run_interp(bytecode: &[u8], arg0: i64) -> (i64, u128) {
 fn run_jit(jit_fn: translate::JitFn, arg0: i64) -> (i64, u128) {
     let start = Instant::now();
     let args = [arg0, 0i64, 0i64];
-    let result = unsafe { jit_fn(args.as_ptr()) };
+    let result = unsafe { jit_fn(args.as_ptr(), 0, 0) };
     (result, start.elapsed().as_nanos())
 }
 

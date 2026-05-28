@@ -58,7 +58,7 @@ fn differential_matches_for_simple_add() {
 
     // Run JIT directly.
     let args_buf = [arg, 0, 0];
-    let jit_result = unsafe { (entry.func)(args_buf.as_ptr()) };
+    let jit_result = unsafe { (entry.func)(args_buf.as_ptr(), 0, 0) };
 
     assert_eq!(interp_result, jit_result, "JIT/interp diverged");
     assert_eq!(

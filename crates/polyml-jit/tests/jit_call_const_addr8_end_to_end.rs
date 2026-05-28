@@ -126,7 +126,7 @@ fn jit_emitted_call_const_addr8_chains_through_trampoline() {
     //    RETURN_N+2 = 1+2 = 3). Provide 3 dummy slots.
     let dummy_args = [0i64; 3];
     let result = polyml_runtime::with_jit_interp(&mut interp, || unsafe {
-        caller_jit(dummy_args.as_ptr())
+        caller_jit(dummy_args.as_ptr(), 0, 0)
     });
 
     // Expected chain: caller pushes 7 → calls callee → callee's
@@ -154,6 +154,6 @@ fn callee_jit_directly_returns_arg_plus_100() {
     let mut jit = Jit::new().unwrap();
     let callee_jit = translate::compile(&mut jit, &callee_bc).unwrap();
     let args = [tag(7), 0, 0];
-    let result = unsafe { callee_jit(args.as_ptr()) };
+    let result = unsafe { callee_jit(args.as_ptr(), 0, 0) };
     assert_eq!(untag(result), 107);
 }

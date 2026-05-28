@@ -42,7 +42,7 @@ fn run_jit_arity1(bytecode: &[u8], arg0: i64) -> i64 {
     let mut jit = Jit::new().unwrap();
     let f = translate::compile(&mut jit, bytecode).expect("translate");
     let args = [arg0, 0i64, 0i64];
-    unsafe { f(args.as_ptr()) }
+    unsafe { f(args.as_ptr(), 0, 0) }
 }
 
 /// Run the same bytecode via the interpreter. Stack is seeded with
@@ -130,7 +130,7 @@ fn jit_zero_arg_function_returns_constant() {
     let mut jit = Jit::new().unwrap();
     let f = translate::compile(&mut jit, &bc).expect("translate");
     let args = [0i64; 8];
-    let result = unsafe { f(args.as_ptr()) };
+    let result = unsafe { f(args.as_ptr(), 0, 0) };
     assert_eq!(untag(result), 1);
 }
 
@@ -145,6 +145,6 @@ fn jit_local_2_is_first_arg_in_arity_1_frame() {
     let f = translate::compile(&mut jit, &bc).expect("translate");
     // SML frame: [arg_0, retPC, closure].
     let args = [tag(77), 0, 0];
-    let result = unsafe { f(args.as_ptr()) };
+    let result = unsafe { f(args.as_ptr(), 0, 0) };
     assert_eq!(untag(result), 77, "LOCAL_2 should read args[0]");
 }

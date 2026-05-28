@@ -50,7 +50,7 @@ fn invoke_jit_via_interp_layout(jit_fn: translate::JitFn, sml_args: &[i64]) -> i
     }
     args_ptr.push(0); // retPC placeholder
     args_ptr.push(0); // closure placeholder
-    unsafe { jit_fn(args_ptr.as_ptr()) }
+    unsafe { jit_fn(args_ptr.as_ptr(), 0, 0) }
 }
 
 #[test]
