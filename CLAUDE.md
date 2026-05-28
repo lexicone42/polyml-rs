@@ -240,8 +240,13 @@ end-to-end:
 - All 6 HOL4 tests pass with JIT enabled (kernel construction,
   primitive inference rules, derived theorems)
 
-611 of 2,723 translated entries installed (the rest are filtered
-because of known translation bugs in specific opcodes).
+**Current coverage** (2026-05-28): 3,265 / 4,436 code objects
+translate (73.6%), 592 install (the install filter rejects functions
+whose bytecode contains opcodes whose translations we don't yet
+trust). The big jump from 60% → 73% happened on 2026-05-28 by
+implementing STACK_CONTAINER_B (+122), LOCK/CLEAR_MUTABLE (+170),
+BLOCK_EQUAL_BYTE (+65), GET_THREAD_ID (+16), and a handful of
+smaller opcodes.
 
 The opcodes we currently SKIP at install time (`install_all_jit_entries`
 in `polyml-jit/src/lib.rs`):
@@ -250,6 +255,14 @@ in `polyml-jit/src/lib.rs`):
 - CALL_CONST_ADDR variants (0x57/0x58/0x17/0x18) — translation
   loads closure pointer at runtime, but the call still SEGVs
   downstream in unisolated cases.
+
+Top remaining translation blockers (= functions that don't even
+translate, much less install):
+- CALL_CLOSURE (0x0c, 268 functions) — needs runtime arity discovery
+- ESCAPE (0xfe, 129 functions) — gateway to 77 extended opcodes
+- BLOCK_COMPARE_BYTE (0xee, 5) — like BLOCK_EQUAL_BYTE but tri-valued
+- LDEXC (0x6d, 11) — load current exception, needs handler state
+- ALLOC_MUT_CLOSURE_B (0x76, 10) — mutable closure alloc
 
 Now SAFE (re-enabled, no regressions):
 - RAISE_EX (0x10), SET_HANDLER8/16 (0x81/0xf9), CLOSURE_B (0xd0),
