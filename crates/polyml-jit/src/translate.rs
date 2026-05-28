@@ -131,6 +131,9 @@ const INSTR_LOAD_ML_WORD: u8 = 0x04;
 const INSTR_STORE_ML_BYTE: u8 = 0xe4;
 const INSTR_BLOCK_MOVE_WORD: u8 = 0x07;
 const INSTR_BLOCK_MOVE_BYTE: u8 = 0xec;
+const INSTR_STACK_CONTAINER_B: u8 = 0x0e;
+const INSTR_MOVE_TO_CONTAINER_B: u8 = 0x24;
+const INSTR_INDIRECT_CONTAINER_B: u8 = 0x74;
 const INSTR_PUSH_HANDLER: u8 = 0x78;
 const INSTR_NOT_BOOLEAN: u8 = 0x91;
 const INSTR_IS_TAGGED: u8 = 0x92;
@@ -924,6 +927,88 @@ fn compile_with_consts_impl(
                     // for the (much more common) no-exception path.
                     let zero = builder.ins().iconst(int, 0);
                     stack.push(zero);
+                }
+                INSTR_STACK_CONTAINER_B => {
+                    // Allocate a Cranelift StackSlot for the container,
+                    // initialize all N slots to tagged 0, push N
+                    // placeholder values + 1 pointer onto the
+                    // compile-time stack.
+                    //
+                    // Interpreter semantics (bytecode.cpp::stack_containerB):
+                    //   for i in 0..N: push tagged 0
+                    //   push stack_addr(slot, 0)
+                    //
+                    // The container's slots are accessed exclusively
+                    // via MOVE_TO_CONTAINER_B / INDIRECT_CONTAINER_B,
+                    // which read/write through the pointer. LOCAL_K
+                    // access to the placeholder zero values is never
+                    // emitted by the SML compiler (it tracks container
+                    // slots as memory, not as stack values), so the
+                    // placeholders are just depth-fillers.
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let n = bytecode[pc] as usize;
+                    pc += 1;
+                    let slot_size = std::cmp::max(8, (n * 8) as u32);
+                    let ss = builder.create_sized_stack_slot(
+                        cranelift::prelude::StackSlotData::new(
+                            cranelift::prelude::StackSlotKind::ExplicitSlot,
+                            slot_size,
+                            3,
+                        ),
+                    );
+                    let tag0 = builder.ins().iconst(int, tag(0));
+                    for i in 0..n {
+                        builder.ins().stack_store(tag0, ss, (i * 8) as i32);
+                    }
+                    for _ in 0..n {
+                        stack.push(tag0);
+                    }
+                    let ptr = builder.ins().stack_addr(int, ss, 0);
+                    stack.push(ptr);
+                }
+                INSTR_MOVE_TO_CONTAINER_B => {
+                    // [k]: pop value; peek pointer (still at top);
+                    // write value to ptr[k]. Net -1.
+                    //
+                    // bytecode.cpp::moveToContainerB:
+                    //   PolyWord u = *sp++;
+                    //   (*sp).stackAddr[*pc] = u;
+                    //   pc += 1;
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let k = bytecode[pc] as usize;
+                    pc += 1;
+                    let value = stack.pop().ok_or(TranslateError::Underflow(pc - 2))?;
+                    let ptr = *stack.last().ok_or(TranslateError::Underflow(pc - 2))?;
+                    builder.ins().store(
+                        cranelift::prelude::MemFlags::trusted(),
+                        value,
+                        ptr,
+                        (k * 8) as i32,
+                    );
+                }
+                INSTR_INDIRECT_CONTAINER_B => {
+                    // [k]: replace top (= ptr) with ptr[k]. Net 0.
+                    //
+                    // bytecode.cpp::indirectContainerB:
+                    //   *sp = (*sp).stackAddr[*pc];
+                    //   pc += 1;
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let k = bytecode[pc] as usize;
+                    pc += 1;
+                    let ptr = stack.pop().ok_or(TranslateError::Underflow(pc - 2))?;
+                    let val = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        ptr,
+                        (k * 8) as i32,
+                    );
+                    stack.push(val);
                 }
                 INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE => {
                     // Interpreter (bytecode.cpp::blockMoveWord/Byte):
@@ -1991,6 +2076,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_INDIRECT_B => 2,
         INSTR_LOAD_UNTAGGED | INSTR_STORE_ML_WORD | INSTR_STORE_ML_BYTE => 1,
         INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE | INSTR_PUSH_HANDLER => 1,
+        INSTR_STACK_CONTAINER_B | INSTR_MOVE_TO_CONTAINER_B
+            | INSTR_INDIRECT_CONTAINER_B => 1,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -2263,6 +2350,20 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_STORE_ML_BYTE => (1, 3, None, 0),  // same shape; byte store
                 // pop length,dest_off,dest,src_off,src; push 1. Net -4.
                 INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE => (1, 5, None, 0),
+                INSTR_STACK_CONTAINER_B => {
+                    // Push N zeros + 1 pointer. Net +(N+1).
+                    if pc >= bytecode.len() { return None; }
+                    let n = bytecode[pc] as i32;
+                    (n + 1, 0, None, 1)
+                }
+                INSTR_MOVE_TO_CONTAINER_B => {
+                    // Pop value; peek pointer (top). Net -1.
+                    (0, 1, Some(0), 1)
+                }
+                INSTR_INDIRECT_CONTAINER_B => {
+                    // Replace top with load through top. Net 0.
+                    (1, 1, None, 1)
+                }
                 INSTR_PUSH_HANDLER => (1, 0, None, 0), // push handler sentinel; +1.
                 INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
                 INSTR_NO_OP => (0, 0, None, 0),
@@ -2652,6 +2753,32 @@ fn scan_branch_targets(
                 // pop src; push tag(0). Net -4; min depth 5.
                 if depth < 5 { return Err(TranslateError::Underflow(pc - 1)); }
                 depth -= 4;
+            }
+            INSTR_STACK_CONTAINER_B => {
+                // Pushes N zeros + 1 pointer. Net +(N+1).
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                let n = bytecode[pc] as usize;
+                pc += 1;
+                depth += n + 1;
+            }
+            INSTR_MOVE_TO_CONTAINER_B => {
+                // Pop value; peek pointer; write through it. Net -1.
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                pc += 1; // consume immediate
+                if depth < 2 { return Err(TranslateError::Underflow(pc - 2)); }
+                depth -= 1;
+            }
+            INSTR_INDIRECT_CONTAINER_B => {
+                // Replace top (pointer) with loaded value. Net 0.
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                pc += 1; // consume immediate
+                if depth == 0 { return Err(TranslateError::Underflow(pc - 2)); }
             }
             INSTR_PUSH_HANDLER => {
                 // Push current handler_sp (we use 0 sentinel). Net +1.

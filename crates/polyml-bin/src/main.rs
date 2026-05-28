@@ -101,6 +101,12 @@ enum Cmd {
         /// Cap disassembled instructions at this count.
         #[arg(long, default_value_t = 200)]
         max: usize,
+        /// Scan ALL code objects in the loaded image (not just
+        /// JIT-installed ones). With --bc-grep, finds the first
+        /// uninstalled function matching the pattern. Useful for
+        /// studying functions blocked by un-translated opcodes.
+        #[arg(long)]
+        scan_all: bool,
     },
     /// Differential test: pick a JIT-installed function from a loaded
     /// image and run it under both the interpreter and the JIT with
@@ -193,8 +199,8 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             r#use.clone(),
             *jit,
         ),
-        Cmd::Disasm { image, idx, code_obj, bc_grep, max } => disasm_command(
-            image, *idx, code_obj.as_deref(), bc_grep.as_deref(), *max,
+        Cmd::Disasm { image, idx, code_obj, bc_grep, max, scan_all } => disasm_command(
+            image, *idx, code_obj.as_deref(), bc_grep.as_deref(), *max, *scan_all,
         ),
         Cmd::Diff {
             image,
@@ -830,8 +836,10 @@ fn disasm_command(
     code_obj_hex: Option<&str>,
     bc_grep: Option<&str>,
     max: usize,
+    scan_all: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     use polyml_runtime::interpreter::disasm;
+    use polyml_runtime::length_word;
 
     let bytes = std::fs::read(image_path)?;
     let image = Image::parse(&bytes)?;
@@ -839,6 +847,71 @@ fn disasm_command(
     let rts = Arc::new(RtsTable::new());
     polyml_runtime::rts::clear_finish_requested();
     let _ = patch_entry_points(&mut loaded, &rts);
+
+    // --scan-all mode: walk ALL code objects, find first match,
+    // disassemble. Bypasses JIT installation.
+    if scan_all {
+        let Some(pat) = bc_grep else {
+            return Err("--scan-all requires --bc-grep PATTERN".into());
+        };
+        let mut found_count = 0usize;
+        let mut shown = 0usize;
+        let show_max = idx.unwrap_or(1); // --idx N now means "show N matches"
+        for space in [&loaded.immutable, &loaded.mutable, &loaded.code] {
+            let used = space.used_words();
+            let Some(base) = space.iter().next().map(|w| w as *const PolyWord) else {
+                continue;
+            };
+            let mut i = 0usize;
+            while i < used && shown < show_max {
+                let lw = unsafe { *base.add(i) };
+                let n = length_word::length_of(lw);
+                if n == 0 || i + 1 + n > used {
+                    break;
+                }
+                let body = unsafe { base.add(i + 1) };
+                if length_word::is_code_object(lw) {
+                    let (cp, _) = unsafe { length_word::const_segment_for_code(body) };
+                    let bytecode_len = (cp as usize)
+                        .saturating_sub(body as usize)
+                        .saturating_sub(std::mem::size_of::<usize>());
+                    let bc: &[u8] = unsafe {
+                        std::slice::from_raw_parts(body as *const u8, bytecode_len)
+                    };
+                    let head: String = bc.iter().take(64)
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if head.contains(pat) {
+                        found_count += 1;
+                        shown += 1;
+                        println!(
+                            "\n=== Match {found_count} at code_obj=0x{:016x}, bytecode_len={bytecode_len} ===",
+                            body as usize,
+                        );
+                        let decoded = disasm::disassemble(bc);
+                        for (pc, d) in decoded.iter().take(max) {
+                            let imm = d.imm_text.as_deref().unwrap_or("");
+                            println!(
+                                "{pc:>5}: {:>4} {:<22} {imm}",
+                                format!("{:02x}", d.op),
+                                d.mnemonic,
+                            );
+                        }
+                        if decoded.len() > max {
+                            println!("... ({} more instructions)", decoded.len() - max);
+                        }
+                    }
+                }
+                i += 1 + n;
+            }
+        }
+        if found_count == 0 {
+            println!("No code objects matched pattern '{pat}'");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
     let mut interp = unsafe { Interpreter::from_code_object(64 * 1024, code_obj_ptr) }
         .with_default_alloc_space_bytes(256 * 1024 * 1024)
