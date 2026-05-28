@@ -131,6 +131,7 @@ const INSTR_LOAD_ML_WORD: u8 = 0x04;
 const INSTR_STORE_ML_BYTE: u8 = 0xe4;
 const INSTR_BLOCK_MOVE_WORD: u8 = 0x07;
 const INSTR_BLOCK_MOVE_BYTE: u8 = 0xec;
+const INSTR_BLOCK_EQUAL_BYTE: u8 = 0xed;
 const INSTR_STACK_CONTAINER_B: u8 = 0x0e;
 const INSTR_MOVE_TO_CONTAINER_B: u8 = 0x24;
 const INSTR_INDIRECT_CONTAINER_B: u8 = 0x74;
@@ -361,6 +362,19 @@ fn compile_with_consts_impl(
     let block_move_byte_ref = jit
         .module
         .declare_func_in_func(block_move_byte_id, &mut ctx.func);
+
+    // block_equal_byte: same signature, returns tag(bool).
+    let block_equal_byte_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_block_equal_byte",
+            Linkage::Import,
+            &block_move_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let block_equal_byte_ref = jit
+        .module
+        .declare_func_in_func(block_equal_byte_id, &mut ctx.func);
 
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -1050,6 +1064,29 @@ fn compile_with_consts_impl(
                         stack.push(tag0);
                     }
                     // For LOCK: stack unchanged. ptr stays on top.
+                }
+                INSTR_BLOCK_EQUAL_BYTE => {
+                    // Same shape as BLOCK_MOVE_BYTE but returns
+                    // tag(bool). Pop length,off2,p2,off1; peek p1;
+                    // call trampoline (which returns tagged bool);
+                    // pop p1; push the bool. Net -4.
+                    if stack.len() < 5 {
+                        return Err(TranslateError::Underflow(pc - 1));
+                    }
+                    let length_tag = stack.pop().unwrap();
+                    let off2_tag = stack.pop().unwrap();
+                    let p2 = stack.pop().unwrap();
+                    let off1_tag = stack.pop().unwrap();
+                    let p1 = stack.pop().unwrap();
+                    let length = builder.ins().sshr_imm(length_tag, 1);
+                    let off2 = builder.ins().sshr_imm(off2_tag, 1);
+                    let off1 = builder.ins().sshr_imm(off1_tag, 1);
+                    let call = builder.ins().call(
+                        block_equal_byte_ref,
+                        &[p1, off1, p2, off2, length],
+                    );
+                    let result = builder.inst_results(call)[0];
+                    stack.push(result);
                 }
                 INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE => {
                     // Interpreter (bytecode.cpp::blockMoveWord/Byte):
@@ -2135,7 +2172,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_SET_STACK_VAL_B => 2,
         INSTR_INDIRECT_B => 2,
         INSTR_LOAD_UNTAGGED | INSTR_STORE_ML_WORD | INSTR_STORE_ML_BYTE => 1,
-        INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE | INSTR_PUSH_HANDLER => 1,
+        INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE
+            | INSTR_BLOCK_EQUAL_BYTE | INSTR_PUSH_HANDLER => 1,
         // Container opcodes: op + 1 imm byte = 2 total.
         INSTR_STACK_CONTAINER_B | INSTR_MOVE_TO_CONTAINER_B
             | INSTR_INDIRECT_CONTAINER_B => 2,
@@ -2411,8 +2449,9 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_LOAD_UNTAGGED => (1, 2, None, 0),  // pop idx, peek base; net -1+1 = 0
                 INSTR_STORE_ML_WORD => (1, 3, None, 0),  // pop val,idx,base; push 1; net -2
                 INSTR_STORE_ML_BYTE => (1, 3, None, 0),  // same shape; byte store
-                // pop length,dest_off,dest,src_off,src; push 1. Net -4.
-                INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE => (1, 5, None, 0),
+                // pop length,off2,p2,off1,p1; push 1. Net -4.
+                INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE
+                    | INSTR_BLOCK_EQUAL_BYTE => (1, 5, None, 0),
                 INSTR_STACK_CONTAINER_B => {
                     // Push N zeros + 1 pointer. Net +(N+1).
                     if pc >= bytecode.len() { return None; }
@@ -2819,9 +2858,10 @@ fn scan_branch_targets(
                 if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
                 depth -= 2;
             }
-            INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE => {
-                // Pop length, dest_off, dest, src_off; peek src; memcpy;
-                // pop src; push tag(0). Net -4; min depth 5.
+            INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE
+                | INSTR_BLOCK_EQUAL_BYTE => {
+                // Pop length, off2, p2, off1; peek p1; trampoline;
+                // pop p1; push 1 result. Net -4; min depth 5.
                 if depth < 5 { return Err(TranslateError::Underflow(pc - 1)); }
                 depth -= 4;
             }
