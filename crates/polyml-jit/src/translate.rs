@@ -136,6 +136,7 @@ const INSTR_MOVE_TO_CONTAINER_B: u8 = 0x24;
 const INSTR_INDIRECT_CONTAINER_B: u8 = 0x74;
 const INSTR_LOCK: u8 = 0x6c;
 const INSTR_CLEAR_MUTABLE: u8 = 0x95;
+const INSTR_CELL_FLAGS: u8 = 0x94;
 const INSTR_PUSH_HANDLER: u8 = 0x78;
 const INSTR_NOT_BOOLEAN: u8 = 0x91;
 const INSTR_IS_TAGGED: u8 = 0x92;
@@ -1626,6 +1627,25 @@ fn compile_with_consts_impl(
                     let last = stack.len() - 1;
                     stack[last] = tagged_v;
                 }
+                INSTR_CELL_FLAGS => {
+                    // Like CELL_LENGTH but extracts the flags byte
+                    // (top byte of length-word, FLAGS_SHIFT = 56).
+                    // Replace top with tagged(flags).
+                    let p = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let lw = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        p,
+                        -8,
+                    );
+                    let flags = builder.ins().ushr_imm(lw, 56);
+                    // No mask needed; ushr already zeroes the top bits.
+                    let shifted = builder.ins().ishl_imm(flags, 1);
+                    let one = builder.ins().iconst(int, 1);
+                    let tagged_v = builder.ins().bor(shifted, one);
+                    let last = stack.len() - 1;
+                    stack[last] = tagged_v;
+                }
                 INSTR_LOAD_ML_BYTE => {
                     // Pop index (tagged), peek base, replace top with
                     // tagged(*(base + (index>>1))).
@@ -2119,8 +2139,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         // Container opcodes: op + 1 imm byte = 2 total.
         INSTR_STACK_CONTAINER_B | INSTR_MOVE_TO_CONTAINER_B
             | INSTR_INDIRECT_CONTAINER_B => 2,
-        // LOCK and CLEAR_MUTABLE: no immediate bytes, just op.
-        INSTR_LOCK | INSTR_CLEAR_MUTABLE => 1,
+        // LOCK, CLEAR_MUTABLE, CELL_FLAGS: no immediate bytes.
+        INSTR_LOCK | INSTR_CLEAR_MUTABLE | INSTR_CELL_FLAGS => 1,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -2409,6 +2429,10 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 }
                 INSTR_LOCK | INSTR_CLEAR_MUTABLE => {
                     // Peek top, possibly replace with tagged 0. Net 0.
+                    (0, 0, Some(0), 0)
+                }
+                INSTR_CELL_FLAGS => {
+                    // Peek top, replace with tagged(flags). Net 0.
                     (0, 0, Some(0), 0)
                 }
                 INSTR_PUSH_HANDLER => (1, 0, None, 0), // push handler sentinel; +1.
@@ -2831,6 +2855,10 @@ fn scan_branch_targets(
                 // Both peek top, clear F_MUTABLE_BIT in heap object's
                 // length word. LOCK keeps stack as is; CLEAR_MUTABLE
                 // pops top and pushes tagged 0. Net 0 either way.
+                if depth == 0 { return Err(TranslateError::Underflow(pc - 1)); }
+            }
+            INSTR_CELL_FLAGS => {
+                // Peek top (ptr), replace top with tagged(flags). Net 0.
                 if depth == 0 { return Err(TranslateError::Underflow(pc - 1)); }
             }
             INSTR_PUSH_HANDLER => {
