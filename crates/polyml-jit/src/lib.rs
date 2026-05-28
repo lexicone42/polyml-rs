@@ -561,6 +561,16 @@ pub unsafe extern "C" fn block_move_byte_trampoline(
     1 // TAGGED(0)
 }
 
+/// GET_THREAD_ID trampoline. Allocates an 8-word mutable cell with
+/// all words = tagged(0). Used by JIT'd `INSTR_GET_THREAD_ID`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn get_thread_id_trampoline() -> i64 {
+    match polyml_runtime::jit_dispatch_get_thread_id() {
+        Some(ptr) => ptr as i64,
+        None => 1, // tagged(0) on failure
+    }
+}
+
 /// Byte-mem allocation trampoline. `(n_words, flags) -> i64`.
 /// Used by JIT'd `ALLOC_BYTE_MEM`. Body is uninitialized.
 #[unsafe(no_mangle)]
@@ -687,6 +697,10 @@ impl Jit {
         builder.symbol(
             "polyml_jit_block_equal_byte",
             block_equal_byte_trampoline as *const u8,
+        );
+        builder.symbol(
+            "polyml_jit_get_thread_id",
+            get_thread_id_trampoline as *const u8,
         );
         Ok(Self {
             module: JITModule::new(builder),

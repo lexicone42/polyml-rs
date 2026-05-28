@@ -96,6 +96,34 @@ pub fn jit_dispatch_alloc_bytes(n_words: usize, flags: u8) -> Option<u64> {
     Some(body as u64)
 }
 
+/// Trampoline-callable: allocate a stub thread object — an 8-word
+/// mutable cell with all words = tagged(0). Mirrors the interpreter's
+/// `INSTR_GET_THREAD_ID` semantics.
+///
+/// We don't have real threads, so any read of the thread object's
+/// fields returns zero. This is enough for SML code that only reads
+/// the thread-id pointer for identity checks.
+pub fn jit_dispatch_get_thread_id() -> Option<u64> {
+    use crate::length_word::F_MUTABLE_BIT;
+    let interp_ptr = JIT_INTERP.with(|c| c.get());
+    if interp_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: caller invariant.
+    let interp = unsafe { &mut *interp_ptr };
+    let space = interp.jit_alloc_space_mut()?;
+    let n = 8usize;
+    let body = space.try_alloc(n)?;
+    // Init all 8 words to tagged(0).
+    unsafe {
+        for i in 0..n {
+            body.add(i).write(crate::PolyWord::tagged(0));
+        }
+        crate::space::set_length_word(body, n, F_MUTABLE_BIT);
+    }
+    Some(body as u64)
+}
+
 /// Trampoline-callable: build a closure object. The closure layout
 /// is `[code_addr, capture_0, capture_1, ...]` where `code_addr`
 /// is copied from `src_closure[0]`. Length word is `n_captures + 1`

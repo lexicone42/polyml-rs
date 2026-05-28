@@ -47,6 +47,7 @@ const INSTR_FIXED_SUB: u8 = 0xab;
 const INSTR_FIXED_MULT: u8 = 0xac;
 const INSTR_FIXED_QUOT: u8 = 0xad;
 const INSTR_FIXED_REM: u8 = 0xae;
+const INSTR_GET_THREAD_ID: u8 = 0xd9;
 const INSTR_EQUAL_WORD: u8 = 0xa0;
 const INSTR_LESS_SIGNED: u8 = 0xa2;
 const INSTR_LESS_UNSIGNED: u8 = 0xa3;
@@ -378,6 +379,21 @@ fn compile_with_consts_impl(
     let block_equal_byte_ref = jit
         .module
         .declare_func_in_func(block_equal_byte_id, &mut ctx.func);
+
+    // get_thread_id: no args, returns i64.
+    let mut get_tid_sig = jit.module.make_signature();
+    get_tid_sig.returns.push(AbiParam::new(types::I64));
+    let get_tid_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_get_thread_id",
+            Linkage::Import,
+            &get_tid_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let get_tid_ref = jit
+        .module
+        .declare_func_in_func(get_tid_id, &mut ctx.func);
 
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -1067,6 +1083,13 @@ fn compile_with_consts_impl(
                         stack.push(tag0);
                     }
                     // For LOCK: stack unchanged. ptr stays on top.
+                }
+                INSTR_GET_THREAD_ID => {
+                    // Allocate stub thread object (8-word mutable),
+                    // push its pointer. Net +1.
+                    let call = builder.ins().call(get_tid_ref, &[]);
+                    let result = builder.inst_results(call)[0];
+                    stack.push(result);
                 }
                 INSTR_BLOCK_EQUAL_BYTE => {
                     // Same shape as BLOCK_MOVE_BYTE but returns
@@ -2213,8 +2236,9 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         // Container opcodes: op + 1 imm byte = 2 total.
         INSTR_STACK_CONTAINER_B | INSTR_MOVE_TO_CONTAINER_B
             | INSTR_INDIRECT_CONTAINER_B => 2,
-        // LOCK, CLEAR_MUTABLE, CELL_FLAGS: no immediate bytes.
-        INSTR_LOCK | INSTR_CLEAR_MUTABLE | INSTR_CELL_FLAGS => 1,
+        // LOCK, CLEAR_MUTABLE, CELL_FLAGS, GET_THREAD_ID: no imm.
+        INSTR_LOCK | INSTR_CLEAR_MUTABLE | INSTR_CELL_FLAGS
+            | INSTR_GET_THREAD_ID => 1,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -2510,6 +2534,10 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_CELL_FLAGS => {
                     // Peek top, replace with tagged(flags). Net 0.
                     (0, 0, Some(0), 0)
+                }
+                INSTR_GET_THREAD_ID => {
+                    // Push pointer. Net +1.
+                    (1, 0, None, 0)
                 }
                 INSTR_PUSH_HANDLER => (1, 0, None, 0), // push handler sentinel; +1.
                 INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
@@ -2938,6 +2966,10 @@ fn scan_branch_targets(
             INSTR_CELL_FLAGS => {
                 // Peek top (ptr), replace top with tagged(flags). Net 0.
                 if depth == 0 { return Err(TranslateError::Underflow(pc - 1)); }
+            }
+            INSTR_GET_THREAD_ID => {
+                // Push allocated pointer. Net +1.
+                depth += 1;
             }
             INSTR_PUSH_HANDLER => {
                 // Push current handler_sp (we use 0 sentinel). Net +1.
