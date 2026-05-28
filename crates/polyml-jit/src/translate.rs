@@ -138,6 +138,7 @@ const INSTR_INDIRECT_CONTAINER_B: u8 = 0x74;
 const INSTR_LOCK: u8 = 0x6c;
 const INSTR_CLEAR_MUTABLE: u8 = 0x95;
 const INSTR_CELL_FLAGS: u8 = 0x94;
+const INSTR_CONST_INT_W: u8 = 0x1b;
 const INSTR_PUSH_HANDLER: u8 = 0x78;
 const INSTR_NOT_BOOLEAN: u8 = 0x91;
 const INSTR_IS_TAGGED: u8 = 0x92;
@@ -1279,6 +1280,17 @@ fn compile_with_consts_impl(
                     );
                     stack.push(val);
                 }
+                INSTR_CONST_INT_W => {
+                    if pc + 1 >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    // Wide variant: u16 LE immediate. Like CONST_INT_B
+                    // but with 2-byte unsigned operand (interpreter
+                    // casts via isize::try_from on a u16).
+                    let raw = u16::from_le_bytes([bytecode[pc], bytecode[pc + 1]]) as i64;
+                    pc += 2;
+                    stack.push(builder.ins().iconst(int, tag(raw)));
+                }
                 INSTR_CONST_INT_B => {
                     if pc >= bytecode.len() {
                         return Err(TranslateError::Truncated(pc));
@@ -2158,6 +2170,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_RETURN_3 => 1,
         INSTR_RETURN_B => 2,
         INSTR_RETURN_W => 3,
+        // CONST_INT_W: op + 2 imm bytes (u16 LE).
+        INSTR_CONST_INT_W => 3,
         INSTR_TAIL_B_B => 3,
         INSTR_CLOSURE_B => 2,
         INSTR_ALLOC_BYTE_MEM | INSTR_ALLOC_WORD_MEMORY | INSTR_STORE_UNTAGGED => 1,
@@ -2412,6 +2426,7 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
             match op {
                 INSTR_CONST_0..=INSTR_CONST_4 | INSTR_CONST_10 => (1, 0, None, 0),
                 INSTR_CONST_INT_B => (1, 0, None, 1),
+                INSTR_CONST_INT_W => (1, 0, None, 2),
                 INSTR_LOCAL_0..=INSTR_LOCAL_11 => {
                     let d = (op - INSTR_LOCAL_0) as usize;
                     (1, 0, Some(d), 0)
@@ -3022,6 +3037,13 @@ fn scan_branch_targets(
                     return Err(TranslateError::Truncated(pc));
                 }
                 pc += 1;
+                depth += 1;
+            }
+            INSTR_CONST_INT_W => {
+                if pc + 1 >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                pc += 2;
                 depth += 1;
             }
             INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
