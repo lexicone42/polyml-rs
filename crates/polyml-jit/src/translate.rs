@@ -740,24 +740,46 @@ fn compile_with_consts_impl(
                     stack.push(result_val);
                 }
                 INSTR_CALL_CLOSURE => {
-                    // Tail-call CALL_CLOSURE: pop closure, spill the
-                    // remaining compile-time stack to a Cranelift
-                    // StackSlot, call dynamic_call trampoline (which
-                    // reads N from the closure's code header and
-                    // pulls the top N values from the spill buffer),
-                    // then RETURN the result.
+                    // CALL_CLOSURE: pop closure, spill the remaining
+                    // compile-time stack to a Cranelift StackSlot,
+                    // call dynamic_call trampoline (which reads N
+                    // from the closure's code header and pulls the
+                    // top N values from the spill buffer), then
+                    // RETURN the result.
                     //
-                    // Only valid in tail-call position: the next
-                    // opcode must be a RETURN. Otherwise we'd have
-                    // to know the post-call stack shape (we don't —
-                    // the trampoline consumed N args but N is dynamic).
+                    // Two patterns we recognize as "tail-equivalent":
+                    //
+                    //   A. CALL_CLOSURE; RETURN_N  (direct)
+                    //   B. CALL_CLOSURE; LOCAL_0; RESET_R_1; RETURN_1
+                    //      (peek result; drop one below; return)
+                    //
+                    // Pattern B is the SML compiler's "swap top into
+                    // place before return" idiom. After CALL_CLOSURE
+                    // the result is on top. LOCAL_0 pushes a copy of
+                    // top. RESET_R_1 preserves the new top, drops 1
+                    // below (= the original result). RETURN_1 returns
+                    // the copy. Functionally equivalent to returning
+                    // the call result directly — our JIT emits the
+                    // dynamic call and returns its result, skipping
+                    // the cleanup ops entirely.
+                    //
+                    // Other non-tail uses (the result is consumed by
+                    // arithmetic, branched on, etc.) fail with
+                    // Unsupported — those need the future memory-
+                    // backed model.
                     let next_op = bytecode.get(pc).copied().unwrap_or(0);
-                    let is_tail = matches!(
+                    let direct_tail = matches!(
                         next_op,
                         INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3
                         | INSTR_RETURN_B | INSTR_RETURN_W
                     );
-                    if !is_tail {
+                    // Pattern B: 0x29 (LOCAL_0), 0x64 (RESET_R_1),
+                    // 0x42 (RETURN_1).
+                    let cleanup_tail =
+                        bytecode.get(pc).copied() == Some(0x29)
+                        && bytecode.get(pc + 1).copied() == Some(0x64)
+                        && bytecode.get(pc + 2).copied() == Some(0x42);
+                    if !direct_tail && !cleanup_tail {
                         return Err(TranslateError::Unsupported {
                             op: INSTR_CALL_CLOSURE,
                             at: pc - 1,
@@ -766,10 +788,6 @@ fn compile_with_consts_impl(
                     let closure = stack.pop()
                         .ok_or(TranslateError::Underflow(pc - 1))?;
                     let depth = stack.len();
-                    // Allocate a StackSlot big enough for all
-                    // remaining compile-time values. Even empty
-                    // stacks need a valid pointer; allocate 8 bytes
-                    // minimum.
                     let slot_size = std::cmp::max(8, (depth * 8) as u32);
                     let slot = builder.create_sized_stack_slot(
                         cranelift::prelude::StackSlotData::new(
@@ -778,9 +796,6 @@ fn compile_with_consts_impl(
                             3,
                         ),
                     );
-                    // Write compile-time stack[i] to slot offset i*8.
-                    // The trampoline reads top-N from
-                    // args_ptr[depth-N..depth], matching this layout.
                     for (i, v) in stack.iter().enumerate() {
                         builder.ins().stack_store(*v, slot, (i * 8) as i32);
                     }
@@ -791,11 +806,19 @@ fn compile_with_consts_impl(
                         &[closure, args_ptr, depth_v],
                     );
                     let result = builder.inst_results(call)[0];
-                    // Replace the entire compile-time stack with just
-                    // the result. The next opcode (RETURN_N) will pop
-                    // this and emit `return`.
-                    stack.clear();
-                    stack.push(result);
+                    if cleanup_tail {
+                        // Skip past LOCAL_0; RESET_R_1; RETURN_1 — we
+                        // emit the return directly with our call result.
+                        pc += 3;
+                        builder.ins().return_(&[result]);
+                        returned = true;
+                    } else {
+                        // Direct tail: leave result on compile-time
+                        // stack so the next opcode (RETURN_N) pops it
+                        // and emits the return.
+                        stack.clear();
+                        stack.push(result);
+                    }
                 }
                 INSTR_CALL_LOCAL_B => {
                     // [N]: closure is at sp[N]; the N args above it

@@ -138,10 +138,41 @@ pub fn jit_dispatch_dynamic_call(
     let n = if (marker == 0xff || marker == 0xe9) && (arity_byte & 0x80) != 0 {
         (arity_byte & 0x7f) as usize
     } else {
-        // No enter-int prologue — fall back to scanning for RETURN_N
-        // via the existing arity inference. This is best-effort; if
-        // it fails, error.
-        return Err(InterpError::NotAClosure(closure));
+        // No enter-int prologue — fall back to scanning forward in
+        // the code object for the first RETURN_N. Standard pattern
+        // for closures whose compiler didn't emit an enter-int marker.
+        // Scan a generous window (the SML compiler keeps function
+        // bodies small enough that this terminates quickly).
+        let mut scan_pc = 0usize;
+        let mut inferred = None;
+        while scan_pc < 512 {
+            // SAFETY: code object byte access bounded by 512 byte
+            // window; real bodies are typically <200 bytes.
+            let b = unsafe { *code_ptr.add(scan_pc) };
+            match b {
+                0x42 => { inferred = Some(1); break; } // RETURN_1
+                0x43 => { inferred = Some(2); break; } // RETURN_2
+                0x44 => { inferred = Some(3); break; } // RETURN_3
+                0x1f => {
+                    // RETURN_B: next byte is arity
+                    let n_imm = unsafe { *code_ptr.add(scan_pc + 1) };
+                    inferred = Some(n_imm as usize);
+                    break;
+                }
+                0x0d => {
+                    // RETURN_W: next two bytes are u16 LE arity
+                    let lo = unsafe { *code_ptr.add(scan_pc + 1) } as usize;
+                    let hi = unsafe { *code_ptr.add(scan_pc + 2) } as usize;
+                    inferred = Some(lo | (hi << 8));
+                    break;
+                }
+                _ => scan_pc += 1,
+            }
+        }
+        match inferred {
+            Some(n) => n,
+            None => return Err(InterpError::NotAClosure(closure)),
+        }
     };
     #[allow(clippy::cast_sign_loss)]
     let depth = args_depth.max(0) as usize;
