@@ -134,6 +134,8 @@ const INSTR_BLOCK_MOVE_BYTE: u8 = 0xec;
 const INSTR_STACK_CONTAINER_B: u8 = 0x0e;
 const INSTR_MOVE_TO_CONTAINER_B: u8 = 0x24;
 const INSTR_INDIRECT_CONTAINER_B: u8 = 0x74;
+const INSTR_LOCK: u8 = 0x6c;
+const INSTR_CLEAR_MUTABLE: u8 = 0x95;
 const INSTR_PUSH_HANDLER: u8 = 0x78;
 const INSTR_NOT_BOOLEAN: u8 = 0x91;
 const INSTR_IS_TAGGED: u8 = 0x92;
@@ -1009,6 +1011,44 @@ fn compile_with_consts_impl(
                         (k * 8) as i32,
                     );
                     stack.push(val);
+                }
+                INSTR_LOCK | INSTR_CLEAR_MUTABLE => {
+                    // Both clear the F_MUTABLE_BIT (0x40) in the
+                    // length-word's top byte (flags portion) of the
+                    // heap object on top of stack.
+                    //
+                    // LOCK: peek ptr, clear bit, leave ptr on stack.
+                    // CLEAR_MUTABLE: same, then replace top with
+                    // tagged 0.
+                    //
+                    // F_MUTABLE_BIT = 0x40 at FLAGS_SHIFT = 56 (on
+                    // 64-bit), so the mask to clear is
+                    // 0xbfff_ffff_ffff_ffff (all bits except bit 62).
+                    let ptr = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let lw_addr = builder.ins().iadd_imm(ptr, -8);
+                    let lw = builder.ins().load(
+                        int,
+                        cranelift::prelude::MemFlags::trusted(),
+                        lw_addr,
+                        0,
+                    );
+                    // F_MUTABLE_BIT = 0x40 at FLAGS_SHIFT = 56.
+                    // Mask out that one bit: !(0x40 << 56).
+                    let mask = builder.ins().iconst(int, !(0x40_i64 << 56));
+                    let new_lw = builder.ins().band(lw, mask);
+                    builder.ins().store(
+                        cranelift::prelude::MemFlags::trusted(),
+                        new_lw,
+                        lw_addr,
+                        0,
+                    );
+                    if op == INSTR_CLEAR_MUTABLE {
+                        // Replace top with tagged 0.
+                        stack.pop();
+                        let tag0 = builder.ins().iconst(int, tag(0));
+                        stack.push(tag0);
+                    }
+                    // For LOCK: stack unchanged. ptr stays on top.
                 }
                 INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE => {
                     // Interpreter (bytecode.cpp::blockMoveWord/Byte):
@@ -2076,8 +2116,11 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_INDIRECT_B => 2,
         INSTR_LOAD_UNTAGGED | INSTR_STORE_ML_WORD | INSTR_STORE_ML_BYTE => 1,
         INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE | INSTR_PUSH_HANDLER => 1,
+        // Container opcodes: op + 1 imm byte = 2 total.
         INSTR_STACK_CONTAINER_B | INSTR_MOVE_TO_CONTAINER_B
-            | INSTR_INDIRECT_CONTAINER_B => 1,
+            | INSTR_INDIRECT_CONTAINER_B => 2,
+        // LOCK and CLEAR_MUTABLE: no immediate bytes, just op.
+        INSTR_LOCK | INSTR_CLEAR_MUTABLE => 1,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -2363,6 +2406,10 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_INDIRECT_CONTAINER_B => {
                     // Replace top with load through top. Net 0.
                     (1, 1, None, 1)
+                }
+                INSTR_LOCK | INSTR_CLEAR_MUTABLE => {
+                    // Peek top, possibly replace with tagged 0. Net 0.
+                    (0, 0, Some(0), 0)
                 }
                 INSTR_PUSH_HANDLER => (1, 0, None, 0), // push handler sentinel; +1.
                 INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
@@ -2779,6 +2826,12 @@ fn scan_branch_targets(
                 }
                 pc += 1; // consume immediate
                 if depth == 0 { return Err(TranslateError::Underflow(pc - 2)); }
+            }
+            INSTR_LOCK | INSTR_CLEAR_MUTABLE => {
+                // Both peek top, clear F_MUTABLE_BIT in heap object's
+                // length word. LOCK keeps stack as is; CLEAR_MUTABLE
+                // pops top and pushes tagged 0. Net 0 either way.
+                if depth == 0 { return Err(TranslateError::Underflow(pc - 1)); }
             }
             INSTR_PUSH_HANDLER => {
                 // Push current handler_sp (we use 0 sentinel). Net +1.
