@@ -508,6 +508,38 @@ pub unsafe extern "C" fn block_move_word_trampoline(
     1 // TAGGED(0)
 }
 
+/// Byte-block compare trampoline. `(p1, off1, p2, off2, length) -> tag(-1|0|1)`.
+/// Returns tagged -1 if `p1[off1..] < p2[off2..]`, 0 if equal, 1 if greater.
+/// Used by JIT'd `BLOCK_COMPARE_BYTE`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn block_compare_byte_trampoline(
+    p1_word: i64,
+    off1: i64,
+    p2_word: i64,
+    off2: i64,
+    length: i64,
+) -> i64 {
+    use polyml_runtime::PolyWord;
+    let p1 = PolyWord::from_bits(p1_word as usize).as_ptr::<u8>();
+    let p2 = PolyWord::from_bits(p2_word as usize).as_ptr::<u8>();
+    #[allow(clippy::cast_sign_loss)]
+    let o1 = off1.max(0) as usize;
+    #[allow(clippy::cast_sign_loss)]
+    let o2 = off2.max(0) as usize;
+    #[allow(clippy::cast_sign_loss)]
+    let len = length.max(0) as usize;
+    let ordering = unsafe {
+        let s1 = std::slice::from_raw_parts(p1.add(o1), len);
+        let s2 = std::slice::from_raw_parts(p2.add(o2), len);
+        s1.cmp(s2)
+    };
+    match ordering {
+        std::cmp::Ordering::Less => -1,        // tag(-1)
+        std::cmp::Ordering::Equal => 1,         // tag(0)
+        std::cmp::Ordering::Greater => 3,       // tag(1)
+    }
+}
+
 /// Byte-block equality trampoline. `(p1, off1, p2, off2, length) -> tag(bool)`.
 /// Returns tagged 1 if `p1[off1..off1+length] == p2[off2..off2+length]`,
 /// tagged 0 otherwise. Used by JIT'd `BLOCK_EQUAL_BYTE`.
@@ -714,6 +746,10 @@ impl Jit {
         builder.symbol(
             "polyml_jit_block_equal_byte",
             block_equal_byte_trampoline as *const u8,
+        );
+        builder.symbol(
+            "polyml_jit_block_compare_byte",
+            block_compare_byte_trampoline as *const u8,
         );
         builder.symbol(
             "polyml_jit_get_thread_id",

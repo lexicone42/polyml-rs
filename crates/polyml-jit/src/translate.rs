@@ -137,6 +137,7 @@ const INSTR_STORE_ML_BYTE: u8 = 0xe4;
 const INSTR_BLOCK_MOVE_WORD: u8 = 0x07;
 const INSTR_BLOCK_MOVE_BYTE: u8 = 0xec;
 const INSTR_BLOCK_EQUAL_BYTE: u8 = 0xed;
+const INSTR_BLOCK_COMPARE_BYTE: u8 = 0xee;
 const INSTR_STACK_CONTAINER_B: u8 = 0x0e;
 const INSTR_MOVE_TO_CONTAINER_B: u8 = 0x24;
 const INSTR_INDIRECT_CONTAINER_B: u8 = 0x74;
@@ -381,6 +382,19 @@ fn compile_with_consts_impl(
     let block_equal_byte_ref = jit
         .module
         .declare_func_in_func(block_equal_byte_id, &mut ctx.func);
+
+    // block_compare_byte: same signature, returns tag(-1|0|1).
+    let block_compare_byte_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_block_compare_byte",
+            Linkage::Import,
+            &block_move_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let block_compare_byte_ref = jit
+        .module
+        .declare_func_in_func(block_compare_byte_id, &mut ctx.func);
 
     // get_thread_id: no args, returns i64.
     let mut get_tid_sig = jit.module.make_signature();
@@ -1145,11 +1159,11 @@ fn compile_with_consts_impl(
                         off,
                     );
                 }
-                INSTR_BLOCK_EQUAL_BYTE => {
-                    // Same shape as BLOCK_MOVE_BYTE but returns
-                    // tag(bool). Pop length,off2,p2,off1; peek p1;
-                    // call trampoline (which returns tagged bool);
-                    // pop p1; push the bool. Net -4.
+                INSTR_BLOCK_EQUAL_BYTE | INSTR_BLOCK_COMPARE_BYTE => {
+                    // Same shape as BLOCK_MOVE_BYTE; returns tagged
+                    // bool or tagged ordering depending on opcode.
+                    // Pop length,off2,p2,off1; peek p1; call
+                    // trampoline; pop p1; push result. Net -4.
                     if stack.len() < 5 {
                         return Err(TranslateError::Underflow(pc - 1));
                     }
@@ -1161,8 +1175,13 @@ fn compile_with_consts_impl(
                     let length = builder.ins().sshr_imm(length_tag, 1);
                     let off2 = builder.ins().sshr_imm(off2_tag, 1);
                     let off1 = builder.ins().sshr_imm(off1_tag, 1);
+                    let fref = if op == INSTR_BLOCK_EQUAL_BYTE {
+                        block_equal_byte_ref
+                    } else {
+                        block_compare_byte_ref
+                    };
                     let call = builder.ins().call(
-                        block_equal_byte_ref,
+                        fref,
                         &[p1, off1, p2, off2, length],
                     );
                     let result = builder.inst_results(call)[0];
@@ -2286,7 +2305,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_INDIRECT_B => 2,
         INSTR_LOAD_UNTAGGED | INSTR_STORE_ML_WORD | INSTR_STORE_ML_BYTE => 1,
         INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE
-            | INSTR_BLOCK_EQUAL_BYTE | INSTR_PUSH_HANDLER => 1,
+            | INSTR_BLOCK_EQUAL_BYTE | INSTR_BLOCK_COMPARE_BYTE
+            | INSTR_PUSH_HANDLER => 1,
         // Container opcodes: op + 1 imm byte = 2 total.
         INSTR_STACK_CONTAINER_B | INSTR_MOVE_TO_CONTAINER_B
             | INSTR_INDIRECT_CONTAINER_B => 2,
@@ -2568,7 +2588,8 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_STORE_ML_BYTE => (1, 3, None, 0),  // same shape; byte store
                 // pop length,off2,p2,off1,p1; push 1. Net -4.
                 INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE
-                    | INSTR_BLOCK_EQUAL_BYTE => (1, 5, None, 0),
+                    | INSTR_BLOCK_EQUAL_BYTE
+                    | INSTR_BLOCK_COMPARE_BYTE => (1, 5, None, 0),
                 INSTR_STACK_CONTAINER_B => {
                     // Push N zeros + 1 pointer. Net +(N+1).
                     if pc >= bytecode.len() { return None; }
@@ -2989,7 +3010,7 @@ fn scan_branch_targets(
                 depth -= 2;
             }
             INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE
-                | INSTR_BLOCK_EQUAL_BYTE => {
+                | INSTR_BLOCK_EQUAL_BYTE | INSTR_BLOCK_COMPARE_BYTE => {
                 // Pop length, off2, p2, off1; peek p1; trampoline;
                 // pop p1; push 1 result. Net -4; min depth 5.
                 if depth < 5 { return Err(TranslateError::Underflow(pc - 1)); }
