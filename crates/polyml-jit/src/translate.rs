@@ -48,6 +48,8 @@ const INSTR_FIXED_MULT: u8 = 0xac;
 const INSTR_FIXED_QUOT: u8 = 0xad;
 const INSTR_FIXED_REM: u8 = 0xae;
 const INSTR_GET_THREAD_ID: u8 = 0xd9;
+const INSTR_ALLOC_MUT_CLOSURE_B: u8 = 0x76;
+const INSTR_MOVE_TO_MUT_CLOSURE_B: u8 = 0x75;
 const INSTR_EQUAL_WORD: u8 = 0xa0;
 const INSTR_LESS_SIGNED: u8 = 0xa2;
 const INSTR_LESS_UNSIGNED: u8 = 0xa3;
@@ -394,6 +396,23 @@ fn compile_with_consts_impl(
     let get_tid_ref = jit
         .module
         .declare_func_in_func(get_tid_id, &mut ctx.func);
+
+    // alloc_mut_closure: (n_captures, src_closure) -> i64.
+    let mut amc_sig = jit.module.make_signature();
+    amc_sig.params.push(AbiParam::new(types::I64));
+    amc_sig.params.push(AbiParam::new(types::I64));
+    amc_sig.returns.push(AbiParam::new(types::I64));
+    let amc_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_alloc_mut_closure",
+            Linkage::Import,
+            &amc_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let amc_ref = jit
+        .module
+        .declare_func_in_func(amc_id, &mut ctx.func);
 
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -1090,6 +1109,41 @@ fn compile_with_consts_impl(
                     let call = builder.ins().call(get_tid_ref, &[]);
                     let result = builder.inst_results(call)[0];
                     stack.push(result);
+                }
+                INSTR_ALLOC_MUT_CLOSURE_B => {
+                    // [N]: allocate mut closure of N+1 words, slot 0 =
+                    // src closure's code, slots 1..N+1 = tagged(0).
+                    // REPLACES top (src closure) with new closure ptr.
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let n = bytecode[pc] as i64;
+                    pc += 1;
+                    let src = stack.pop().ok_or(TranslateError::Underflow(pc - 2))?;
+                    let n_v = builder.ins().iconst(int, n);
+                    let call = builder.ins().call(amc_ref, &[n_v, src]);
+                    let result = builder.inst_results(call)[0];
+                    stack.push(result);
+                }
+                INSTR_MOVE_TO_MUT_CLOSURE_B => {
+                    // [slot]: pop value, peek target closure ptr,
+                    // write value at target[slot+1]. Target ptr stays
+                    // on top. Net -1.
+                    if pc >= bytecode.len() {
+                        return Err(TranslateError::Truncated(pc));
+                    }
+                    let slot = bytecode[pc] as usize;
+                    pc += 1;
+                    let value = stack.pop().ok_or(TranslateError::Underflow(pc - 2))?;
+                    let target = *stack.last().ok_or(TranslateError::Underflow(pc - 2))?;
+                    // Offset = (slot + 1) * 8
+                    let off = ((slot + 1) * 8) as i32;
+                    builder.ins().store(
+                        cranelift::prelude::MemFlags::trusted(),
+                        value,
+                        target,
+                        off,
+                    );
                 }
                 INSTR_BLOCK_EQUAL_BYTE => {
                     // Same shape as BLOCK_MOVE_BYTE but returns
@@ -2239,6 +2293,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         // LOCK, CLEAR_MUTABLE, CELL_FLAGS, GET_THREAD_ID: no imm.
         INSTR_LOCK | INSTR_CLEAR_MUTABLE | INSTR_CELL_FLAGS
             | INSTR_GET_THREAD_ID => 1,
+        // ALLOC_MUT_CLOSURE_B, MOVE_TO_MUT_CLOSURE_B: op + 1 imm.
+        INSTR_ALLOC_MUT_CLOSURE_B | INSTR_MOVE_TO_MUT_CLOSURE_B => 2,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
     })
 }
@@ -2538,6 +2594,14 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_GET_THREAD_ID => {
                     // Push pointer. Net +1.
                     (1, 0, None, 0)
+                }
+                INSTR_ALLOC_MUT_CLOSURE_B => {
+                    // Replace top. Net 0. 1 imm byte.
+                    (0, 0, Some(0), 1)
+                }
+                INSTR_MOVE_TO_MUT_CLOSURE_B => {
+                    // Pop value, peek target. Net -1. 1 imm byte.
+                    (0, 1, Some(1), 1)
                 }
                 INSTR_PUSH_HANDLER => (1, 0, None, 0), // push handler sentinel; +1.
                 INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
@@ -2970,6 +3034,23 @@ fn scan_branch_targets(
             INSTR_GET_THREAD_ID => {
                 // Push allocated pointer. Net +1.
                 depth += 1;
+            }
+            INSTR_ALLOC_MUT_CLOSURE_B => {
+                // Replace top (src closure) with new closure. Net 0.
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                pc += 1;
+                if depth == 0 { return Err(TranslateError::Underflow(pc - 2)); }
+            }
+            INSTR_MOVE_TO_MUT_CLOSURE_B => {
+                // Pop value, peek target. Net -1.
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
+                pc += 1;
+                if depth < 2 { return Err(TranslateError::Underflow(pc - 2)); }
+                depth -= 1;
             }
             INSTR_PUSH_HANDLER => {
                 // Push current handler_sp (we use 0 sentinel). Net +1.

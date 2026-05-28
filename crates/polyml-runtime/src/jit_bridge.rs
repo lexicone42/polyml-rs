@@ -96,6 +96,45 @@ pub fn jit_dispatch_alloc_bytes(n_words: usize, flags: u8) -> Option<u64> {
     Some(body as u64)
 }
 
+/// Trampoline-callable: allocate a mutable closure of `n_captures + 1`
+/// words. Slot 0 is copied from `src_closure[0]` (the code address);
+/// slots 1..n_captures+1 are initialized to tagged(0) — they get
+/// filled in later by `MOVE_TO_MUT_CLOSURE_B` instructions.
+///
+/// Flags: F_CLOSURE_OBJ | F_MUTABLE_BIT.
+pub fn jit_dispatch_alloc_mut_closure(
+    n_captures: usize,
+    src_closure_word: u64,
+) -> Option<u64> {
+    let interp_ptr = JIT_INTERP.with(|c| c.get());
+    if interp_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: caller invariant.
+    let interp = unsafe { &mut *interp_ptr };
+    let src = PolyWord::from_bits(src_closure_word as usize);
+    if !src.is_data_ptr() {
+        return None;
+    }
+    // SAFETY: source closure is a data pointer.
+    let code_addr_word = unsafe { *src.as_ptr::<PolyWord>() };
+    let space = interp.jit_alloc_space_mut()?;
+    let n_words = n_captures + 1;
+    let body = space.try_alloc(n_words)?;
+    // SAFETY: body has n_words slots.
+    unsafe {
+        crate::space::set_length_word(
+            body, n_words,
+            crate::length_word::F_CLOSURE_OBJ | crate::length_word::F_MUTABLE_BIT,
+        );
+        body.write(code_addr_word);
+        for i in 0..n_captures {
+            body.add(1 + i).write(PolyWord::tagged(0));
+        }
+    }
+    Some(body as u64)
+}
+
 /// Trampoline-callable: allocate a stub thread object — an 8-word
 /// mutable cell with all words = tagged(0). Mirrors the interpreter's
 /// `INSTR_GET_THREAD_ID` semantics.

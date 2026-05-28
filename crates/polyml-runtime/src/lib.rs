@@ -19,9 +19,9 @@ pub mod space;
 
 pub use interpreter::{InterpError, Interpreter, JitEntry, StepResult};
 pub use jit_bridge::{
-    jit_dispatch_alloc, jit_dispatch_alloc_bytes, jit_dispatch_closure_alloc,
-    jit_dispatch_closure_call, jit_dispatch_get_thread_id,
-    with_jit_interp, JIT_INTERP,
+    jit_dispatch_alloc, jit_dispatch_alloc_bytes, jit_dispatch_alloc_mut_closure,
+    jit_dispatch_closure_alloc, jit_dispatch_closure_call,
+    jit_dispatch_get_thread_id, with_jit_interp, JIT_INTERP,
 };
 pub use loader::{load_image, LoadError, LoadedImage};
 pub use poly_word::PolyWord;

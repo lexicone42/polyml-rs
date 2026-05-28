@@ -561,6 +561,23 @@ pub unsafe extern "C" fn block_move_byte_trampoline(
     1 // TAGGED(0)
 }
 
+/// ALLOC_MUT_CLOSURE_B trampoline. `(n_captures, src_closure) -> i64`.
+/// Allocates an (n_captures+1)-word mutable closure; slot 0 = src
+/// closure's code addr; slots 1..n_captures+1 = tagged(0). The
+/// captures are filled in later by MOVE_TO_MUT_CLOSURE_B.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alloc_mut_closure_trampoline(
+    n_captures: i64,
+    src_closure_word: i64,
+) -> i64 {
+    #[allow(clippy::cast_sign_loss)]
+    let n = n_captures.max(0) as usize;
+    match polyml_runtime::jit_dispatch_alloc_mut_closure(n, src_closure_word as u64) {
+        Some(ptr) => ptr as i64,
+        None => 1,
+    }
+}
+
 /// GET_THREAD_ID trampoline. Allocates an 8-word mutable cell with
 /// all words = tagged(0). Used by JIT'd `INSTR_GET_THREAD_ID`.
 #[unsafe(no_mangle)]
@@ -701,6 +718,10 @@ impl Jit {
         builder.symbol(
             "polyml_jit_get_thread_id",
             get_thread_id_trampoline as *const u8,
+        );
+        builder.symbol(
+            "polyml_jit_alloc_mut_closure",
+            alloc_mut_closure_trampoline as *const u8,
         );
         Ok(Self {
             module: JITModule::new(builder),
