@@ -593,6 +593,42 @@ pub unsafe extern "C" fn block_move_byte_trampoline(
     1 // TAGGED(0)
 }
 
+/// Dynamic CALL_CLOSURE trampoline. The JIT'd caller has popped the
+/// closure (passed as `closure_word`) and spilled its remaining
+/// compile-time stack into a Cranelift StackSlot at `args_ptr` of
+/// length `args_depth`. The top of that spill — the N call args — is
+/// at `args_ptr[args_depth - N..args_depth]`, where N is the callee
+/// arity (read from the closure's code header at runtime).
+///
+/// Returns the callee's result. On failure, returns tagged(0) = 1.
+///
+/// Tail-call only: the JIT'd caller is expected to RETURN this
+/// value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dynamic_call_trampoline(
+    closure_word: i64,
+    args_ptr: *const i64,
+    args_depth: i64,
+) -> i64 {
+    match polyml_runtime::jit_dispatch_dynamic_call(
+        closure_word as u64,
+        args_ptr,
+        args_depth,
+    ) {
+        Ok(v) => v.0 as i64,
+        Err(e) => {
+            if std::env::var("JIT_TRAMP_PANIC_ON_ERR").is_ok() {
+                eprintln!(
+                    "  dynamic_call_trampoline ERR: closure=0x{closure_word:016x} \
+                     depth={args_depth} err={e:?}"
+                );
+                std::process::abort();
+            }
+            1 // tag(0)
+        }
+    }
+}
+
 /// ALLOC_MUT_CLOSURE_B trampoline. `(n_captures, src_closure) -> i64`.
 /// Allocates an (n_captures+1)-word mutable closure; slot 0 = src
 /// closure's code addr; slots 1..n_captures+1 = tagged(0). The
@@ -758,6 +794,10 @@ impl Jit {
         builder.symbol(
             "polyml_jit_alloc_mut_closure",
             alloc_mut_closure_trampoline as *const u8,
+        );
+        builder.symbol(
+            "polyml_jit_dynamic_call",
+            dynamic_call_trampoline as *const u8,
         );
         Ok(Self {
             module: JITModule::new(builder),

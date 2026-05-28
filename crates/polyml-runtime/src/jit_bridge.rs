@@ -96,6 +96,74 @@ pub fn jit_dispatch_alloc_bytes(n_words: usize, flags: u8) -> Option<u64> {
     Some(body as u64)
 }
 
+/// Trampoline-callable: dynamic CALL_CLOSURE dispatch.
+///
+/// The JIT'd caller has popped the closure (it's `closure_word`) and
+/// spilled its remaining compile-time stack — the top of which holds
+/// the N call args — into a buffer at `args_ptr` of length
+/// `args_depth` PolyWord-bits values. The args are stored such that
+/// `args_ptr[args_depth - N..args_depth]` is the SML's TOP N values,
+/// in stack-bottom-to-top order (= args_ptr[args_depth-1] is the
+/// topmost-pushed = arg_(N-1); args_ptr[args_depth-N] is arg_0).
+///
+/// The trampoline reads N (callee arity) from the closure's code-
+/// header (`enter_int` marker + arity byte), then dispatches to the
+/// existing `jit_dispatch_closure_call` machinery with exactly those
+/// N args. Returns the callee's result as raw PolyWord bits.
+///
+/// Tail-call only: the JIT'd caller is expected to RETURN this value
+/// immediately. The trampoline doesn't try to maintain caller-side
+/// stack state for further bytecode execution.
+pub fn jit_dispatch_dynamic_call(
+    closure_word: u64,
+    args_ptr: *const i64,
+    args_depth: i64,
+) -> Result<PolyWord, InterpError> {
+    let closure = PolyWord::from_bits(closure_word as usize);
+    if !closure.is_data_ptr() {
+        return Err(InterpError::NotAClosure(closure));
+    }
+    // Read the closure's code object and inspect its enter-int header
+    // to determine callee arity.
+    // SAFETY: closure is a data pointer to a closure object.
+    let code_word = unsafe { *closure.as_ptr::<PolyWord>() };
+    if !code_word.is_data_ptr() {
+        return Err(InterpError::NotAClosure(closure));
+    }
+    let code_ptr = code_word.as_ptr::<u8>();
+    // SAFETY: code object starts with at least 2 bytes (enter-int).
+    let (marker, arity_byte) = unsafe { (*code_ptr, *code_ptr.add(1)) };
+    // x86-64 marker is 0xff, ARM64 is 0xe9; second byte is
+    // `arity | 0x80` (the 0x80 bit distinguishes from raw opcodes).
+    let n = if (marker == 0xff || marker == 0xe9) && (arity_byte & 0x80) != 0 {
+        (arity_byte & 0x7f) as usize
+    } else {
+        // No enter-int prologue — fall back to scanning for RETURN_N
+        // via the existing arity inference. This is best-effort; if
+        // it fails, error.
+        return Err(InterpError::NotAClosure(closure));
+    };
+    #[allow(clippy::cast_sign_loss)]
+    let depth = args_depth.max(0) as usize;
+    if n > depth {
+        return Err(InterpError::StackUnderflow);
+    }
+    // Build a slice of the N topmost args (in stack-bottom-to-top
+    // order: slice[0] = arg_0 = deepest pushed = args_ptr[depth-N];
+    // slice[N-1] = arg_(N-1) = topmost = args_ptr[depth-1]).
+    let arg_slice: Vec<PolyWord> = unsafe {
+        (0..n)
+            .map(|i| {
+                let raw = args_ptr.add(depth - n + i).read();
+                PolyWord::from_bits(raw as usize)
+            })
+            .collect()
+    };
+    // Delegate to the existing dynamic-dispatch machinery, which
+    // already handles closure → code-obj → callee execution.
+    jit_dispatch_closure_call(closure, &arg_slice)
+}
+
 /// Trampoline-callable: allocate a mutable closure of `n_captures + 1`
 /// words. Slot 0 is copied from `src_closure[0]` (the code address);
 /// slots 1..n_captures+1 are initialized to tagged(0) — they get

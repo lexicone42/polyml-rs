@@ -121,6 +121,7 @@ const INSTR_RESET_R_2: u8 = 0x65;
 const INSTR_RESET_R_3: u8 = 0x66;
 const INSTR_RESET_R_B: u8 = 0x27;
 const INSTR_CALL_LOCAL_B: u8 = 0x16;
+const INSTR_CALL_CLOSURE: u8 = 0x0c;
 const INSTR_TAIL_B_B: u8 = 0x7b;
 const INSTR_CLOSURE_B: u8 = 0xd0;
 const INSTR_ALLOC_BYTE_MEM: u8 = 0xbd;
@@ -450,6 +451,25 @@ fn compile_with_consts_impl(
         .module
         .declare_func_in_func(amc_id, &mut ctx.func);
 
+    // dynamic_call: (closure_word, args_ptr, args_depth) -> i64.
+    // Used by CALL_CLOSURE-in-tail-position to dispatch dynamically.
+    let mut dc_sig = jit.module.make_signature();
+    dc_sig.params.push(AbiParam::new(types::I64));
+    dc_sig.params.push(AbiParam::new(types::I64));
+    dc_sig.params.push(AbiParam::new(types::I64));
+    dc_sig.returns.push(AbiParam::new(types::I64));
+    let dc_id = jit
+        .module
+        .declare_function(
+            "polyml_jit_dynamic_call",
+            Linkage::Import,
+            &dc_sig,
+        )
+        .map_err(|e| JitError::Module(e.to_string()))?;
+    let dc_ref = jit
+        .module
+        .declare_func_in_func(dc_id, &mut ctx.func);
+
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
         let entry = builder.create_block();
@@ -717,6 +737,64 @@ fn compile_with_consts_impl(
                         builder.ins().call(alloc_func_ref, &[n_v, vals_ptr]);
                     let result_val = builder.inst_results(call_inst)[0];
                     stack.push(result_val);
+                }
+                INSTR_CALL_CLOSURE => {
+                    // Tail-call CALL_CLOSURE: pop closure, spill the
+                    // remaining compile-time stack to a Cranelift
+                    // StackSlot, call dynamic_call trampoline (which
+                    // reads N from the closure's code header and
+                    // pulls the top N values from the spill buffer),
+                    // then RETURN the result.
+                    //
+                    // Only valid in tail-call position: the next
+                    // opcode must be a RETURN. Otherwise we'd have
+                    // to know the post-call stack shape (we don't —
+                    // the trampoline consumed N args but N is dynamic).
+                    let next_op = bytecode.get(pc).copied().unwrap_or(0);
+                    let is_tail = matches!(
+                        next_op,
+                        INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3
+                        | INSTR_RETURN_B | INSTR_RETURN_W
+                    );
+                    if !is_tail {
+                        return Err(TranslateError::Unsupported {
+                            op: INSTR_CALL_CLOSURE,
+                            at: pc - 1,
+                        });
+                    }
+                    let closure = stack.pop()
+                        .ok_or(TranslateError::Underflow(pc - 1))?;
+                    let depth = stack.len();
+                    // Allocate a StackSlot big enough for all
+                    // remaining compile-time values. Even empty
+                    // stacks need a valid pointer; allocate 8 bytes
+                    // minimum.
+                    let slot_size = std::cmp::max(8, (depth * 8) as u32);
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift::prelude::StackSlotData::new(
+                            cranelift::prelude::StackSlotKind::ExplicitSlot,
+                            slot_size,
+                            3,
+                        ),
+                    );
+                    // Write compile-time stack[i] to slot offset i*8.
+                    // The trampoline reads top-N from
+                    // args_ptr[depth-N..depth], matching this layout.
+                    for (i, v) in stack.iter().enumerate() {
+                        builder.ins().stack_store(*v, slot, (i * 8) as i32);
+                    }
+                    let args_ptr = builder.ins().stack_addr(int, slot, 0);
+                    let depth_v = builder.ins().iconst(int, depth as i64);
+                    let call = builder.ins().call(
+                        dc_ref,
+                        &[closure, args_ptr, depth_v],
+                    );
+                    let result = builder.inst_results(call)[0];
+                    // Replace the entire compile-time stack with just
+                    // the result. The next opcode (RETURN_N) will pop
+                    // this and emit `return`.
+                    stack.clear();
+                    stack.push(result);
                 }
                 INSTR_CALL_LOCAL_B => {
                     // [N]: closure is at sp[N]; the N args above it
@@ -2263,6 +2341,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_CALL_FAST_RTS4
         | INSTR_CALL_FAST_RTS5 => 1,
         INSTR_CALL_LOCAL_B => 2,
+        // CALL_CLOSURE: no immediate bytes.
+        INSTR_CALL_CLOSURE => 1,
         INSTR_TUPLE_2 | INSTR_TUPLE_3 | INSTR_TUPLE_4 => 1,
         INSTR_TUPLE_B => 2,
         INSTR_IS_TAGGED_LOCAL_B => 2,
@@ -2652,6 +2732,13 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     (0, 1, Some(1), 1)
                 }
                 INSTR_PUSH_HANDLER => (1, 0, None, 0), // push handler sentinel; +1.
+                INSTR_CALL_CLOSURE => {
+                    // Tail-call: at this point control flow exits the
+                    // function. The translator only accepts
+                    // CALL_CLOSURE if it's immediately followed by a
+                    // RETURN, so terminate inference here.
+                    return Some((-min_depth).max(0) as usize);
+                }
                 INSTR_INDIRECT_0_LOCAL_0 => (1, 0, Some(0), 0),
                 INSTR_NO_OP => (0, 0, None, 0),
                 INSTR_RESET_1 => (0, 1, None, 0),
@@ -3171,6 +3258,17 @@ fn scan_branch_targets(
                 // PEEK closure: pop N args, push 1 result. Closure
                 // stays. Net: -N + 1 (was -N before fix).
                 depth = depth - n + 1;
+            }
+            INSTR_CALL_CLOSURE => {
+                // Tail-call only. After this op, control exits via
+                // RETURN. Set stack to single-element (the result)
+                // and let the scan continue to the immediate-next
+                // RETURN. If next isn't RETURN, translation will
+                // fail when we re-walk in compile_with_consts_impl.
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
+                depth = 1;
             }
             INSTR_TUPLE_2 | INSTR_TUPLE_3 | INSTR_TUPLE_4 | INSTR_TUPLE_B => {
                 let n = match op {
