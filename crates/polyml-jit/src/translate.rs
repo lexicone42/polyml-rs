@@ -45,6 +45,8 @@ const INSTR_WORD_SHIFT_R_LOG: u8 = 0xbb;
 const INSTR_SET_STACK_VAL_B: u8 = 0x25;
 const INSTR_FIXED_SUB: u8 = 0xab;
 const INSTR_FIXED_MULT: u8 = 0xac;
+const INSTR_FIXED_QUOT: u8 = 0xad;
+const INSTR_FIXED_REM: u8 = 0xae;
 const INSTR_EQUAL_WORD: u8 = 0xa0;
 const INSTR_LESS_SIGNED: u8 = 0xa2;
 const INSTR_LESS_UNSIGNED: u8 = 0xa3;
@@ -1461,6 +1463,24 @@ fn compile_with_consts_impl(
                     let result = builder.ins().iadd(doubled, one);
                     stack.push(result);
                 }
+                INSTR_FIXED_QUOT | INSTR_FIXED_REM => {
+                    // Interp: pops x (top, divisor), pops y (dividend),
+                    // pushes y/x or y%x. Division by zero traps (we
+                    // let Cranelift's sdiv/srem trap on 0 like SIGFPE).
+                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let xn = builder.ins().sshr_imm(x, 1);
+                    let yn = builder.ins().sshr_imm(y, 1);
+                    let result_n = if op == INSTR_FIXED_QUOT {
+                        builder.ins().sdiv(yn, xn)
+                    } else {
+                        builder.ins().srem(yn, xn)
+                    };
+                    let doubled = builder.ins().ishl_imm(result_n, 1);
+                    let one = builder.ins().iconst(int, 1);
+                    let result = builder.ins().iadd(doubled, one);
+                    stack.push(result);
+                }
                 INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3 => {
                     // For our JIT ABI we just return the top value;
                     // the SML-stack pops of args+closure+retPC are
@@ -2129,6 +2149,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_FIXED_ADD
         | INSTR_FIXED_SUB
         | INSTR_FIXED_MULT
+        | INSTR_FIXED_QUOT
+        | INSTR_FIXED_REM
         | INSTR_WORD_ADD
         | INSTR_WORD_SUB
         | INSTR_WORD_MULT
@@ -2561,6 +2583,7 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     (1, n, None, 1)
                 }
                 INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
+                | INSTR_FIXED_QUOT | INSTR_FIXED_REM
                 | INSTR_WORD_ADD | INSTR_WORD_SUB | INSTR_WORD_MULT
                 | INSTR_WORD_DIV | INSTR_WORD_MOD
                 | INSTR_WORD_AND | INSTR_WORD_OR | INSTR_WORD_XOR
@@ -3047,6 +3070,7 @@ fn scan_branch_targets(
                 depth += 1;
             }
             INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
+            | INSTR_FIXED_QUOT | INSTR_FIXED_REM
             | INSTR_WORD_ADD | INSTR_WORD_SUB | INSTR_WORD_MULT
             | INSTR_WORD_DIV | INSTR_WORD_MOD
             | INSTR_WORD_AND | INSTR_WORD_OR | INSTR_WORD_XOR
