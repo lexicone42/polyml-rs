@@ -443,10 +443,15 @@ survive a flaky terminal — one invocation yields the whole picture).
   loader). Run standalone: `tools/sml-exp.sh /tmp/hol4_kernel
   crates/polyml-bin/tests/hol4_support/theory_subsystem.sml`.
 - `crates/polyml-bin/tests/hol4_theory.rs` (+ `tests/common/mod.rs`) —
-  `theory_subsystem_loads` (asserts ≥50/54) and `theory_new_theory_runs`
-  (asserts `Theory.new_theory` executes — currently SUCCEEDS, REFL works).
-  `#[ignore]`; needs `/tmp/hol4_kernel`. `common/mod.rs` has the reusable
-  `run_theory_subsystem` + `classify_errors`/`parse_loaded` helpers.
+  `theory_subsystem_loads` (asserts ≥50/54), `theory_new_theory_runs`
+  (`Theory.new_theory` executes — SUCCEEDS, REFL works), and
+  `theory_dev_proof` (declares a type + consts + a schematic axiom on a
+  user theory, then derives `|- mul e (mul e x) = x` via `Thm.INST` +
+  `Thm.TRANS` — real theorem development beyond the kernel primitives, no
+  Parse needed). `#[ignore]`; needs `/tmp/hol4_kernel`. `common/mod.rs`
+  has the reusable `run_theory_subsystem` + `classify_errors`/`parse_loaded`
+  helpers. `tools/closure-probe.sh <ckpt> <dir>…` is a generic "how far
+  does this subsystem load?" probe (enumerate + fixpoint-load + summarize).
   ```sh
   cargo build --release -p polyml-bin
   tools/build-hol4-checkpoints.sh
@@ -465,10 +470,23 @@ Two runtime gaps this work surfaced (both real, worth fixing):
 
 HOL4 Theory subsystem status: 50/54 modules compile + load + run on the
 interpreter (the 4 stuck are the theorem-DB *search* layer: DB /
-DBSearchParser / TheoryReader — not needed for Theory). See the
-per-project exo-self notes (2026-05-30) for the full dependency
-archaeology and the keystone fix (Thm.hash leak hidden by Overlay's
-opaque `open Kernel`).
+DBSearchParser / TheoryReader — DBSearchParser needs the `regexpMatch`
+library which isn't vendored). See the per-project exo-self notes
+(2026-05-30) for the full dependency archaeology and the keystone fix
+(Thm.hash leak hidden by Overlay's opaque `open Kernel`).
+
+The **tactic layer is gated on the Parse subsystem** (measured, not
+guessed): `src/1` tactic files load 5/17 on the Theory checkpoint — the
+rest need `boolSyntax`→`boolTheory`→`boolScript`. `boolScript.sml` is in
+HOL4's extended `Theory bool[bare]` script syntax and uses `“…”` term
+quotations (needs the `quse`/quote-filter preprocessor). And `src/parse`
+itself loads only **48/99** — the parser core (`term_grammar`, `Pretype`,
+`Preterm`, `Absyn`, `parse_term`, `PPBackEnd`) plus the **ml-lex-generated
+`base_lexer`** (not checked in — same wall class as HOLsexp). So a real
+tactic proof is a multi-session arc behind a generated-lexer wall; the
+`theory_dev_proof` test is the "beyond the kernel" proof reachable today
+without it. `tools/closure-probe.sh /tmp/hol4_theory src/parse` reproduces
+the 48/99 number.
 
 ## RTS calling conventions
 

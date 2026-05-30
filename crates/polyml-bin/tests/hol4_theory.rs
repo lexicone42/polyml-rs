@@ -91,6 +91,61 @@ val () =
     );
 }
 
+/// A theorem DERIVED on a user-declared theory (no Parse subsystem needed):
+/// declare a fresh type `u`, constants `e`/`mul`, a schematic left-identity
+/// axiom `mul e x = x`, then compose `Thm.INST` + `Thm.TRANS` into
+/// `|- mul e (mul e x) = x` (0 hypotheses). Real theorem *development* beyond
+/// the fixed kernel primitives, on the live Theory subsystem.
+#[test]
+#[ignore = "slow: needs /tmp/hol4_kernel (tools/build-hol4-checkpoints.sh)"]
+fn theory_dev_proof() {
+    let proof = r#"
+val () = (let
+  val _   = Theory.new_theory "demo"
+  val _   = Theory.new_type ("u", 0)
+  val u   = Type.mk_type ("u", [])
+  fun fnty (a,b) = Type.mk_type ("fun", [a, b])
+  val _   = Theory.new_constant ("e", u)
+  val _   = Theory.new_constant ("mul", fnty (u, fnty (u, u)))
+  val e   = Term.mk_const ("e", u)
+  val mul = Term.mk_const ("mul", fnty (u, fnty (u, u)))
+  val x   = Term.mk_var ("x", u)
+  fun mk2 (f,a,b) = Term.mk_comb (Term.mk_comb (f, a), b)
+  (* FinalTerm (opaque kernel ascription) hides prim_mk_eq/dest_eq_ty, so build
+     equality from min's polymorphic `=` via mk_const, and check by aconv. *)
+  val bool = Type.mk_type ("bool", [])
+  val eqc  = Term.mk_const ("=", fnty (u, fnty (u, bool)))
+  fun mkeq (a,b) = mk2 (eqc, a, b)
+  val left_id = Theory.new_axiom ("left_id", mkeq (mk2 (mul,e,x), x))
+  val eex = mk2 (mul, e, x)
+  val t1  = Thm.INST [{redex = x, residue = eex}] left_id   (* mul e (mul e x) = mul e x *)
+  val derived = Thm.TRANS t1 left_id                        (* mul e (mul e x) = x *)
+  val expected = mkeq (mk2 (mul, e, eex), x)
+  val concl_ok = Term.aconv (Thm.concl derived) expected
+in
+  print ("DEMO concl_ok=" ^ Bool.toString concl_ok
+         ^ " hyps=" ^ Int.toString (length (Thm.hyp derived)) ^ "\n");
+  print "DEMO_PROOF_OK\n"
+end)
+handle e => print ("DEMO_PROOF_FAIL " ^ General.exnMessage e ^ "\n");
+"#;
+    let Some((out, _)) = run_theory_subsystem(proof, 200_000_000_000) else {
+        eprintln!("SKIP: /tmp/hol4_kernel or vendor/hol4 missing — run tools/build-hol4-checkpoints.sh");
+        return;
+    };
+    assert!(
+        out.contains("DEMO_PROOF_OK"),
+        "theory-development proof did not complete.\n{}",
+        tail(&out, 30)
+    );
+    assert!(
+        out.contains("concl_ok=true") && out.contains("hyps=0"),
+        "derived theorem has the wrong shape: {}",
+        grep_line(&out, "DEMO concl_ok")
+    );
+    eprintln!("theory-dev proof: {}", grep_line(&out, "DEMO concl_ok"));
+}
+
 fn grep_line(out: &str, needle: &str) -> String {
     out.lines()
         .find(|l| l.contains(needle))
