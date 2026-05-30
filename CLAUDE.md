@@ -422,6 +422,54 @@ poly run --profile --trace-rts <image>
 histogram on exit. See `crates/polyml-runtime/tests/exec_bootstrap_profile.rs`
 for a deeper-stop-and-dump example.
 
+## HOL4 / SML experiment harness
+
+Built 2026-05-30 to make SML reconstruction debugging repeatable (and to
+survive a flaky terminal — one invocation yields the whole picture).
+
+- `tools/sml-exp.sh [--steps N] [--cwd D] <checkpoint> <driver.sml>` —
+  pipe an SML driver through `poly run <checkpoint>` and print ONE
+  structured summary (result, fixpoint `LOADED_OK n/m` + stuck list,
+  grouped compile diagnostics: undeclared structures/values, type
+  errors, sig mismatches). Also writes a `.summary` next to the log.
+- `tools/build-hol4-checkpoints.sh [--force] [basis|kernel|all]` —
+  builds `/tmp/basis_loaded` (basis) and `/tmp/hol4_kernel` (basis +
+  LCF kernel). The warm kernel image drops Theory-load iteration from
+  ~3 min to ~15s.
+- `crates/polyml-bin/tests/hol4_support/` — the captured HOL4 Theory
+  reconstruction (was /tmp scratch): `build_kernel_checkpoint.sml`,
+  `theory_subsystem.sml` (Net + real Overlay opaque re-ascription +
+  HOLsexp/SHA1 stubs + Systeml stub + the ~54-file closure + fixpoint
+  loader). Run standalone: `tools/sml-exp.sh /tmp/hol4_kernel
+  crates/polyml-bin/tests/hol4_support/theory_subsystem.sml`.
+- `crates/polyml-bin/tests/hol4_theory.rs` (+ `tests/common/mod.rs`) —
+  `theory_subsystem_loads` (asserts ≥50/54) and `theory_new_theory_runs`
+  (asserts `Theory.new_theory` executes — currently SUCCEEDS, REFL works).
+  `#[ignore]`; needs `/tmp/hol4_kernel`. `common/mod.rs` has the reusable
+  `run_theory_subsystem` + `classify_errors`/`parse_loaded` helpers.
+  ```sh
+  cargo build --release -p polyml-bin
+  tools/build-hol4-checkpoints.sh
+  cargo test --release -p polyml-bin --test hol4_theory -- --ignored --nocapture
+  ```
+
+Two runtime gaps this work surfaced (both real, worth fixing):
+1. **`OS.Process.getEnv` returns `SOME ""`** for set env vars (stubbed/
+   broken) — so HOL paths must be passed by other means (we use the
+   `../hol4` relative path from cwd = `vendor/polyml`).
+2. **An uncaught exception propagating through a single `PolyML.use`**
+   trips the "exception packet being called as a closure → call to
+   non-closure value" halt (interpreter exception-unwinding bug). Piping
+   source per-declaration to the REPL avoids it (each top-level decl is
+   handled independently). `run_theory_subsystem` pipes for this reason.
+
+HOL4 Theory subsystem status: 50/54 modules compile + load + run on the
+interpreter (the 4 stuck are the theorem-DB *search* layer: DB /
+DBSearchParser / TheoryReader — not needed for Theory). See the
+per-project exo-self notes (2026-05-30) for the full dependency
+archaeology and the keystone fix (Thm.hash leak hidden by Overlay's
+opaque `open Kernel`).
+
 ## RTS calling conventions
 
 The most common cause of arity-mismatch bugs:
