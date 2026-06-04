@@ -594,13 +594,31 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   default `bool_ss` (UNWIND_ss → `Unwind`→`refuteLib`/`Canon`/`tautLib`→
   `HolSatLib` SAT subsystem; `Canon` also has backtick quotes) is NOT built — a
   hand-rolled simpset suffices and avoids those walls.
-- `bossLib`/`BasicProvers` — a build campaign: num/pair/pred_set/list/option
-  `*Script.sml` theories (all reuse the now-working Script→Theory recipe) +
-  `Datatype`/`TotalDefn`.
+- **`numTheory` + INDUCTION — DONE** (`/tmp/hol4_num`, `build_num_checkpoint.sml`,
+  `hol4_induction.rs`). `numScript.sml` builds via the recipe and bootstraps the
+  naturals + `numTheory.INDUCTION` from `boolTheory.INFINITY_AX`. With HOL4's
+  generic `src/1/Prim_rec` (INDUCT_THEN takes the induction theorem as an arg —
+  no prim_recTheory needed) and `INDUCT_TAC = Prim_rec.INDUCT_THEN
+  numTheory.INDUCTION Tactic.ASSUME_TAC`, genuine induction proofs run:
+  `⊢ ∀n. n = 0 ∨ ∃m. n = SUC m` and `⊢ ∀n. ¬(SUC n = n)` (verified NOT provable
+  without induction). `⊢ ∀n. n + 0 = n` is NOT done: `+` needs `num_Axiom` →
+  `SIMP_REC` → `UNIQUE_SKOLEM_THM` → a real `bool_ss` (UNWIND_ss → the SAT
+  subsystem) — a multi-day reconstruction; see `build_prim_rec_checkpoint.sml`
+  for the documented boundary.
+- `bossLib`/`BasicProvers` + arithmetic — the remaining campaign: a real
+  `bool_ss`/`SIMP_TAC` (needs the SAT subsystem `HolSatLib` + de-backticking
+  `Canon`), `num_Axiom`/`new_recursive_definition` for `+`/`*`, then the
+  pair/pred_set/list/option `*Script.sml` theories (all reuse the recipe) +
+  `Datatype`/`TotalDefn`. This is where "real mathematics" (arithmetic by
+  induction, list lemmas, …) opens up.
 
-`theory_dev_proof` remains the kernel-level proof; the tactic/rewrite tests are
-the goal-directed proofs. `tools/closure-probe.sh /tmp/hol4_theory src/parse`
-measures parse-layer load on the Theory base (pre-fixes).
+The HOL4 ladder so far (each a `build-hol4-checkpoints.sh` target + an
+`#[ignore]` regression test): kernel → theory → parse → bool → tactic → rewrite
+→ marker → combin → simp → num. Headline proofs on `/tmp/hol4_simp`:
+the Drinker Paradox `⊢ ∃x. D x ⇒ ∀y. D y`, quantifier duality, `S K K = I`
+(`hol4_fancy.rs`); on `/tmp/hol4_num`: induction over ℕ (`hol4_induction.rs`).
+`theory_dev_proof` remains the kernel-level proof. `tools/closure-probe.sh
+/tmp/hol4_theory src/parse` measures parse-layer load on the Theory base.
 
 ## RTS calling conventions
 
