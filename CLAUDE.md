@@ -600,17 +600,25 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   generic `src/1/Prim_rec` (INDUCT_THEN takes the induction theorem as an arg —
   no prim_recTheory needed) and `INDUCT_TAC = Prim_rec.INDUCT_THEN
   numTheory.INDUCTION Tactic.ASSUME_TAC`, genuine induction proofs run:
-  `⊢ ∀n. n = 0 ∨ ∃m. n = SUC m` and `⊢ ∀n. ¬(SUC n = n)` (verified NOT provable
-  without induction). `⊢ ∀n. n + 0 = n` is NOT done: `+` needs `num_Axiom` →
-  `SIMP_REC` → `UNIQUE_SKOLEM_THM` → a real `bool_ss` (UNWIND_ss → the SAT
-  subsystem) — a multi-day reconstruction; see `build_prim_rec_checkpoint.sml`
-  for the documented boundary.
-- `bossLib`/`BasicProvers` + arithmetic — the remaining campaign: a real
-  `bool_ss`/`SIMP_TAC` (needs the SAT subsystem `HolSatLib` + de-backticking
-  `Canon`), `num_Axiom`/`new_recursive_definition` for `+`/`*`, then the
-  pair/pred_set/list/option `*Script.sml` theories (all reuse the recipe) +
-  `Datatype`/`TotalDefn`. This is where "real mathematics" (arithmetic by
-  induction, list lemmas, …) opens up.
+  `⊢ ∀n. n = 0 ∨ ∃m. n = SUC m` and `⊢ ∀n. ¬(SUC n = n)`.
+- **`⊢ ∀n. n + 0 = n` — DONE** (`num_arith_trophy.sml`, `hol4_induction.rs::
+  arithmetic_induction_n_plus_0`). The canonical arithmetic induction, proved BY
+  HAND on `/tmp/hol4_num` — the "multi-day SAT/bool_ss wall" was **sidesteppable**:
+  `UNIQUE_SKOLEM_THM` → `num_Axiom` (primitive recursion) → `add` (via
+  `num_Axiom` + `new_specification`) → `INDUCT_TAC`, with NO bool_ss, NO SAT
+  subsystem, NO relationTheory, no `Prim_rec`. Two reusable techniques:
+  (1) **plain `REWRITE_TAC` is first-order** — it can't rewrite with the
+  higher-order `FORALL_AND_THM`/`SKOLEM_THM`/`EXISTS_UNIQUE_THM`; use
+  `Conv.HO_REWR_CONV` under `TOP_DEPTH_CONV` (this is what `bool_ss` was really
+  providing for UNIQUE_SKOLEM_THM). (2) `LESS_THM` is provable **TC-free**
+  (induction + `num_CASES` + `LESS_MONO_REV`), so `<` needs no `relationTheory`.
+  With `num_Axiom` in hand, recursive function definitions over ℕ are reachable
+  (direct `num_Axiom` + `new_specification`) without the SAT path.
+- `bossLib`/`BasicProvers` — the remaining campaign: a faithful `bool_ss`/
+  `SIMP_TAC` (its `UNWIND_ss` → the SAT subsystem `HolSatLib`; but the arithmetic
+  result above shows HO-conversions can replace `bool_ss` for many proofs),
+  `Datatype`/`TotalDefn`, and the pair/pred_set/list/option `*Script.sml`
+  theories (all reuse the recipe). Broader "real mathematics" opens up here.
 
 The HOL4 ladder so far (each a `build-hol4-checkpoints.sh` target + an
 `#[ignore]` regression test): kernel → theory → parse → bool → tactic → rewrite
