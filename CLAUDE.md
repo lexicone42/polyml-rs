@@ -574,18 +574,25 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
 - `REWRITE_TAC [thm]`/`ASM_REWRITE_TAC`/`ONCE_REWRITE_TAC` — DONE.
 - `new_theory` on a non-empty base — DONE (keystone above).
 - `markerTheory` — DONE (`/tmp/hol4_marker`).
-- `combinTheory` — NEXT. `combinScript.sml` is `Theory combin[bare]; Libs
-  HolKernel Parse boolLib computeLib` and uses `Q.*` tactics — so it needs the
-  `Q` structure AND `computeLib` (the CBV evaluator) loaded first. More involved
-  than marker.
-- `SIMP_TAC`/`simpLib` (`src/simp/src`, ~17 hand-written-SML modules, NO
-  ml-yacc) — needs bool+combin+marker theories + leaves liteLib, Ho_Net/
-  Ho_Rewrite, refuteLib/AC/Canon, tautLib, markerSyntax/markerLib, Hol_pp
-  (expanded DB stub), ParseExtras, Prim_rec (patch its `grammarDB{bool}` valOf),
-  then the 9-module core (Trace→Opening→Travrules→Cond_rewr→Traverse→simpLib→
-  pureSimps→Unwind→boolSimps). Smallest goal: `simpLib.SIMP_CONV bool_ss []
-  ``T /\ p`` = ⊢ T ∧ p ⇔ p`. The synthesized-boolLib richness for the simp core's
-  open-sets is the one untested risk.
+- `combinTheory` — DONE (`/tmp/hol4_combin`, `build_combin_checkpoint.sml`).
+  combinScript only *opens* `computeLib`/`combinpp` (never calls them), so they're
+  stubbed (+ a no-op `compute` ThmAttribute, since `boolLib.save_thm_attrs` raises
+  on unknown attrs); the real leaf needed was `src/q/Q`. Avoids the heavy
+  computeLib/clauses/TypeBase closure. `combinTheory.I_THM = ⊢ ∀x. I x = x`.
+- `SIMP_TAC`/`simpLib` (`src/simp/src`, hand-written SML, NO ml-yacc) — IN
+  PROGRESS. Build on `/tmp/hol4_combin`. The simp leaves load and the 5 core
+  modules (Trace/Opening/Travrules/Cond_rewr/Traverse) compile against the
+  synthesized boolLib (richness gap = ZERO for them). simpLib's entrypoint needs:
+  `Hol_pp` (expanded DB stub), `ParseExtras`, `Prim_rec` (patch its
+  `grammarDB{bool}` valOf → global Parse), `liteLib`, `AC`, `term_tactic`,
+  `Ho_Rewrite`, `simpfrag`, real `markerSyntax`, real-or-stub `TypeBasePure`/
+  `TypeBase` (simpLib only type-checks `ty_name_of`/`simpls_of`/`fetch`), and a
+  TYPED `markerLib` STUB of 15 names (use-sites simpLib.sml:787-983 — the real
+  markerLib needs the absent proofManagerLib). bool_ss needs pureSimps+boolSimps
+  (boolSimps needs `combinTheory.I_THM` ✓); `UNWIND_ss`/full bool_ss is blocked
+  (`Unwind`→`refuteLib`→`Canon` has backtick quotes + `tautLib`→`HolSatLib` SAT
+  subsystem, absent) — NOT needed for a basic SIMP_CONV with a hand-rolled
+  simpset (`simpLib.empty_ss` + rewrites). Goal: `SIMP_CONV <ss> [I_THM]` rewrites.
 - `bossLib`/`BasicProvers` — a build campaign: num/pair/pred_set/list/option
   `*Script.sml` theories (all reuse the now-working Script→Theory recipe) +
   `Datatype`/`TotalDefn`.
