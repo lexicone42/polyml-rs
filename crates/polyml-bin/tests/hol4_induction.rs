@@ -88,3 +88,36 @@ fn induction_proofs_over_num() {
     );
     eprintln!("HOL4 induction trophy: both proofs PASS on the Rust interpreter");
 }
+
+/// The canonical arithmetic induction `|- !n. n + 0 = n`, proved by hand on
+/// /tmp/hol4_num — including the primitive-recursion theorem `num_Axiom` and
+/// `UNIQUE_SKOLEM_THM` — WITHOUT bool_ss / the SAT subsystem / relationTheory
+/// (higher-order `Conv.HO_REWR_CONV` substitutes for the bool_ss rewrites; `<`
+/// is handled TC-free). See `num_arith_trophy.sml`.
+#[test]
+#[ignore = "slow: needs /tmp/hol4_num (tools/build-hol4-checkpoints.sh num)"]
+fn arithmetic_induction_n_plus_0() {
+    let Some(num) = num_checkpoint_path() else {
+        eprintln!("SKIP: /tmp/hol4_num missing — run tools/build-hol4-checkpoints.sh num");
+        return;
+    };
+    let Some((out, _code)) =
+        run_support_driver_on(&num, "num_arith_trophy.sml", 400_000_000_000)
+    else {
+        eprintln!("SKIP: vendor/hol4 or driver missing");
+        return;
+    };
+    assert!(out.contains("TROPHY_DONE"), "num_arith_trophy.sml did not finish.\n{}", tail(&out, 40));
+    // primitive-recursion theorem (the blocker that was sidestepped)
+    assert!(out.contains("num_Axiom_OK:"), "num_Axiom not derived.\n{}", tail(&out, 40));
+    // the canonical arithmetic induction, zero hypotheses
+    assert!(out.contains("TROPHY_HYPS=0"), "trophy had hypotheses.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("FULL_TROPHY_PASS")
+            && (out.contains("∀n. n + 0 = n") || out.contains("!n. n + 0 = n")),
+        "|- !n. n + 0 = n not proved.\n{}",
+        tail(&out, 40)
+    );
+    assert!(!out.contains("_FAIL"), "a step failed.\n{}", tail(&out, 40));
+    eprintln!("HOL4 arithmetic induction: |- !n. n + 0 = n PROVEN on the Rust interpreter");
+}
