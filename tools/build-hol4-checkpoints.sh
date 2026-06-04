@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# build-hol4-checkpoints.sh -- build the two warm Poly/ML images the HOL4
-# experiments rely on:
-#   /tmp/basis_loaded   basis only        (Bootstrap.use "basis/build.sml")
-#   /tmp/hol4_kernel    basis + LCF kernel (build_kernel_checkpoint.sml)
+# build-hol4-checkpoints.sh -- build the warm Poly/ML images the HOL4
+# experiments rely on, in dependency order:
+#   /tmp/basis_loaded   basis only          (Bootstrap.use "basis/build.sml")
+#   /tmp/hol4_kernel    basis + LCF kernel   (build_kernel_checkpoint.sml)
+#   /tmp/hol4_theory    + Theory subsystem   (theory_subsystem.sml + export)
+#   /tmp/hol4_parse     + term/type parser   (build_parse_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -16,8 +18,8 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|all) TARGET="$1"; shift;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0;;
+    basis|kernel|theory|parse|all) TARGET="$1"; shift;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -64,8 +66,48 @@ build_kernel() {
   fi
 }
 
+build_theory() {
+  [ -f /tmp/hol4_kernel ] || { echo "theory: need /tmp/hol4_kernel first"; build_kernel || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_theory ]; then
+    echo "theory: /tmp/hol4_theory exists ($(wc -c </tmp/hol4_theory) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "theory: building /tmp/hol4_theory …"
+  # theory_subsystem.sml loads the Theory closure but does not export (it is
+  # also driven directly by the hol4_theory tests); append the export tail.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 100000000000 /tmp/hol4_kernel \
+      < <( cat "$SUPPORT/theory_subsystem.sml"; \
+           printf '\nval () = (print "EXPORTING /tmp/hol4_theory\\n"; PolyML.export("/tmp/hol4_theory", PolyML.rootFunction); print "THEORY_CHECKPOINT_DONE\\n");\n' ) \
+    ) >/tmp/build-theory.log 2>&1
+  if [ -f /tmp/hol4_theory ] && grep -qa "THEORY_CHECKPOINT_DONE" /tmp/build-theory.log; then
+    echo "theory: OK ($(wc -c </tmp/hol4_theory) bytes; $(grep -aoE 'LOADED_OK [0-9]+/[0-9]+' /tmp/build-theory.log | tail -1))"
+  else
+    echo "theory: FAILED — see /tmp/build-theory.log"; tail -8 /tmp/build-theory.log; return 1
+  fi
+}
+
+build_parse() {
+  [ -f /tmp/hol4_theory ] || { echo "parse: need /tmp/hol4_theory first"; build_theory || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_parse ]; then
+    echo "parse: /tmp/hol4_parse exists ($(wc -c </tmp/hol4_parse) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "parse: building /tmp/hol4_parse …"
+  # build_parse_checkpoint.sml exports /tmp/hol4_parse itself, gated on a
+  # Parse.Term/Parse.Type smoke test (PARSE_SMOKE_PASS).
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 200000000000 /tmp/hol4_theory \
+      < "$SUPPORT/build_parse_checkpoint.sml" ) >/tmp/build-parse.log 2>&1
+  if [ -f /tmp/hol4_parse ] && grep -qa "PARSE_CHECKPOINT_DONE" /tmp/build-parse.log; then
+    echo "parse: OK ($(wc -c </tmp/hol4_parse) bytes; $(grep -aoE 'LOADED_OK [0-9]+/[0-9]+' /tmp/build-parse.log | tail -1); smoke PASS)"
+  else
+    echo "parse: FAILED — see /tmp/build-parse.log"; tail -10 /tmp/build-parse.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)  build_basis;;
   kernel) build_kernel;;
-  all)    build_basis && build_kernel;;
+  theory) build_theory;;
+  parse)  build_parse;;
+  all)    build_basis && build_kernel && build_theory && build_parse;;
 esac

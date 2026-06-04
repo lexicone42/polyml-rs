@@ -475,18 +475,46 @@ library which isn't vendored). See the per-project exo-self notes
 (2026-05-30) for the full dependency archaeology and the keystone fix
 (Thm.hash leak hidden by Overlay's opaque `open Kernel`).
 
-The **tactic layer is gated on the Parse subsystem** (measured, not
-guessed): `src/1` tactic files load 5/17 on the Theory checkpoint — the
-rest need `boolSyntax`→`boolTheory`→`boolScript`. `boolScript.sml` is in
-HOL4's extended `Theory bool[bare]` script syntax and uses `“…”` term
-quotations (needs the `quse`/quote-filter preprocessor). And `src/parse`
-itself loads only **48/99** — the parser core (`term_grammar`, `Pretype`,
-`Preterm`, `Absyn`, `parse_term`, `PPBackEnd`) plus the **ml-lex-generated
-`base_lexer`** (not checked in — same wall class as HOLsexp). So a real
-tactic proof is a multi-session arc behind a generated-lexer wall; the
-`theory_dev_proof` test is the "beyond the kernel" proof reachable today
-without it. `tools/closure-probe.sh /tmp/hol4_theory src/parse` reproduces
-the 48/99 number.
+HOL4 **term/type parser status: WORKING** (2026-06-04). The full
+`src/parse` core — 79/79 modules including `term_grammar`, `Pretype`,
+`Preterm`, `Absyn`, `parse_type`, `parse_term`, `Overload`, `term_pp`,
+`type_pp`, `Parse` — compiles, loads, and *runs* on the interpreter.
+`Parse.Term [QUOTE "\\x. x"]` and `Parse.Type [QUOTE ":'a -> 'a"]` parse
+real quotations into HOL4 terms/types (see `crates/polyml-bin/tests/
+hol4_parse.rs`). Build the warm checkpoint with
+`tools/build-hol4-checkpoints.sh parse` → `/tmp/hol4_parse` (chain:
+basis → kernel → theory → parse; the script gates the export on a
+Parse.Term/Parse.Type smoke test). `base_lexer.sml` IS checked in
+(ml-lex-generated, loads cleanly — the historical "generated-lexer wall"
+does not apply), and `term_tokens.sml` is rewritten to `\DDD` escapes so
+our ≥0x80-rejecting string lexer accepts it.
+
+**The keystone was a missing pervasive `Interrupt`** (root-caused
+2026-06-04, not the earlier "Interrupt-dispatch" red herring). Real
+PolyML installs Interrupt/Bind/Match into the INITIAL top-level namespace
+(`mlsource/MLCompiler/INITIALISE_.ML:524`); `basis/General.sml` re-binds
+Bind/Match/Overflow/etc. at top level but **NOT Interrupt**, and our
+checkpoint export/reload drops the compiler-pervasive one — so a bare
+`Interrupt` was *unbound* on our checkpoints. HOL4's
+`src/portableML/Portable.sml` uses `... handle Interrupt => raise
+Interrupt | _ => NONE` for `Lib.total` / `Lib.can` / `with_exn`; with
+`Interrupt` unbound those parse as a catch-all **variable** pattern that
+re-raises everything, so `total`/`can` never returned `NONE`. That
+silently broke `term_grammar`'s `min_grammar` build
+(`Overload.add_overloading` → `strip_comb` → `total dest_comb` re-raised
+"not a comb") and ~22 downstream parse modules. Fix: one line in
+`build_kernel_checkpoint.sml` — `exception Interrupt = RunCall.Interrupt;`
+before `Portable.sml` compiles. (Two smaller leaf fixes rode along:
+`Systeml.OS` for `type_pp.sml:15`, and the `AList`/`Graph`/`SymGraph`/
+`ImplicitGraph` graph libs for `AncestryData.sml`.)
+
+The **tactic layer** (`src/1`) is the next wall, still gated on
+`boolSyntax`→`boolTheory`→`boolScript`. `boolScript.sml` uses HOL4's
+extended `Theory bool[bare]` script syntax with `“…”` term quotations
+(needs the `quse`/quote-filter preprocessor). With the parser now live,
+that arc is reachable; until then `theory_dev_proof` remains the
+"beyond the kernel" proof. `tools/closure-probe.sh /tmp/hol4_theory
+src/parse` measures parse-layer load on the Theory base (pre-fixes).
 
 ## RTS calling conventions
 

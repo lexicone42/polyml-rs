@@ -28,6 +28,22 @@ structure Systeml = struct
 end;
 structure Path = OS.Path;
 
+(* Restore the pervasive `Interrupt` exception.  Real PolyML installs
+   Interrupt/Bind/Match into the INITIAL top-level namespace
+   (mlsource/MLCompiler/INITIALISE_.ML:524), and basis/General.sml
+   re-binds Bind/Match/Overflow/etc. at top level — but NOT Interrupt.
+   Our checkpoint export/reload keeps the basis-rebound names yet drops
+   the compiler-pervasive Interrupt, so a bare `Interrupt` is unbound
+   here.  HOL4's src/portableML/Portable.sml relies on a top-level
+   `Interrupt` for the standard `... handle Interrupt => raise Interrupt
+   | _ => NONE` idiom (Lib.total / Lib.can / with_exn, lines 25/85/87/
+   121/227).  With Interrupt unbound those parse as a catch-all VARIABLE
+   pattern that re-raises EVERYTHING, so `total`/`can` never return
+   NONE — which silently breaks e.g. term_grammar's min_grammar build
+   (Overload.add_overloading -> strip_comb -> total dest_comb) and most
+   of the parser core.  Bind it before Portable.sml compiles. *)
+exception Interrupt = RunCall.Interrupt;
+
 pr "\nKERNEL_PRELUDE_START\n";
 PMu "quotation_dtype.sml"; PMu "poly/PrettyImpl.sml";
 PMu "poly/Exn.sig"; PMu "poly/Exn.sml";

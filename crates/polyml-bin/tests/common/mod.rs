@@ -46,6 +46,13 @@ pub fn kernel_checkpoint_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Warm basis+kernel+Theory+parser checkpoint built by
+/// `tools/build-hol4-checkpoints.sh parse`.
+pub fn parse_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/hol4_parse");
+    p.exists().then_some(p)
+}
+
 /// A file under `crates/polyml-bin/tests/hol4_support/`.
 pub fn support_file(name: &str) -> PathBuf {
     workspace_root()
