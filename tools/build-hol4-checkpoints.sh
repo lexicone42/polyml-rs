@@ -8,8 +8,9 @@
 #   /tmp/hol4_bool      + bool theory        (build_bool_checkpoint.sml)
 #   /tmp/hol4_tactic    + src/1 tactic layer (build_tactic_checkpoint.sml)
 #   /tmp/hol4_rewrite   + REWRITE_TAC engine (build_rewrite_checkpoint.sml)
+#   /tmp/hol4_marker    + markerTheory       (build_marker_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -21,7 +22,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -162,6 +163,24 @@ build_rewrite() {
   fi
 }
 
+build_marker() {
+  [ -f /tmp/hol4_rewrite ] || { echo "marker: need /tmp/hol4_rewrite first"; build_rewrite || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_marker ]; then
+    echo "marker: /tmp/hol4_marker exists ($(wc -c </tmp/hol4_marker) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "marker: building /tmp/hol4_marker …"
+  # build_marker_checkpoint.sml builds markerTheory from src/marker/markerScript.sml
+  # (the first *Script theory on a NON-empty base); export gated on MARKER_SMOKE_PASS.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 200000000000 /tmp/hol4_rewrite \
+      < "$SUPPORT/build_marker_checkpoint.sml" ) >/tmp/build-marker.log 2>&1
+  if [ -f /tmp/hol4_marker ] && grep -qa "MARKER_CHECKPOINT_DONE" /tmp/build-marker.log; then
+    echo "marker: OK ($(wc -c </tmp/hol4_marker) bytes; $(grep -aoE 'MARKERTHEORY_NAMES [0-9]+' /tmp/build-marker.log | tail -1) names; smoke PASS)"
+  else
+    echo "marker: FAILED — see /tmp/build-marker.log"; tail -12 /tmp/build-marker.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)   build_basis;;
   kernel)  build_kernel;;
@@ -170,6 +189,7 @@ case "$TARGET" in
   bool)    build_bool;;
   tactic)  build_tactic;;
   rewrite) build_rewrite;;
+  marker)  build_marker;;
   all)     build_basis && build_kernel && build_theory && build_parse \
-             && build_bool && build_tactic && build_rewrite;;
+             && build_bool && build_tactic && build_rewrite && build_marker;;
 esac
