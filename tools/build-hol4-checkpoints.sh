@@ -10,8 +10,9 @@
 #   /tmp/hol4_rewrite   + REWRITE_TAC engine (build_rewrite_checkpoint.sml)
 #   /tmp/hol4_marker    + markerTheory       (build_marker_checkpoint.sml)
 #   /tmp/hol4_combin    + combinTheory       (build_combin_checkpoint.sml)
+#   /tmp/hol4_simp      + simpLib SIMP_TAC   (build_simp_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -23,7 +24,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -200,6 +201,24 @@ build_combin() {
   fi
 }
 
+build_simp() {
+  [ -f /tmp/hol4_combin ] || { echo "simp: need /tmp/hol4_combin first"; build_combin || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_simp ]; then
+    echo "simp: /tmp/hol4_simp exists ($(wc -c </tmp/hol4_simp) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "simp: building /tmp/hol4_simp …"
+  # build_simp_checkpoint.sml assembles simpLib (leaves + 5 core + markerLib/
+  # TypeBase stubs) and proves a goal via SIMP_CONV+SIMP_TAC; gated on SIMP_SMOKE_PASS.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 200000000000 /tmp/hol4_combin \
+      < "$SUPPORT/build_simp_checkpoint.sml" ) >/tmp/build-simp.log 2>&1
+  if [ -f /tmp/hol4_simp ] && grep -qa "SIMP_CHECKPOINT_DONE" /tmp/build-simp.log; then
+    echo "simp: OK ($(wc -c </tmp/hol4_simp) bytes; $(grep -aoE 'TOTAL [0-9]+/[0-9]+' /tmp/build-simp.log | tail -1) loaded; SIMP_TAC PASS)"
+  else
+    echo "simp: FAILED — see /tmp/build-simp.log"; tail -12 /tmp/build-simp.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)   build_basis;;
   kernel)  build_kernel;;
@@ -210,7 +229,8 @@ case "$TARGET" in
   rewrite) build_rewrite;;
   marker)  build_marker;;
   combin)  build_combin;;
+  simp)    build_simp;;
   all)     build_basis && build_kernel && build_theory && build_parse \
              && build_bool && build_tactic && build_rewrite && build_marker \
-             && build_combin;;
+             && build_combin && build_simp;;
 esac

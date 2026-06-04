@@ -86,6 +86,12 @@ pub fn combin_checkpoint_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Warm checkpoint with simpLib / SIMP_TAC (`tools/build-hol4-checkpoints.sh simp`).
+pub fn simp_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/hol4_simp");
+    p.exists().then_some(p)
+}
+
 /// A file under `crates/polyml-bin/tests/hol4_support/`.
 pub fn support_file(name: &str) -> PathBuf {
     workspace_root()
