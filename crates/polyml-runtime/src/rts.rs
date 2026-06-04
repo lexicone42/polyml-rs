@@ -2327,11 +2327,24 @@ fn write_array(strm: PolyWord, arg: PolyWord) -> PolyWord {
     // its body is well-defined for trusted callers.
     let base = vec.as_ptr::<u8>();
     let slice = unsafe { std::slice::from_raw_parts(base.add(off), len) };
-    // Route via std::io for fds 1/2; ignore others for now.
-    let n = match fd_plus_one - 1 {
+    // Route via std::io for fds 1/2; write real files via their fd.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = (fd_plus_one - 1) as i32;
+    let n = match fd {
         1 => std::io::stdout().write(slice).unwrap_or(0),
         2 => std::io::stderr().write(slice).unwrap_or(0),
-        _ => 0,
+        0 => 0,
+        _ => {
+            use std::os::fd::FromRawFd;
+            // SAFETY: fd is a live fd opened by open_file_output. We
+            // reconstruct a File to call write, then leak it back via
+            // into_raw_fd so Drop does NOT close the still-in-use fd.
+            let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+            let n = f.write(slice).unwrap_or(0);
+            use std::os::fd::IntoRawFd;
+            let _ = f.into_raw_fd();
+            n
+        }
     };
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_possible_wrap)]

@@ -577,9 +577,19 @@ impl Interpreter {
                     // SAFETY: i < len bounds the slice access.
                     let lw = unsafe { *base.add(i) };
                     let n = crate::length_word::length_of(lw);
-                    if n == 0 || i + 1 + n > *len {
-                        // Bad header or out of range; stop scanning.
+                    if i + 1 + n > *len {
+                        // Object body would overrun the region: genuinely
+                        // malformed. Stop scanning this region.
                         break;
+                    }
+                    if n == 0 {
+                        // Zero-length object (empty tuple/vector) is LEGAL.
+                        // It occupies just its length-word slot and has no
+                        // body pointers. Skip it and KEEP scanning — using
+                        // `break` here truncates the whole region and leaves
+                        // every later object's children un-forwarded.
+                        i += 1;
+                        continue;
                     }
                     let body = unsafe { base.add(i + 1) };
                     let ty = crate::length_word::type_of(lw);
@@ -730,8 +740,14 @@ impl Interpreter {
             while i < used {
                 let lw = unsafe { *start.add(i) };
                 let n = crate::length_word::length_of(lw);
-                if n == 0 || i + 1 + n > used {
+                if i + 1 + n > used {
                     break;
+                }
+                if n == 0 {
+                    // Zero-length object is legal; skip it (do NOT break, or
+                    // the walk truncates and misses every later object).
+                    i += 1;
+                    continue;
                 }
                 // Inspect body words (offset i+1 .. i+1+n).
                 for k in 0..n {
@@ -744,6 +760,39 @@ impl Interpreter {
                                 i + 1 + k,
                                 v,
                             ));
+                        }
+                    }
+                }
+                i += 1 + n;
+            }
+        }
+        // 7. Walk the registered image mutable-root regions. These hold
+        //    pointers into alloc-space (the top-level namespace + runtime
+        //    `ref`s allocated into image-mutable). A break-on-zero-length
+        //    bug here was the source of the dangling-pointer SEGV, so the
+        //    audit must scan them to catch the same class of regression.
+        for (ptr, len) in &self.image_mutable_roots {
+            let base = *ptr;
+            let mut i = 0usize;
+            while i < *len {
+                let lw = unsafe { *base.add(i) };
+                let n = crate::length_word::length_of(lw);
+                if i + 1 + n > *len {
+                    break;
+                }
+                if n == 0 {
+                    i += 1;
+                    continue;
+                }
+                let ty = crate::length_word::type_of(lw);
+                if ty != crate::length_word::F_BYTE_OBJ {
+                    for k in 0..n {
+                        let v = unsafe { (*base.add(i + 1 + k)).0 };
+                        if in_old(v) {
+                            residual += 1;
+                            if samples.len() < 5 {
+                                samples.push(("image_mut_body", i + 1 + k, v));
+                            }
                         }
                     }
                 }
