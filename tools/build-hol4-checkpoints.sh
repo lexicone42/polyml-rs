@@ -5,8 +5,10 @@
 #   /tmp/hol4_kernel    basis + LCF kernel   (build_kernel_checkpoint.sml)
 #   /tmp/hol4_theory    + Theory subsystem   (theory_subsystem.sml + export)
 #   /tmp/hol4_parse     + term/type parser   (build_parse_checkpoint.sml)
+#   /tmp/hol4_bool      + bool theory        (build_bool_checkpoint.sml)
+#   /tmp/hol4_tactic    + src/1 tactic layer (build_tactic_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -18,8 +20,8 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|all) TARGET="$1"; shift;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0;;
+    basis|kernel|theory|parse|bool|tactic|all) TARGET="$1"; shift;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -104,10 +106,50 @@ build_parse() {
   fi
 }
 
+build_bool() {
+  [ -f /tmp/hol4_parse ] || { echo "bool: need /tmp/hol4_parse first"; build_parse || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_bool ]; then
+    echo "bool: /tmp/hol4_bool exists ($(wc -c </tmp/hol4_bool) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "bool: building /tmp/hol4_bool …"
+  # build_bool_checkpoint.sml runs the quote-filter on src/bool/boolScript.sml,
+  # builds the bool theory segment, synthesizes `structure boolTheory`, and
+  # exports gated on a smoke test (BOOL_SMOKE_PASS).
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 200000000000 /tmp/hol4_parse \
+      < "$SUPPORT/build_bool_checkpoint.sml" ) >/tmp/build-bool.log 2>&1
+  if [ -f /tmp/hol4_bool ] && grep -qa "BOOL_CHECKPOINT_DONE" /tmp/build-bool.log; then
+    echo "bool: OK ($(wc -c </tmp/hol4_bool) bytes; $(grep -aoE 'BOOLTHEORY_NAMES [0-9]+' /tmp/build-bool.log | tail -1) names; smoke PASS)"
+  else
+    echo "bool: FAILED — see /tmp/build-bool.log"; tail -10 /tmp/build-bool.log; return 1
+  fi
+}
+
+build_tactic() {
+  [ -f /tmp/hol4_bool ] || { echo "tactic: need /tmp/hol4_bool first"; build_bool || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_tactic ]; then
+    echo "tactic: /tmp/hol4_tactic exists ($(wc -c </tmp/hol4_tactic) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "tactic: building /tmp/hol4_tactic …"
+  # build_tactic_checkpoint.sml loads the src/1 tactic layer (27 files) and
+  # proves p==>p and conj-comm with real tactics; export gated on the smoke.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 200000000000 /tmp/hol4_bool \
+      < "$SUPPORT/build_tactic_checkpoint.sml" ) >/tmp/build-tactic.log 2>&1
+  if [ -f /tmp/hol4_tactic ] && grep -qa "TACTIC_CHECKPOINT_DONE" /tmp/build-tactic.log; then
+    echo "tactic: OK ($(wc -c </tmp/hol4_tactic) bytes; $(grep -aoE 'TAC_LOADED [0-9]+/[0-9]+' /tmp/build-tactic.log | tail -1); proofs PASS)"
+  else
+    echo "tactic: FAILED — see /tmp/build-tactic.log"; tail -12 /tmp/build-tactic.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)  build_basis;;
   kernel) build_kernel;;
   theory) build_theory;;
   parse)  build_parse;;
-  all)    build_basis && build_kernel && build_theory && build_parse;;
+  bool)   build_bool;;
+  tactic) build_tactic;;
+  all)    build_basis && build_kernel && build_theory && build_parse \
+            && build_bool && build_tactic;;
 esac

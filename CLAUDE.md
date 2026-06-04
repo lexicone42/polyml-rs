@@ -508,13 +508,46 @@ before `Portable.sml` compiles. (Two smaller leaf fixes rode along:
 `Systeml.OS` for `type_pp.sml:15`, and the `AList`/`Graph`/`SymGraph`/
 `ImplicitGraph` graph libs for `AncestryData.sml`.)
 
-The **tactic layer** (`src/1`) is the next wall, still gated on
-`boolSyntax`→`boolTheory`→`boolScript`. `boolScript.sml` uses HOL4's
-extended `Theory bool[bare]` script syntax with `“…”` term quotations
-(needs the `quse`/quote-filter preprocessor). With the parser now live,
-that arc is reachable; until then `theory_dev_proof` remains the
-"beyond the kernel" proof. `tools/closure-probe.sh /tmp/hol4_theory
-src/parse` measures parse-layer load on the Theory base (pre-fixes).
+HOL4 **bool theory + tactic layer: WORKING** (2026-06-04). Goal-directed
+tactic proofs run on the interpreter: `Tactical.prove(``p ==> p``,
+DISCH_TAC THEN POP_ASSUM ACCEPT_TAC)`, conjunction-commutativity, and a
+K-combinator goal all prove (see `crates/polyml-bin/tests/hol4_tactic.rs`).
+The chain is now basis → kernel → theory → parse → **bool → tactic**, all
+built by `tools/build-hol4-checkpoints.sh` (targets `bool` → `/tmp/hol4_bool`,
+`tactic` → `/tmp/hol4_tactic`).
+
+Two things made `boolScript.sml` (modern `Theory bool[bare]` + `“…”`
+quotations) loadable without an external toolchain:
+1. **The quote-filter runs on our interpreter.** HOL4's *modern* filter
+   (`tools/parsing/HOLSource{AST,Parser,Expand,Printer}` + `DString`/`DArray`/
+   `AttributeSyntax`/`SimpleBuffer`) is hand-written SML, NOT ml-lex/yacc
+   generated (the lone `.lex`, `HolLex`, feeds only the *legacy*
+   `HolParserOld`). `build_bool_checkpoint.sml` loads the 16 filter modules
+   (one fix: `Systeml.canBindStr`) and runs `HOLSource.inputFile` on the real
+   `boolScript.sml` → 175 KB of plain ASCII (in-body unicode becomes `\DDD`
+   escapes via `HOLSourcePrinter.encodeStr`, so the ≥0x80 string-lexer gate is
+   never hit). No sed/Rust preprocessor; no string-lexer change.
+2. **`export_theory` is neutralized, `structure boolTheory` synthesized.**
+   `Theory.export_theory()` does heavy FS finalize (`OS.FileSys.getDir`, path
+   ops, writes) that raises → trips the exn-unwinding halt; we don't need the
+   on-disk `.dat`/generated `.sml`, only the in-memory segment, so we rewrite
+   `export_theory`→`current_theory` (no-op) in the filtered source and build
+   `structure boolTheory` (191 names) ourselves from
+   `Theory.current_{axioms,definitions,theorems}()`.
+The tactic layer then needs three small props: `structure Definition =
+Theory.Definition`, a thin `structure DB` over `DB_dtype` (the full
+DB search layer — `DBSearchParser`/`regexpMatch` — is NOT needed), and
+`val explode = String.explode` (our checkpoint leaked `Portable.explode`
+= string-list to the top-level pervasive; `Conv.sml`'s `dest_path` wants the
+SML-default char-list `explode`). The src/1 leaves loaded: `thmpos_dtype`,
+`Rsyntax`, `Psyntax`, `FullUnify`, `resolve_then`, `mp_then`. 27/27 of the
+core chain load (`boolSyntax`…`Tactic`).
+
+Next: higher tactics (`REWRITE_TAC` via `Rewrite`/`simpLib`), `bossLib`, and
+real theory development — and ultimately Isabelle. `theory_dev_proof` remains
+the kernel-level proof; the tactic tests are the goal-directed proof.
+`tools/closure-probe.sh /tmp/hol4_theory src/parse` measures parse-layer load
+on the Theory base (pre-fixes).
 
 ## RTS calling conventions
 

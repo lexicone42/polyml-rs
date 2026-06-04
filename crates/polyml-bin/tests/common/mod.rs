@@ -53,6 +53,20 @@ pub fn parse_checkpoint_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Warm parser+bool-theory checkpoint built by
+/// `tools/build-hol4-checkpoints.sh bool`.
+pub fn bool_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/hol4_bool");
+    p.exists().then_some(p)
+}
+
+/// Warm bool+tactic-layer checkpoint built by
+/// `tools/build-hol4-checkpoints.sh tactic`.
+pub fn tactic_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/hol4_tactic");
+    p.exists().then_some(p)
+}
+
 /// A file under `crates/polyml-bin/tests/hol4_support/`.
 pub fn support_file(name: &str) -> PathBuf {
     workspace_root()
