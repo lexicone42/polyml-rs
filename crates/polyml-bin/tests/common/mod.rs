@@ -92,6 +92,25 @@ pub fn simp_checkpoint_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Warm checkpoint with numTheory (`tools/build-hol4-checkpoints.sh num`).
+pub fn num_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/hol4_num");
+    p.exists().then_some(p)
+}
+
+/// Pipe the contents of a `hol4_support/*.sml` driver into `poly run <image>`
+/// (cwd = vendor/polyml), with `HOL4_DIR` set to `vendor/hol4`. Returns None if
+/// `image`, the driver, or `vendor/hol4` are absent (caller should skip).
+pub fn run_support_driver_on(
+    image: &std::path::Path,
+    driver_name: &str,
+    max_steps: u64,
+) -> Option<(String, i32)> {
+    let hol = hol4_dir()?;
+    let src = std::fs::read_to_string(support_file(driver_name)).ok()?;
+    run_image_env(image, &src, max_steps, &[("HOL4_DIR", hol.to_str().unwrap())])
+}
+
 /// A file under `crates/polyml-bin/tests/hol4_support/`.
 pub fn support_file(name: &str) -> PathBuf {
     workspace_root()

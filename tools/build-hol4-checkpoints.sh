@@ -11,8 +11,9 @@
 #   /tmp/hol4_marker    + markerTheory       (build_marker_checkpoint.sml)
 #   /tmp/hol4_combin    + combinTheory       (build_combin_checkpoint.sml)
 #   /tmp/hol4_simp      + simpLib SIMP_TAC   (build_simp_checkpoint.sml)
+#   /tmp/hol4_num       + numTheory          (build_num_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -24,7 +25,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -219,6 +220,24 @@ build_simp() {
   fi
 }
 
+build_num() {
+  [ -f /tmp/hol4_combin ] || { echo "num: need /tmp/hol4_combin first"; build_combin || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_num ]; then
+    echo "num: /tmp/hol4_num exists ($(wc -c </tmp/hol4_num) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "num: building /tmp/hol4_num …"
+  # build_num_checkpoint.sml builds numTheory from src/num/theories/numScript.sml
+  # (bootstraps the naturals + INDUCTION from INFINITY_AX); gated on NUM_SMOKE_PASS.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 200000000000 /tmp/hol4_combin \
+      < "$SUPPORT/build_num_checkpoint.sml" ) >/tmp/build-num.log 2>&1
+  if [ -f /tmp/hol4_num ] && grep -qa "NUM_CHECKPOINT_DONE" /tmp/build-num.log; then
+    echo "num: OK ($(wc -c </tmp/hol4_num) bytes; $(grep -aoE 'NUMTHEORY_NAMES [0-9]+' /tmp/build-num.log | tail -1) names; INDUCTION present; smoke PASS)"
+  else
+    echo "num: FAILED — see /tmp/build-num.log"; tail -12 /tmp/build-num.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)   build_basis;;
   kernel)  build_kernel;;
@@ -230,7 +249,8 @@ case "$TARGET" in
   marker)  build_marker;;
   combin)  build_combin;;
   simp)    build_simp;;
+  num)     build_num;;
   all)     build_basis && build_kernel && build_theory && build_parse \
              && build_bool && build_tactic && build_rewrite && build_marker \
-             && build_combin && build_simp;;
+             && build_combin && build_simp && build_num;;
 esac
