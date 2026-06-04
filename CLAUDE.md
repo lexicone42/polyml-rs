@@ -553,17 +553,41 @@ simplifies boolean goals via the default rewrite set (11 boolTheory clauses,
 `tools/build-hol4-checkpoints.sh rewrite` → `/tmp/hol4_rewrite`. (Higher-order
 `Ho_Net`/`Ho_Rewrite` load cleanly too but aren't needed for plain REWRITE_TAC.)
 
+**Building theories above bool now works** (the `new_theory` export keystone,
+2026-06-04). `Theory.new_theory` on a NON-empty base implicitly exports the
+current segment to disk first (`Theory.sml:1178`), and that PP-to-file path
+trips the interpreter's exception-unwinding VM halt — bool only built because it
+came off the *empty* scratch segment (no-export branch). Fix: the public
+`export_theory` already gates on `Globals.interactive`; we made `new_theory`'s
+*implicit* export honor it too (`Theory.sml:1178` patch) and set
+`Globals.interactive := true` in `build_kernel_checkpoint.sml`. We drive HOL4 as
+a REPL and never write `.dat`, so this is faithful. **markerTheory is built**
+this way (`build_marker_checkpoint.sml` → `/tmp/hol4_marker`, all 29
+defs/theorems via real tactics). Two reusable pieces: a synthesized
+`structure boolLib` (the real one won't load — `grammarDB{bool}=NONE` + backtick
+quotes) + tactic infixes; and `Theory.register_replayed_axiom` for the ancestor
+(bool) axioms before `new_theory` (our synthesized `boolTheory` keeps each
+theorem's live axiom-nonce tag, unlike disk `DISK_THM`, so `uptodate_axioms`
+needs the nonces registered).
+
 Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
-- `REWRITE_TAC [thm]`/`ASM_REWRITE_TAC`/`ONCE_REWRITE_TAC` — DONE (same modules).
-- `boolLib` aggregate — cheap; absent leaves `Hol_pp`, `ParseExtras`, `Prim_rec`
-  (watch the thin-`DB` stub + opaque-identity on boolLib's bulk re-open).
-- `SIMP_TAC`/`simpLib` (`src/simp/src`, 17 hand-written-SML modules, NO
-  ml-yacc) — **the wall is `markerTheory`** (`src/marker/markerScript.sml`,
-  `Theory marker[bare]`). It needs exactly the quote-filter + Script→Theory
-  build pipeline we now have for bool (`build_bool_checkpoint.sml`), so it's
-  reachable: build markerTheory the same way.
+- `REWRITE_TAC [thm]`/`ASM_REWRITE_TAC`/`ONCE_REWRITE_TAC` — DONE.
+- `new_theory` on a non-empty base — DONE (keystone above).
+- `markerTheory` — DONE (`/tmp/hol4_marker`).
+- `combinTheory` — NEXT. `combinScript.sml` is `Theory combin[bare]; Libs
+  HolKernel Parse boolLib computeLib` and uses `Q.*` tactics — so it needs the
+  `Q` structure AND `computeLib` (the CBV evaluator) loaded first. More involved
+  than marker.
+- `SIMP_TAC`/`simpLib` (`src/simp/src`, ~17 hand-written-SML modules, NO
+  ml-yacc) — needs bool+combin+marker theories + leaves liteLib, Ho_Net/
+  Ho_Rewrite, refuteLib/AC/Canon, tautLib, markerSyntax/markerLib, Hol_pp
+  (expanded DB stub), ParseExtras, Prim_rec (patch its `grammarDB{bool}` valOf),
+  then the 9-module core (Trace→Opening→Travrules→Cond_rewr→Traverse→simpLib→
+  pureSimps→Unwind→boolSimps). Smallest goal: `simpLib.SIMP_CONV bool_ss []
+  ``T /\ p`` = ⊢ T ∧ p ⇔ p`. The synthesized-boolLib richness for the simp core's
+  open-sets is the one untested risk.
 - `bossLib`/`BasicProvers` — a build campaign: num/pair/pred_set/list/option
-  `*Script.sml` theories, all on the same Script→Theory pipeline, plus
+  `*Script.sml` theories (all reuse the now-working Script→Theory recipe) +
   `Datatype`/`TotalDefn`.
 
 `theory_dev_proof` remains the kernel-level proof; the tactic/rewrite tests are
