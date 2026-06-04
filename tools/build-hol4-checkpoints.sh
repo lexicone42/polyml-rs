@@ -9,8 +9,9 @@
 #   /tmp/hol4_tactic    + src/1 tactic layer (build_tactic_checkpoint.sml)
 #   /tmp/hol4_rewrite   + REWRITE_TAC engine (build_rewrite_checkpoint.sml)
 #   /tmp/hol4_marker    + markerTheory       (build_marker_checkpoint.sml)
+#   /tmp/hol4_combin    + combinTheory       (build_combin_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -22,7 +23,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|marker|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -181,6 +182,24 @@ build_marker() {
   fi
 }
 
+build_combin() {
+  [ -f /tmp/hol4_marker ] || { echo "combin: need /tmp/hol4_marker first"; build_marker || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_combin ]; then
+    echo "combin: /tmp/hol4_combin exists ($(wc -c </tmp/hol4_combin) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "combin: building /tmp/hol4_combin …"
+  # build_combin_checkpoint.sml builds combinTheory from src/combin/combinScript.sml
+  # (Libs ... computeLib stubbed; Q loaded); export gated on COMBIN_SMOKE_PASS.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 200000000000 /tmp/hol4_marker \
+      < "$SUPPORT/build_combin_checkpoint.sml" ) >/tmp/build-combin.log 2>&1
+  if [ -f /tmp/hol4_combin ] && grep -qa "COMBIN_CHECKPOINT_DONE" /tmp/build-combin.log; then
+    echo "combin: OK ($(wc -c </tmp/hol4_combin) bytes; $(grep -aoE 'COMBINTHEORY_NAMES [0-9]+' /tmp/build-combin.log | tail -1) names; smoke PASS)"
+  else
+    echo "combin: FAILED — see /tmp/build-combin.log"; tail -12 /tmp/build-combin.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)   build_basis;;
   kernel)  build_kernel;;
@@ -190,6 +209,8 @@ case "$TARGET" in
   tactic)  build_tactic;;
   rewrite) build_rewrite;;
   marker)  build_marker;;
+  combin)  build_combin;;
   all)     build_basis && build_kernel && build_theory && build_parse \
-             && build_bool && build_tactic && build_rewrite && build_marker;;
+             && build_bool && build_tactic && build_rewrite && build_marker \
+             && build_combin;;
 esac

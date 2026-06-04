@@ -74,6 +74,18 @@ pub fn rewrite_checkpoint_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Warm checkpoint with markerTheory (`tools/build-hol4-checkpoints.sh marker`).
+pub fn marker_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/hol4_marker");
+    p.exists().then_some(p)
+}
+
+/// Warm checkpoint with combinTheory (`tools/build-hol4-checkpoints.sh combin`).
+pub fn combin_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/hol4_combin");
+    p.exists().then_some(p)
+}
+
 /// A file under `crates/polyml-bin/tests/hol4_support/`.
 pub fn support_file(name: &str) -> PathBuf {
     workspace_root()
