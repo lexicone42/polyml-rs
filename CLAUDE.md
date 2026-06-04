@@ -579,20 +579,21 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   stubbed (+ a no-op `compute` ThmAttribute, since `boolLib.save_thm_attrs` raises
   on unknown attrs); the real leaf needed was `src/q/Q`. Avoids the heavy
   computeLib/clauses/TypeBase closure. `combinTheory.I_THM = ⊢ ∀x. I x = x`.
-- `SIMP_TAC`/`simpLib` (`src/simp/src`, hand-written SML, NO ml-yacc) — IN
-  PROGRESS. Build on `/tmp/hol4_combin`. The simp leaves load and the 5 core
-  modules (Trace/Opening/Travrules/Cond_rewr/Traverse) compile against the
-  synthesized boolLib (richness gap = ZERO for them). simpLib's entrypoint needs:
-  `Hol_pp` (expanded DB stub), `ParseExtras`, `Prim_rec` (patch its
-  `grammarDB{bool}` valOf → global Parse), `liteLib`, `AC`, `term_tactic`,
-  `Ho_Rewrite`, `simpfrag`, real `markerSyntax`, real-or-stub `TypeBasePure`/
-  `TypeBase` (simpLib only type-checks `ty_name_of`/`simpls_of`/`fetch`), and a
-  TYPED `markerLib` STUB of 15 names (use-sites simpLib.sml:787-983 — the real
-  markerLib needs the absent proofManagerLib). bool_ss needs pureSimps+boolSimps
-  (boolSimps needs `combinTheory.I_THM` ✓); `UNWIND_ss`/full bool_ss is blocked
-  (`Unwind`→`refuteLib`→`Canon` has backtick quotes + `tautLib`→`HolSatLib` SAT
-  subsystem, absent) — NOT needed for a basic SIMP_CONV with a hand-rolled
-  simpset (`simpLib.empty_ss` + rewrites). Goal: `SIMP_CONV <ss> [I_THM]` rewrites.
+- `SIMP_TAC`/`simpLib` — DONE (`/tmp/hol4_simp`, `build_simp_checkpoint.sml`,
+  `hol4_simp.rs`). `SIMP_CONV ss [] ``(I:'a->'a) x = x`` = ⊢ (I x = x) ⇔ T` and
+  `prove(``(I:'a->'a) x = x``, SIMP_TAC ss [])` = `⊢ I x = x`, with a hand-rolled
+  `simpLib.empty_ss ++ rewrites [combinTheory.I_THM, AND_CLAUSES, REFL_CLAUSE]`.
+  Assembled on `/tmp/hol4_combin` (33 files): leaves (`Hol_pp` w/ expanded DB
+  stub, `term_tactic`, `Ho_Net`, `ParseExtras`, `Ho_Rewrite`, `Prim_rec`
+  [grammarDB{bool} valOf → global Parse], `liteLib`, `AC`, `simpfrag`) + real
+  `markerSyntax` + the 5 simp-core modules + TYPED STUBS for `markerLib`
+  (15 names; real one needs the absent `proofManagerLib`) and `TypeBasePure`/
+  `TypeBase` (simpLib only type-checks `ty_name_of`/`simpls_of`/`fetch`).
+  Footgun: synthesized boolLib's `open Theory` shadows the *function* `pp_thm`
+  with `Theory.pp_thm` (a ref) — re-export `val pp_thm = Hol_pp.pp_thm`. The full
+  default `bool_ss` (UNWIND_ss → `Unwind`→`refuteLib`/`Canon`/`tautLib`→
+  `HolSatLib` SAT subsystem; `Canon` also has backtick quotes) is NOT built — a
+  hand-rolled simpset suffices and avoids those walls.
 - `bossLib`/`BasicProvers` — a build campaign: num/pair/pred_set/list/option
   `*Script.sml` theories (all reuse the now-working Script→Theory recipe) +
   `Datatype`/`TotalDefn`.
