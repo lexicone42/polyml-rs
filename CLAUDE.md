@@ -543,11 +543,32 @@ SML-default char-list `explode`). The src/1 leaves loaded: `thmpos_dtype`,
 `Rsyntax`, `Psyntax`, `FullUnify`, `resolve_then`, `mp_then`. 27/27 of the
 core chain load (`boolSyntax`…`Tactic`).
 
-Next: higher tactics (`REWRITE_TAC` via `Rewrite`/`simpLib`), `bossLib`, and
-real theory development — and ultimately Isabelle. `theory_dev_proof` remains
-the kernel-level proof; the tactic tests are the goal-directed proof.
-`tools/closure-probe.sh /tmp/hol4_theory src/parse` measures parse-layer load
-on the Theory base (pre-fixes).
+HOL4 **REWRITE_TAC (rewriting engine): WORKING** (2026-06-04). `REWRITE_TAC []`
+simplifies boolean goals via the default rewrite set (11 boolTheory clauses,
+`Rewrite.implicit_rewrites`), and `REWRITE_TAC [thm]`, `ASM_REWRITE_TAC`,
+`ONCE_REWRITE_TAC` all run (`crates/polyml-bin/tests/hol4_rewrite.rs`:
+`⊢ T ∧ p ⇔ p`, `⊢ p ∨ T`, `⊢ ¬¬p ⇔ p`, `⊢ p ⇒ p ∧ T`). The engine is just
+4 files — `BoundedRewrites.{sig,sml}` + `Rewrite.{sig,sml}` — on top of
+`/tmp/hol4_tactic` (`Net` + `Conv.REWR_CONV` are already present); built by
+`tools/build-hol4-checkpoints.sh rewrite` → `/tmp/hol4_rewrite`. (Higher-order
+`Ho_Net`/`Ho_Rewrite` load cleanly too but aren't needed for plain REWRITE_TAC.)
+
+Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
+- `REWRITE_TAC [thm]`/`ASM_REWRITE_TAC`/`ONCE_REWRITE_TAC` — DONE (same modules).
+- `boolLib` aggregate — cheap; absent leaves `Hol_pp`, `ParseExtras`, `Prim_rec`
+  (watch the thin-`DB` stub + opaque-identity on boolLib's bulk re-open).
+- `SIMP_TAC`/`simpLib` (`src/simp/src`, 17 hand-written-SML modules, NO
+  ml-yacc) — **the wall is `markerTheory`** (`src/marker/markerScript.sml`,
+  `Theory marker[bare]`). It needs exactly the quote-filter + Script→Theory
+  build pipeline we now have for bool (`build_bool_checkpoint.sml`), so it's
+  reachable: build markerTheory the same way.
+- `bossLib`/`BasicProvers` — a build campaign: num/pair/pred_set/list/option
+  `*Script.sml` theories, all on the same Script→Theory pipeline, plus
+  `Datatype`/`TotalDefn`.
+
+`theory_dev_proof` remains the kernel-level proof; the tactic/rewrite tests are
+the goal-directed proofs. `tools/closure-probe.sh /tmp/hol4_theory src/parse`
+measures parse-layer load on the Theory base (pre-fixes).
 
 ## RTS calling conventions
 

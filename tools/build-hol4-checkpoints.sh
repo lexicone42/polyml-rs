@@ -7,8 +7,9 @@
 #   /tmp/hol4_parse     + term/type parser   (build_parse_checkpoint.sml)
 #   /tmp/hol4_bool      + bool theory        (build_bool_checkpoint.sml)
 #   /tmp/hol4_tactic    + src/1 tactic layer (build_tactic_checkpoint.sml)
+#   /tmp/hol4_rewrite   + REWRITE_TAC engine (build_rewrite_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -20,8 +21,8 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|all) TARGET="$1"; shift;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|all) TARGET="$1"; shift;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -143,13 +144,32 @@ build_tactic() {
   fi
 }
 
+build_rewrite() {
+  [ -f /tmp/hol4_tactic ] || { echo "rewrite: need /tmp/hol4_tactic first"; build_tactic || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_rewrite ]; then
+    echo "rewrite: /tmp/hol4_rewrite exists ($(wc -c </tmp/hol4_rewrite) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "rewrite: building /tmp/hol4_rewrite …"
+  # build_rewrite_checkpoint.sml loads BoundedRewrites + Rewrite and proves
+  # REWRITE_TAC goals; export gated on REWRITE_SMOKE_PASS.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 100000000000 /tmp/hol4_tactic \
+      < "$SUPPORT/build_rewrite_checkpoint.sml" ) >/tmp/build-rewrite.log 2>&1
+  if [ -f /tmp/hol4_rewrite ] && grep -qa "REWRITE_CHECKPOINT_DONE" /tmp/build-rewrite.log; then
+    echo "rewrite: OK ($(wc -c </tmp/hol4_rewrite) bytes; $(grep -aoE 'IMPLICIT_SIZE [0-9]+' /tmp/build-rewrite.log | tail -1); REWRITE_TAC PASS)"
+  else
+    echo "rewrite: FAILED — see /tmp/build-rewrite.log"; tail -12 /tmp/build-rewrite.log; return 1
+  fi
+}
+
 case "$TARGET" in
-  basis)  build_basis;;
-  kernel) build_kernel;;
-  theory) build_theory;;
-  parse)  build_parse;;
-  bool)   build_bool;;
-  tactic) build_tactic;;
-  all)    build_basis && build_kernel && build_theory && build_parse \
-            && build_bool && build_tactic;;
+  basis)   build_basis;;
+  kernel)  build_kernel;;
+  theory)  build_theory;;
+  parse)   build_parse;;
+  bool)    build_bool;;
+  tactic)  build_tactic;;
+  rewrite) build_rewrite;;
+  all)     build_basis && build_kernel && build_theory && build_parse \
+             && build_bool && build_tactic && build_rewrite;;
 esac
