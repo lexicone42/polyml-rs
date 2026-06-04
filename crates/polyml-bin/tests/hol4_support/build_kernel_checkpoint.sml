@@ -94,6 +94,13 @@ K0u "Type.sig"; K0u "Type.sml";
 K0u "Term.sig"; K0u "Term.sml";
 Tu "Compute.sig"; Tu "Compute.sml";
 Tu "std-thmsig.ML"; Tu "std-thm.ML";
+(* Interactive (REPL) mode: we drive HOL4 in-memory and never write .dat/.sml
+   theory files.  This gates the implicit segment export inside Theory.new_theory
+   (patched in src/postkernel/Theory.sml to honor Globals.interactive, like the
+   public export_theory already does) — so building a theory on a NON-empty base
+   (e.g. combin/marker on top of bool) no longer trips the export PP-to-file
+   exception-unwinding VM halt. Bakes into every downstream checkpoint. *)
+val () = Globals.interactive := true;
 pr "KERNEL_PRELUDE_DONE\n";
 
 (* sanity: kernel actually works *)
