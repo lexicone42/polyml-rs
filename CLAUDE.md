@@ -620,11 +620,19 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   `Datatype`/`TotalDefn`, and the pair/pred_set/list/option `*Script.sml`
   theories (all reuse the recipe). Broader "real mathematics" opens up here.
 
+- **Arithmetic library — DONE** (`/tmp/hol4_arith`, `build_arith_checkpoint.sml`,
+  `hol4_arith.rs`, `structure numArith`). `add`/`mult`/`EVEN`/`ODD` defined from
+  `num_Axiom` (no Prim_rec), and the Peano laws proved by `INDUCT_TAC` (no
+  bool_ss/SAT): `ADD_COMM`, `ADD_ASSOC`, `ADD_RCANCEL`, `ADD_EQ_0`, `MULT_COMM`,
+  `RIGHT_ADD_DISTRIB`, and the parity headline `⊢ ∀m n. EVEN (m+n) ⇔ (EVEN m ⇔
+  EVEN n)`. This is genuine "real mathematics by induction" on the interpreter.
+
 The HOL4 ladder so far (each a `build-hol4-checkpoints.sh` target + an
 `#[ignore]` regression test): kernel → theory → parse → bool → tactic → rewrite
-→ marker → combin → simp → num. Headline proofs on `/tmp/hol4_simp`:
+→ marker → combin → simp → num → arith. Headline proofs on `/tmp/hol4_simp`:
 the Drinker Paradox `⊢ ∃x. D x ⇒ ∀y. D y`, quantifier duality, `S K K = I`
-(`hol4_fancy.rs`); on `/tmp/hol4_num`: induction over ℕ (`hol4_induction.rs`).
+(`hol4_fancy.rs`); on `/tmp/hol4_num`: induction over ℕ (`hol4_induction.rs`);
+on `/tmp/hol4_arith`: ADD_COMM/MULT_COMM/EVEN_ADD (`hol4_arith.rs`).
 `theory_dev_proof` remains the kernel-level proof. `tools/closure-probe.sh
 /tmp/hol4_theory src/parse` measures parse-layer load on the Theory base.
 
