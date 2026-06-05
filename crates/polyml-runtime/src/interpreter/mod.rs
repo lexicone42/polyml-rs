@@ -2483,9 +2483,12 @@ impl Interpreter {
                 Ok(StepResult::Continue)
             }
             EXTINSTR_FLOAT_TO_INT => {
-                let f = Self::unbox_float(self.peek(0)?);
-                #[allow(clippy::cast_possible_truncation)]
-                let i = f as isize;
+                let f = f64::from(Self::unbox_float(self.peek(0)?));
+                // bytecode.cpp:2018-2058 — consume the trailing rounding-mode
+                // operand byte (0=nearest, 1=floor, 2=ceil, 3=trunc), else PC
+                // lands on it and traps.
+                let mode = self.fetch_u8()?;
+                let i = Self::real_to_int_round(f, mode);
                 self.stack[self.sp] = PolyWord::tagged(i);
                 Ok(StepResult::Continue)
             }
@@ -2552,13 +2555,13 @@ impl Interpreter {
                 (r << 1) | 1
             }),
             EXTINSTR_REAL_TO_INT => {
-                // ML semantics: round-to-nearest (banker's by default).
-                // For simplicity use Rust's `as` which truncates toward
-                // zero; bootstrap rarely converts non-integral reals.
+                // bytecode.cpp:2014-2058. The opcode is followed by a
+                // rounding-mode operand byte (0=nearest, 1=floor, 2=ceil,
+                // 3=trunc); it MUST be consumed or PC lands on it and traps.
                 let r = self.peek(0)?;
                 let f = unsafe { Self::read_real(r) };
-                #[allow(clippy::cast_possible_truncation)]
-                let i = f as isize;
+                let mode = self.fetch_u8()?;
+                let i = Self::real_to_int_round(f, mode);
                 self.stack[self.sp] = PolyWord::tagged(i);
                 Ok(StepResult::Continue)
             }
@@ -3085,6 +3088,23 @@ impl Interpreter {
         // SAFETY: 1 word = 8 bytes = sizeof(f64); object body is
         // word-aligned per Poly invariants.
         unsafe { *w.as_ptr::<f64>() }
+    }
+
+    /// Round an f64 to an integer per PolyML's rounding-mode byte
+    /// (`bytecode.cpp:2034-2049`, `reals.h:31-34`): 0=nearest, 1=floor(down),
+    /// 2=ceil(up), 3/default=trunc(toward zero). Mode 0 uses Rust `round()`
+    /// (half away from zero) to match upstream's C `round()`, not banker's
+    /// rounding. Truncation is the C default for any unexpected mode value.
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    fn real_to_int_round(f: f64, mode: u8) -> isize {
+        let r = match mode {
+            0 => f.round(),
+            1 => f.floor(),
+            2 => f.ceil(),
+            _ => f.trunc(),
+        };
+        r as isize
     }
 
     fn alloc_real(&mut self, v: f64) -> Result<PolyWord, InterpError> {
