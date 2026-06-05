@@ -614,11 +614,17 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   (induction + `num_CASES` + `LESS_MONO_REV`), so `<` needs no `relationTheory`.
   With `num_Axiom` in hand, recursive function definitions over ℕ are reachable
   (direct `num_Axiom` + `new_specification`) without the SAT path.
-- `bossLib`/`BasicProvers` — the remaining campaign: a faithful `bool_ss`/
-  `SIMP_TAC` (its `UNWIND_ss` → the SAT subsystem `HolSatLib`; but the arithmetic
-  result above shows HO-conversions can replace `bool_ss` for many proofs),
-  `Datatype`/`TotalDefn`, and the pair/pred_set/list/option `*Script.sml`
-  theories (all reuse the recipe). Broader "real mathematics" opens up here.
+- The general **`Datatype` package is BLOCKED on the SAT subsystem** (scoped
+  2026-06-05): `Datatype`/`define_type` → `ind_typeTheory`, whose `Libs`
+  (`mesonLib`, `InductiveDefinition`) `open` `tautLib` → `HolSatLib` AT LOAD,
+  and `HolSatLib` shells out to an external `minisat` binary (`Systeml.system_ps`
+  + DIMACS temp files) — absent, and `OS.Process.getEnv` is stubbed besides.
+  `arithmeticScript`/`numpairScript` are also too `SIMP/METIS/ARITH`-saturated
+  (351/74 callsites) for the HO_REWR_CONV trick to convert. So **hand-roll each
+  datatype** (num-style: `new_type`(+axioms) or `new_type_definition`+bijections,
+  then derive operations from the recursion theorem, prove by `INDUCT_TAC`) — a
+  reusable `define_recursive` / INDUCT-from-theorem helper would make each future
+  type boilerplate. `bossLib`/`BasicProvers` proper would need the SAT path.
 
 - **Arithmetic library — DONE** (`/tmp/hol4_arith`, `build_arith_checkpoint.sml`,
   `hol4_arith.rs`, `structure numArith`). `add`/`mult`/`EVEN`/`ODD` defined from
@@ -626,13 +632,27 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   bool_ss/SAT): `ADD_COMM`, `ADD_ASSOC`, `ADD_RCANCEL`, `ADD_EQ_0`, `MULT_COMM`,
   `RIGHT_ADD_DISTRIB`, and the parity headline `⊢ ∀m n. EVEN (m+n) ⇔ (EVEN m ⇔
   EVEN n)`. This is genuine "real mathematics by induction" on the interpreter.
+- **Ordering library — DONE** (`/tmp/hol4_order`, `build_order_checkpoint.sml`,
+  `hol4_order.rs`, `structure numOrder`). `LE m n <=> ?p. n = m + p`, then
+  `LE_REFL`/`ZERO_LE`/`LE_ADD`/`LE_TRANS`/`SUC_LE`/`LE_ANTISYM` (+ `ADD_LCANCEL`).
+  Pitfall: `LE_ANTISYM` must drop one existential-witness assumption before the
+  final `ASM_REWRITE_TAC` or it loops into an uncatchable stack overflow.
+- **List structural induction — DONE, type AXIOMATIZED** (`list_append_axiomatized.sml`,
+  `hol4_list.rs`). `⊢ ∀l. APPEND l NIL = l` and `⊢ ∀l1 l2 l3. APPEND (APPEND l1
+  l2) l3 = APPEND l1 (APPEND l2 l3)` by GENUINE `LIST_INDUCT_TAC` (APPEND defined
+  from the list recursion theorem). Caveat: the list type + `list_INDUCT`/
+  `list_Axiom` are `new_axiom` (labelled `*_AX`) — the derived route is viable
+  (`pair_tydef_milestone.sml` shows `new_type_definition` works for parametric
+  types) but a volume effort; the general `Datatype` package is SAT-blocked (above).
 
 The HOL4 ladder so far (each a `build-hol4-checkpoints.sh` target + an
 `#[ignore]` regression test): kernel → theory → parse → bool → tactic → rewrite
-→ marker → combin → simp → num → arith. Headline proofs on `/tmp/hol4_simp`:
+→ marker → combin → simp → num → arith → order. Headline proofs on `/tmp/hol4_simp`:
 the Drinker Paradox `⊢ ∃x. D x ⇒ ∀y. D y`, quantifier duality, `S K K = I`
-(`hol4_fancy.rs`); on `/tmp/hol4_num`: induction over ℕ (`hol4_induction.rs`);
-on `/tmp/hol4_arith`: ADD_COMM/MULT_COMM/EVEN_ADD (`hol4_arith.rs`).
+(`hol4_fancy.rs`); on `/tmp/hol4_num`: induction over ℕ + `APPEND_ASSOC`
+(`hol4_induction.rs`, `hol4_list.rs`); on `/tmp/hol4_arith`:
+ADD_COMM/MULT_COMM/EVEN_ADD (`hol4_arith.rs`); on `/tmp/hol4_order`: the `<=`
+laws (`hol4_order.rs`).
 `theory_dev_proof` remains the kernel-level proof. `tools/closure-probe.sh
 /tmp/hol4_theory src/parse` measures parse-layer load on the Theory base.
 
