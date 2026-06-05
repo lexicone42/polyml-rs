@@ -12,8 +12,9 @@
 #   /tmp/hol4_combin    + combinTheory       (build_combin_checkpoint.sml)
 #   /tmp/hol4_simp      + simpLib SIMP_TAC   (build_simp_checkpoint.sml)
 #   /tmp/hol4_num       + numTheory          (build_num_checkpoint.sml)
+#   /tmp/hol4_arith     + arithmetic (+,*,EVEN) (build_arith_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -25,7 +26,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -238,6 +239,25 @@ build_num() {
   fi
 }
 
+build_arith() {
+  [ -f /tmp/hol4_num ] || { echo "arith: need /tmp/hol4_num first"; build_num || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_arith ]; then
+    echo "arith: /tmp/hol4_arith exists ($(wc -c </tmp/hol4_arith) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "arith: building /tmp/hol4_arith …"
+  # build_arith_checkpoint.sml derives num_Axiom + add + mult and proves the
+  # Peano laws (ADD_COMM/ASSOC, MULT_COMM, distrib, cancellation, parity) by
+  # induction; export gated on a hypothesis-free smoke check.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 400000000000 /tmp/hol4_num \
+      < "$SUPPORT/build_arith_checkpoint.sml" ) >/tmp/build-arith.log 2>&1
+  if [ -f /tmp/hol4_arith ] && grep -qa "ARITH_CHECKPOINT_DONE" /tmp/build-arith.log; then
+    echo "arith: OK ($(wc -c </tmp/hol4_arith) bytes; $(grep -aoE 'SMOKE_ADD_COMM:.*' /tmp/build-arith.log | head -1))"
+  else
+    echo "arith: FAILED — see /tmp/build-arith.log"; tail -12 /tmp/build-arith.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)   build_basis;;
   kernel)  build_kernel;;
@@ -250,7 +270,8 @@ case "$TARGET" in
   combin)  build_combin;;
   simp)    build_simp;;
   num)     build_num;;
+  arith)   build_arith;;
   all)     build_basis && build_kernel && build_theory && build_parse \
              && build_bool && build_tactic && build_rewrite && build_marker \
-             && build_combin && build_simp && build_num;;
+             && build_combin && build_simp && build_num && build_arith;;
 esac
