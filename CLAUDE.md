@@ -701,6 +701,14 @@ over ℕ + `APPEND_ASSOC` (`hol4_induction.rs`, `hol4_list.rs`); on
 `/tmp/hol4_order`: the `<=` laws (`hol4_order.rs`); on `/tmp/hol4_taut`:
 `⊢ p ∨ ¬p`, De Morgan, Peirce (`hol4_taut.rs`); on `/tmp/hol4_meson`: the drinker
 paradox + a symmetric/transitive relation goal by `MESON_TAC` (`hol4_meson.rs`).
+
+**Pelletier benchmark suite — 46/47 by MESON** (`hol4_pelletier.rs`,
+`pelletier_problems.sml`, on `/tmp/hol4_meson`). The classic Pelletier (1986) FOL
+benchmark set runs through `MESON_TAC`: 46 of 47 prove (P1–P46, each a verified
+0-hyp theorem — incl. P34 Andrews's Challenge, P38, P39 Russell). P47 (Schubert's
+Steamroller) is the EXPECTED `MESON_TAC` failure, matching HOL4's own selftest —
+so we're at parity with upstream HOL4's MESON on the suite. (Predicates F,S are
+alpha-renamed Fp,Sp since F=false / S=combinator in HOL4.)
 `theory_dev_proof` remains the kernel-level proof. `tools/closure-probe.sh
 /tmp/hol4_theory src/parse` measures parse-layer load on the Theory base.
 
