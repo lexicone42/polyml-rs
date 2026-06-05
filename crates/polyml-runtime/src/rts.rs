@@ -365,7 +365,7 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyTimingGetChildSystem", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     // Process / OS / Foreign stubs.
     t.register("PolyGetProcessName", RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)));
-    t.register("PolyGetEnv", RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)));
+    t.register("PolyGetEnv", RtsFn::Arity2(poly_get_env));
     t.register("PolyGetEnvironment", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyFullGC", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyGetLocalStats", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
@@ -1242,6 +1242,11 @@ fn poly_basic_io_general(
         62 => fs_file_size(ctx, arg),
         // 66: access(name, mode) → 1 / 0
         66 => fs_access(arg, strm),
+        // 67: tmpName() → a fresh unique temp-file path string.
+        //     HOL4's HolSat (dimacsTools) needs this before it falls
+        //     through to its pure-SML DPLL prover; without it the call
+        //     returns a tagged int and faults on `tmp ^ ".cnf"`.
+        67 => fs_tmp_name(ctx),
         // Various stub returns of TAGGED(0):
         //   17: bytes available
         //   18: get stream position
@@ -2450,6 +2455,21 @@ fn get_current_dir(ctx: &mut RtsContext<'_>) -> PolyWord {
     alloc_poly_string(ctx, &bytes)
 }
 
+/// IO subcode 67: `OS.FileSys.tmpName` — return a unique temporary
+/// file path. The file is NOT created; callers (`TextIO.openOut`) open
+/// it themselves, and HOL4 concatenates an extension first, so we hand
+/// back a bare unique stem in the system temp dir. Mirrors
+/// `basicio.cpp:1002`. Uniqueness = pid + a monotonic counter so the
+/// repeated CNF files HolSat writes never collide.
+fn fs_tmp_name(ctx: &mut RtsContext<'_>) -> PolyWord {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let mut path = std::env::temp_dir();
+    path.push(format!("polymlrs_tmp_{pid}_{n}"));
+    alloc_poly_string(ctx, path.into_os_string().into_encoded_bytes().as_slice())
+}
+
 /// IO subcode 57: `OS.FileSys.isDir`.
 fn fs_is_dir(arg: PolyWord) -> PolyWord {
     let Some(name) = poly_string_to_rust(arg) else {
@@ -2608,6 +2628,63 @@ fn make_simple_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
         p.add(3).write(PolyWord::tagged(0)); // ex_location = NONE
     }
     PolyWord::from_ptr(p.cast_const())
+}
+
+/// Build an `OS.SysErr` exception packet: `ex_id = TAGGED(2)`
+/// (`EXC_syserr`, see `vendor/polyml/libpolyml/sys.h:27` +
+/// `run_time.cpp:196`), `ex_name = "SysErr"`, `ex_arg = (msg, NONE)`.
+/// The basis `SysErr` constructor is `Global(mkConst(toMachineWord 2))`
+/// (`INITIALISE_.ML:538`), so a handler `handle SysErr _` matches a
+/// packet whose word-0 ex_id == `TAGGED(2)`. NOTE: this is why
+/// `make_simple_exception` (self-pointer ex_id) would NOT be caught as
+/// `SysErr` — the identity differs.
+fn make_syserr_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
+    let name = alloc_poly_string(ctx, b"SysErr");
+    let msg_s = alloc_poly_string(ctx, msg.as_bytes());
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return msg_s;
+    };
+    // ex_arg = (msg, NONE) : 2-word tuple. NONE = TAGGED(0).
+    let pair = space.alloc(2);
+    // SAFETY: just allocated 2 words.
+    let pair_w = unsafe {
+        crate::space::set_length_word(pair, 2, 0);
+        pair.write(msg_s);
+        pair.add(1).write(PolyWord::tagged(0)); // NONE
+        PolyWord::from_ptr(pair.cast_const())
+    };
+    let p = space.alloc(4);
+    // SAFETY: just allocated 4 words. The earlier `pair` pointer stays
+    // valid (bump allocator only advances).
+    unsafe {
+        crate::space::set_length_word(p, 4, 0);
+        p.write(PolyWord::tagged(2)); // ex_id = EXC_syserr
+        p.add(1).write(name); // ex_name = "SysErr"
+        p.add(2).write(pair_w); // ex_arg = (msg, NONE)
+        p.add(3).write(PolyWord::tagged(0)); // ex_location = NONE
+    }
+    PolyWord::from_ptr(p.cast_const())
+}
+
+/// `PolyGetEnv(threadId, name)` — return the real environment value, or
+/// raise `SysErr` (so the basis `getEnv` returns `NONE`) when the
+/// variable is unset. Mirrors `process_env.cpp:433-436`. Previously a
+/// hard stub that returned `""`, which the basis wrapped as `SOME ""`
+/// for *every* variable (set or not).
+fn poly_get_env(ctx: &mut RtsContext<'_>, _tid: PolyWord, name_arg: PolyWord) -> PolyWord {
+    let Some(name) = poly_string_to_rust(name_arg) else {
+        ctx.raised_exception = Some(make_syserr_exception(ctx, "getEnv: bad argument"));
+        return PolyWord::tagged(0);
+    };
+    match std::env::var(&name) {
+        Ok(val) => alloc_poly_string(ctx, val.as_bytes()),
+        Err(_) => {
+            // unset or non-UTF-8: both map to NONE, matching upstream's
+            // "Not Found" SysErr.
+            ctx.raised_exception = Some(make_syserr_exception(ctx, "Not Found"));
+            PolyWord::tagged(0)
+        }
+    }
 }
 
 /// IO subcodes 5/6/13/14: open a file for writing (truncating
