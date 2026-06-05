@@ -14,7 +14,7 @@
 #   /tmp/hol4_num       + numTheory          (build_num_checkpoint.sml)
 #   /tmp/hol4_arith     + arithmetic (+,*,EVEN) (build_arith_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -26,7 +26,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -258,6 +258,24 @@ build_arith() {
   fi
 }
 
+build_order() {
+  [ -f /tmp/hol4_num ] || { echo "order: need /tmp/hol4_num first"; build_num || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_order ]; then
+    echo "order: /tmp/hol4_order exists ($(wc -c </tmp/hol4_order) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "order: building /tmp/hol4_order …"
+  # build_order_checkpoint.sml defines LE (m<=n <=> ?p. n = m+p) and proves the
+  # ordering laws (refl/trans/antisym/...) by induction; export gated on smoke.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 400000000000 /tmp/hol4_num \
+      < "$SUPPORT/build_order_checkpoint.sml" ) >/tmp/build-order.log 2>&1
+  if [ -f /tmp/hol4_order ] && grep -qa "ORDER_CHECKPOINT_DONE" /tmp/build-order.log; then
+    echo "order: OK ($(wc -c </tmp/hol4_order) bytes; $(grep -aoE 'SMOKE_LE_ANTISYM:.*' /tmp/build-order.log | head -1))"
+  else
+    echo "order: FAILED — see /tmp/build-order.log"; tail -12 /tmp/build-order.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)   build_basis;;
   kernel)  build_kernel;;
@@ -271,7 +289,9 @@ case "$TARGET" in
   simp)    build_simp;;
   num)     build_num;;
   arith)   build_arith;;
+  order)   build_order;;
   all)     build_basis && build_kernel && build_theory && build_parse \
              && build_bool && build_tactic && build_rewrite && build_marker \
-             && build_combin && build_simp && build_num && build_arith;;
+             && build_combin && build_simp && build_num && build_arith \
+             && build_order;;
 esac
