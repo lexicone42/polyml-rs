@@ -458,10 +458,12 @@ survive a flaky terminal — one invocation yields the whole picture).
   cargo test --release -p polyml-bin --test hol4_theory -- --ignored --nocapture
   ```
 
-Two runtime gaps this work surfaced (both real, worth fixing):
-1. **`OS.Process.getEnv` returns `SOME ""`** for set env vars (stubbed/
-   broken) — so HOL paths must be passed by other means (we use the
-   `../hol4` relative path from cwd = `vendor/polyml`).
+Two runtime gaps this work surfaced:
+1. **`OS.Process.getEnv` — FIXED** (commit 3930551). Was a hard stub that
+   returned `SOME ""` for every variable; now reads `std::env::var` and raises
+   a real `SysErr` packet on miss, so set vars return `SOME value` and unset
+   return `NONE`. (Historically HOL paths were passed via the `../hol4` relative
+   path from cwd = `vendor/polyml`; `HOL4_DIR` now works too.)
 2. **An uncaught exception propagating through a single `PolyML.use`**
    trips the "exception packet being called as a closure → call to
    non-closure value" halt (interpreter exception-unwinding bug). Piping
@@ -614,17 +616,32 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   (induction + `num_CASES` + `LESS_MONO_REV`), so `<` needs no `relationTheory`.
   With `num_Axiom` in hand, recursive function definitions over ℕ are reachable
   (direct `num_Axiom` + `new_specification`) without the SAT path.
-- The general **`Datatype` package is BLOCKED on the SAT subsystem** (scoped
-  2026-06-05): `Datatype`/`define_type` → `ind_typeTheory`, whose `Libs`
-  (`mesonLib`, `InductiveDefinition`) `open` `tautLib` → `HolSatLib` AT LOAD,
-  and `HolSatLib` shells out to an external `minisat` binary (`Systeml.system_ps`
-  + DIMACS temp files) — absent, and `OS.Process.getEnv` is stubbed besides.
-  `arithmeticScript`/`numpairScript` are also too `SIMP/METIS/ARITH`-saturated
-  (351/74 callsites) for the HO_REWR_CONV trick to convert. So **hand-roll each
-  datatype** (num-style: `new_type`(+axioms) or `new_type_definition`+bijections,
-  then derive operations from the recursion theorem, prove by `INDUCT_TAC`) — a
-  reusable `define_recursive` / INDUCT-from-theorem helper would make each future
-  type boilerplate. `bossLib`/`BasicProvers` proper would need the SAT path.
+- **The SAT subsystem is NOT a blocker** (corrected 2026-06-05; the earlier
+  "Datatype BLOCKED on SAT" finding was wrong). `HolSatLib` does NOT require an
+  external `minisat`: `minisatProve.invoke_solver` gates the external binary on
+  `access(getSolverExe solver,[A_EXEC])` (`minisatProve.sml:60`); the binary is
+  absent (only C++ source is vendored), our `fs_access` returns false, and the
+  call falls through to HOL4's **pure-SML `DPLL_TAUT` prover** (`dpll.sml`) —
+  genuine kernel inference, no shell-out, no `Process.system`. The only real RTS
+  gaps were `OS.FileSys.tmpName`/`remove` (the DIMACS temp file `dimacsTools`
+  writes *before* the DPLL fallback fires) + `OS.Process.getEnv` (was a `SOME ""`
+  stub) — all fixed in `rts.rs` (commits 3930551 / 68f253c). **`tautLib.TAUT_PROVE`
+  now runs on the interpreter** (`/tmp/hol4_taut`, `build_taut_checkpoint.sml`,
+  `hol4_taut.rs`): proves `p ∨ ¬p`, De Morgan, hypothetical syllogism, Peirce's
+  law via DPLL. Recipe: build `satTheory` (truth-table tautologies, Script→Theory),
+  load the HolSat closure + `tautLib` (with the `grammarDB{bool}` patch + a
+  `minisatParse` stub for the dead external-replay path).
+- **`Datatype` remaining work is NON-SAT** (re-scoped 2026-06-05). With SAT
+  off the table, `Datatype`/`define_type` → `ind_typeTheory` still needs: the
+  `mesonLib` closure (`liteLib` + `Ho_Rewrite` [both on `/tmp/hol4_simp`] +
+  `Canon_Port` + `jrhTactics` — a pure prover, no `.dat`, no new RTS), then
+  `InductiveDefinition`, then `ind_typeTheory`'s `.dat` (the `DB`/`TheoryReader`/
+  `regexpMatch` layer — the long-standing 4-stuck-module gap), plus `TypeBase`.
+  So the next prize is **`mesonLib` (first-order automated proving)** — chain a
+  checkpoint on `/tmp/hol4_simp` + `tautLib` + the 4 meson modules. Hand-rolling
+  each datatype num-style (`new_type`/`new_type_definition` + recursion theorem +
+  `INDUCT_TAC`) remains a viable parallel route; a reusable `define_recursive` /
+  INDUCT-from-theorem helper would make each type boilerplate.
 
 - **Arithmetic library — DONE** (`/tmp/hol4_arith`, `build_arith_checkpoint.sml`,
   `hol4_arith.rs`, `structure numArith`). `add`/`mult`/`EVEN`/`ODD` defined from
@@ -643,16 +660,19 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   from the list recursion theorem). Caveat: the list type + `list_INDUCT`/
   `list_Axiom` are `new_axiom` (labelled `*_AX`) — the derived route is viable
   (`pair_tydef_milestone.sml` shows `new_type_definition` works for parametric
-  types) but a volume effort; the general `Datatype` package is SAT-blocked (above).
+  types) but a volume effort; the general `Datatype` package's remaining work is
+  the non-SAT meson/IndDef/ind_type closure (above).
 
 The HOL4 ladder so far (each a `build-hol4-checkpoints.sh` target + an
 `#[ignore]` regression test): kernel → theory → parse → bool → tactic → rewrite
-→ marker → combin → simp → num → arith → order. Headline proofs on `/tmp/hol4_simp`:
-the Drinker Paradox `⊢ ∃x. D x ⇒ ∀y. D y`, quantifier duality, `S K K = I`
-(`hol4_fancy.rs`); on `/tmp/hol4_num`: induction over ℕ + `APPEND_ASSOC`
-(`hol4_induction.rs`, `hol4_list.rs`); on `/tmp/hol4_arith`:
+→ marker → combin → simp → num → arith → order, plus the **taut** branch off
+combin (`/tmp/hol4_taut`: HolSatLib + tautLib via pure-SML DPLL). Headline proofs
+on `/tmp/hol4_simp`: the Drinker Paradox `⊢ ∃x. D x ⇒ ∀y. D y`, quantifier
+duality, `S K K = I` (`hol4_fancy.rs`); on `/tmp/hol4_num`: induction over ℕ +
+`APPEND_ASSOC` (`hol4_induction.rs`, `hol4_list.rs`); on `/tmp/hol4_arith`:
 ADD_COMM/MULT_COMM/EVEN_ADD (`hol4_arith.rs`); on `/tmp/hol4_order`: the `<=`
-laws (`hol4_order.rs`).
+laws (`hol4_order.rs`); on `/tmp/hol4_taut`: `⊢ p ∨ ¬p`, De Morgan, Peirce
+(`hol4_taut.rs`).
 `theory_dev_proof` remains the kernel-level proof. `tools/closure-probe.sh
 /tmp/hol4_theory src/parse` measures parse-layer load on the Theory base.
 
