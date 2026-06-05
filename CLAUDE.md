@@ -631,17 +631,28 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   law via DPLL. Recipe: build `satTheory` (truth-table tautologies, Script→Theory),
   load the HolSat closure + `tautLib` (with the `grammarDB{bool}` patch + a
   `minisatParse` stub for the dead external-replay path).
-- **`Datatype` remaining work is NON-SAT** (re-scoped 2026-06-05). With SAT
-  off the table, `Datatype`/`define_type` → `ind_typeTheory` still needs: the
-  `mesonLib` closure (`liteLib` + `Ho_Rewrite` [both on `/tmp/hol4_simp`] +
-  `Canon_Port` + `jrhTactics` — a pure prover, no `.dat`, no new RTS), then
-  `InductiveDefinition`, then `ind_typeTheory`'s `.dat` (the `DB`/`TheoryReader`/
-  `regexpMatch` layer — the long-standing 4-stuck-module gap), plus `TypeBase`.
-  So the next prize is **`mesonLib` (first-order automated proving)** — chain a
-  checkpoint on `/tmp/hol4_simp` + `tautLib` + the 4 meson modules. Hand-rolling
-  each datatype num-style (`new_type`/`new_type_definition` + recursion theorem +
-  `INDUCT_TAC`) remains a viable parallel route; a reusable `define_recursive` /
-  INDUCT-from-theorem helper would make each type boilerplate.
+- **`mesonLib` (first-order automated proving) — DONE** (`/tmp/hol4_meson`,
+  `build_meson_checkpoint.sml`, `hol4_meson.rs`). `MESON_TAC` (HOL4's model-
+  elimination prover — Skolemizes, instantiates quantifiers by unification,
+  chains inferences) runs on the interpreter, cascading from the SAT fix
+  (mesonLib `open`s tautLib at load). Built on `/tmp/hol4_simp` (carries
+  `liteLib`+`Ho_Rewrite`): shadow simp's boolLib with the widened one from
+  build_combin (for `save_thm_at`), replay the taut layer, then load
+  `Canon_Port`/`jrhTactics`/`mesonLib` — the first two of which carry `` `…` ``
+  quotations so they go through the `HOLSource` quote-filter, plus the
+  `grammarDB{combin}`/`grammarDB{bool}` → global-Parse patch. Proves the drinker
+  paradox, a predicate syllogism, and a symmetric+transitive relation goal via
+  genuine first-order reasoning. NOTE the quote-filter trick: `HOLSource.inputFile`
+  works on plain `.sml` (not just Theory scripts), converting `` ``…`` `` term
+  quotations to `[QUOTE …]` — this unblocks any quotation-carrying HOL4 `.sml`.
+- **`Datatype` remaining work is NON-SAT** (re-scoped 2026-06-05). With SAT off
+  the table and `mesonLib` done, `Datatype`/`define_type` → `ind_typeTheory` still
+  needs: `InductiveDefinition` (`src/IndDef`), then `ind_typeTheory`'s `.dat` (the
+  `DB`/`TheoryReader`/`regexpMatch` layer — the long-standing 4-stuck-module gap),
+  plus `TypeBase`. Hand-rolling each datatype num-style (`new_type`/
+  `new_type_definition` + recursion theorem + `INDUCT_TAC`) remains a viable
+  parallel route; a reusable `define_recursive` / INDUCT-from-theorem helper would
+  make each type boilerplate.
 
 - **Arithmetic library — DONE** (`/tmp/hol4_arith`, `build_arith_checkpoint.sml`,
   `hol4_arith.rs`, `structure numArith`). `add`/`mult`/`EVEN`/`ODD` defined from
@@ -666,13 +677,15 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
 The HOL4 ladder so far (each a `build-hol4-checkpoints.sh` target + an
 `#[ignore]` regression test): kernel → theory → parse → bool → tactic → rewrite
 → marker → combin → simp → num → arith → order, plus the **taut** branch off
-combin (`/tmp/hol4_taut`: HolSatLib + tautLib via pure-SML DPLL). Headline proofs
-on `/tmp/hol4_simp`: the Drinker Paradox `⊢ ∃x. D x ⇒ ∀y. D y`, quantifier
-duality, `S K K = I` (`hol4_fancy.rs`); on `/tmp/hol4_num`: induction over ℕ +
-`APPEND_ASSOC` (`hol4_induction.rs`, `hol4_list.rs`); on `/tmp/hol4_arith`:
-ADD_COMM/MULT_COMM/EVEN_ADD (`hol4_arith.rs`); on `/tmp/hol4_order`: the `<=`
-laws (`hol4_order.rs`); on `/tmp/hol4_taut`: `⊢ p ∨ ¬p`, De Morgan, Peirce
-(`hol4_taut.rs`).
+combin (`/tmp/hol4_taut`: HolSatLib + tautLib via pure-SML DPLL) and the
+**meson** branch off simp (`/tmp/hol4_meson`: mesonLib first-order proving).
+Headline proofs on `/tmp/hol4_simp`: the Drinker Paradox `⊢ ∃x. D x ⇒ ∀y. D y`,
+quantifier duality, `S K K = I` (`hol4_fancy.rs`); on `/tmp/hol4_num`: induction
+over ℕ + `APPEND_ASSOC` (`hol4_induction.rs`, `hol4_list.rs`); on
+`/tmp/hol4_arith`: ADD_COMM/MULT_COMM/EVEN_ADD (`hol4_arith.rs`); on
+`/tmp/hol4_order`: the `<=` laws (`hol4_order.rs`); on `/tmp/hol4_taut`:
+`⊢ p ∨ ¬p`, De Morgan, Peirce (`hol4_taut.rs`); on `/tmp/hol4_meson`: the drinker
+paradox + a symmetric/transitive relation goal by `MESON_TAC` (`hol4_meson.rs`).
 `theory_dev_proof` remains the kernel-level proof. `tools/closure-probe.sh
 /tmp/hol4_theory src/parse` measures parse-layer load on the Theory base.
 
