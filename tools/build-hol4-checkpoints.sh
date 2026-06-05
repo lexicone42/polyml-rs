@@ -13,6 +13,7 @@
 #   /tmp/hol4_simp      + simpLib SIMP_TAC   (build_simp_checkpoint.sml)
 #   /tmp/hol4_num       + numTheory          (build_num_checkpoint.sml)
 #   /tmp/hol4_arith     + arithmetic (+,*,EVEN) (build_arith_checkpoint.sml)
+#   /tmp/hol4_taut      + HolSat/tautLib (DPLL) (build_taut_checkpoint.sml)
 #
 # Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|all]
 #   --force   rebuild even if the image already exists
@@ -26,7 +27,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|taut|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -276,6 +277,26 @@ build_order() {
   fi
 }
 
+build_taut() {
+  [ -f /tmp/hol4_combin ] || { echo "taut: need /tmp/hol4_combin first"; build_combin || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_taut ]; then
+    echo "taut: /tmp/hol4_taut exists ($(wc -c </tmp/hol4_taut) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "taut: building /tmp/hol4_taut …"
+  # build_taut_checkpoint.sml builds satTheory (truth-table tautologies) and
+  # loads the HolSat closure + tautLib; TAUT_PROVE runs via the pure-SML DPLL
+  # solver (no external minisat — access(solverExe) is false). Needs the
+  # OS.FileSys.tmpName/remove RTS support. Export gated on TAUT_SMOKE_PASS.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 200000000000 /tmp/hol4_combin \
+      < "$SUPPORT/build_taut_checkpoint.sml" ) >/tmp/build-taut.log 2>&1
+  if [ -f /tmp/hol4_taut ] && grep -qa "TAUT_CHECKPOINT_DONE" /tmp/build-taut.log; then
+    echo "taut: OK ($(wc -c </tmp/hol4_taut) bytes; $(grep -aoE 'TAUT_RESULT [A-Z_]+:.*' /tmp/build-taut.log | head -1))"
+  else
+    echo "taut: FAILED — see /tmp/build-taut.log"; tail -12 /tmp/build-taut.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)   build_basis;;
   kernel)  build_kernel;;
@@ -290,8 +311,9 @@ case "$TARGET" in
   num)     build_num;;
   arith)   build_arith;;
   order)   build_order;;
+  taut)    build_taut;;
   all)     build_basis && build_kernel && build_theory && build_parse \
              && build_bool && build_tactic && build_rewrite && build_marker \
              && build_combin && build_simp && build_num && build_arith \
-             && build_order;;
+             && build_order && build_taut;;
 esac

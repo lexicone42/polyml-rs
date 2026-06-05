@@ -112,6 +112,13 @@ pub fn order_checkpoint_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Warm checkpoint with HolSatLib + tautLib (propositional tautology proving
+/// via the pure-SML DPLL solver) (`tools/build-hol4-checkpoints.sh taut`).
+pub fn taut_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/hol4_taut");
+    p.exists().then_some(p)
+}
+
 /// Pipe the contents of a `hol4_support/*.sml` driver into `poly run <image>`
 /// (cwd = vendor/polyml), with `HOL4_DIR` set to `vendor/hol4`. Returns None if
 /// `image`, the driver, or `vendor/hol4` are absent (caller should skip).

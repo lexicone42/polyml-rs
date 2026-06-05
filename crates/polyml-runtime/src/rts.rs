@@ -1240,6 +1240,10 @@ fn poly_basic_io_general(
         61 => fs_mod_time(ctx, arg),
         // 62: fileSize(name)
         62 => fs_file_size(ctx, arg),
+        // 64: remove(name) — delete a file. HOL4's HolSat writes DIMACS temp
+        //     files (via tmpName) and clean_delete()s them; without this they
+        //     leak into the temp dir on every SAT/tautLib call.
+        64 => fs_remove(arg),
         // 66: access(name, mode) → 1 / 0
         66 => fs_access(arg, strm),
         // 67: tmpName() → a fresh unique temp-file path string.
@@ -2468,6 +2472,16 @@ fn fs_tmp_name(ctx: &mut RtsContext<'_>) -> PolyWord {
     let mut path = std::env::temp_dir();
     path.push(format!("polymlrs_tmp_{pid}_{n}"));
     alloc_poly_string(ctx, path.into_os_string().into_encoded_bytes().as_slice())
+}
+
+/// IO subcode 64: `OS.FileSys.remove` — delete a file. Best-effort:
+/// errors are swallowed (callers like HOL4's `clean_delete` already wrap
+/// this in an exception handler), and the result is unit (`TAGGED(0)`).
+fn fs_remove(arg: PolyWord) -> PolyWord {
+    if let Some(name) = poly_string_to_rust(arg) {
+        let _ = std::fs::remove_file(&name);
+    }
+    PolyWord::tagged(0)
 }
 
 /// IO subcode 57: `OS.FileSys.isDir`.
