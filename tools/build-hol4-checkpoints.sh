@@ -14,6 +14,7 @@
 #   /tmp/hol4_num       + numTheory          (build_num_checkpoint.sml)
 #   /tmp/hol4_arith     + arithmetic (+,*,EVEN) (build_arith_checkpoint.sml)
 #   /tmp/hol4_taut      + HolSat/tautLib (DPLL) (build_taut_checkpoint.sml)
+#   /tmp/hol4_meson     + mesonLib (MESON_TAC)  (build_meson_checkpoint.sml)
 #
 # Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|all]
 #   --force   rebuild even if the image already exists
@@ -27,7 +28,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|taut|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|taut|meson|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -297,6 +298,26 @@ build_taut() {
   fi
 }
 
+build_meson() {
+  [ -f /tmp/hol4_simp ] || { echo "meson: need /tmp/hol4_simp first"; build_simp || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_meson ]; then
+    echo "meson: /tmp/hol4_meson exists ($(wc -c </tmp/hol4_meson) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "meson: building /tmp/hol4_meson …"
+  # build_meson_checkpoint.sml replays the taut layer on simp (widened boolLib +
+  # satTheory + HolSat + tautLib) then loads Canon_Port/jrhTactics/mesonLib and
+  # runs MESON_TAC proofs (first-order, via DPLL-backed tautLib). Export gated on
+  # MESON_SMOKE_PASS.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 400000000000 /tmp/hol4_simp \
+      < "$SUPPORT/build_meson_checkpoint.sml" ) >/tmp/build-meson.log 2>&1
+  if [ -f /tmp/hol4_meson ] && grep -qa "MESON_CHECKPOINT_DONE" /tmp/build-meson.log; then
+    echo "meson: OK ($(wc -c </tmp/hol4_meson) bytes; $(grep -aoE 'MESON DRINKER:.*' /tmp/build-meson.log | head -1))"
+  else
+    echo "meson: FAILED — see /tmp/build-meson.log"; tail -12 /tmp/build-meson.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)   build_basis;;
   kernel)  build_kernel;;
@@ -312,8 +333,9 @@ case "$TARGET" in
   arith)   build_arith;;
   order)   build_order;;
   taut)    build_taut;;
+  meson)   build_meson;;
   all)     build_basis && build_kernel && build_theory && build_parse \
              && build_bool && build_tactic && build_rewrite && build_marker \
              && build_combin && build_simp && build_num && build_arith \
-             && build_order && build_taut;;
+             && build_order && build_taut && build_meson;;
 esac
