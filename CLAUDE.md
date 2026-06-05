@@ -645,6 +645,21 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   genuine first-order reasoning. NOTE the quote-filter trick: `HOLSource.inputFile`
   works on plain `.sml` (not just Theory scripts), converting `` ``…`` `` term
   quotations to `[QUOTE …]` — this unblocks any quotation-carrying HOL4 `.sml`.
+- **METIS (`metisLib`) — WIP: mlib core builds 33/33, blocked on full bool_ss**
+  (`build_metis_checkpoint.sml`, 2026-06-05). The novel/hard part works: HOL4's
+  entire 33-module `mlib*` first-order prover core (Joe Hurd's Metis) loads on the
+  interpreter, plus glue `Canon`/`matchTools`/`folMapping`/`refuteLib`/`Unwind`/
+  `pureSimps`/`BoolExtractShared` and `normalFormsTheory` (Script→Theory). Two
+  unblocks it surfaced: a real **interpreter bug** — `EXTINSTR realToInt/floatToInt`
+  (0x6e/0x6f) didn't consume the rounding-mode operand byte (fixed, commit e4800cf;
+  `Real.floor`/`ceil`/`round`/`trunc` were all broken — `mlib` calls `Random`→`floor`
+  at load) — and `portableML` `Intset`/`Intmap`. THE WALL: `normalForms`' load proofs
+  use `SIMP_TAC boolSimps.bool_ss`; `boolSimps`' SSFRAG reaches `markerLib.Cong`, but
+  the simp checkpoint baked a STUBBED `markerLib` (real one needs `proofManagerLib`),
+  and a top-level shadow can't override the pre-compiled `simpLib`. → **Finishing METIS
+  needs the simp layer rebuilt with a real `markerLib`** (build `proofManagerLib`, or
+  stub only it). That is the `full bool_ss` sub-project; the WIP file has all the
+  other patches (COND_BOOL_CLAUSES, DB.fetch table, grammarDB) ready.
 - **`Datatype` remaining work is NON-SAT** (re-scoped 2026-06-05). With SAT off
   the table and `mesonLib` done, `Datatype`/`define_type` → `ind_typeTheory` still
   needs: `InductiveDefinition` (`src/IndDef`), then `ind_typeTheory`'s `.dat` (the
