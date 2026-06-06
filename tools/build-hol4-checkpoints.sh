@@ -225,7 +225,10 @@ build_simp() {
 }
 
 build_num() {
-  [ -f /tmp/hol4_combin ] || { echo "num: need /tmp/hol4_combin first"; build_combin || return 1; }
+  # Built on the PROVER base (/tmp/hol4_metis) so the canonical /tmp/hol4_num has
+  # the REAL numTheory AND full bool_ss/SIMP/MESON/METIS live — the unified
+  # foundation needed toward the Datatype package (ind_typeTheory's num ancestor).
+  [ -f /tmp/hol4_metis ] || { echo "num: need /tmp/hol4_metis first"; build_metis || return 1; }
   if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_num ]; then
     echo "num: /tmp/hol4_num exists ($(wc -c </tmp/hol4_num) bytes) — skip (--force to rebuild)"
     return 0
@@ -233,7 +236,7 @@ build_num() {
   echo "num: building /tmp/hol4_num …"
   # build_num_checkpoint.sml builds numTheory from src/num/theories/numScript.sml
   # (bootstraps the naturals + INDUCTION from INFINITY_AX); gated on NUM_SMOKE_PASS.
-  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 200000000000 /tmp/hol4_combin \
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 200000000000 /tmp/hol4_metis \
       < "$SUPPORT/build_num_checkpoint.sml" ) >/tmp/build-num.log 2>&1
   if [ -f /tmp/hol4_num ] && grep -qa "NUM_CHECKPOINT_DONE" /tmp/build-num.log; then
     echo "num: OK ($(wc -c </tmp/hol4_num) bytes; $(grep -aoE 'NUMTHEORY_NAMES [0-9]+' /tmp/build-num.log | tail -1) names; INDUCTION present; smoke PASS)"
@@ -357,6 +360,6 @@ case "$TARGET" in
   metis)   build_metis;;
   all)     build_basis && build_kernel && build_theory && build_parse \
              && build_bool && build_tactic && build_rewrite && build_marker \
-             && build_combin && build_simp && build_num && build_arith \
-             && build_order && build_taut && build_meson && build_metis;;
+             && build_combin && build_simp && build_taut && build_meson \
+             && build_metis && build_num && build_arith && build_order;;
 esac
