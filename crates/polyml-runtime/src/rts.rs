@@ -550,12 +550,11 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyBasicIOGeneral", RtsFn::Arity4(poly_basic_io_general));
 
     // Arbitrary precision (all take threadId, arg1, arg2 unless noted).
-    // All fast-path: if both args are tagged and result fits in a tag,
-    // return TAGGED(result). Otherwise return TAGGED(0), which upstream
-    // uses as the "ML exception raised" sentinel (we don't have a real
-    // boxed bignum path yet). In practice bootstrap's compile-time
-    // arithmetic stays in the tagged range almost always; if we hit
-    // the overflow path we'll know.
+    // Fast-path: if both args are tagged and the result fits in a tag,
+    // return TAGGED(result). Otherwise fall through to a real boxed-bignum
+    // path (num_bigint::BigInt; see poly_word_to_bigint / bigint_to_poly_word
+    // ~line 1292) and allocate a boxed result — so e.g. IntInf.pow(2,100)
+    // computes correctly, not just tagged-range arithmetic.
     t.register("PolyAddArbitrary", RtsFn::Arity3(poly_add_arbitrary));
     t.register("PolySubtractArbitrary", RtsFn::Arity3(poly_subtract_arbitrary));
     t.register("PolyMultiplyArbitrary", RtsFn::Arity3(poly_multiply_arbitrary));
