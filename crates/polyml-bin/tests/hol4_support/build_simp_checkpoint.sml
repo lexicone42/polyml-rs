@@ -162,13 +162,28 @@ val _ = U "src/simp/src/Traverse.sig";
 val _ = U "src/simp/src/Traverse.sml";
 pr ("CORE_DONE " ^ Int.toString (!nok) ^ "/" ^ Int.toString (!nok + !nf) ^ "\n");
 
-(* STEP 5: markerLib typed stub (the 15 names simpLib uses + unAC/unCong). *)
+(* STEP 5: markerLib stub. The REWRITING-marker functions (Cong/unCong/AC/unAC/
+   TIDY_ABBREV_CONV) are REAL — they are tiny kernel ops over markerTheory (copied
+   verbatim from src/marker/markerLib.sml), and simpLib/boolSimps actually CALL
+   them at load (boolSimps' BOOL_ss/CONG_ss build with Cong + TIDY_ABBREV_CONV).
+   The suspended-goal / Excl / FRAG / Req machinery (which needs the heavy
+   BasicProvers/AncestryData/proofManagerLib closure) is NOT on the simp/bool_ss
+   path, so those stay raise-stubs. This makes simpLib compile against a real Cong,
+   which is what unblocks the full bool_ss (and hence METIS' normalForms). *)
 structure markerLib = struct
+  local open Thm Drule Conv Rewrite in
   type 'a set = 'a HOLset.set
-  fun Cong (_:thm) : thm = raise Fail "markerLib stub Cong"
-  fun unCong (_:thm) : thm = raise Fail "markerLib stub unCong"
-  fun AC (_:thm) (_:thm) : thm = raise Fail "markerLib stub AC"
-  fun unAC (_:thm) : thm * thm = raise Fail "markerLib stub unAC"
+  fun Cong th = EQ_MP (SYM (SPEC (concl th) markerTheory.Cong_def)) th
+  fun unCong th = PURE_REWRITE_RULE [markerTheory.Cong_def] th
+  fun AC th1 th2 =
+      EQ_MP (SYM (SPECL [concl th1, concl th2] markerTheory.AC_DEF)) (CONJ th1 th2)
+  fun unAC th = let val th1 = PURE_REWRITE_RULE [markerTheory.AC_DEF] th
+                in (CONJUNCT1 th1, CONJUNCT2 th1) end
+  fun TIDY_ABBREV_CONV t =
+      if markerSyntax.is_malformed_abbrev t then
+        (REWR_CONV markerTheory.Abbrev_def THENC TRY_CONV (REWR_CONV boolTheory.EQ_SYM_EQ)) t
+      else ALL_CONV t
+  val TIDY_ABBREV_RULE = CONV_RULE TIDY_ABBREV_CONV
   fun Excl (_:string) : thm = raise Fail "markerLib stub Excl"
   fun destExcl (_:thm) : string option = NONE
   fun ExclSF (_:string) : thm = raise Fail "markerLib stub ExclSF"
@@ -182,6 +197,7 @@ structure markerLib = struct
   fun LLABEL_RES_THEN (f:thm list -> tactic) (l:thm list) : tactic = f l
   val NoAsms : thm = TRUTH
   fun process_taclist_then ({arg}:{arg:thm list}) (f:thm list -> tactic) : tactic = f arg
+  end (* local open *)
 end;
 
 (* STEP 6: simpLib. *)

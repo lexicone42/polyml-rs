@@ -126,6 +126,13 @@ pub fn meson_checkpoint_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Warm checkpoint with metisLib (resolution/paramodulation prover, METIS_TAC)
+/// (`tools/build-hol4-checkpoints.sh metis`).
+pub fn metis_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/hol4_metis");
+    p.exists().then_some(p)
+}
+
 /// Pipe the contents of a `hol4_support/*.sml` driver into `poly run <image>`
 /// (cwd = vendor/polyml), with `HOL4_DIR` set to `vendor/hol4`. Returns None if
 /// `image`, the driver, or `vendor/hol4` are absent (caller should skip).

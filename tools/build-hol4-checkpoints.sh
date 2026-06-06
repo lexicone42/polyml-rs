@@ -15,6 +15,7 @@
 #   /tmp/hol4_arith     + arithmetic (+,*,EVEN) (build_arith_checkpoint.sml)
 #   /tmp/hol4_taut      + HolSat/tautLib (DPLL) (build_taut_checkpoint.sml)
 #   /tmp/hol4_meson     + mesonLib (MESON_TAC)  (build_meson_checkpoint.sml)
+#   /tmp/hol4_metis     + metisLib (METIS_TAC)  (build_metis_checkpoint.sml)
 #
 # Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|all]
 #   --force   rebuild even if the image already exists
@@ -28,7 +29,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|taut|meson|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|taut|meson|metis|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -318,6 +319,25 @@ build_meson() {
   fi
 }
 
+build_metis() {
+  [ -f /tmp/hol4_meson ] || { echo "metis: need /tmp/hol4_meson first"; build_meson || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_metis ]; then
+    echo "metis: /tmp/hol4_metis exists ($(wc -c </tmp/hol4_metis) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "metis: building /tmp/hol4_metis …"
+  # build_metis_checkpoint.sml builds the full bool_ss closure, the 33-module mlib*
+  # prover core, normalForms+folTools, and metisLib; METIS_TAC then proves
+  # equality/paramodulation goals (AC_CHAIN, CONG). Export gated on METIS_SMOKE_PASS.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 800000000000 /tmp/hol4_meson \
+      < "$SUPPORT/build_metis_checkpoint.sml" ) >/tmp/build-metis.log 2>&1
+  if [ -f /tmp/hol4_metis ] && grep -qa "METIS_CHECKPOINT_DONE" /tmp/build-metis.log; then
+    echo "metis: OK ($(wc -c </tmp/hol4_metis) bytes; $(grep -aoE 'METIS AC_CHAIN:.*' /tmp/build-metis.log | head -1 | cut -c1-60))"
+  else
+    echo "metis: FAILED — see /tmp/build-metis.log"; tail -12 /tmp/build-metis.log; return 1
+  fi
+}
+
 case "$TARGET" in
   basis)   build_basis;;
   kernel)  build_kernel;;
@@ -334,8 +354,9 @@ case "$TARGET" in
   order)   build_order;;
   taut)    build_taut;;
   meson)   build_meson;;
+  metis)   build_metis;;
   all)     build_basis && build_kernel && build_theory && build_parse \
              && build_bool && build_tactic && build_rewrite && build_marker \
              && build_combin && build_simp && build_num && build_arith \
-             && build_order && build_taut && build_meson;;
+             && build_order && build_taut && build_meson && build_metis;;
 esac
