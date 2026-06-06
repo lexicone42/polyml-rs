@@ -666,14 +666,39 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   (mlibOmega's `Time.fromSeconds`); resets per fresh image, NOT a soundness issue,
   so prove one goal-group per process. Earlier "blocked on proofManagerLib" was
   overblown — the real markerLib only uses it in one interactive helper.
-- **`Datatype` remaining work is NON-SAT** (re-scoped 2026-06-05). With SAT off
-  the table and `mesonLib` done, `Datatype`/`define_type` → `ind_typeTheory` still
-  needs: `InductiveDefinition` (`src/IndDef`), then `ind_typeTheory`'s `.dat` (the
-  `DB`/`TheoryReader`/`regexpMatch` layer — the long-standing 4-stuck-module gap),
-  plus `TypeBase`. Hand-rolling each datatype num-style (`new_type`/
-  `new_type_definition` + recursion theorem + `INDUCT_TAC`) remains a viable
-  parallel route; a reusable `define_recursive` / INDUCT-from-theorem helper would
-  make each type boilerplate.
+- **`Datatype` package — STAGED ROADMAP** (mapped 2026-06-06; Stage 0 DONE). The
+  real `Datatype`/`define_type` needs `ind_typeTheory`, whose `Ancestors` are
+  `num prim_rec arithmetic numpair` and which simplifies with `bool_ss ++ numSimps`.
+  So the cost is the **arithmetic MIDDLE of the stack**, not the (light) Datatype top
+  layer. The historical "too SIMP/SAT-saturated" verdict is OBSOLETE — the real
+  `bool_ss`/`SIMP`/`MESON`/`METIS` now exist. Staged path from `/tmp/hol4_metis`
+  (build each via the Script→Theory recipe, checkpoint each layer):
+  - **Stage 0 — DONE**: real `numTheory` on the prover base. `build_num` re-based on
+    `/tmp/hol4_metis`; `/tmp/hol4_num` now has real `numScript` INDUCTION + live
+    `bool_ss`(∃!)/`MESON`/`METIS`; arith/order rebuild on it (`hol4_num_prover.rs`).
+  - Stage 1 — `prim_recTheory` truncated at `num_Axiom` (line 549): patch out the
+    `relationTheory`-dependent TC block + WF tail, swap `LESS_LEMMA1` to the TC-free
+    proof from `num_arith_trophy.sml`, and fix `UNIQUE_SKOLEM_THM` (the upstream LCF
+    proof needs `CONV_TAC (DEPTH_CONV FORALL_AND_CONV)` to fix the normal form, then
+    an explicit witness for the 2nd-order branch — MESON goes Too-deep). LIKELY.
+  - Stage 2-3 — `relationTheory` (2618 lines; or just the `transitive_def`/`RTC`
+    fragment arithmetic needs) + real `TypeBase`/`TypeBasePure` (replace the
+    build_simp typed stubs) + `BasicProvers` (needs a working `srw_ss()`). HARD.
+  - Stage 4 — `numeralTheory` + `arithmeticTheory` (5759 lines, 81 METIS — watch the
+    METIS cumulative Time-exception; split or swap small METIS_PROVE→MESON). UNCERTAIN.
+  - Stage 5 — `computeLib` (first build ever) + `reduceLib` + `numSimps` (~25 pure-SML
+    modules, no minisat; sidestep `cv` via legacy `conv-old/Arithconv`). UNCERTAIN.
+  - Stage 6 — `numpairTheory` (heaviest; needs `numSimps` + `TotalDefn`/`Define`, or a
+    minimal `nfst/nsnd` sidestep). HARD — the biggest structural risk.
+  - Stage 7-9 — `ind_typeTheory` (light: 18 SIMP/1 MESON) + `InductiveDefinition`/
+    `IndDef` (hand-rolled MONO_TAC, no MESON; quote-filter + grammarDB patch) +
+    `Datatype` assembly (`ParseDatatype`/`RecordType`/`DataSize`). LIKELY once the
+    arithmetic middle exists. SMOKE: `Datatype \`tree = Leaf | Node tree tree\`` →
+    check generated induction/recursion theorems.
+  Bottom line: reachable but a multi-session effort dominated by the arithmetic
+  middle. Hand-rolling each datatype num-style (`new_type_definition` + recursion
+  theorem + `INDUCT_TAC`, see `pair_tydef_milestone.sml`) remains a viable parallel
+  shortcut for specific types.
 
 - **Arithmetic library — DONE** (`/tmp/hol4_arith`, `build_arith_checkpoint.sml`,
   `hol4_arith.rs`, `structure numArith`). `add`/`mult`/`EVEN`/`ODD` defined from
