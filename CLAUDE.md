@@ -764,16 +764,43 @@ basis checkpoint, incl. `ml_name_space` (PolyML.NameSpace round-trips), `ml_syst
 `ml_recursive`. Source vendored as a git-ignored sparse blobless clone of
 `mirror-isabelle` `src/Pure` (~6 MB) under `vendor/isabelle/`.
 
-**First WALL** (next target): our default `int` is **FixedInt(63-bit)**
-(`Int.precision = SOME 63`); upstream PolyML defaults to **arbitrary-precision** `int`,
-so `Real.fromInt (Time.toNanoseconds t)` (Isabelle `time.ML:32`) type-errors and
-cascades to `isabelle_thread.ML` + `ml_compiler0.ML`. (`ml_statistics.ML` separately
-needs a real `PolyML.Statistics` record shape.) Both are incidental basis-archaeology
-gaps (the predicted "127 files of it"), not architectural. Other deferred-but-real
-items for a full session (NOT load-time): real threading/Future scheduler, the
-`CPCompilerResultFun`/`PolyML.parseTree` path (untested vs HOL4's discard path), a
-stable `GET_THREAD_ID` (cache one thread object — needed when `with_attributes` runs
-at compile time), sockets/PIDE/Scala protocol, real C FFI. None block a minimal load.
+**Full recon DONE** (2026-06-06; both gating risks retired). The complete
+engineering plan to a minimal Pure load (compile-all-Pure-ML, no theory execution):
+
+- **parseTree introspection — GREEN** (`parsetree_introspect.rs`): the 2nd major
+  compiler coupling (Isabelle's `ml_compiler.ML` drives `PolyML.compiler` +
+  `CPCompilerResultFun` and walks `PolyML.parseTree`/`PT*`, which HOL4 never does)
+  works — compile returns code+tree, the walk renders a `PTtype` to `int`, error
+  decls return `code=NONE, tree=SOME`. No longer a risk.
+- **The gap inventory collapses to THREE root-cause groups**: (1) int-precision;
+  (2) Isabelle `\<...>` symbol notation — **2a** string-literal cartouches (SMALL:
+  SML rejects `\<`; cleanest fix = permissive string escape in the lexer / upstream
+  `unescapeString`) vs **2b** bare ML antiquotations `\<^here>`/`\<^binding>` (HARD,
+  THE structural wall); (3) Isabelle system `Options` env (stub).
+- With stubs for the 4 Phase-0 walls + the int/cartouche patches, **Phase 0 = 27/27,
+  Phase 1 = 50/50, and 83/90 to "Fundamental structures" — `name.ML`, `term.ML`,
+  `context.ML` (the Isabelle KERNEL) load.** No Pure file forks a thread/socket at
+  load (single-threaded load is safe).
+- **THE real frontier = the ML-antiquotation expander** (`ML_Lex` + `ML_Context`),
+  needed by **97 of ~150 remaining Pure files**. This is an Isabelle compile-pipeline
+  PORT (months), NOT a polyml-rs runtime gap — and it couples back to the (now-GREEN)
+  parseTree path.
+- **int-precision — a latent interpreter bug found**: flipping the default to
+  arbitrary-precision (`--intIsIntInf`, the real fix that deletes the whole Group-1
+  cascade) **deterministically SEGVs our interpreter at `basis/Real.sml` (exit 139)**,
+  reproduced via the full Stage1 chain. The runtime bignum itself is fine (IntInf.pow
+  works). So near-term = a per-checkpoint shim (retype the Real↔int family to LargeInt
+  + supply `Time.seconds`, kept OUT of HOL4); long-term = diagnose the Real.sml SEGV
+  then flip. This Real.sml-SEGV-under-arbitrary-int is its own worthwhile runtime bug.
+
+Roadmap (root-cause-grouped, in `[[isabelle-go-signal]]` / task #69): 1 int-shim →
+2 string-cartouche pass-through → 3 Options stub → 4 ml_statistics shape → (Phase 0/1
+= 50/50, kernel structures load) → 5 diagnose Real.sml SEGV + flip default int →
+6 snippet milestone (`val x=1+1` through Isabelle's own `ML_Compiler0`) → 7 kernel
+sub-block (term/thm/proofterm — uses only `\<^here>`, textually rewritten by
+ml_compiler0) → **8 (LARGE) port the antiquotation expander** → 9 remaining Phase 2/3
+volume. Deferred-but-real (frontend-only, NOT load-time): real Future scheduler,
+sockets/PIDE/Scala, C FFI, stable `GET_THREAD_ID` (cache one thread object).
 
 ## RTS calling conventions
 
