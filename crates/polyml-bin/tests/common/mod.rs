@@ -40,6 +40,22 @@ pub fn hol4_dir() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Vendored Isabelle/Pure ML sources (sparse blobless clone of
+/// `github.com/isabelle-prover/mirror-isabelle`, `src/Pure` only). Git-ignored
+/// like `vendor/hol4`; obtain with:
+///   git clone --filter=blob:none --no-checkout <mirror> vendor/isabelle/mirror-isabelle
+///   (cd vendor/isabelle/mirror-isabelle && git sparse-checkout set src/Pure && git checkout)
+pub fn isabelle_pure_dir() -> Option<PathBuf> {
+    let p = workspace_root().join("vendor/isabelle/mirror-isabelle/src/Pure");
+    p.exists().then_some(p)
+}
+
+/// Basis-only warm checkpoint (`tools/build-hol4-checkpoints.sh basis`).
+pub fn basis_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/basis_loaded");
+    p.exists().then_some(p)
+}
+
 /// Warm basis+kernel checkpoint built by `tools/build-hol4-checkpoints.sh kernel`.
 pub fn kernel_checkpoint_path() -> Option<PathBuf> {
     let p = PathBuf::from("/tmp/hol4_kernel");
