@@ -746,6 +746,35 @@ alpha-renamed Fp,Sp since F=false / S=combinator in HOL4.)
 `theory_dev_proof` remains the kernel-level proof. `tools/closure-probe.sh
 /tmp/hol4_theory src/parse` measures parse-layer load on the Theory base.
 
+## Isabelle reconnaissance (the north star) — GO SIGNAL, 2026-06-06
+
+After completing HOL4's prover stack, probed whether our Rust PolyML can run
+**Isabelle**. Verdict: reachable but FAR (months) — yet **no missing C-RTS
+primitive blocks a minimal Isabelle/Pure source load**; the hard PolyML coupling
+(`PolyML.NameSpace`, structural `PolyML.pretty`, the `CPCompilerResultFun` parse-tree
+path at ROOT.ML #226) is vendored SML already compiled into our image. Isabelle/Pure
+has a Scala-free ML entry (`poly --eval "val SML_file = PolyML.use" --use ROOT.ML`),
+threads/Future are lazy (single-threaded load works), SaveState is save-time-only,
+and the version matches (5.9.2).
+
+**First rung DONE** (`isabelle_pure.rs`, `common::isabelle_pure_dir`): the first
+Isabelle/Pure ML runs on the interpreter — **23 of 27 Phase-0 files load** on a
+basis checkpoint, incl. `ml_name_space` (PolyML.NameSpace round-trips), `ml_system`,
+`ml_pretty`, `multithreading`/`synchronized`, `thread_attributes`, `ml_heap`,
+`ml_recursive`. Source vendored as a git-ignored sparse blobless clone of
+`mirror-isabelle` `src/Pure` (~6 MB) under `vendor/isabelle/`.
+
+**First WALL** (next target): our default `int` is **FixedInt(63-bit)**
+(`Int.precision = SOME 63`); upstream PolyML defaults to **arbitrary-precision** `int`,
+so `Real.fromInt (Time.toNanoseconds t)` (Isabelle `time.ML:32`) type-errors and
+cascades to `isabelle_thread.ML` + `ml_compiler0.ML`. (`ml_statistics.ML` separately
+needs a real `PolyML.Statistics` record shape.) Both are incidental basis-archaeology
+gaps (the predicted "127 files of it"), not architectural. Other deferred-but-real
+items for a full session (NOT load-time): real threading/Future scheduler, the
+`CPCompilerResultFun`/`PolyML.parseTree` path (untested vs HOL4's discard path), a
+stable `GET_THREAD_ID` (cache one thread object — needed when `with_attributes` runs
+at compile time), sockets/PIDE/Scala protocol, real C FFI. None block a minimal load.
+
 ## RTS calling conventions
 
 The most common cause of arity-mismatch bugs:
