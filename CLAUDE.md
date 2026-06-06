@@ -645,21 +645,27 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   genuine first-order reasoning. NOTE the quote-filter trick: `HOLSource.inputFile`
   works on plain `.sml` (not just Theory scripts), converting `` ``…`` `` term
   quotations to `[QUOTE …]` — this unblocks any quotation-carrying HOL4 `.sml`.
-- **METIS (`metisLib`) — WIP: mlib core builds 33/33, blocked on full bool_ss**
-  (`build_metis_checkpoint.sml`, 2026-06-05). The novel/hard part works: HOL4's
-  entire 33-module `mlib*` first-order prover core (Joe Hurd's Metis) loads on the
-  interpreter, plus glue `Canon`/`matchTools`/`folMapping`/`refuteLib`/`Unwind`/
-  `pureSimps`/`BoolExtractShared` and `normalFormsTheory` (Script→Theory). Two
-  unblocks it surfaced: a real **interpreter bug** — `EXTINSTR realToInt/floatToInt`
-  (0x6e/0x6f) didn't consume the rounding-mode operand byte (fixed, commit e4800cf;
-  `Real.floor`/`ceil`/`round`/`trunc` were all broken — `mlib` calls `Random`→`floor`
-  at load) — and `portableML` `Intset`/`Intmap`. THE WALL: `normalForms`' load proofs
-  use `SIMP_TAC boolSimps.bool_ss`; `boolSimps`' SSFRAG reaches `markerLib.Cong`, but
-  the simp checkpoint baked a STUBBED `markerLib` (real one needs `proofManagerLib`),
-  and a top-level shadow can't override the pre-compiled `simpLib`. → **Finishing METIS
-  needs the simp layer rebuilt with a real `markerLib`** (build `proofManagerLib`, or
-  stub only it). That is the `full bool_ss` sub-project; the WIP file has all the
-  other patches (COND_BOOL_CLAUSES, DB.fetch table, grammarDB) ready.
+- **METIS (`metisLib` / `METIS_TAC`) — DONE** (`/tmp/hol4_metis`,
+  `build_metis_checkpoint.sml`, `hol4_metis.rs`, 2026-06-06). HOL4's strongest
+  first-order prover (Joe Hurd's resolution + paramodulation) runs on the
+  interpreter: `METIS_TAC` proves equality/paramodulation goals MESON can't —
+  `AC_CHAIN` (4-deep product reversal from comm+assoc, the HOL4 README's own
+  showcase), equality congruence, FOL syllogisms — each a verified 0-hyp theorem.
+  The finish was the **full `bool_ss`**: make the build_simp `markerLib` stub's
+  REWRITING functions (`Cong`/`unCong`/`AC`/`unAC`/`TIDY_ABBREV_CONV`) REAL — tiny
+  kernel ops over `markerTheory` — so `simpLib` is compiled against a real `Cong`
+  and full `bool_ss` loads (the heavy suspended-goal/`proofManagerLib` machinery
+  stays stubbed; `bool_ss` never touches it). Then the 33-module `mlib*` core +
+  `Canon`/`refuteLib`/`Unwind`/`BoolExtractShared`/`pureSimps` + `normalFormsTheory`
+  (Script→Theory) + `normalForms`/`folTools`/`metisTools`/`metisLib`, with the usual
+  patches (grammarDB, COND_BOOL_CLAUSES, DB.fetch table, HOLSource quote-filter) and
+  one tactic patch (COND_COND → case-split: our simp doesn't rewrite CONDs through
+  atomic-bool assumptions). Needs the realToInt interpreter fix (e4800cf) +
+  portableML `Intset`/`Intmap`. CAVEAT: mlib's time-slice scheduler vs our timing
+  → cumulative/heavy proving in ONE process can hit a spurious `Time` exception
+  (mlibOmega's `Time.fromSeconds`); resets per fresh image, NOT a soundness issue,
+  so prove one goal-group per process. Earlier "blocked on proofManagerLib" was
+  overblown — the real markerLib only uses it in one interactive helper.
 - **`Datatype` remaining work is NON-SAT** (re-scoped 2026-06-05). With SAT off
   the table and `mesonLib` done, `Datatype`/`define_type` → `ind_typeTheory` still
   needs: `InductiveDefinition` (`src/IndDef`), then `ind_typeTheory`'s `.dat` (the
@@ -692,15 +698,18 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
 The HOL4 ladder so far (each a `build-hol4-checkpoints.sh` target + an
 `#[ignore]` regression test): kernel → theory → parse → bool → tactic → rewrite
 → marker → combin → simp → num → arith → order, plus the **taut** branch off
-combin (`/tmp/hol4_taut`: HolSatLib + tautLib via pure-SML DPLL) and the
-**meson** branch off simp (`/tmp/hol4_meson`: mesonLib first-order proving).
+combin (`/tmp/hol4_taut`: HolSatLib + tautLib via pure-SML DPLL), the **meson**
+branch off simp (`/tmp/hol4_meson`: mesonLib first-order proving), and **metis**
+off meson (`/tmp/hol4_metis`: metisLib resolution+paramodulation, full bool_ss).
 Headline proofs on `/tmp/hol4_simp`: the Drinker Paradox `⊢ ∃x. D x ⇒ ∀y. D y`,
 quantifier duality, `S K K = I` (`hol4_fancy.rs`); on `/tmp/hol4_num`: induction
 over ℕ + `APPEND_ASSOC` (`hol4_induction.rs`, `hol4_list.rs`); on
 `/tmp/hol4_arith`: ADD_COMM/MULT_COMM/EVEN_ADD (`hol4_arith.rs`); on
 `/tmp/hol4_order`: the `<=` laws (`hol4_order.rs`); on `/tmp/hol4_taut`:
 `⊢ p ∨ ¬p`, De Morgan, Peirce (`hol4_taut.rs`); on `/tmp/hol4_meson`: the drinker
-paradox + a symmetric/transitive relation goal by `MESON_TAC` (`hol4_meson.rs`).
+paradox + a symmetric/transitive relation goal by `MESON_TAC` (`hol4_meson.rs`);
+on `/tmp/hol4_metis`: `AC_CHAIN` product-reversal + equality congruence by
+`METIS_TAC` (`hol4_metis.rs`).
 
 **Pelletier benchmark suite — 46/47 by MESON** (`hol4_pelletier.rs`,
 `pelletier_problems.sml`, on `/tmp/hol4_meson`). The classic Pelletier (1986) FOL
