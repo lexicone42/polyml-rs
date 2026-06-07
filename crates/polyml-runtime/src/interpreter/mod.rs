@@ -3971,7 +3971,12 @@ impl Interpreter {
         // something corrupted the stack. Print a detailed dump so we
         // can trace the source. Gated on JIT_TRACE_RETURNS to avoid
         // noise in normal runs.
-        if std::env::var("JIT_TRACE_RETURNS").is_ok()
+        // Balance check: retPC must point into the caller's code segment.
+        // If not, a callee left the stack misaligned (a one-slot leak puts the
+        // real closure pointer in the retPC slot). Uses the CACHED ARBINT_DEBUG
+        // flag (NOT per-call env::var, which would syscall every return), and
+        // aborts at the FIRST corrupted return — that frame IS the leak culprit.
+        if arbint_trace_on()
             && !(caller_start as usize <= ret_pc_bits
                 && ret_pc_bits < caller_end as usize)
         {
@@ -3985,12 +3990,20 @@ impl Interpreter {
                 result.0,
                 self.frames.len(),
             );
-            // Print 5 most recent CALL targets.
             let recent = self.recent_call_targets_snapshot();
             eprintln!("  recent CALL targets (newest first):");
-            for (i, t) in recent.iter().enumerate().take(5) {
+            for (i, t) in recent.iter().enumerate().take(8) {
                 eprintln!("    -{i}: 0x{t:016x}");
             }
+            // Dump the opcode ring so the leaking callee's op sequence is visible.
+            OP_RING.with(|r| {
+                let ring = r.borrow();
+                eprintln!("  --- op ring (last {}) at BAD return ---", ring.len());
+                for (code, off, op, sp) in ring.iter().rev().take(40).collect::<Vec<_>>().iter().rev() {
+                    eprintln!("    code=0x{code:x} off={off:>5} op=0x{op:02x} sp={sp}");
+                }
+            });
+            std::process::abort();
         }
         self.code_start = caller_start;
         self.code_end = caller_end;
