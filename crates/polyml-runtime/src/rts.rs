@@ -372,7 +372,16 @@ fn register_builtins(t: &mut RtsTable) {
         t.register(name, RtsFn::Arity2(zero2));
     }
     t.register("PolyRealLdexp", RtsFn::Arity2(zero2));
-    t.register("PolyFloatArbitraryPrecision", RtsFn::Arity2(zero2));
+    // Real.fromLargeInt (and, under arbitrary-precision int, Real.fromInt): convert
+    // an arbitrary-precision int (tagged or boxed bignum) to a boxed double.
+    // reals.cpp:240 PolyFloatArbitraryPrecision(arg) -> double. Fast call, ONE arg
+    // (the old Arity2 stub was both wrong-arity and returned tagged(0), which made
+    // `val zero/one/four = fromInt …` in basis/Real.sml produce fake reals and SEGV
+    // the load under arbitrary int).
+    t.register("PolyFloatArbitraryPrecision", RtsFn::Arity1(|c, x| {
+        use num_traits::ToPrimitive;
+        box_real(c, poly_word_to_bigint(x).and_then(|n| n.to_f64()).unwrap_or(0.0))
+    }));
     // Timing / system stubs.
     t.register("PolyTimingTicksPerMicroSec", RtsFn::Arity1(|_, _| PolyWord::tagged(1)));
     t.register("PolyTimingGetNow", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));

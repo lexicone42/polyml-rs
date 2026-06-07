@@ -1531,7 +1531,7 @@ impl Interpreter {
                 // mapped memory) and dump context. Gated on env var.
                 if std::env::var("JIT_TRACE_STORES").is_ok() {
                     let b = base.0;
-                    let suspicious = b < 0x1000 || (b & 0x1) != 0;
+                    let suspicious = b < 0x1000 || (b & 0x1) != 0 || index > 0x10_0000;
                     if suspicious {
                         eprintln!(
                             "  STORE_ML_WORD BAD: base=0x{b:016x} index={index} to_store=0x{:016x} cur_code=0x{:016x} frames_depth={}",

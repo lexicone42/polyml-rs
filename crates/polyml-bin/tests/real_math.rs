@@ -45,6 +45,13 @@ val () = pr ("COS=" ^ Bool.toString (approx (Math.cos (opR 0.0), 1.0)) ^ "\n");
 val () = pr ("LN=" ^ Bool.toString (approx (Math.ln (Math.exp (opR 1.0)), 1.0)) ^ "\n");
 val () = pr ("POW=" ^ Bool.toString (approx (Math.pow (opR 2.0, opR 10.0), 1024.0)) ^ "\n");
 val () = pr ("ATAN2=" ^ Bool.toString (approx (Math.atan2 (opR 1.0, opR 1.0), 0.7853981633974483)) ^ "\n");
+(* fromLargeInt = PolyFloatArbitraryPrecision (int->real); also IS Real.fromInt
+   under arbitrary-precision int, so it must produce a real boxed double — was
+   stubbed to tagged(0). *)
+val rtL = LargeInt.fromInt rt;
+fun opL (i:LargeInt.int) = i + rtL - rtL;
+val () = pr ("FLI=" ^ Bool.toString (approx (Real.fromLargeInt (opL 5), 5.0)) ^ "\n");
+val () = pr ("FLI_NEG=" ^ Bool.toString (approx (Real.fromLargeInt (opL (~7)), ~7.0)) ^ "\n");
 val () = pr ("FLOOR=" ^ Int.toString (Real.floor (opR 3.7)) ^ "\n");
 val () = pr ("CEIL=" ^ Int.toString (Real.ceil (opR 3.2)) ^ "\n");
 (* the path that was broken (and SEGV'd under arbitrary-int): toLargeInt uses
@@ -64,7 +71,7 @@ pr "REALMATH_DONE\n";
         return;
     };
     assert!(out.contains("REALMATH_DONE"), "driver did not finish.\n{}", tail(&out, 30));
-    for f in ["SQRT", "SIN", "COS", "LN", "POW", "ATAN2"] {
+    for f in ["SQRT", "SIN", "COS", "LN", "POW", "ATAN2", "FLI", "FLI_NEG"] {
         assert!(out.contains(&format!("{f}=true")), "{f} math wrong (stubbed?).\n{}", tail(&out, 30));
     }
     assert!(out.contains("FLOOR=3"), "Real.floor wrong.\n{}", tail(&out, 30));
