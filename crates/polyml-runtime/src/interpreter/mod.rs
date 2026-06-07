@@ -2529,6 +2529,43 @@ impl Interpreter {
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
 
+            // ----- PackWord / SysWord raw array accessors. bytecode.cpp:1438-1482.
+            // Treat the base as a raw word array; read/write word[index].
+            // loadPolyWord/loadNativeWord: pop index, peek base, box base[index]
+            // as a 1-word byte object, replace top. Net -1.
+            EXTINSTR_LOAD_POLY_WORD | EXTINSTR_LOAD_NATIVE_WORD => {
+                let index = self.pop()?.untag() as usize;
+                let base = self.peek(0)?;
+                let p = base.as_ptr::<usize>();
+                // SAFETY: compiler emits a valid base + in-bounds index.
+                let r = unsafe { *p.add(index) };
+                let boxed = self.alloc_lg_word(r)?;
+                self.stack[self.sp] = boxed;
+                Ok(StepResult::Continue)
+            }
+            // storePolyWord: pop toStore (boxed; read its word), pop index,
+            // peek base, base[index] := toStore, replace top with Zero. Net -2.
+            EXTINSTR_STORE_POLY_WORD => {
+                let to_store = unsafe { Self::read_lg_word(self.pop()?) };
+                let index = self.pop()?.untag() as usize;
+                let base = self.peek(0)?;
+                let p = base.as_ptr::<usize>().cast_mut();
+                // SAFETY: compiler emits a valid mutable base + in-bounds index.
+                unsafe { *p.add(index) = to_store };
+                self.stack[self.sp] = PolyWord::tagged(0);
+                Ok(StepResult::Continue)
+            }
+            // storeNativeWord: same but does NOT replace top — base stays. Net -2.
+            EXTINSTR_STORE_NATIVE_WORD => {
+                let to_store = unsafe { Self::read_lg_word(self.pop()?) };
+                let index = self.pop()?.untag() as usize;
+                let base = self.peek(0)?;
+                let p = base.as_ptr::<usize>().cast_mut();
+                // SAFETY: compiler emits a valid mutable base + in-bounds index.
+                unsafe { *p.add(index) = to_store };
+                Ok(StepResult::Continue)
+            }
+
             // ----- Float (f32) arithmetic. On 64-bit, Float values
             // are *tagged* — packed into the high 32 bits of a
             // PolyWord with the low bit set (FLT_SHIFT = 32).
