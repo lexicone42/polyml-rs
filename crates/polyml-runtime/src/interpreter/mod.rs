@@ -2602,6 +2602,14 @@ impl Interpreter {
                 let r = self.peek(0)?;
                 // SAFETY: peek returns a boxed Real pointer.
                 let d = unsafe { Self::read_real(r) };
+                // bytecode.cpp:1999 — realToFloat carries a trailing rounding-mode
+                // operand byte (genDoubleToFloat emits 5 = use-current-rounding).
+                // It MUST be consumed; otherwise PC lands on that byte and, since
+                // 5 == INSTR_STORE_ML_WORD (0x05), we dispatch a spurious store one
+                // byte early. This was the arbitrary-int basis/Real.sml load SEGV:
+                // Real32.fromReal directly follows Real.fromLargeInt only on the
+                // arbitrary-precision branch, so the desync surfaces there.
+                let _mode = self.fetch_u8()?;
                 #[allow(clippy::cast_possible_truncation)]
                 let f = d as f32;
                 self.stack[self.sp] = Self::box_float(f);
