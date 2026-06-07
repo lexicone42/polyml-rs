@@ -322,12 +322,33 @@ fn register_builtins(t: &mut RtsTable) {
     // All of these are `rtsCallFast{F_F|FF_F|RR_R|...}` style:
     // - F_F : double -> double (Arity1 — no threadId for Fast variants)
     // - FF_F: double*double -> double (Arity2)
+    // DOUBLE unary math (rtsCallFastR_R: real -> real, no threadId). Previously
+    // stubbed to tagged(0) — which made Real.sqrt/sin/floor/round/... silently
+    // return 0 AND, crucially, made `toArbitrary o realFloor` (Real.toLargeInt,
+    // and the default Real.floor under arbitrary-precision int) read the bytes of
+    // a tagged int as a boxed double → wrong value / SEGV. Implement them for real.
+    t.register("PolyRealSqrt", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sqrt())));
+    t.register("PolyRealSin", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sin())));
+    t.register("PolyRealCos", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).cos())));
+    t.register("PolyRealTan", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).tan())));
+    t.register("PolyRealArcSin", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).asin())));
+    t.register("PolyRealArcCos", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).acos())));
+    t.register("PolyRealArctan", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).atan())));
+    t.register("PolyRealSinh", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sinh())));
+    t.register("PolyRealCosh", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).cosh())));
+    t.register("PolyRealTanh", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).tanh())));
+    t.register("PolyRealExp", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).exp())));
+    t.register("PolyRealLog", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).ln())));
+    t.register("PolyRealLog10", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).log10())));
+    // floor/ceil/trunc obvious; round = round-half-to-even (matches upstream
+    // PolyRealRound, reals.cpp:350-359).
+    t.register("PolyRealFloor", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).floor())));
+    t.register("PolyRealCeil", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).ceil())));
+    t.register("PolyRealRound", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).round_ties_even())));
+    t.register("PolyRealTrunc", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).trunc())));
+    // FLOAT (Real32) variants still stubbed — Real32 boxing differs; not on the
+    // Isabelle/HOL4 double path.
     let real_unary_stubs = [
-        "PolyRealSqrt", "PolyRealSin", "PolyRealCos", "PolyRealTan",
-        "PolyRealArcSin", "PolyRealArcCos", "PolyRealArctan",
-        "PolyRealSinh", "PolyRealCosh", "PolyRealTanh",
-        "PolyRealExp", "PolyRealLog", "PolyRealLog10",
-        "PolyRealFloor", "PolyRealCeil", "PolyRealRound", "PolyRealTrunc",
         "PolyRealFSqrt", "PolyRealFSin", "PolyRealFCos", "PolyRealFTan",
         "PolyRealFArcSin", "PolyRealFArcCos", "PolyRealFArctan",
         "PolyRealFSinh", "PolyRealFCosh", "PolyRealFTanh",
@@ -337,9 +358,13 @@ fn register_builtins(t: &mut RtsTable) {
     for name in real_unary_stubs {
         t.register(name, RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     }
+    // DOUBLE binary math (rtsCallFastRR_R: real*real -> real, no threadId).
+    t.register("PolyRealAtan2", RtsFn::Arity2(|c, y, x| box_real(c, read_real_word(y).atan2(read_real_word(x)))));
+    t.register("PolyRealPow", RtsFn::Arity2(|c, b, e| box_real(c, read_real_word(b).powf(read_real_word(e)))));
+    t.register("PolyRealCopySign", RtsFn::Arity2(|c, a, b| box_real(c, read_real_word(a).copysign(read_real_word(b)))));
+    t.register("PolyRealRem", RtsFn::Arity2(|c, a, b| box_real(c, read_real_word(a) % read_real_word(b))));
     let real_binary_stubs = [
-        "PolyRealAtan2", "PolyRealCopySign", "PolyRealNextAfter",
-        "PolyRealPow", "PolyRealRem",
+        "PolyRealNextAfter",
         "PolyRealFAtan2", "PolyRealFCopySign", "PolyRealFNextAfter",
         "PolyRealFPow", "PolyRealFRem",
     ];
@@ -1626,12 +1651,14 @@ fn poly_xor_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, ar
     PolyWord::tagged(0)
 }
 
-/// Shift left of a tagged int. Shift must be tagged & non-negative;
-/// if result overflows the tag range we fall through to TAGGED(0).
-/// Mirrors `arb.cpp:2017-2096` fast path only.
-#[allow(clippy::needless_pass_by_value)]
+/// `IntInf.<<` — arbitrary-precision left shift (= multiply by 2^shift).
+/// Backs `PolyShiftLeftArbitrary`; the SML side only routes here when the
+/// value or result doesn't fit in a short word, so we MUST handle boxed
+/// bignums (the old tagged-only fast path returned TAGGED(0) for those —
+/// silently producing 0 for e.g. `IntInf.<<(1, 0w70)`). Go through BigInt
+/// so tagged, boxed and negative inputs all work and the result re-boxes.
 fn poly_shift_left_arbitrary(
-    _: &mut RtsContext<'_>,
+    ctx: &mut RtsContext<'_>,
     _tid: PolyWord,
     arg: PolyWord,
     shift: PolyWord,
@@ -1639,31 +1666,27 @@ fn poly_shift_left_arbitrary(
     if !shift.is_tagged() {
         return PolyWord::tagged(0);
     }
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let shift_by = shift.untag() as u32;
-    if shift_by == 0 {
-        return arg;
+    let by = shift.untag();
+    if by <= 0 {
+        return arg; // shift 0 is identity; negatives don't occur (word arg)
     }
-    if arg.is_tagged() {
-        let x = arg.untag();
-        if x == 0 {
-            return PolyWord::tagged(0);
-        }
-        if shift_by >= isize::BITS - 1 {
-            return PolyWord::tagged(0); // overflow → would need bignum
-        }
-        let r = (x as i128) << shift_by;
-        if fits_tagged(r) {
-            return PolyWord::tagged(r as isize);
-        }
-    }
-    PolyWord::tagged(0)
+    let Some(n) = poly_word_to_bigint(arg) else {
+        return PolyWord::tagged(0);
+    };
+    #[allow(clippy::cast_sign_loss)]
+    let r = n << (by as usize);
+    bigint_to_poly_word(ctx, &r)
 }
 
-/// Shift right (logical) of a tagged int.
-#[allow(clippy::needless_pass_by_value)]
+/// `IntInf.~>>` — arbitrary-precision ARITHMETIC right shift (= floor-divide
+/// by 2^shift, rounding toward negative infinity). Backs
+/// `PolyShiftRightArbitrary`. The old impl did a *logical* shift on the raw
+/// (two's-complement) bits of a negative tagged value and returned TAGGED(0)
+/// for boxed bignums — so `IntInf.~>>` of a negative gave a huge positive
+/// (breaking `Real.toLargeInt` of negatives). `num_bigint`'s `>>` is the
+/// arithmetic (floor) shift, which is exactly the right semantics.
 fn poly_shift_right_arbitrary(
-    _: &mut RtsContext<'_>,
+    ctx: &mut RtsContext<'_>,
     _tid: PolyWord,
     arg: PolyWord,
     shift: PolyWord,
@@ -1671,27 +1694,16 @@ fn poly_shift_right_arbitrary(
     if !shift.is_tagged() {
         return PolyWord::tagged(0);
     }
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let shift_by = shift.untag() as u32;
-    if shift_by == 0 {
+    let by = shift.untag();
+    if by <= 0 {
         return arg;
     }
-    if arg.is_tagged() {
-        let x = arg.untag();
-        if shift_by >= isize::BITS {
-            return PolyWord::tagged(0);
-        }
-        // ML LargeWord.>> is logical; mirror that on the untagged
-        // value.
-        #[allow(clippy::cast_sign_loss)]
-        let r = (x as usize) >> shift_by;
-        #[allow(clippy::cast_possible_wrap)]
-        let r = r as isize;
-        if fits_tagged(r as i128) {
-            return PolyWord::tagged(r);
-        }
-    }
-    PolyWord::tagged(0)
+    let Some(n) = poly_word_to_bigint(arg) else {
+        return PolyWord::tagged(0);
+    };
+    #[allow(clippy::cast_sign_loss)]
+    let r = n >> (by as usize);
+    bigint_to_poly_word(ctx, &r)
 }
 
 /// GCD using i64 for the fast path. Bootstrap rarely calls this so a
@@ -2214,6 +2226,31 @@ fn strip_g_trailing(s: &str) -> String {
 /// `mantissa ∈ [0.5, 1.0)`. SML signature: `real -> int * real`.
 /// Returns a 2-word tuple `[boxed_mantissa, tagged_exponent]`.
 #[allow(clippy::needless_pass_by_value)]
+/// Read a `PolyWord` argument as an `f64` (boxed Real = 1-word byte object).
+fn read_real_word(x: PolyWord) -> f64 {
+    if x.is_data_ptr() {
+        // SAFETY: caller passes a boxed Real (1-word byte object).
+        unsafe { *x.as_ptr::<f64>() }
+    } else {
+        0.0
+    }
+}
+
+/// Box an `f64` as a PolyML Real (1-word byte object).
+fn box_real(ctx: &mut RtsContext<'_>, v: f64) -> PolyWord {
+    use crate::length_word::F_BYTE_OBJ;
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    let p = space.alloc(1);
+    // SAFETY: just allocated 1 word.
+    unsafe {
+        crate::space::set_length_word(p, 1, F_BYTE_OBJ);
+        p.cast::<f64>().write(v);
+    }
+    PolyWord::from_ptr(p.cast_const())
+}
+
 fn poly_real_frexp(ctx: &mut RtsContext<'_>, _tid: PolyWord, x: PolyWord) -> PolyWord {
     use crate::length_word::F_BYTE_OBJ;
     let v: f64 = if x.is_data_ptr() {
@@ -3130,6 +3167,49 @@ mod tests {
             PolyWord::tagged(3),
         );
         assert_eq!(r.untag(), 5);
+    }
+
+    #[test]
+    fn arb_shift_right_negative_is_arithmetic() {
+        // `IntInf.~>>` is an ARITHMETIC (floor) shift: -40 ~>> 3 = -5, not a huge
+        // positive. Regression for the logical-shift-on-negatives bug.
+        let r = poly_shift_right_arbitrary(
+            &mut ctx(),
+            t(),
+            PolyWord::tagged(-40),
+            PolyWord::tagged(3),
+        );
+        assert_eq!(r.untag(), -5);
+        // floor rounding toward -inf: -1 ~>> 1 = -1 (not 0).
+        let r = poly_shift_right_arbitrary(&mut ctx(), t(), PolyWord::tagged(-1), PolyWord::tagged(1));
+        assert_eq!(r.untag(), -1);
+    }
+
+    #[test]
+    fn arb_shift_left_negative_preserves_sign() {
+        // -5 << 3 = -40.
+        let r = poly_shift_left_arbitrary(
+            &mut ctx(),
+            t(),
+            PolyWord::tagged(-5),
+            PolyWord::tagged(3),
+        );
+        assert_eq!(r.untag(), -40);
+    }
+
+    #[test]
+    fn arb_shift_left_boxes_large_result() {
+        // 1 << 70 doesn't fit in a tagged int — must box (old tagged-only path
+        // returned 0). Needs an alloc space.
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let r = poly_shift_left_arbitrary(&mut c, t(), PolyWord::tagged(1), PolyWord::tagged(70));
+        assert!(r.is_data_ptr(), "1<<70 should be boxed");
+        let bi = poly_word_to_bigint(r).expect("readable bignum");
+        assert_eq!(bi, BigInt::from(1u128 << 70));
+        // round-trip back down: (1<<70) ~>> 70 = 1.
+        let back = poly_shift_right_arbitrary(&mut c, t(), r, PolyWord::tagged(70));
+        assert_eq!(back.untag(), 1);
     }
 
     #[test]

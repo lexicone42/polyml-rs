@@ -2549,7 +2549,12 @@ impl Interpreter {
             // We must arithmetic-shift the untagged value, then re-tag.
             EXTINSTR_WORD_SHIFT_R_ARITH => self.bin_op_word(|x, y| {
                 let s = (x >> 1) & 63;
-                let v = (y >> 1) as isize; // sign-extend before shift
+                // Untag WITH sign extension: cast to isize FIRST, then `>>` is
+                // arithmetic (matches PolyWord::untag). The old `(y >> 1) as isize`
+                // did a *logical* usize shift to untag, so the payload's top bit was
+                // never sign-extended and `~>>` of a negative behaved like `>>`
+                // (e.g. Real.toLargeInt of a negative gave a huge positive).
+                let v = (y as isize) >> 1; // sign-extend before shift
                 #[allow(clippy::cast_sign_loss)]
                 let r = v.wrapping_shr(s as u32) as usize;
                 (r << 1) | 1
