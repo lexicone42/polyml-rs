@@ -363,15 +363,24 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyRealPow", RtsFn::Arity2(|c, b, e| box_real(c, read_real_word(b).powf(read_real_word(e)))));
     t.register("PolyRealCopySign", RtsFn::Arity2(|c, a, b| box_real(c, read_real_word(a).copysign(read_real_word(b)))));
     t.register("PolyRealRem", RtsFn::Arity2(|c, a, b| box_real(c, read_real_word(a) % read_real_word(b))));
+    // Real.nextAfter (Real.sml:480). Registered FIRST here to preserve the
+    // dispatch-token ordinal it had as the head of the old stub array.
+    t.register("PolyRealNextAfter", RtsFn::Arity2(|c, a, b| box_real(c, next_after(read_real_word(a), read_real_word(b)))));
     let real_binary_stubs = [
-        "PolyRealNextAfter",
         "PolyRealFAtan2", "PolyRealFCopySign", "PolyRealFNextAfter",
         "PolyRealFPow", "PolyRealFRem",
     ];
     for name in real_binary_stubs {
         t.register(name, RtsFn::Arity2(zero2));
     }
-    t.register("PolyRealLdexp", RtsFn::Arity2(zero2));
+    // Real.fromManAndExp = ldexp(man, exp) = man * 2^exp (Real.sml:265,
+    // rtsCallFastRI_R: real * int -> real). exp clamped to a range beyond which
+    // the result is already inf/0 in f64.
+    t.register("PolyRealLdexp", RtsFn::Arity2(|c, m, e| {
+        #[allow(clippy::cast_possible_truncation)]
+        let exp = e.untag().clamp(-2000, 2000) as i32;
+        box_real(c, read_real_word(m) * 2f64.powi(exp))
+    }));
     // Real.fromLargeInt (and, under arbitrary-precision int, Real.fromInt): convert
     // an arbitrary-precision int (tagged or boxed bignum) to a boxed double.
     // reals.cpp:240 PolyFloatArbitraryPrecision(arg) -> double. Fast call, ONE arg
@@ -524,7 +533,18 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolySizePtrdiff", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())));
     t.register("PolySizeSize", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<usize>())));
     t.register("PolySizeSsize", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())));
-    t.register("PolyLog2Arbitrary", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // IntInf.log2 long path (IntInf.sml:55): floor(log2(|x|)) = highest set bit
+    // index = bits()-1. Was a hard stub returning 0 (silent wrong answer for any
+    // value >= 2^62). The SML wrapper only calls this for boxed (large) values.
+    t.register("PolyLog2Arbitrary", RtsFn::Arity1(|_, x| {
+        match poly_word_to_bigint(x) {
+            Some(n) if n.bits() > 0 => {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                PolyWord::tagged((n.bits() - 1) as isize)
+            }
+            _ => PolyWord::tagged(0),
+        }
+    }));
     t.register("PolySizeDouble", RtsFn::Arity1(|_, _| poly_size_double_inner()));
     t.register("PolySizeFloat", RtsFn::Arity1(|_, _| poly_size_float_inner()));
     // PolyFinish: (threadId, exitCode). C signature has 2 args
@@ -1847,10 +1867,18 @@ fn poly_get_low_order_as_large_word(
         let v = arg.untag() as usize;
         v
     } else if arg.is_data_ptr() {
-        // Boxed: read first body word as the low limb.
+        // Boxed: read first body word as the low limb of the MAGNITUDE.
+        // Bignums are sign-magnitude, so for a negative-flagged object the
+        // two's-complement low word is `0 - low` (arb.cpp:1936 `if(negative) p=0-p`).
         let p = arg.as_ptr::<PolyWord>();
         // SAFETY: caller-trusted boxed bignum.
-        unsafe { (*p).0 }
+        let low = unsafe { (*p).0 };
+        let lw = unsafe { crate::space::MemorySpace::length_word_of(p) };
+        if crate::length_word::flags_of(lw) & crate::length_word::F_NEGATIVE_BIT != 0 {
+            0usize.wrapping_sub(low)
+        } else {
+            low
+        }
     } else {
         return PolyWord::tagged(0);
     };
@@ -2243,6 +2271,25 @@ fn read_real_word(x: PolyWord) -> f64 {
     } else {
         0.0
     }
+}
+
+/// IEEE-754 `nextafter(x, y)`: the next representable double after `x` in the
+/// direction of `y`. Rust std has no stable `next_after`, so do the standard
+/// bit-pattern walk (same-sign doubles order monotonically by bit pattern).
+fn next_after(x: f64, y: f64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return f64::NAN;
+    }
+    if x == y {
+        return y;
+    }
+    if x == 0.0 {
+        // Smallest subnormal toward y.
+        return f64::from_bits(1).copysign(y);
+    }
+    let bits = x.to_bits();
+    let next = if (y > x) == (x > 0.0) { bits + 1 } else { bits - 1 };
+    f64::from_bits(next)
 }
 
 /// Box an `f64` as a PolyML Real (1-word byte object).
@@ -3219,6 +3266,30 @@ mod tests {
         // round-trip back down: (1<<70) ~>> 70 = 1.
         let back = poly_shift_right_arbitrary(&mut c, t(), r, PolyWord::tagged(70));
         assert_eq!(back.untag(), 1);
+    }
+
+    #[test]
+    fn get_low_order_negates_negative_boxed() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        // -(2^64 + 7): magnitude needs >64 bits so it boxes; negative-flagged.
+        let n = -(BigInt::from(1u128 << 64) + BigInt::from(7u8));
+        let boxed = bigint_to_poly_word(&mut c, &n);
+        assert!(boxed.is_data_ptr(), "value should box");
+        let res = poly_get_low_order_as_large_word(&mut c, t(), boxed);
+        // low limb of magnitude (2^64+7) is 7; two's-complement-negated = -7.
+        let low = unsafe { (*res.as_ptr::<usize>()) };
+        assert_eq!(low, 0usize.wrapping_sub(7), "negative boxed low word must be negated");
+    }
+
+    #[test]
+    fn next_after_walks_one_ulp() {
+        let up = next_after(1.0, 2.0);
+        assert!(up > 1.0 && up == f64::from_bits(1.0f64.to_bits() + 1));
+        let down = next_after(1.0, 0.0);
+        assert!(down < 1.0 && down == f64::from_bits(1.0f64.to_bits() - 1));
+        assert!(next_after(0.0, -1.0) < 0.0); // smallest negative subnormal
+        assert!(next_after(5.0, 5.0) == 5.0); // equal -> y
     }
 
     #[test]
