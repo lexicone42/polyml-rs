@@ -95,6 +95,29 @@ use crate::rts::{RtsContext, RtsFn, RtsTable};
 use crate::space::{MemorySpace, SpaceKind};
 use thiserror::Error;
 
+// ---- ARBINT_DEBUG opcode ring buffer (diagnostic for the arbitrary-int basis
+// load wall). Records (code_start, pc_offset, opcode, sp_depth) for the last N
+// executed opcodes; dumped at the INSTR_STORE_ML_WORD imbalance crash so a PC
+// desync or stack-imbalance is visible. Gated behind a cached env flag so it
+// costs nothing in normal runs.
+thread_local! {
+    static OP_RING: std::cell::RefCell<std::collections::VecDeque<(usize, u32, u8, usize)>> =
+        std::cell::RefCell::new(std::collections::VecDeque::with_capacity(192));
+}
+fn arbint_trace_on() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static F: AtomicU8 = AtomicU8::new(0);
+    match F.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::env::var("ARBINT_DEBUG").is_ok();
+            F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
 /// Result of one (`step`) or many (`run`) interpreter steps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepResult {
@@ -1181,6 +1204,19 @@ impl Interpreter {
 
         let opcode_pc = self.pc;
         let op = self.fetch_u8()?;
+        if arbint_trace_on() {
+            #[allow(clippy::cast_possible_truncation)]
+            let off = unsafe { opcode_pc.offset_from(self.code_start) as u32 };
+            let code = self.code_start as usize;
+            let sp_depth = self.stack_height();
+            OP_RING.with(|r| {
+                let mut r = r.borrow_mut();
+                if r.len() >= 192 {
+                    r.pop_front();
+                }
+                r.push_back((code, off, op, sp_depth));
+            });
+        }
         if let Some(d) = self.diag.as_mut() {
             #[allow(clippy::cast_possible_truncation)]
             let off = unsafe { opcode_pc.offset_from(self.code_start) as u32 };
@@ -1525,20 +1561,67 @@ impl Interpreter {
             }
             INSTR_STORE_ML_WORD => {
                 let to_store = self.pop()?;
-                let index = self.pop()?.untag() as usize;
+                let index_word = self.pop()?;
+                let index = index_word.untag() as usize;
                 let base = self.peek(0)?;
                 // Diagnostic: catch bad bases (non-pointer or below
                 // mapped memory) and dump context. Gated on env var.
+                // Also fires when the popped INDEX is itself a pointer
+                // (not a tagged int) — that means a stack/PC desync upstream.
                 if std::env::var("JIT_TRACE_STORES").is_ok() {
                     let b = base.0;
-                    let suspicious = b < 0x1000 || (b & 0x1) != 0 || index > 0x10_0000;
+                    let suspicious = b < 0x1000 || (b & 0x1) != 0 || index > 0x10_0000
+                        || !index_word.is_tagged();
                     if suspicious {
+                        let pc_off = unsafe { self.pc.offset_from(self.code_start) };
                         eprintln!(
-                            "  STORE_ML_WORD BAD: base=0x{b:016x} index={index} to_store=0x{:016x} cur_code=0x{:016x} frames_depth={}",
+                            "  STORE_ML_WORD BAD: base=0x{b:016x} index_word=0x{:016x} (tagged={}) index={index} to_store=0x{:016x} cur_code=0x{:016x} pc_off={pc_off} frames_depth={}",
+                            index_word.0, index_word.is_tagged(),
                             to_store.0,
                             self.code_start as usize,
                             self.frames.len(),
                         );
+                        // Dump the bytecode stream leading up to this store so
+                        // a desyncing constant-load opcode is visible.
+                        if pc_off >= 0 {
+                            let lo = (pc_off as usize).saturating_sub(48);
+                            let hi = (pc_off as usize) + 4;
+                            let bytes: Vec<String> = (lo..hi)
+                                .map(|i| {
+                                    let mark = if i as isize == pc_off { "[" } else { " " };
+                                    let b = unsafe { *self.code_start.add(i) };
+                                    format!("{mark}{b:02x}")
+                                })
+                                .collect();
+                            eprintln!("    bc[{lo}..{hi}] = {}", bytes.join(""));
+                        }
+                        // Dump the opcode ring buffer (last ~192 executed ops)
+                        // to expose the PC desync / stack imbalance origin.
+                        if arbint_trace_on() {
+                            OP_RING.with(|r| {
+                                let ring = r.borrow();
+                                let cur = self.code_start as usize;
+                                eprintln!("    --- op ring (last {}), cur_code=0x{cur:x} ---", ring.len());
+                                // Dump bytecode head of each distinct code object seen.
+                                let mut seen: Vec<usize> = Vec::new();
+                                for (code, _, _, _) in ring.iter() {
+                                    if !seen.contains(code) {
+                                        seen.push(*code);
+                                        let bytes: Vec<String> = (0..20usize)
+                                            .map(|i| {
+                                                let b = unsafe { *(*code as *const u8).add(i) };
+                                                format!("{b:02x}")
+                                            })
+                                            .collect();
+                                        eprintln!("    codehead 0x{code:x}: {}", bytes.join(" "));
+                                    }
+                                }
+                                for (code, off, op, sp) in ring.iter() {
+                                    let same = if *code == cur { "*" } else { " " };
+                                    eprintln!("    {same}code=0x{code:x} off={off:>5} op=0x{op:02x} sp={sp}");
+                                }
+                            });
+                        }
                         let recent = self.recent_call_targets_snapshot();
                         for (i, t) in recent.iter().enumerate().take(5) {
                             eprintln!("    recent call -{i}: 0x{t:016x}");
@@ -2398,6 +2481,11 @@ impl Interpreter {
                     #[allow(clippy::cast_possible_wrap)]
                     let v = raw as isize;
                     self.stack[self.sp] = PolyWord::tagged(v);
+                } else if std::env::var("ARBINT_DEBUG").is_ok() {
+                    let pc_off = unsafe { self.pc.offset_from(self.code_start) };
+                    eprintln!("  LONG_W_TO_TAGGED on NON-PTR top: 0x{:016x} (tagged={}) pc_off={pc_off}",
+                        p.0, p.is_tagged());
+                    std::process::abort();
                 }
                 Ok(StepResult::Continue)
             }
@@ -3176,6 +3264,10 @@ impl Interpreter {
     /// `w` must be a valid boxed-LargeWord pointer (1+ word byte object).
     unsafe fn read_lg_word(w: PolyWord) -> usize {
         if !w.is_data_ptr() {
+            if std::env::var("ARBINT_DEBUG").is_ok() {
+                eprintln!("  read_lg_word on NON-PTR operand: 0x{:016x} (tagged={})", w.0, w.is_tagged());
+                std::process::abort();
+            }
             return 0;
         }
         unsafe { (*w.as_ptr::<PolyWord>()).0 }
