@@ -232,6 +232,12 @@ pub struct Interpreter {
     /// regions to scan as GC roots. Each call to
     /// `with_image_mutable_root` appends here.
     image_mutable_roots: Vec<(*const PolyWord, usize)>,
+    /// Cached singleton thread object returned by `INSTR_GET_THREAD_ID`
+    /// (= `Thread.self()`). Must be the SAME object every call so thread
+    /// identity is stable and `Thread.setLocal`/`getLocal` (which store data
+    /// in this object) work — `Thread_Data`, and hence Isabelle's generic
+    /// context, depend on it. Allocated lazily; forwarded by the GC as a root.
+    thread_object: Option<PolyWord>,
     /// Optional execution-profile collector. `None` = disabled (the
     /// hot path pays only a branch). Enable with
     /// [`enable_diagnostics`](Self::enable_diagnostics).
@@ -294,6 +300,7 @@ impl Interpreter {
             recent_call_targets: [0; 16],
             recent_call_idx: 0,
             image_mutable_roots: Vec::new(),
+            thread_object: None,
             rts: Arc::new(RtsTable::empty()),
             _owned_code: Some(code),
             diag: None,
@@ -337,6 +344,7 @@ impl Interpreter {
             recent_call_targets: [0; 16],
             recent_call_idx: 0,
             image_mutable_roots: Vec::new(),
+            thread_object: None,
             rts: Arc::new(RtsTable::empty()),
             _owned_code: None,
             diag: None,
@@ -553,6 +561,10 @@ impl Interpreter {
             .collect();
         let mut exn_slot = self.exception_packet.unwrap_or(PolyWord::ZERO);
         let mut bootstrap_tail = crate::rts::peek_bootstrap_tail_call();
+        // Cached Thread.self() object (if allocated) — a GC root: its body holds
+        // thread-local data (incl. the Isabelle generic context), and its
+        // identity must survive collection.
+        let mut thread_obj_slot = self.thread_object.unwrap_or(PolyWord::ZERO);
 
         // Take ownership of the stack-slice we want the GC to forward
         // by indexing into self.stack directly via raw pointer.
@@ -588,6 +600,8 @@ impl Interpreter {
             }
             // 4. Bootstrap tail-call slot (PolyEndBootstrapMode arg).
             unsafe { c.forward(&mut bootstrap_tail as *mut _) };
+            // 4b. Cached Thread.self() object.
+            unsafe { c.forward(&mut thread_obj_slot as *mut _) };
             // 5. Image mutable spaces: walk object-by-object so we
             //    only forward body words (skipping length words),
             //    and dispatch by type (byte objects have no internal
@@ -664,6 +678,9 @@ impl Interpreter {
         } else {
             Some(exn_slot)
         };
+        if self.thread_object.is_some() {
+            self.thread_object = Some(thread_obj_slot);
+        }
         let new_code_start = code_start_slot.as_ptr::<PolyWord>().cast::<u8>();
         self.code_start = new_code_start;
         // SAFETY: offsets remain valid; new code object has the same length.
@@ -3430,6 +3447,14 @@ impl Interpreter {
     /// gives those reads a defined (zero) value rather than crashing.
     fn alloc_stub_thread_object(&mut self) -> Result<PolyWord, InterpError> {
         use crate::length_word::F_MUTABLE_BIT;
+        // Return the cached singleton if it exists: Thread.self() must yield a
+        // STABLE object so thread identity holds and Thread.setLocal/getLocal
+        // (which store into this object's slots) round-trip. Without this,
+        // Thread_Data — and Isabelle's generic context (Context.put/the_generic_context)
+        // — silently lose all data.
+        if let Some(t) = self.thread_object {
+            return Ok(t);
+        }
         let length = 8;
         let p = self.allocate(length, F_MUTABLE_BIT)?;
         // SAFETY: just allocated `length` words
@@ -3438,7 +3463,9 @@ impl Interpreter {
                 p.add(i).write(PolyWord::tagged(0));
             }
         }
-        Ok(PolyWord::from_ptr(p.cast_const()))
+        let t = PolyWord::from_ptr(p.cast_const());
+        self.thread_object = Some(t);
+        Ok(t)
     }
 
     /// Dispatch a `CALL_FAST_RTS<N>` opcode through the RTS table.
