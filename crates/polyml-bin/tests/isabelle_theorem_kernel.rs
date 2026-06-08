@@ -3,8 +3,11 @@
 //! Beyond the term/type kernel (`isabelle_kernel.rs`), the full LCF theorem kernel
 //! `thm.ML` loads on the arbitrary-int image and we derive real Isabelle theorems
 //! with its primitive inferences: `reflexive` (⊢ x ≡ x), `symmetric`, `transitive`,
-//! and `beta_conversion` (⊢ (λu. u) x ≡ x). Each is a checked `thm` produced by
-//! Isabelle's actual kernel — the Isabelle analogue of the HOL4 LCF-kernel milestone.
+//! `beta_conversion` (⊢ (λu. u) x ≡ x), and — after declaring the `prop` type into
+//! the empty proto-Pure theory — the implication laws `⊢ A ⟹ A` (assume +
+//! implies_intr) and the weakening law `⊢ A ⟹ B ⟹ A` (nested implies_intr). Each is
+//! a checked `thm` from Isabelle's actual kernel — the Isabelle analogue of the HOL4
+//! LCF-kernel milestone.
 //!
 //! The keystone that unlocked this was a runtime fix: `INSTR_GET_THREAD_ID` now
 //! returns a STABLE singleton object, so `Thread.self()`/`Thread_Data` work and
@@ -79,6 +82,21 @@ val cbeta = Thm.global_cterm_of thy ((Abs ("u", aT, Bound 0)) $ Free ("x", aT));
 val b = Thm.beta_conversion false cbeta;
 val brhs = case Thm.prop_of b of (Const("Pure.eq",_) $ _) $ Free("x",_) => true | _ => false;
 val () = pr ("=THM= beta " ^ Bool.toString (isEq b andalso brhs) ^ "\n");
+(* Implication kernel: declare the `prop` type (proto-Pure is empty), then derive
+   |- A ==> A and the weakening law |- A ==> B ==> A via assume/implies_intr. *)
+val pthy = Sign.add_types_global [(Binding.name "prop", 0, NoSyn)] thy;
+val propT = Type ("prop", []);
+val cA = Thm.global_cterm_of pthy (Free ("A", propT));
+val cB = Thm.global_cterm_of pthy (Free ("B", propT));
+val thAA = Thm.implies_intr cA (Thm.assume cA);                 (* |- A ==> A *)
+val okAA = (case Thm.prop_of thAA of (Const("Pure.imp",_) $ Free("A",_)) $ Free("A",_) => true | _ => false)
+           andalso Thm.nprems_of thAA = 1 andalso null (Thm.hyps_of thAA);
+val () = pr ("=THM= imp_refl " ^ Bool.toString okAA ^ "\n");
+val thK = Thm.implies_intr cA (Thm.implies_intr cB (Thm.assume cA));  (* |- A ==> B ==> A *)
+val okK = (case Thm.prop_of thK of
+             (Const("Pure.imp",_) $ Free("A",_)) $ ((Const("Pure.imp",_) $ Free("B",_)) $ Free("A",_)) => true
+           | _ => false) andalso null (Thm.hyps_of thK);
+val () = pr ("=THM= imp_weaken " ^ Bool.toString okK ^ "\n");
 pr "=THM= DONE\n";
 "#
     );
@@ -93,10 +111,10 @@ pr "=THM= DONE\n";
         return;
     };
     assert!(out.contains("=THM= DONE"), "theorem kernel demo did not finish.\n{}", tail(&out, 40));
-    for op in ["reflexive", "symmetric", "transitive", "beta"] {
+    for op in ["reflexive", "symmetric", "transitive", "beta", "imp_refl", "imp_weaken"] {
         assert!(
             out.contains(&format!("=THM= {op} true")),
-            "LCF primitive `{op}` did not produce a checked equality theorem.\n{}",
+            "LCF primitive `{op}` did not produce a checked theorem.\n{}",
             tail(&out, 40)
         );
     }
