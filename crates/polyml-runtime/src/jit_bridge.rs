@@ -242,24 +242,18 @@ pub fn jit_dispatch_alloc_mut_closure(
 /// fields returns zero. This is enough for SML code that only reads
 /// the thread-id pointer for identity checks.
 pub fn jit_dispatch_get_thread_id() -> Option<u64> {
-    use crate::length_word::F_MUTABLE_BIT;
     let interp_ptr = JIT_INTERP.with(|c| c.get());
     if interp_ptr.is_null() {
         return None;
     }
     // SAFETY: caller invariant.
     let interp = unsafe { &mut *interp_ptr };
-    let space = interp.jit_alloc_space_mut()?;
-    let n = 8usize;
-    let body = space.try_alloc(n)?;
-    // Init all 8 words to tagged(0).
-    unsafe {
-        for i in 0..n {
-            body.add(i).write(crate::PolyWord::tagged(0));
-        }
-        crate::space::set_length_word(body, n, F_MUTABLE_BIT);
-    }
-    Some(body as u64)
+    // Route through the SAME cached singleton the interpreter's INSTR_GET_THREAD_ID
+    // uses, so Thread.self() identity is stable across interp/JIT and Thread.setLocal/
+    // getLocal (and hence Thread_Data / Isabelle's generic context) round-trip. The
+    // old code allocated a FRESH object every JIT call. The cached object is already
+    // GC-forwarded as a root (interpreter mod.rs gc()).
+    interp.alloc_stub_thread_object().ok().map(|w| w.0 as u64)
 }
 
 /// Trampoline-callable: build a closure object. The closure layout

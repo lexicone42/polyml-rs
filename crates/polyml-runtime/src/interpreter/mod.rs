@@ -2468,11 +2468,18 @@ impl Interpreter {
                 self.do_create_closure(n)
             }
             EXTINSTR_INDIRECT_CLOSURE_W => {
-                let depth = self.fetch_u16_le()? as usize;
-                let closure_word = self.peek(depth)?;
+                // bytecode.cpp:2310-2311: *sp = (*sp).AsObjPtr()->Get(arg1 + 1).
+                // The 16-bit operand is the captured-field INDEX; the closure is on
+                // TOP (peek 0); word 0 is the code pointer so the field is at 1+item;
+                // replace in place (net 0). The old code peeked at `depth`, hardcoded
+                // field 1, and pushed (net +1) — wrong on all three, and the stack
+                // leak desynced every later frame. (Mirrors EXTINSTR_INDIRECT_W.)
+                let item = self.fetch_u16_le()? as usize;
+                let closure_word = self.peek(0)?;
                 let p = closure_word.as_ptr::<PolyWord>();
-                // SAFETY: caller emits valid closure
-                let val = unsafe { *p.add(1) };
+                // SAFETY: caller emits a valid closure with field index in range.
+                let val = unsafe { *p.add(1 + item) };
+                self.pop()?;
                 self.push_continue(val)
             }
             EXTINSTR_RESET_W => {
@@ -3445,7 +3452,7 @@ impl Interpreter {
     /// Real PolyML returns `taskData->threadObject`, which has known
     /// fields the bootstrap reads via INDIRECT_*. The 8-word stub
     /// gives those reads a defined (zero) value rather than crashing.
-    fn alloc_stub_thread_object(&mut self) -> Result<PolyWord, InterpError> {
+    pub(crate) fn alloc_stub_thread_object(&mut self) -> Result<PolyWord, InterpError> {
         use crate::length_word::F_MUTABLE_BIT;
         // Return the cached singleton if it exists: Thread.self() must yield a
         // STABLE object so thread identity holds and Thread.setLocal/getLocal
@@ -4130,6 +4137,27 @@ mod tests {
             Ok(StepResult::Returned(w)) => w.untag(),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn reset_vs_reset_r_differ() {
+        // CLAUDE.md: "Don't merge RESET variants." RESET_R(n) preserves the TOP and
+        // drops the n items BELOW it; RESET(n) drops the top n. With [A=10,B=20,C=30]
+        // (C on top): RESET_R 2 -> top is C(30); RESET 2 -> top is A(10). A fence so
+        // a future merge/refactor of drop_n vs reset is caught immediately.
+        let mk = || {
+            let mut i = Interpreter::from_bytes(64, vec![]);
+            i.push(PolyWord::tagged(10)).unwrap();
+            i.push(PolyWord::tagged(20)).unwrap();
+            i.push(PolyWord::tagged(30)).unwrap();
+            i
+        };
+        let mut ir = mk();
+        ir.reset(2).unwrap(); // RESET_R 2: keep top, drop 2 below
+        assert_eq!(ir.peek(0).unwrap().untag(), 30, "RESET_R must preserve the top");
+        let mut id = mk();
+        id.drop_n(2).unwrap(); // RESET 2: drop top 2
+        assert_eq!(id.peek(0).unwrap().untag(), 10, "RESET must drop the top n");
     }
 
     #[test]
