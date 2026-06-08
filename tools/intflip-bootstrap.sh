@@ -11,10 +11,24 @@
 # Progress -> /tmp/intflip.log; final image -> /tmp/arbint_image (and the chain's
 # own vendor/polyml/polyexport). Gated on a default-int=arbitrary smoke test.
 set -u
+PATCHDIR="$(cd "$(dirname "$0")/../patches" && pwd)"
 cd "$(dirname "$0")/../vendor/polyml" || exit 1
 POLY=../../target/release/poly
 LOG=/tmp/intflip.log
 : > "$LOG"
+# Apply vendored-compiler patches needed for Isabelle (vendor/ is git-ignored, so
+# these live as tracked patches and are applied idempotently here). Currently:
+# cartouche pass-through in basis/String.sml's string-literal converter.
+for p in "$PATCHDIR"/*.patch; do
+    [ -f "$p" ] || continue
+    if git apply --reverse --check "$p" >/dev/null 2>&1; then
+        echo "intflip: patch already applied: $(basename "$p")" | tee -a "$LOG"
+    elif git apply --check "$p" >/dev/null 2>&1; then
+        git apply "$p" && echo "intflip: applied patch: $(basename "$p")" | tee -a "$LOG"
+    else
+        echo "intflip: WARNING could not apply $(basename "$p") (already partly applied?)" | tee -a "$LOG"
+    fi
+done
 echo "intflip: starting full Stage1 chain with --intIsIntInf …" | tee -a "$LOG"
 POLYML_GC_QUIET=1 "$POLY" run --max-steps 200000000000 \
     bootstrap/bootstrap64.txt -- -I . --intIsIntInf \

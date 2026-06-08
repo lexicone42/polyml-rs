@@ -1,0 +1,38 @@
+diff --git a/basis/String.sml b/basis/String.sml
+index a2b2a7a..4241a17 100644
+--- a/basis/String.sml
++++ b/basis/String.sml
+@@ -1073,9 +1073,32 @@ in
+                     if i = len then NONE
+                     else SOME(unsafeStringSub(s, i), i+0w1)
+                 (* Repeatedly convert escape sequences and accumulate the
+-                   results in a list. *)
++                   results in a list. Isabelle source embeds symbols as `\<name>`
++                   (and control symbols `\<^name>`) byte sequences inside string
++                   literals — these are not standard SML escapes, so pass the whole
++                   `\<...>` through verbatim (Isabelle keeps symbols as exactly these
++                   literal bytes). `\<` is unambiguous: `<` is never whitespace, so
++                   it cannot begin a standard `\ ... \` string gap. *)
+                 fun convChars i =
+                     if i = len then [] (* Finished *)
++                    (* `i+0w1 = len` would mean i is the last char (no room for the
++                       2-char `\<`), so `not(i+0w1 = len)` ⟺ i+1 < len here. Use only
++                       polymorphic `=`: the overloaded `<`/`>=` default to string in
++                       this basis-compile context, and the loop indices below reach
++                       their bounds exactly so equality suffices. *)
++                    else if unsafeStringSub(s, i) = #"\\" andalso not (i+0w1 = len)
++                            andalso unsafeStringSub(s, i+0w1) = #"<"
++                    then
++                        let
++                            fun findGt (j: word): word =
++                                if j = len then len (* malformed: take the rest *)
++                                else if unsafeStringSub(s, j) = #">" then j+0w1
++                                else findGt (j+0w1)
++                            val k = findGt (i+0w2)
++                            fun lit (j: word): char list =
++                                if j = k then convChars k
++                                else unsafeStringSub(s, j) :: lit (j+0w1)
++                        in lit i end
+                     else case Char.scan rdr i of
+                         NONE => (* Bad conversion *)
+                             raise RunCall.Conversion "Invalid string constant"
