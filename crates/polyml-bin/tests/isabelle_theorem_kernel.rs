@@ -5,9 +5,10 @@
 //! with its primitive inferences: `reflexive` (⊢ x ≡ x), `symmetric`, `transitive`,
 //! `beta_conversion` (⊢ (λu. u) x ≡ x), and — after declaring the `prop` type into
 //! the empty proto-Pure theory — the implication laws `⊢ A ⟹ A` (assume +
-//! implies_intr) and the weakening law `⊢ A ⟹ B ⟹ A` (nested implies_intr). Each is
-//! a checked `thm` from Isabelle's actual kernel — the Isabelle analogue of the HOL4
-//! LCF-kernel milestone.
+//! implies_intr), the weakening law `⊢ A ⟹ B ⟹ A` (nested implies_intr), and modus
+//! ponens via `implies_elim` (discharging A, B from `⊢ A ⟹ B ⟹ A` to get `A, B ⊢ A`).
+//! Each is a checked `thm` from Isabelle's actual kernel — the Isabelle analogue of
+//! the HOL4 LCF-kernel milestone.
 //!
 //! The keystone that unlocked this was a runtime fix: `INSTR_GET_THREAD_ID` now
 //! returns a STABLE singleton object, so `Thread.self()`/`Thread_Data` work and
@@ -97,6 +98,12 @@ val okK = (case Thm.prop_of thK of
              (Const("Pure.imp",_) $ Free("A",_)) $ ((Const("Pure.imp",_) $ Free("B",_)) $ Free("A",_)) => true
            | _ => false) andalso null (Thm.hyps_of thK);
 val () = pr ("=THM= imp_weaken " ^ Bool.toString okK ^ "\n");
+(* Modus ponens (implies_elim): from |- A ==> B ==> A discharge the premises A, B
+   (as assumptions) to obtain A,B |- A. *)
+val mp = Thm.implies_elim (Thm.implies_elim thK (Thm.assume cA)) (Thm.assume cB);
+val okMP = (case Thm.prop_of mp of Free ("A", _) => true | _ => false)
+           andalso length (Thm.hyps_of mp) = 2;
+val () = pr ("=THM= mp " ^ Bool.toString okMP ^ "\n");
 pr "=THM= DONE\n";
 "#
     );
@@ -111,7 +118,7 @@ pr "=THM= DONE\n";
         return;
     };
     assert!(out.contains("=THM= DONE"), "theorem kernel demo did not finish.\n{}", tail(&out, 40));
-    for op in ["reflexive", "symmetric", "transitive", "beta", "imp_refl", "imp_weaken"] {
+    for op in ["reflexive", "symmetric", "transitive", "beta", "imp_refl", "imp_weaken", "mp"] {
         assert!(
             out.contains(&format!("=THM= {op} true")),
             "LCF primitive `{op}` did not produce a checked theorem.\n{}",
