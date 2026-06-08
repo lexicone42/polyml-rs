@@ -1627,57 +1627,68 @@ fn poly_remainder_arbitrary(
 
 #[allow(clippy::needless_pass_by_value)]
 fn poly_compare_arbitrary(_: &mut RtsContext<'_>, arg1: PolyWord, arg2: PolyWord) -> PolyWord {
-    // compareLong(arg2, arg1): returns -1, 0, 1, wrapped as TAGGED.
+    // IntInf/LargeInt compare: TAGGED sign(arg1 - arg2) ∈ {-1,0,1}.
+    // arb.cpp:1858-1862 PolyCompareArbitrary = compareLong(arg2,arg1) = sign(arg1-arg2).
+    // The SML side (Int.sml:84-96, InitialBasis.ML) only calls this when at least one
+    // operand is BOXED (two-tagged is handled inline by the compiler), so the old code
+    // — a sign-inverted tagged branch over a dead `both_tagged` plus a constant
+    // tagged(0) fallback for boxed — meant EVERY real (boxed) comparison returned
+    // "equal". Compare uniformly via BigInt (handles tagged + boxed, signed). Word /
+    // LargeWord have their own compare opcodes, so everything here is a signed integer.
+    use std::cmp::Ordering;
     if arg1.0 == arg2.0 {
         return PolyWord::tagged(0);
     }
-    if let Some((x, y)) = both_tagged(arg2, arg1) {
-        let c = match x.cmp(&y) {
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Greater => 1,
-        };
-        return PolyWord::tagged(c);
-    }
-    // One or both boxed. The upstream "boxed magnitude > MAX_TAGGED"
-    // shortcut depends on the assumption that ALL boxed values
-    // passed here are bignums. In our setup the SML compiler
-    // sometimes routes Word/LargeWord values through this same
-    // path, which would be miscompared. For now: default to 0
-    // (equal). Needs proper type-aware compare in future.
-    PolyWord::tagged(0)
+    let ord = match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        _ => return PolyWord::tagged(0),
+    };
+    PolyWord::tagged(match ord {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    })
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn poly_or_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+// IntInf.andb/orb/xorb. The SML side (IntInf.sml:77-90) only calls these when an
+// operand is BOXED, so the both-tagged fast path is a dead optimisation and the old
+// tagged(0) fallback made every real call return 0. num_bigint's signed BitAnd/BitOr/
+// BitXor are two's-complement, matching upstream logical_long (arb.cpp:1311-1456).
+fn poly_or_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
     -> PolyWord
 {
     if both_tagged(arg1, arg2).is_some() {
-        // Both bottom bits are 1 → OR result still has bottom bit 1 (tagged)
         return PolyWord::from_bits(arg1.0 | arg2.0);
     }
-    PolyWord::tagged(0)
+    match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+        (Some(a), Some(b)) => bigint_to_poly_word(ctx, &(a | b)),
+        _ => PolyWord::tagged(0),
+    }
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn poly_and_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+fn poly_and_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
     -> PolyWord
 {
     if both_tagged(arg1, arg2).is_some() {
         return PolyWord::from_bits(arg1.0 & arg2.0);
     }
-    PolyWord::tagged(0)
+    match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+        (Some(a), Some(b)) => bigint_to_poly_word(ctx, &(a & b)),
+        _ => PolyWord::tagged(0),
+    }
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn poly_xor_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+fn poly_xor_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
     -> PolyWord
 {
     if both_tagged(arg1, arg2).is_some() {
         // XOR cancels the tag bits → set it back.
         return PolyWord::from_bits((arg1.0 ^ arg2.0) | 1);
     }
-    PolyWord::tagged(0)
+    match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+        (Some(a), Some(b)) => bigint_to_poly_word(ctx, &(a ^ b)),
+        _ => PolyWord::tagged(0),
+    }
 }
 
 /// `IntInf.<<` — arbitrary-precision left shift (= multiply by 2^shift).
@@ -1735,10 +1746,10 @@ fn poly_shift_right_arbitrary(
     bigint_to_poly_word(ctx, &r)
 }
 
-/// GCD using i64 for the fast path. Bootstrap rarely calls this so a
-/// tagged-only impl is fine.
+/// GCD with an i64 tagged fast path and a BigInt fallback for boxed operands
+/// (arb.cpp:1864-1904). The old tagged-only impl returned 0 for any boxed input.
 #[allow(clippy::needless_pass_by_value)]
-fn poly_gcd_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+fn poly_gcd_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
     -> PolyWord
 {
     if let Some((x, y)) = both_tagged(arg2, arg1) {
@@ -1755,12 +1766,17 @@ fn poly_gcd_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, ar
             return PolyWord::tagged(g);
         }
     }
-    PolyWord::tagged(0)
+    use num_integer::Integer;
+    match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+        (Some(a), Some(b)) => bigint_to_poly_word(ctx, &a.gcd(&b)),
+        _ => PolyWord::tagged(0),
+    }
 }
 
-/// LCM = (|x| / gcd(x,y)) * |y|, with care around zero.
+/// LCM = (|x| / gcd(x,y)) * |y|, with care around zero. Tagged fast path + BigInt
+/// fallback for boxed operands / tagged-overflow results (was 0 for both before).
 #[allow(clippy::needless_pass_by_value)]
-fn poly_lcm_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
+fn poly_lcm_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
     -> PolyWord
 {
     if let Some((x, y)) = both_tagged(arg2, arg1) {
@@ -1793,7 +1809,11 @@ fn poly_lcm_arbitrary(_: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, ar
             return PolyWord::tagged(v);
         }
     }
-    PolyWord::tagged(0)
+    use num_integer::Integer;
+    match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+        (Some(a), Some(b)) => bigint_to_poly_word(ctx, &a.lcm(&b)),
+        _ => PolyWord::tagged(0),
+    }
 }
 
 /// `PolyQuotRemArbitraryPair(threadId, arg1, arg2)` — compute
@@ -3164,13 +3184,48 @@ mod tests {
 
     #[test]
     fn arb_compare() {
+        // sign(arg1 - arg2): 5 < 7 -> -1, 7 > 5 -> 1, equal -> 0.
         let r = poly_compare_arbitrary(&mut ctx(), PolyWord::tagged(5), PolyWord::tagged(7));
-        // arg2 cmp arg1 = 7 cmp 5 = 1 (greater)
-        assert_eq!(r.untag(), 1);
-        let r = poly_compare_arbitrary(&mut ctx(), PolyWord::tagged(7), PolyWord::tagged(5));
         assert_eq!(r.untag(), -1);
+        let r = poly_compare_arbitrary(&mut ctx(), PolyWord::tagged(7), PolyWord::tagged(5));
+        assert_eq!(r.untag(), 1);
         let r = poly_compare_arbitrary(&mut ctx(), PolyWord::tagged(5), PolyWord::tagged(5));
         assert_eq!(r.untag(), 0);
+        // negatives
+        let r = poly_compare_arbitrary(&mut ctx(), PolyWord::tagged(-3), PolyWord::tagged(2));
+        assert_eq!(r.untag(), -1);
+    }
+
+    #[test]
+    fn arb_compare_boxed_bignums() {
+        // The reachable path: at least one operand boxed. 2^70 vs 2^70+1.
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let big = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 70u32));
+        let big1 = bigint_to_poly_word(&mut c, &((BigInt::from(1u8) << 70u32) + BigInt::from(1u8)));
+        assert!(big.is_data_ptr() && big1.is_data_ptr(), "2^70 should box");
+        assert_eq!(poly_compare_arbitrary(&mut c, big, big1).untag(), -1, "2^70 < 2^70+1");
+        assert_eq!(poly_compare_arbitrary(&mut c, big1, big).untag(), 1, "2^70+1 > 2^70");
+        assert_eq!(poly_compare_arbitrary(&mut c, big, big).untag(), 0, "equal");
+        // negative boxed
+        let nbig = bigint_to_poly_word(&mut c, &(-(BigInt::from(1u8) << 70u32)));
+        assert_eq!(poly_compare_arbitrary(&mut c, nbig, big).untag(), -1, "-2^70 < 2^70");
+    }
+
+    #[test]
+    fn arb_bitwise_and_gcd_boxed() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        // (2^64 | 0xF) & 0xFF == 0xF   (boxed operand -> RTS path)
+        let a = bigint_to_poly_word(&mut c, &((BigInt::from(1u8) << 64u32) | BigInt::from(0xFu8)));
+        assert!(a.is_data_ptr());
+        let r = poly_and_arbitrary(&mut c, t(), a, PolyWord::tagged(0xFF));
+        assert_eq!(poly_word_to_bigint(r).unwrap(), BigInt::from(0xFu8));
+        // gcd of two boxed multiples: gcd(2^65, 3*2^65) == 2^65
+        let g1 = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 65u32));
+        let g2 = bigint_to_poly_word(&mut c, &(BigInt::from(3u8) * (BigInt::from(1u8) << 65u32)));
+        let g = poly_gcd_arbitrary(&mut c, t(), g1, g2);
+        assert_eq!(poly_word_to_bigint(g).unwrap(), BigInt::from(1u8) << 65u32);
     }
 
     #[test]
