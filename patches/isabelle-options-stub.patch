@@ -1,0 +1,61 @@
+diff --git a/src/Pure/System/options.ML b/src/Pure/System/options.ML
+index 1f41e48..76445b8 100644
+--- a/src/Pure/System/options.ML
++++ b/src/Pure/System/options.ML
+@@ -75,10 +75,22 @@ fun check_name (Options tab) name =
+     else error ("Unknown system option " ^ quote name)
+   end;
+ 
+-fun check_type options name typ =
+-  let val opt = check_name options name in
+-    if #typ opt = typ then opt
+-    else error ("Ill-typed system option " ^ quote name ^ " : " ^ #typ opt ^ " vs. " ^ typ)
++fun check_type (Options tab) name typ =
++  let
++    (* polyml-rs: no Isabelle system options file is loaded, so synthesise a
++       type-appropriate default for options that aren't declared rather than
++       failing a source-only Pure load on an option it reads at load time. *)
++    fun deflt () =
++      {pos = Position.none, typ = typ,
++       value = if typ = boolT then "false" else if typ = intT then "0"
++               else if typ = realT then "0.0" else ""}
++  in
++    case Symtab.lookup tab name of
++      SOME opt =>
++        if #typ opt = typ then opt
++        else if #typ opt = unknownT then deflt ()
++        else error ("Ill-typed system option " ^ quote name ^ " : " ^ #typ opt ^ " vs. " ^ typ)
++    | NONE => deflt ()
+   end;
+ 
+ 
+@@ -235,6 +247,28 @@ fun with_default_update upd f x =
+ (* Pure bootstrap *)
+ 
+ val _ = load_process_default ();
+-val _ = ML_Print_Depth.set_print_depth (default_int "ML_print_depth");
++(* polyml-rs: there is no Isabelle system process to supply
++   ISABELLE_PROCESS_OPTIONS, so synthesise a default options table from the system
++   options Pure declares/reads at load (via the Config declare_option family), so a
++   source-only Pure load works instead of raising "Missing/Unknown system option".
++   Other options read via default_ fall back to check_type's type-default. *)
++val _ =
++  if is_some (Synchronized.value process_default) then ()
++  else
++    let
++      val bools =
++        ["eta_contract", "ML_debugger", "ML_exception_debugger", "ML_exception_trace",
++         "names_long", "names_short", "names_unique", "quick_and_dirty", "show_consts",
++         "show_main_goal", "show_question_marks", "show_sorts", "show_types"];
++      val ints = [("goals_limit", "10"), ("ML_print_depth", "10")];
++      fun decl (nm, ty, v) = declare {pos = Position.none, name = nm, typ = ty, value = v};
++      val opts =
++        empty
++        |> fold (fn nm => decl (nm, boolT, "false")) bools
++        |> fold (fn (nm, v) => decl (nm, intT, v)) ints;
++    in set_process_default (SOME opts) end;
++val _ =
++  (ML_Print_Depth.set_print_depth (default_int "ML_print_depth"))
++    handle _ => ();
+ 
+ end;
