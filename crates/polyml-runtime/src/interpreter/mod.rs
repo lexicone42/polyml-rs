@@ -3369,7 +3369,12 @@ impl Interpreter {
             return None;
         }
         let r = match mode {
-            0 => f.round(),
+            // Mode 0 = TO_NEAREST (Real.round / Real.toInt IEEEReal.TO_NEAREST /
+            // Real32.round): IEEE round-half-to-EVEN, NOT Rust's f.round() which
+            // is half-away-from-zero (2.5->2 not 3, 0.5->0 not 1, ~0.5->0 not ~1).
+            // Differential-tested against upstream PolyML. bytecode.cpp uses the
+            // FE_TONEAREST default = banker's rounding.
+            0 => f.round_ties_even(),
             1 => f.floor(),
             2 => f.ceil(),
             _ => f.trunc(),

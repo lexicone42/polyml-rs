@@ -1691,6 +1691,17 @@ fn poly_multiply_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyW
     arb_binop(ctx, arg1, arg2, i128::checked_mul, |a, b| a * b)
 }
 
+/// Set the pending `Div` exception on the RTS context and return a placeholder
+/// (the dispatcher raises `ctx.raised_exception` and ignores the return value).
+/// The bignum div/mod RTS uses this on a zero divisor so `handle Div` works —
+/// previously they returned TAGGED(0), which crashed the interpreter when the
+/// SML side read it as a result tuple.
+fn raise_div(ctx: &mut RtsContext<'_>) -> PolyWord {
+    let packet = make_div_exception(ctx);
+    ctx.raised_exception = Some(packet);
+    PolyWord::tagged(0)
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn poly_divide_arbitrary(
     ctx: &mut RtsContext<'_>,
@@ -1701,7 +1712,7 @@ fn poly_divide_arbitrary(
     // arg1 = dividend, arg2 = divisor (see PolyQuotRemArbitraryPair).
     if let Some((dvdr, dvd)) = both_tagged(arg2, arg1) {
         if dvdr == 0 {
-            return PolyWord::tagged(0);
+            return raise_div(ctx);
         }
         if !(dvd == MIN_TAGGED && dvdr == -1) {
             return PolyWord::tagged(dvd / dvdr);
@@ -1712,7 +1723,7 @@ fn poly_divide_arbitrary(
         return PolyWord::tagged(0);
     };
     if b == BigInt::from(0) {
-        return PolyWord::tagged(0);
+        return raise_div(ctx);
     }
     bigint_to_poly_word(ctx, &(a / b))
 }
@@ -1726,7 +1737,7 @@ fn poly_remainder_arbitrary(
 ) -> PolyWord {
     if let Some((dvdr, dvd)) = both_tagged(arg2, arg1) {
         if dvdr == 0 {
-            return PolyWord::tagged(0);
+            return raise_div(ctx);
         }
         if !(dvd == MIN_TAGGED && dvdr == -1) {
             return PolyWord::tagged(dvd % dvdr);
@@ -1736,7 +1747,7 @@ fn poly_remainder_arbitrary(
         return PolyWord::tagged(0);
     };
     if b == BigInt::from(0) {
-        return PolyWord::tagged(0);
+        return raise_div(ctx);
     }
     bigint_to_poly_word(ctx, &(a % b))
 }
@@ -1948,7 +1959,7 @@ fn poly_quot_rem_arbitrary_pair(
     // `IntInf.quot/rem` use truncated division (Rust's `/` and `%`).
     let (q_word, r_word) = if let Some((dvdr, dvd)) = both_tagged(arg2, arg1) {
         if dvdr == 0 {
-            return PolyWord::tagged(0);
+            return raise_div(ctx);
         }
         if dvd == MIN_TAGGED && dvdr == -1 {
             // Tagged-overflow on quotient (MIN/-1) — need bigint path.
@@ -1966,9 +1977,9 @@ fn poly_quot_rem_arbitrary_pair(
         else {
             return PolyWord::tagged(0);
         };
-        // `b == 0` can't happen at the bignum level (would be tagged 0).
+        // Zero divisor with a boxed dividend (e.g. divMod(2^70, 0)) — raise Div.
         if b == BigInt::from(0) {
-            return PolyWord::tagged(0);
+            return raise_div(ctx);
         }
         let q = bigint_to_poly_word(ctx, &(&a / &b));
         let r = bigint_to_poly_word(ctx, &(&a % &b));
@@ -3025,6 +3036,29 @@ pub fn make_overflow_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
     PolyWord::from_ptr(p.cast_const())
 }
 
+/// Build the pervasive `Div` exception packet so `handle Div => ...` matches.
+/// Match identity is `ex_id == TAGGED(7)` (`EXC_divide`, sys.h:33). Mirrors
+/// `make_overflow_exception`. Used by the IntInf div/mod/quotRem RTS on a zero
+/// divisor — upstream raises Div (arb.cpp), where we previously returned
+/// TAGGED(0), which the SML side then mis-read as a (q,r) tuple pointer and
+/// HALTED the interpreter (found by differential test vs upstream PolyML).
+pub fn make_div_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
+    let name = alloc_poly_string(ctx, b"Div");
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::ZERO;
+    };
+    let p = space.alloc(4);
+    // SAFETY: just allocated 4 words.
+    unsafe {
+        crate::space::set_length_word(p, 4, 0);
+        p.write(PolyWord::tagged(7)); // ex_id = EXC_divide (the match key)
+        p.add(1).write(name); // ex_name = "Div"
+        p.add(2).write(PolyWord::tagged(0)); // arg = () (nullary exception)
+        p.add(3).write(PolyWord::tagged(0)); // ex_location = NoLocation
+    }
+    PolyWord::from_ptr(p.cast_const())
+}
+
 /// `PolyGetEnv(threadId, name)` — return the real environment value, or
 /// raise `SysErr` (so the basis `getEnv` returns `NONE`) when the
 /// variable is unset. Mirrors `process_env.cpp:433-436`. Previously a
@@ -3555,6 +3589,18 @@ mod tests {
         // GetUser/GetSystem are non-negative CPU microseconds.
         assert!(call(&mut c, "PolyTimingGetUser") >= 0);
         assert!(call(&mut c, "PolyTimingGetSystem") >= 0);
+    }
+
+    #[test]
+    fn arb_and_neg_tagged_boxed_repro() {
+        // andb(~1, 2^80): ~1 is all-ones in two's complement, so the result
+        // must be 2^80. Differential test vs upstream caught ours returning 0.
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let big = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 80u32));
+        assert!(big.is_data_ptr(), "2^80 must box");
+        let r = poly_and_arbitrary(&mut c, t(), PolyWord::tagged(-1), big);
+        assert_eq!(poly_word_to_bigint(r).unwrap(), BigInt::from(1u8) << 80u32);
     }
 
     #[test]
