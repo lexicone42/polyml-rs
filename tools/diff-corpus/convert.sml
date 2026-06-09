@@ -1,0 +1,32 @@
+(* diff-corpus category: convert — conversions-and-scanning *)
+
+val () = print ("@@int_fromstring_valid=" ^ (case Int.fromString "  -123abc" of SOME n => Int.toString n | NONE => "NONE") ^ "\n");
+val () = print ("@@int_fromstring_leadingws_sign=" ^ (case Int.fromString "   +42" of SOME n => Int.toString n | NONE => "NONE") ^ "\n");
+val () = print ("@@int_fromstring_invalid=" ^ (case Int.fromString "xyz" of SOME n => Int.toString n | NONE => "NONE") ^ "\n");
+val () = print ("@@int_fromstring_empty=" ^ (case Int.fromString "" of SOME n => Int.toString n | NONE => "NONE") ^ "\n");
+val () = print ("@@int_fromstring_overflow_raises=" ^ ((case Int.fromString "99999999999999999999999999" of SOME n => Int.toString n | NONE => "NONE") handle Overflow => "OVERFLOW" | _ => "OTHER") ^ "\n");
+val () = print ("@@int_fromstring_tilde_neg=" ^ (case Int.fromString "~7" of SOME n => Int.toString n | NONE => "NONE") ^ "\n");
+val () = let val s = "  -88rest" in print ("@@int_scan_dec_with_reader=" ^ (case Int.scan StringCvt.DEC Substring.getc (Substring.full s) of SOME (n, ss) => Int.toString n ^ "|" ^ Substring.string ss | NONE => "NONE") ^ "\n") end;
+val () = print ("@@int_scan_hex=" ^ (case StringCvt.scanString (Int.scan StringCvt.HEX) "0xFF" of SOME n => Int.toString n | NONE => "NONE") ^ "\n");
+val () = print ("@@int_scan_bin=" ^ (case StringCvt.scanString (Int.scan StringCvt.BIN) "1010" of SOME n => Int.toString n | NONE => "NONE") ^ "\n");
+val () = print ("@@int_scan_oct=" ^ (case StringCvt.scanString (Int.scan StringCvt.OCT) "17" of SOME n => Int.toString n | NONE => "NONE") ^ "\n");
+val () = print ("@@intinf_fromstring_huge=" ^ (case IntInf.fromString "123456789012345678901234567890" of SOME n => IntInf.toString (n + 1) | NONE => "NONE") ^ "\n");
+val () = print ("@@intinf_fromstring_neg_huge=" ^ (case IntInf.fromString "~99999999999999999999999999" of SOME n => IntInf.toString n | NONE => "NONE") ^ "\n");
+val () = print ("@@real_fromstring_sci=" ^ (case Real.fromString "1.5e3" of SOME r => Real.fmt (StringCvt.FIX (SOME 4)) r | NONE => "NONE") ^ "\n");
+val () = print ("@@real_fromstring_invalid=" ^ (case Real.fromString "abc" of SOME r => Real.fmt (StringCvt.FIX (SOME 2)) r | NONE => "NONE") ^ "\n");
+val () = print ("@@real_fromstring_inf_word=" ^ (case Real.fromString "inf" of SOME r => (if Real.isFinite r then Real.fmt (StringCvt.FIX (SOME 2)) r else "INF") | NONE => "NONE") ^ "\n");
+val () = print ("@@real_fromstring_neg_dec=" ^ (case Real.fromString "~3.25" of SOME r => Real.fmt (StringCvt.FIX (SOME 4)) r | NONE => "NONE") ^ "\n");
+val () = print ("@@real_fromstring_trailing=" ^ (case Real.fromString "2.0xy" of SOME r => Real.fmt (StringCvt.FIX (SOME 3)) r | NONE => "NONE") ^ "\n");
+val () = print ("@@bool_fromstring_true=" ^ (case Bool.fromString "true" of SOME b => Bool.toString b | NONE => "NONE") ^ "\n");
+val () = print ("@@bool_fromstring_junk=" ^ (case Bool.fromString "True" of SOME b => Bool.toString b | NONE => "NONE") ^ "\n");
+val () = print ("@@int_fmt_hex_neg=" ^ Int.fmt StringCvt.HEX (~255) ^ "\n");
+val () = print ("@@int_fmt_oct_neg=" ^ Int.fmt StringCvt.OCT (~64) ^ "\n");
+val () = print ("@@int_fmt_bin_neg=" ^ Int.fmt StringCvt.BIN (~10) ^ "\n");
+val () = print ("@@word_fromstring_hex=" ^ (case Word.fromString "1aF" of SOME w => Word.toString w | NONE => "NONE") ^ "\n");
+val () = print ("@@word8_fromstring_overflow=" ^ ((case Word8.fromString "ff" of SOME w => Word8.toString w | NONE => "NONE") handle Overflow => "OVERFLOW" | _ => "OTHER") ^ "\n");
+val () = print ("@@stringcvt_padleft=" ^ StringCvt.padLeft #"0" 6 "42" ^ "\n");
+val () = print ("@@stringcvt_padright=" ^ StringCvt.padRight #"." 5 "ab" ^ "\n");
+val () = print ("@@char_fromcstring_escape=" ^ (case Char.fromCString "\\n" of SOME c => Int.toString (Char.ord c) | NONE => "NONE") ^ "\n");
+val () = print ("@@char_fromcstring_hex=" ^ (case Char.fromCString "\\x41" of SOME c => Int.toString (Char.ord c) | NONE => "NONE") ^ "\n");
+val () = print ("@@int_fmt_dec_minint=" ^ Int.fmt StringCvt.DEC (valOf Int.minInt) ^ "\n");
+val () = print ("@@int_scan_overflow_in_stream=" ^ ((case StringCvt.scanString (Int.scan StringCvt.DEC) "100000000000000000000000" of SOME n => Int.toString n | NONE => "NONE") handle Overflow => "OVERFLOW" | _ => "OTHER") ^ "\n");

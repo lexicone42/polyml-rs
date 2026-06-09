@@ -1,0 +1,37 @@
+(* diff-corpus category: exceptions — exception-semantics-identity *)
+
+val () = print ("@@overflow_maxint_plus1=" ^ ((valOf Int.maxInt + 1; "NO_RAISE") handle Overflow => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@overflow_minint_minus1=" ^ ((valOf Int.minInt - 1; "NO_RAISE") handle Overflow => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@overflow_maxint_times2=" ^ ((valOf Int.maxInt * 2; "NO_RAISE") handle Overflow => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@overflow_abs_minint=" ^ ((abs (valOf Int.minInt); "NO_RAISE") handle Overflow => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@overflow_neg_minint=" ^ ((~ (valOf Int.minInt); "NO_RAISE") handle Overflow => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@overflow_real_floor_1e300=" ^ ((Real.floor 1e300; "NO_RAISE") handle Overflow => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@overflow_real_ceil_neg1e300=" ^ ((Real.ceil (~1e300); "NO_RAISE") handle Overflow => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@overflow_real_round_1e300=" ^ ((Real.round 1e300; "NO_RAISE") handle Overflow => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@overflow_real_trunc_1e300=" ^ ((Real.trunc 1e300; "NO_RAISE") handle Overflow => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@div_int_by_zero=" ^ ((1 div 0; "NO_RAISE") handle Div => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@mod_int_by_zero=" ^ ((1 mod 0; "NO_RAISE") handle Div => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@div_intinf_by_zero=" ^ ((IntInf.div (1, 0); "NO_RAISE") handle Div => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@mod_intinf_by_zero=" ^ ((IntInf.mod (1, 0); "NO_RAISE") handle Div => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@div_word_by_zero=" ^ ((Word.div (0w1, 0w0); "NO_RAISE") handle Div => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@quot_minint_negone=" ^ ((Int.quot (valOf Int.minInt, ~1); "NO_RAISE") handle Overflow => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@subscript_string_sub_empty=" ^ ((String.sub ("", 0); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@subscript_list_nth_empty=" ^ ((List.nth ([], 0); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@subscript_array_sub_empty=" ^ ((Array.sub (Array.fromList ([]: int list), 0); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@subscript_vector_sub_empty=" ^ ((Vector.sub (Vector.fromList ([]: int list), 0); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@subscript_string_sub_neg=" ^ ((String.sub ("abc", ~1); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@empty_list_hd=" ^ ((List.hd ([]: int list); "NO_RAISE") handle Empty => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@empty_list_tl=" ^ ((List.tl ([]: int list); ()); "NO_RAISE") handle Empty => "CAUGHT" | _ => "WRONG") ; val () = print "\n";
+val () = print ("@@option_valof_none=" ^ ((valOf (NONE: int option); "NO_RAISE") handle Option => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@chr_too_large=" ^ ((Char.chr 9999999; "NO_RAISE") handle Chr => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@chr_negative=" ^ ((Char.chr ~1; "NO_RAISE") handle Chr => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@chr_256=" ^ ((Char.chr 256; "NO_RAISE") handle Chr => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@substring_extract_bad=" ^ ((Substring.extract ("ab", 5, NONE); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "WRONG") ^ "\n");
+val () = print ("@@noraise_inrange_add=" ^ ((Int.toString (1000 + 2000)) handle _ => "WRONG") ^ "\n");
+val () = print ("@@noraise_div_normal=" ^ ((Int.toString (17 div 5)) handle _ => "WRONG") ^ "\n");
+val () = print ("@@noraise_chr_valid=" ^ ((Int.toString (Char.ord (Char.chr 65))) handle _ => "WRONG") ^ "\n");
+val () = print ("@@noraise_real_floor_small=" ^ ((Int.toString (Real.floor 3.9)) handle _ => "WRONG") ^ "\n");
+val () = print ("@@sqrt_neg_is_nan=" ^ (if Real.isNan (Math.sqrt (~1.0)) then "NAN" else "NOTNAN") ^ "\n");
+val () = print ("@@ln_neg_is_nan=" ^ (if Real.isNan (Math.ln (~1.0)) then "NAN" else "NOTNAN") ^ "\n");
+val () = print ("@@fromstring_bad_is_none=" ^ (case Real.fromString "zzz" of NONE => "NONE" | SOME _ => "SOME") ^ "\n");
+val () = print ("@@intinf_overflow_nope=" ^ ((IntInf.toString (IntInf.* (4611686018427387903, 2))) handle _ => "WRONG") ^ "\n");

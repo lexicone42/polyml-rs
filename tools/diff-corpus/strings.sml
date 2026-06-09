@@ -1,0 +1,33 @@
+(* diff-corpus category: strings — string_substring_char *)
+
+val () = print ("@@str_size_specials=" ^ Int.toString (size "a\tb\"c\\d\127e") ^ "\n");
+val () = print ("@@str_sub_mid=" ^ Int.toString (Char.ord (String.sub ("hello", 1))) ^ "\n");
+val () = print ("@@str_substring_extract=" ^ String.substring ("abcdefg", 2, 3) ^ "\n");
+val () = print ("@@str_extract_no_len=" ^ String.extract ("abcdefg", 4, NONE) ^ "\n");
+val () = print ("@@str_extract_zero_at_end=[" ^ String.extract ("abc", 3, SOME 0) ^ "]\n");
+val () = print ("@@str_concatWith_empty=[" ^ String.concatWith "," [] ^ "]\n");
+val () = print ("@@str_concatWith_three=" ^ String.concatWith "-" ["a","","c"] ^ "\n");
+val () = print ("@@str_concat_empties=[" ^ String.concat ["","",""] ^ "]\n");
+val () = print ("@@str_implode_explode_roundtrip=" ^ implode (rev (explode "abc\t!")) ^ "\n");
+val () = print ("@@str_toString_escapes=" ^ String.toString "a\tb\"c\\d\127e\n" ^ "\n");
+val () = print ("@@str_toString_lowctrl=" ^ String.toString (implode [chr 0, chr 1, chr 6, chr 7, chr 8, chr 27, chr 31]) ^ "\n");
+val () = print ("@@char_toString_specials=" ^ Char.toString #"\t" ^ "|" ^ Char.toString #"\"" ^ "|" ^ Char.toString #"\\" ^ "|" ^ Char.toString #"\127" ^ "|" ^ Char.toString #"A" ^ "\n");
+val () = print ("@@str_fromString_basic=" ^ (case String.fromString "a\\tb\\\"c" of SOME s => Int.toString (size s) | NONE => "NONE") ^ "\n");
+val () = print ("@@str_fromString_bad=" ^ (case String.fromString "a\\q" of SOME s => "SOME:" ^ Int.toString (size s) | NONE => "NONE") ^ "\n");
+val () = print ("@@char_fromString_dec=" ^ (case Char.fromString "\\127" of SOME c => Int.toString (Char.ord c) | NONE => "NONE") ^ "\n");
+val () = print ("@@str_compare_prefix=" ^ (case String.compare ("abc","abcd") of LESS=>"LESS"|EQUAL=>"EQUAL"|GREATER=>"GREATER") ^ "\n");
+val () = print ("@@str_compare_eq=" ^ (case String.compare ("abc","abc") of LESS=>"LESS"|EQUAL=>"EQUAL"|GREATER=>"GREATER") ^ "\n");
+val () = print ("@@str_collate_byteorder=" ^ (case String.collate Char.compare ("abZ","abc") of LESS=>"LESS"|EQUAL=>"EQUAL"|GREATER=>"GREATER") ^ "\n");
+val () = print ("@@str_isPrefix_suffix=" ^ Bool.toString (String.isPrefix "ab" "abc") ^ "," ^ Bool.toString (String.isSuffix "bc" "abc") ^ "," ^ Bool.toString (String.isPrefix "" "abc") ^ "\n");
+val () = print ("@@str_isSubstring_empty=" ^ Bool.toString (String.isSubstring "" "abc") ^ "," ^ Bool.toString (String.isSubstring "bc" "abc") ^ "," ^ Bool.toString (String.isSubstring "x" "abc") ^ "\n");
+val () = print ("@@str_tokens_vs_fields=" ^ Int.toString (length (String.tokens (fn c => c = #",") ",a,,b,")) ^ "|" ^ Int.toString (length (String.fields (fn c => c = #",") ",a,,b,")) ^ "\n");
+val () = print ("@@str_translate_expand=" ^ String.translate (fn c => if c = #"a" then "XY" else str c) "banana" ^ "\n");
+val () = print ("@@str_map_upcase=" ^ String.map Char.toUpper "aB3!z" ^ "\n");
+val () = print ("@@char_ord_chr_bounds=" ^ Int.toString (Char.ord (chr 0)) ^ "," ^ Int.toString (Char.ord (chr 255)) ^ "," ^ Int.toString (Char.ord #"~") ^ "\n");
+val () = print ("@@char_pred_classes=" ^ String.concatWith "," (map Bool.toString [Char.isAlpha #"Z", Char.isDigit #"7", Char.isSpace #"\t", Char.isAlpha #"3", Char.isSpace #"x"]) ^ "\n");
+val () = print ("@@char_case_nonalpha=" ^ Int.toString (Char.ord (Char.toLower #"5")) ^ "," ^ Int.toString (Char.ord (Char.toUpper #"q")) ^ "," ^ Int.toString (Char.ord (Char.toLower #"Q")) ^ "\n");
+val () = print ("@@char_contains=" ^ Bool.toString (Char.contains "abc" #"b") ^ "," ^ Bool.toString (Char.contains "abc" #"z") ^ "," ^ Bool.toString (Char.contains "" #"a") ^ "\n");
+val ss = Substring.full "hello world"; val (a,b) = Substring.splitl (fn c => c <> #" ") ss; val () = print ("@@substring_full_ops=" ^ Substring.string a ^ "|" ^ Int.toString (Substring.size b) ^ "\n");
+val ss = Substring.substring ("abcdefgh", 2, 4); val () = print ("@@substring_slice_string=" ^ Substring.string ss ^ "," ^ Int.toString (Substring.size ss) ^ "\n");
+val s = "abc\127"; val () = print ("@@str_sub_lastchar=" ^ Int.toString (Char.ord (String.sub (s, size s - 1))) ^ "\n");
+val () = print ("@@char_compare_order=" ^ (case Char.compare (#"a", #"b") of LESS=>"LESS"|EQUAL=>"EQUAL"|GREATER=>"GREATER") ^ "," ^ (case Char.compare (#"~", #"a") of LESS=>"LESS"|EQUAL=>"EQUAL"|GREATER=>"GREATER") ^ "\n");

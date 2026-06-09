@@ -1,0 +1,34 @@
+(* diff-corpus category: mathconst — Math constants and monotone identities (f64 RTS math) *)
+
+val () = print ("@@math_pi=" ^ Real.fmt (StringCvt.FIX (SOME 10)) Math.pi ^ "\n");
+val () = print ("@@math_e=" ^ Real.fmt (StringCvt.FIX (SOME 10)) Math.e ^ "\n");
+val () = print ("@@sqrt2=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.sqrt 2.0) ^ "\n");
+val () = print ("@@ln_exp1=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.ln (Math.exp 1.0)) ^ "\n");
+val () = print ("@@exp_ln2=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.exp (Math.ln 2.0)) ^ "\n");
+val () = print ("@@sin_halfpi=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.sin (Math.pi / 2.0)) ^ "\n");
+val () = print ("@@cos0=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.cos 0.0) ^ "\n");
+val () = print ("@@tan_quarterpi=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.tan (Math.pi / 4.0)) ^ "\n");
+val () = print ("@@atan2_11_x4=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.atan2 (1.0, 1.0) * 4.0) ^ "\n");
+val () = print ("@@atan1_x4=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.atan 1.0 * 4.0) ^ "\n");
+val () = print ("@@pow_2_half=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.pow (2.0, 0.5)) ^ "\n");
+val () = print ("@@log10_1000=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.log10 1000.0) ^ "\n");
+val () = print ("@@log10_001=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.log10 0.001) ^ "\n");
+val () = print ("@@hypot_3_4=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.sqrt (3.0*3.0 + 4.0*4.0)) ^ "\n");
+val () = print ("@@asin1=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.asin 1.0) ^ "\n");
+val () = print ("@@acos_neg1=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.acos (~1.0)) ^ "\n");
+val () = print ("@@ln1_is_zero=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.ln 1.0) ^ "\n");
+val () = print ("@@exp0_is_one=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.exp 0.0) ^ "\n");
+val () = print ("@@sin0_is_zero=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.sin 0.0) ^ "\n");
+val () = print ("@@cos_pi_neg1=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.cos Math.pi) ^ "\n");
+val () = print ("@@pythagorean_id=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.sin 1.0 * Math.sin 1.0 + Math.cos 1.0 * Math.cos 1.0) ^ "\n");
+val () = print ("@@ln_e_cubed=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.ln (Math.exp 3.0)) ^ "\n");
+val () = print ("@@pow_neg2_3=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.pow (~2.0, 3.0)) ^ "\n");
+val () = print ("@@pow_2_10=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.pow (2.0, 10.0)) ^ "\n");
+val () = print ("@@sinh1=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.sinh 1.0) ^ "\n");
+val () = print ("@@cosh1=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.cosh 1.0) ^ "\n");
+val () = print ("@@tanh_neg1=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.tanh (~1.0)) ^ "\n");
+val () = print ("@@atan2_1_0=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.atan2 (1.0, 0.0)) ^ "\n");
+val () = print ("@@atan2_neg_neg=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.atan2 (~1.0, ~1.0)) ^ "\n");
+val () = print ("@@golden_ratio=" ^ Real.fmt (StringCvt.FIX (SOME 10)) ((1.0 + Math.sqrt 5.0) / 2.0) ^ "\n");
+val () = print ("@@ln2=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.ln 2.0) ^ "\n");
+val () = print ("@@log10_e=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.log10 Math.e) ^ "\n");

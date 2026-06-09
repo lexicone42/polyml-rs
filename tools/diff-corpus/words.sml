@@ -1,0 +1,32 @@
+(* diff-corpus category: words — word *)
+
+val () = print ("@@w_toIntX_high=" ^ Int.toString (Word.toIntX (Word.fromInt ~1)) ^ "\n");
+val () = print ("@@w_toInt_neg1=" ^ Word.toString (Word.fromInt ~1) ^ "\n");
+val () = print ("@@w_asr_high=" ^ Word.toString (Word.~>> (Word.fromInt ~1, 0w4)) ^ "\n");
+val () = print ("@@w_lsr_high=" ^ Word.toString (Word.>> (Word.fromInt ~1, 0w4)) ^ "\n");
+val () = print ("@@w_asr_signed=" ^ Int.toString (Word.toIntX (Word.~>> (Word.fromInt ~256, 0w4))) ^ "\n");
+val () = print ("@@w8_asr_high=" ^ Word8.toString (Word8.~>> (Word8.fromInt ~1, 0w2)) ^ "\n");
+val () = print ("@@w8_lsr_high=" ^ Word8.toString (Word8.>> (Word8.fromInt ~1, 0w2)) ^ "\n");
+val () = print ("@@w8_toIntX=" ^ Int.toString (Word8.toIntX (Word8.fromInt 200)) ^ "\n");
+val () = print ("@@w8_wrap_add=" ^ Word8.toString (Word8.+ (0w200, 0w100)) ^ "\n");
+val () = print ("@@lw_asr_high=" ^ LargeWord.toString (LargeWord.~>> (LargeWord.fromInt ~1, 0w4)) ^ "\n");
+val () = print ("@@w_bitops=" ^ Word.toString (Word.andb (0wxF0, 0wx3C)) ^ "/" ^ Word.toString (Word.orb (0wxF0, 0wx3C)) ^ "/" ^ Word.toString (Word.xorb (0wxF0, 0wx3C)) ^ "/" ^ Word.toString (Word.notb 0w0) ^ "\n");
+val () = print ("@@w_shl_drop=" ^ Word.toString (Word.<< (0w1, 0w63)) ^ "\n");
+val () = print ("@@w_shl_full=" ^ Word.toString (Word.<< (0wxFF, 0w64)) ^ "\n");
+val () = print ("@@w_sub_wrap=" ^ Word.toString (Word.- (0w0, 0w1)) ^ "\n");
+val () = print ("@@w_mul_wrap=" ^ Word.toString (Word.* (Word.fromInt ~1, 0w2)) ^ "\n");
+val () = print ("@@w_div0=" ^ (((Word.div (0w5, 0w0); "NO_RAISE")) handle Div => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = print ("@@w_mod0=" ^ (((Word.mod (0w5, 0w0); "NO_RAISE")) handle Div => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = print ("@@w_compare=" ^ (case Word.compare (0w5, Word.fromInt ~1) of LESS => "LESS" | EQUAL => "EQUAL" | GREATER => "GREATER") ^ "\n");
+val () = print ("@@w_fromLargeInt_neg=" ^ Word.toString (Word.fromLargeInt ~1) ^ "\n");
+val () = print ("@@w_toLargeInt=" ^ IntInf.toString (Word.toLargeInt (Word.fromInt ~1)) ^ "\n");
+val () = print ("@@w_toLargeIntX=" ^ IntInf.toString (Word.toLargeIntX (Word.fromInt ~1)) ^ "\n");
+val () = print ("@@w_to_lw=" ^ LargeWord.toString (Word.toLarge (Word.fromInt ~1)) ^ "\n");
+val () = print ("@@lw_to_w_trunc=" ^ Word.toString (Word.fromLarge (LargeWord.fromInt ~1)) ^ "\n");
+val () = print ("@@w8_notb=" ^ Word8.toString (Word8.notb 0w0) ^ "\n");
+val () = print ("@@w8_bitops=" ^ Word8.toString (Word8.andb (0wxF0, 0wx3C)) ^ "/" ^ Word8.toString (Word8.orb (0wxF0, 0wx3C)) ^ "/" ^ Word8.toString (Word8.xorb (0wxF0, 0wx3C)) ^ "\n");
+val () = print ("@@w_lsr_overshift=" ^ Word.toString (Word.>> (0wxFFFF, 0w200)) ^ "\n");
+val () = print ("@@w_asr_overshift=" ^ Word.toString (Word.~>> (Word.fromInt ~1, 0w200)) ^ "\n");
+val () = print ("@@w8_toInt_max=" ^ Int.toString (Word8.toInt (Word8.fromInt 255)) ^ "\n");
+val () = print ("@@lw_bitops=" ^ LargeWord.toString (LargeWord.andb (LargeWord.fromInt ~1, 0wxFF)) ^ "\n");
+val () = print ("@@w_fromInt_big=" ^ Word.toString (Word.fromInt 4611686018427387903) ^ "\n");

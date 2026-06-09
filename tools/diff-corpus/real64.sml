@@ -1,0 +1,32 @@
+(* diff-corpus category: real64 — real *)
+
+val () = print ("@@sqrt_2=" ^ Real.fmt (StringCvt.FIX (SOME 10)) (Math.sqrt 2.0) ^ "\n");
+val () = print ("@@sqrt_neg1_isnan=" ^ Bool.toString (Real.isNan (Math.sqrt (~1.0))) ^ "\n");
+val () = print ("@@math_trig_at_1=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.sin 1.0 + Math.cos 1.0 + Math.tan 1.0) ^ "\n");
+val () = print ("@@atan2_quadrants=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.atan2 (1.0, ~1.0) + Math.atan2 (~1.0, ~1.0)) ^ "\n");
+val () = print ("@@exp_ln_log10=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.exp 1.0 + Math.ln 10.0 + Math.log10 1000.0) ^ "\n");
+val () = print ("@@hyperbolic_at_1=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.sinh 1.0 + Math.cosh 1.0 + Math.tanh 1.0) ^ "\n");
+val () = print ("@@pow_fractional=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.pow (2.0, 0.5) + Math.pow (27.0, 1.0/3.0)) ^ "\n");
+val () = print ("@@pow_neg_base_int_exp=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.pow (~2.0, 3.0)) ^ "\n");
+val () = print ("@@asin_acos_atan=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.asin 0.5 + Math.acos 0.5 + Math.atan 1.0) ^ "\n");
+val () = print ("@@round_half_even=" ^ Int.toString (Real.round 0.5) ^ "," ^ Int.toString (Real.round 1.5) ^ "," ^ Int.toString (Real.round 2.5) ^ "," ^ Int.toString (Real.round (~0.5)) ^ "," ^ Int.toString (Real.round (~1.5)) ^ "\n");
+val () = print ("@@floor_ceil_trunc_neg=" ^ Int.toString (Real.floor (~2.5)) ^ "," ^ Int.toString (Real.ceil (~2.5)) ^ "," ^ Int.toString (Real.trunc (~2.5)) ^ "," ^ Int.toString (Real.trunc 2.9) ^ "\n");
+val () = print ("@@real_rem=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Real.rem (5.3, 2.0)) ^ "," ^ Real.fmt (StringCvt.FIX (SOME 8)) (Real.rem (~5.3, 2.0)) ^ "\n");
+val nz = ~0.0 in val () = print ("@@negzero_signbit=" ^ Bool.toString (Real.signBit nz) ^ "," ^ Bool.toString (Real.signBit 0.0) ^ "," ^ Bool.toString (Real.==(nz, 0.0)) ^ "\n") end;
+val () = print ("@@copysign=" ^ Real.fmt (StringCvt.FIX (SOME 4)) (Real.copySign (3.0, ~1.0)) ^ "," ^ Real.fmt (StringCvt.FIX (SOME 4)) (Real.copySign (~3.0, 1.0)) ^ "," ^ Bool.toString (Real.signBit (Real.copySign (0.0, ~1.0))) ^ "\n");
+val () = print ("@@posinf_neginf_finite=" ^ Bool.toString (Real.isFinite Real.posInf) ^ "," ^ Bool.toString (Real.isFinite Real.negInf) ^ "," ^ Bool.toString (Real.isNan (Real.posInf + Real.negInf)) ^ "\n");
+val () = print ("@@div_by_zero_real=" ^ Bool.toString (Real.==(1.0/0.0, Real.posInf)) ^ "," ^ Bool.toString (Real.==(~1.0/0.0, Real.negInf)) ^ "," ^ Bool.toString (Real.isNan (0.0/0.0)) ^ "\n");
+val r = (Real.compare (0.0/0.0, 1.0); "NO_RAISE") handle IEEEReal.Unordered => "UNORDERED" | _ => "OTHER" in val () = print ("@@real_compare_nan=" ^ r ^ "\n") end;
+val () = print ("@@real_min_max=" ^ Real.fmt (StringCvt.FIX (SOME 4)) (Real.min (3.0, ~2.0)) ^ "," ^ Real.fmt (StringCvt.FIX (SOME 4)) (Real.max (3.0, ~2.0)) ^ "," ^ Real.fmt (StringCvt.FIX (SOME 4)) (Real.min (1.0, 0.0/0.0)) ^ "\n");
+val a = Real.nextAfter (1.0, 2.0) in val () = print ("@@nextafter=" ^ Bool.toString (a > 1.0) ^ "," ^ Bool.toString (Real.nextAfter (1.0, 0.0) < 1.0) ^ "," ^ Real.fmt (StringCvt.SCI (SOME 4)) (a - 1.0) ^ "\n") end;
+val () = print ("@@fmt_sci_gen=" ^ Real.fmt (StringCvt.SCI (SOME 4)) 12345.678 ^ "|" ^ Real.fmt (StringCvt.GEN (SOME 6)) 0.0001234 ^ "|" ^ Real.fmt (StringCvt.FIX (SOME 2)) (~0.0) ^ "\n");
+val () = print ("@@tostring_repr=" ^ Real.toString 1.5 ^ "|" ^ Real.toString 100.0 ^ "|" ^ Real.toString 0.5 ^ "|" ^ Real.toString (~0.25) ^ "\n");
+val () = print ("@@to_largeint_modes=" ^ LargeInt.toString (Real.toLargeInt IEEEReal.TO_NEAREST 2.5) ^ "," ^ LargeInt.toString (Real.toLargeInt IEEEReal.TO_NEAREST 3.5) ^ "," ^ LargeInt.toString (Real.toLargeInt IEEEReal.TO_POSINF 2.1) ^ "," ^ LargeInt.toString (Real.toLargeInt IEEEReal.TO_NEGINF 2.9) ^ "\n");
+val () = print ("@@toint_modes=" ^ Int.toString (Real.toInt IEEEReal.TO_NEAREST (~2.5)) ^ "," ^ Int.toString (Real.toInt IEEEReal.TO_ZERO (~2.9)) ^ "," ^ Int.toString (Real.toInt IEEEReal.TO_POSINF (~2.9)) ^ "\n");
+val r = (Real.toInt IEEEReal.TO_NEAREST Real.posInf; "NO_RAISE") handle Overflow => "OVERFLOW" | General.Domain => "DOMAIN" | _ => "OTHER" in val () = print ("@@toint_overflow=" ^ r ^ "\n") end;
+val r = (Real.floor (0.0/0.0); "NO_RAISE") handle General.Domain => "DOMAIN" | Overflow => "OVERFLOW" | _ => "OTHER" in val () = print ("@@floor_nan_raises=" ^ r ^ "\n") end;
+val () = print ("@@abs_neg_negzero=" ^ Real.fmt (StringCvt.FIX (SOME 4)) (Real.abs (~3.5)) ^ "," ^ Bool.toString (Real.signBit (Real.abs (~0.0))) ^ "," ^ Real.fmt (StringCvt.FIX (SOME 4)) (~ (~3.5)) ^ "\n");
+val () = print ("@@real_class_checks=" ^ Bool.toString (Real.isNormal 1.0) ^ "," ^ Bool.toString (Real.isNormal 0.0) ^ "," ^ Bool.toString (Real.isFinite (0.0/0.0)) ^ "\n");
+val () = print ("@@fromint_split=" ^ Real.fmt (StringCvt.FIX (SOME 4)) (Real.fromInt 7 / Real.fromInt 2) ^ "," ^ Real.fmt (StringCvt.FIX (SOME 4)) (Real.realFloor 2.7) ^ "," ^ Real.fmt (StringCvt.FIX (SOME 4)) (Real.realCeil (~2.3)) ^ "\n");
+val r = (Real.checkFloat Real.posInf; "NO_RAISE") handle Overflow => "OVERFLOW" | General.Div => "DIV" | _ => "OTHER" in val () = print ("@@checkfloat_inf=" ^ r ^ "\n") end;
+val {man, exp} = Real.toManExp 12.0 in val () = print ("@@split_to_manexp=" ^ Real.fmt (StringCvt.FIX (SOME 4)) man ^ "," ^ Int.toString exp ^ "," ^ Real.fmt (StringCvt.FIX (SOME 4)) (Real.fromManExp {man=man, exp=exp}) ^ "\n") end;

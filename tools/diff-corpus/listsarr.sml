@@ -1,0 +1,32 @@
+(* diff-corpus category: listsarr — List/Array/Vector *)
+
+val () = let val l = [3,1,4,1,5,9,2,6] in print ("@@list_length_rev=" ^ Int.toString (List.length l) ^ "," ^ String.concatWith "|" (map Int.toString (rev l)) ^ "\n") end;
+val () = let val l = [1,2,3] @ [4,5,6,7] val t = List.take (l, 4) val d = List.drop (l, 4) in print ("@@list_append_take_drop=" ^ Int.toString (List.foldl (op +) 0 t) ^ "," ^ Int.toString (List.foldl (op +) 0 d) ^ "\n") end;
+val () = let val l = [10,20,30,40,50] in print ("@@list_nth_valid=" ^ Int.toString (List.nth (l,0)) ^ "," ^ Int.toString (List.nth (l,4)) ^ "," ^ Int.toString (List.nth (l,2)) ^ "\n") end;
+val () = print ("@@list_nth_subscript=" ^ ((List.nth ([1,2,3], 3); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = print ("@@list_nth_negative=" ^ ((List.nth ([1,2,3], ~1); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = print ("@@list_take_overrun=" ^ ((List.take ([1,2,3], 5); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = print ("@@list_drop_overrun=" ^ ((List.drop ([1,2,3], 5); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = let val l = [1,2,3,4] val fl = List.foldl (fn (x,a) => a*10+x) 0 l val fr = List.foldr (fn (x,a) => a*10+x) 0 l in print ("@@list_foldl_foldr_diff=" ^ Int.toString fl ^ "," ^ Int.toString fr ^ "\n") end;
+val () = let val l = [1,2,3,4,5,6] val m = List.map (fn x => x*x) l val f = List.filter (fn x => x mod 2 = 0) l val (a,b) = List.partition (fn x => x > 3) l in print ("@@list_map_filter_partition=" ^ Int.toString (List.foldl (op +) 0 m) ^ "," ^ String.concatWith "|" (map Int.toString f) ^ "," ^ Int.toString (length a) ^ "," ^ Int.toString (length b) ^ "\n") end;
+val () = let val l = [2,4,6,8] val e = List.exists (fn x => x = 6) l val a = List.all (fn x => x mod 2 = 0) l val f = List.find (fn x => x > 5) l in print ("@@list_exists_all_find=" ^ Bool.toString e ^ "," ^ Bool.toString a ^ "," ^ (case f of SOME v => Int.toString v | NONE => "NONE") ^ "\n") end;
+val () = let val t = List.tabulate (5, fn i => i*i) val c = List.concat [[1,2],[],[3],[4,5,6]] in print ("@@list_tabulate_concat_last=" ^ String.concatWith "|" (map Int.toString t) ^ "," ^ Int.toString (List.length c) ^ "," ^ Int.toString (List.last c) ^ "\n") end;
+val () = let val t = List.tabulate (0, fn i => i) in print ("@@list_tabulate_zero=" ^ Int.toString (List.length t) ^ "\n") end;
+val () = print ("@@list_tabulate_negative=" ^ ((List.tabulate (~1, fn i => i); "NO_RAISE") handle Size => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = print ("@@list_last_empty=" ^ ((List.last ([]:int list); "NO_RAISE") handle Empty => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = let val r1 = List.getItem [42,7] val r2 = List.getItem ([]:int list) in print ("@@list_getitem=" ^ (case r1 of SOME (h,t) => Int.toString h ^ ":" ^ Int.toString (length t) | NONE => "NONE") ^ "," ^ (case r2 of SOME _ => "SOME" | NONE => "NONE") ^ "\n") end;
+val () = let val z = ListPair.zip ([1,2,3],[10,20,30,40]) val (a,b) = ListPair.unzip z in print ("@@listpair_zip_unzip=" ^ Int.toString (length z) ^ "," ^ Int.toString (List.foldl (op +) 0 a) ^ "," ^ Int.toString (List.foldl (op +) 0 b) ^ "\n") end;
+val () = let val m = ListPair.map (fn (x,y) => x+y) ([1,2,3,4],[10,20]) in print ("@@listpair_map_unequal=" ^ String.concatWith "|" (map Int.toString m) ^ "\n") end;
+val () = print ("@@listpair_zipeq_raises=" ^ ((ListPair.zipEq ([1,2,3],[1,2]); "NO_RAISE") handle ListPair.UnequalLengths => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = let fun ins (x, []) = [x] | ins (x, y::ys) = if x <= y then x::y::ys else y::ins(x,ys) val sorted = List.foldl ins [] [5,2,8,1,9,3,7,4,6,0] in print ("@@insertion_sort=" ^ String.concatWith "|" (map Int.toString sorted) ^ "\n") end;
+val () = let val a = Array.tabulate (5, fn i => i*2) val () = Array.update (a, 2, 99) in print ("@@array_tabulate_sub_update=" ^ Int.toString (Array.length a) ^ "," ^ Int.toString (Array.sub (a,2)) ^ "," ^ Int.toString (Array.sub (a,4)) ^ "\n") end;
+val () = let val a = Array.tabulate (3, fn i => i) in print ("@@array_sub_subscript=" ^ ((Array.sub (a,3); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "OTHER") ^ "\n") end;
+val () = let val a = Array.tabulate (3, fn i => i) in print ("@@array_update_subscript=" ^ ((Array.update (a,~1,0); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "OTHER") ^ "\n") end;
+val () = let val a = Array.tabulate (4, fn i => i+1) val fl = Array.foldl (fn (x,acc) => acc*10+x) 0 a val fr = Array.foldr (fn (x,acc) => acc*10+x) 0 a in print ("@@array_foldl_foldr=" ^ Int.toString fl ^ "," ^ Int.toString fr ^ "\n") end;
+val () = let val a = Array.tabulate (5, fn i => i) val () = Array.modify (fn x => x*x) a in print ("@@array_modify=" ^ Int.toString (Array.foldl (op +) 0 a) ^ "," ^ Int.toString (Array.sub (a,4)) ^ "\n") end;
+val () = print ("@@array_tabulate_negative=" ^ ((Array.tabulate (~3, fn i => i); "NO_RAISE") handle Size => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = let val v = Vector.tabulate (5, fn i => i+1) val m = Vector.map (fn x => x*10) v in print ("@@vector_tabulate_sub_map=" ^ Int.toString (Vector.length v) ^ "," ^ Int.toString (Vector.sub (v,0)) ^ "," ^ Int.toString (Vector.sub (m,4)) ^ "\n") end;
+val () = let val v = Vector.tabulate (4, fn i => i+1) val fl = Vector.foldl (fn (x,acc) => acc*10+x) 0 v val fr = Vector.foldr (fn (x,acc) => acc*10+x) 0 v in print ("@@vector_foldl_foldr=" ^ Int.toString fl ^ "," ^ Int.toString fr ^ "\n") end;
+val () = let val v = Vector.tabulate (3, fn i => i) in print ("@@vector_sub_subscript=" ^ ((Vector.sub (v,3); "NO_RAISE") handle Subscript => "CAUGHT" | _ => "OTHER") ^ "\n") end;
+val () = let val v = Vector.concat [Vector.fromList [1,2], Vector.fromList ([]:int list), Vector.fromList [3,4,5]] in print ("@@vector_empty_concat=" ^ Int.toString (Vector.length v) ^ "," ^ Int.toString (Vector.foldl (op +) 0 v) ^ "\n") end;
+val () = let val l = [9,8,7] val d0 = List.drop (l,0) val t3 = List.take (l,3) in print ("@@list_drop_zero_take_all=" ^ Int.toString (length d0) ^ "," ^ Int.toString (length t3) ^ "," ^ Int.toString (List.foldl (op +) 0 t3) ^ "\n") end;

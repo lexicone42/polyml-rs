@@ -1,0 +1,34 @@
+(* diff-corpus category: intinf — IntInf/LargeInt arbitrary-precision *)
+
+val () = let val a = IntInf.pow(2,63) val b = IntInf.pow(2,63)+1 in print ("@@intinf_compare_across_2p63=" ^ (case IntInf.compare(a,b) of LESS=>"LESS"|EQUAL=>"EQUAL"|GREATER=>"GREATER") ^ "\n") end;
+val () = let val a = IntInf.pow(2,70) val b = IntInf.pow(2,70) in print ("@@intinf_compare_two_big_equal=" ^ (case IntInf.compare(a,b) of LESS=>"LESS"|EQUAL=>"EQUAL"|GREATER=>"GREATER") ^ "\n") end;
+val () = let val a = IntInf.pow(2,64) val b = a+1 in print ("@@intinf_lt_big_vs_bigplus1=" ^ Bool.toString (IntInf.<(a,b)) ^ "\n") end;
+val () = let val a = ~(IntInf.pow(2,80)) val b = IntInf.pow(2,80) in print ("@@intinf_gt_negbig_vs_posbig=" ^ Bool.toString (IntInf.>(b,a)) ^ "\n") end;
+val () = let val a = IntInf.pow(2,100) in print ("@@intinf_le_equal_big=" ^ Bool.toString (IntInf.<=(a,a)) ^ "\n") end;
+val () = let val a = ~(IntInf.pow(2,90)) val b = ~(IntInf.pow(2,90)) - 1 in print ("@@intinf_ge_negbig_pair=" ^ Bool.toString (IntInf.>=(a,b)) ^ "\n") end;
+val () = let val a = IntInf.pow(2,80) + 255 val b = IntInf.fromInt 240 in print ("@@intinf_andb_large_pos=" ^ IntInf.toString (IntInf.andb(a,b)) ^ "\n") end;
+val () = let val a = IntInf.pow(2,80) val b = IntInf.fromInt 5 in print ("@@intinf_orb_large_small=" ^ IntInf.toString (IntInf.orb(a,b)) ^ "\n") end;
+val () = let val a = IntInf.pow(2,75) + 12345 in print ("@@intinf_xorb_large_self=" ^ IntInf.toString (IntInf.xorb(a,a)) ^ "\n") end;
+val () = let val a = IntInf.fromInt ~1 val b = IntInf.pow(2,80) in print ("@@intinf_andb_neg_small=" ^ IntInf.toString (IntInf.andb(a,b)) ^ "\n") end;
+val () = let val a = ~(IntInf.pow(2,70)) val b = IntInf.fromInt 1 in print ("@@intinf_orb_neg_large=" ^ IntInf.toString (IntInf.orb(a,b)) ^ "\n") end;
+val () = let val a = IntInf.pow(2,80) in print ("@@intinf_notb_large=" ^ IntInf.toString (IntInf.notb a) ^ "\n") end;
+val () = let val a = ~(IntInf.pow(2,80)) in print ("@@intinf_notb_neg_large=" ^ IntInf.toString (IntInf.notb a) ^ "\n") end;
+val () = let val a = IntInf.pow(2,60) in print ("@@intinf_shl_large=" ^ IntInf.toString (IntInf.<<(a, 0w10)) ^ "\n") end;
+val () = let val a = ~(IntInf.pow(2,80)) in print ("@@intinf_ashr_neg_large=" ^ IntInf.toString (IntInf.~>>(a, 0w5)) ^ "\n") end;
+val () = let val a = IntInf.fromInt ~1 in print ("@@intinf_ashr_neg_one=" ^ IntInf.toString (IntInf.~>>(a, 0w40)) ^ "\n") end;
+val () = let val a = IntInf.fromInt ~3 in print ("@@intinf_ashr_neg_odd=" ^ IntInf.toString (IntInf.~>>(a, 0w1)) ^ "\n") end;
+val () = print ("@@intinf_pow_2_100=" ^ IntInf.toString (IntInf.pow(2,100)) ^ "\n");
+val () = print ("@@intinf_pow_neg_base_odd=" ^ IntInf.toString (IntInf.pow(~3,7)) ^ "\n");
+val () = print ("@@intinf_pow_zero_exp=" ^ IntInf.toString (IntInf.pow(IntInf.pow(2,70),0)) ^ "\n");
+val () = print ("@@intinf_log2_big=" ^ Int.toString (IntInf.log2 (IntInf.pow(2,99) + 1)) ^ "\n");
+val () = print ("@@intinf_log2_zero_raises=" ^ ((IntInf.log2 (IntInf.fromInt 0); "NO_RAISE") handle Domain => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = let val (q,r) = IntInf.divMod(~(IntInf.pow(2,70)) + 7, IntInf.fromInt 3) in print ("@@intinf_divmod_neg_dividend=" ^ IntInf.toString q ^ "," ^ IntInf.toString r ^ "\n") end;
+val () = let val (q,r) = IntInf.quotRem(~(IntInf.pow(2,70)) + 7, IntInf.fromInt 3) in print ("@@intinf_quotrem_neg_dividend=" ^ IntInf.toString q ^ "," ^ IntInf.toString r ^ "\n") end;
+val () = let val (q,r) = IntInf.divMod(IntInf.pow(2,70) + 7, IntInf.fromInt ~3) in print ("@@intinf_divmod_neg_divisor=" ^ IntInf.toString q ^ "," ^ IntInf.toString r ^ "\n") end;
+val () = print ("@@intinf_div_by_zero_raises=" ^ ((IntInf.divMod(IntInf.pow(2,70), IntInf.fromInt 0); "NO_RAISE") handle Div => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = let fun g(a,b)= if b=IntInf.fromInt 0 then a else g(b, a mod b) val r = g(IntInf.pow(2,80), IntInf.pow(2,80) - IntInf.pow(2,40)) in print ("@@intinf_gcd_handrolled=" ^ IntInf.toString r ^ "\n") end;
+val () = let fun g(a,b)= if b=IntInf.fromInt 0 then a else g(b, a mod b) val a = IntInf.pow(2,40) val b = IntInf.pow(3,20) val l = (a*b) div g(a,b) in print ("@@intinf_lcm_handrolled=" ^ IntInf.toString l ^ "\n") end;
+val () = print ("@@intinf_tostring_large_neg=" ^ IntInf.toString (~(IntInf.pow(10,30))) ^ "\n");
+val () = let val a = IntInf.fromInt 4611686018427387903 in print ("@@intinf_mul_across_boundary=" ^ IntInf.toString (a * IntInf.fromInt 2) ^ "\n") end;
+val () = print ("@@intinf_fromint_maxint_plus1=" ^ IntInf.toString (IntInf.fromInt 4611686018427387903 + IntInf.fromInt 1) ^ "\n");
+val () = print ("@@intinf_mod_neg_floor=" ^ IntInf.toString ((~(IntInf.pow(2,70)) + 1) mod IntInf.fromInt 7) ^ "\n");

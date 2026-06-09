@@ -1,0 +1,35 @@
+(* diff-corpus category: bitsmix — bitlevel_mixed *)
+
+val () = print ("@@word_fromint_neg1_al6nes=" ^ Word.toString (Word.fromInt ~1) ^ "\n");
+val () = print ("@@word_fromint_neg1_wordsize=" ^ Int.toString Word.wordSize ^ "\n");
+val () = print ("@@word_toLargeInt_neg1=" ^ LargeInt.toString (Word.toLargeInt (Word.fromInt ~1)) ^ "\n");
+val () = print ("@@word_toLargeIntX_neg1=" ^ LargeInt.toString (Word.toLargeIntX (Word.fromInt ~1)) ^ "\n");
+let val w = Word.<< (0w1, Word.fromInt (Word.wordSize - 1)) in print ("@@word_toLargeIntX_highbit=" ^ LargeInt.toString (Word.toLargeIntX w) ^ "\n") end;
+let val w = Word.<< (0w1, Word.fromInt (Word.wordSize - 1)) in print ("@@word_toLargeInt_highbit=" ^ LargeInt.toString (Word.toLargeInt w) ^ "\n") end;
+val () = print ("@@intinf_notb_zero=" ^ IntInf.toString (IntInf.notb 0) ^ "\n");
+val () = print ("@@intinf_notb_pos=" ^ IntInf.toString (IntInf.notb 12345) ^ "\n");
+val () = print ("@@intinf_notb_neg=" ^ IntInf.toString (IntInf.notb (~12345)) ^ "\n");
+let val x = IntInf.orb (IntInf.<< (1, 0w70), IntInf.<< (1, 0w3)) in print ("@@intinf_orb_setbits=" ^ IntInf.toString x ^ "\n") end;
+let val full = IntInf.- (IntInf.<< (1, 0w64), 1) val cleared = IntInf.andb (full, IntInf.notb (IntInf.<< (1, 0w5))) in print ("@@intinf_andb_clearbit=" ^ IntInf.toString cleared ^ "\n") end;
+val () = print ("@@intinf_xorb_neg=" ^ IntInf.toString (IntInf.xorb (~1, 255)) ^ "\n");
+val () = print ("@@intinf_andb_neg_neg=" ^ IntInf.toString (IntInf.andb (~256, ~16)) ^ "\n");
+val () = print ("@@intinf_arshift_neg=" ^ IntInf.toString (IntInf.~>> (~1024, 0w3)) ^ "\n");
+val () = print ("@@intinf_arshift_neg1_big=" ^ IntInf.toString (IntInf.~>> (~1, 0w100)) ^ "\n");
+val () = print ("@@intinf_lshift_big=" ^ IntInf.toString (IntInf.<< (1, 0w100)) ^ "\n");
+let fun pop (n, acc) = if n = (0:IntInf.int) then acc else pop (IntInf.~>> (n, 0w1), acc + (IntInf.toInt (IntInf.andb (n, 1)))) val c = pop (IntInf.- (IntInf.<< (1, 0w80), 1), 0) in print ("@@intinf_popcount_fold=" ^ Int.toString c ^ "\n") end;
+val () = print ("@@int_toLarge_maxint=" ^ LargeInt.toString (Int.toLarge (valOf Int.maxInt)) ^ "\n");
+let val big = Int.toLarge (valOf Int.maxInt) in print ("@@int_fromLarge_roundtrip=" ^ Int.toString (Int.fromLarge big) ^ "\n") end;
+let val big = IntInf.+ (Int.toLarge (valOf Int.maxInt), 1) val r = (Int.toString (IntInf.toInt big)) handle Overflow => "CAUGHT" | _ => "OTHER" in print ("@@intinf_toInt_overflow=" ^ r ^ "\n") end;
+let val big = Int.toLarge (valOf Int.maxInt) in print ("@@intinf_toInt_fits_max=" ^ Int.toString (IntInf.toInt big) ^ "\n") end;
+let val big = Int.toLarge (valOf Int.minInt) in print ("@@intinf_toInt_fits_min=" ^ Int.toString (IntInf.toInt big) ^ "\n") end;
+let val big = IntInf.- (Int.toLarge (valOf Int.minInt), 1) val r = (Int.toString (IntInf.toInt big)) handle Overflow => "CAUGHT" | _ => "OTHER" in print ("@@intinf_toInt_underflow=" ^ r ^ "\n") end;
+let val x = Word.orb (0wxF0, 0wx0F) val y = Word.andb (x, 0wxAA) in print ("@@word_orb_andb_mask=" ^ Word.toString y ^ "\n") end;
+val () = print ("@@word_notb_zero=" ^ Word.toString (Word.notb 0w0) ^ "\n");
+val () = print ("@@word_xorb_self=" ^ Word.toString (Word.xorb (0wxDEADBEEF, 0wxDEADBEEF)) ^ "\n");
+val () = print ("@@word8_fromint_neg1=" ^ Word8.toString (Word8.fromInt ~1) ^ "\n");
+val () = print ("@@word8_notb=" ^ Word8.toString (Word8.notb 0wx0F) ^ "\n");
+val () = print ("@@word8_toLargeIntX_highbit=" ^ LargeInt.toString (Word8.toLargeIntX 0wx80) ^ "\n");
+val () = print ("@@largeword_fromint_neg1=" ^ LargeWord.toString (LargeWord.fromInt ~1) ^ "\n");
+let val a = IntInf.<< (255, 0w8) val b = IntInf.~>> (a, 0w4) val c = IntInf.<< (b, 0w2) in print ("@@intinf_alternating_shift=" ^ IntInf.toString c ^ "\n") end;
+let val w = Word.<< (Word.fromInt 1, Word.fromInt Word.wordSize) in print ("@@word_lshift_overflow_wraps=" ^ Word.toString w ^ "\n") end;
+let val low = 0wx80 val v = Word8.toLargeIntX (Word8.fromLargeWord (Word.toLargeWord low)) in print ("@@intinf_signext_via_orb=" ^ LargeInt.toString v ^ "\n") end;
