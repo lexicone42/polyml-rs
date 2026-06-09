@@ -77,6 +77,39 @@ faithful across the Basis Library surface that HOL4/Isabelle exercise.
 Run the whole thing: `tools/diff-oracle.sh --dir tools/diff-corpus` (29/30 agree;
 the lone `intinf.sml` divergence is the documented andb case).
 
+## Compiler-stress sweep + andb/orb root-cause (third pass)
+
+A third workflow generated COMPILER-OPTIMIZER-STRESS programs (recursion, closures,
+pattern matching, exceptions, higher-order, let-poly, big-case jump tables,
+mini-interpreters, numeric-mix) — 12 themes — to hunt the `andb` mis-compilation
+*class*. Result: **complex programs run faithfully; the ONLY divergence is the same
+IntInf.andb/orb class.** Across the entire surface (30 Basis categories + 12
+compiler-stress themes ≈ 1300 comparisons) andb/orb is the **sole** divergence.
+
+Root cause (finding #4, task #72), via a bytecode dumper (RunCall reflection) +
+the fixed disassembler:
+- `IntInf.andb` AND `orb` (not `xorb`) are mis-compiled in the basis. The optimizer
+  specializes andb/orb using AND/OR algebra ("and-ing a short positive / or-ing a
+  short negative yields a short result" — IntInf.sml comment); xorb lacks the algebra.
+- Our **bytecode backend mis-lowers** the specialized conditional: the basis_andb
+  bytecode checks `isShort(A)` then `JUMP8_TRUE` straight to the word path, leaving
+  the required sign check (`GREATER_EQ_SIGNED`/`CELL_FLAGS`/`EQUAL_WORD`) as DEAD CODE.
+  So a short operand in the special-case slot wrongly takes the word path →
+  `Word.andb/orb` of low words → truncation. `andb(~1,2^80)=0`, `orb(5,2^80)=5`.
+- It's the bytecode backend (not the interpreter, RTS, or codetree optimizer):
+  upstream NATIVE andb is correct (codetree is fine); a fresh REPL/file/structure
+  compile of the identical body is correct (the specialization only fires in the full
+  basis-build inlining context); the disassembled bytecode itself routes short-A to the
+  word path bypassing the sign check.
+
+Fix is a deliberate choice (task #72): (A) deep fix in the bytecode-backend conditional
+lowering — the right fix, fixes the class, focused multi-step task; (B) tracked
+basis-workaround patch (andb/orb always RTS) — small + correct but masks the backend
+bug, needs all checkpoints rebuilt, and is a faithfulness deviation.
+
+Bonus fix found en route: `disasm.rs` mis-decoded `IS_TAGGED_LOCAL_B` (no operand →
+misaligned everything after); fixed (commit cc92c6b) — it feeds the JIT/profiler.
+
 ## Next levers
 - Wire the corpus into `tools/regression.sh` (gated on the oracle existing).
 - Expand the corpus (Substring, Time, Date format-independent bits, Array2, IEEE
