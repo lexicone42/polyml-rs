@@ -2415,22 +2415,69 @@ impl Interpreter {
                     PolyWord::tagged(0)
                 })
             }
-            // atomicReset: write TAGGED(0) (= unlocked) into the mutex.
+            // atomicReset (= UnlockMutex builtin): write TAGGED(0)
+            // (= unlocked) into the mutex and return a BOOLEAN that is
+            // True iff this thread was the only locker, i.e. iff the old
+            // value was exactly TAGGED(1). bytecode.cpp:1534-1542:
+            //   oldValue = p->Get(0); p->Set(0, TAGGED(0));
+            //   *sp = oldValue == TAGGED(1) ? True : False;
+            // True/False are TAGGED(1)/TAGGED(0) (bytecode.cpp:86-87).
+            // basis/Thread.sml:556 uses the result: True => done, False =>
+            // fall through to PolyThreadMutexUnlock. Always returning False
+            // forced a spurious Full-RTS call on every uncontended unlock.
             EXTINSTR_ATOMIC_RESET => {
                 let mutex = self.pop()?;
-                if mutex.is_data_ptr()
+                let was_sole_locker = if mutex.is_data_ptr()
                     && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0
                 {
                     let p = mutex.as_ptr::<PolyWord>().cast_mut();
                     // SAFETY: pointer-aligned & is_data_ptr
+                    let old = unsafe { *p };
+                    // SAFETY: same
                     unsafe { p.write(PolyWord::tagged(0)) };
-                }
-                self.push_continue(PolyWord::tagged(0))
+                    old.0 == PolyWord::tagged(1).0
+                } else {
+                    // Non-pointer/misaligned defensive case (no upstream
+                    // analogue). False = conservative "contended" path,
+                    // harmless single-threaded (the follow-up
+                    // PolyThreadMutexUnlock is an idempotent reset).
+                    false
+                };
+                self.push_continue(if was_sole_locker {
+                    PolyWord::tagged(1)
+                } else {
+                    PolyWord::tagged(0)
+                })
             }
+            // atomicExchAdd (LEGACY: the current PolyML compiler no longer
+            // emits this — IntCodeCons.ML:255 has the opcode commented out,
+            // marked "Now legacy code"). Kept for image/opcode-stream
+            // compatibility. Upstream bytecode.cpp:1483-1494: pops ONE
+            // addend `u`, PEEKS the object on top, returns its old word0,
+            // and writes back word0 = old + u - 1 (raw-tag arithmetic).
+            // Raw bits: raw(a)=2a+1, so raw(old)+raw(u)-1 = 2(a+b)+1 =
+            // TAGGED(a+b) — the -1 collapses the doubled tag bit. The old
+            // version popped TWO slots (underflow by one) and ignored the
+            // object entirely.
             EXTINSTR_ATOMIC_EXCH_ADD => {
-                let _ = self.pop()?;
-                let _ = self.pop()?;
-                self.push_continue(PolyWord::tagged(0))
+                let addend = self.pop()?;
+                let obj = self.peek(0)?;
+                let old = if obj.is_data_ptr()
+                    && obj.0 & (std::mem::size_of::<usize>() - 1) == 0
+                {
+                    let p = obj.as_ptr::<PolyWord>().cast_mut();
+                    // SAFETY: pointer-aligned & is_data_ptr
+                    let old = unsafe { *p };
+                    let new_bits = old.0.wrapping_add(addend.0).wrapping_sub(1);
+                    // SAFETY: same
+                    unsafe { p.write(PolyWord::from_bits(new_bits)) };
+                    old
+                } else {
+                    PolyWord::tagged(0)
+                };
+                // Replace top (the object) with the OLD word0.
+                self.pop()?;
+                self.push_continue(old)
             }
             // log2(word at top), replace top. (bytecode.cpp:2359-2367.)
             EXTINSTR_LOG2_WORD => {
@@ -4260,6 +4307,45 @@ mod tests {
         let mut id = mk();
         id.drop_n(2).unwrap(); // RESET 2: drop top 2
         assert_eq!(id.peek(0).unwrap().untag(), 10, "RESET must drop the top n");
+    }
+
+    #[test]
+    fn atomic_reset_returns_true_only_when_sole_locker() {
+        // unlockMutex (atomicReset) writes TAGGED(0) into the mutex and
+        // returns True iff the old word0 was exactly TAGGED(1) (sole locker).
+        // bytecode.cpp:1534-1542. Our old handler always returned False.
+        for (old, expect_true) in [(1isize, true), (0isize, false), (3isize, false)] {
+            let code = vec![INSTR_ESCAPE, opcodes::ext::EXTINSTR_ATOMIC_RESET];
+            let mut i = Interpreter::from_bytes(64, code);
+            // 1-word "mutex" cell, Box-backed (heap, word-aligned, no allocator).
+            let p = Box::into_raw(Box::new([PolyWord::tagged(old)])).cast::<PolyWord>();
+            i.test_seed_top(PolyWord::from_ptr(p.cast_const()));
+            let _ = i.step().unwrap();
+            let res = i.peek(0).unwrap();
+            assert_eq!(unsafe { (*p).0 }, PolyWord::tagged(0).0, "mutex reset to unlocked");
+            let want = if expect_true { PolyWord::tagged(1).0 } else { PolyWord::tagged(0).0 };
+            assert_eq!(res.0, want, "old={old}: True iff old==TAGGED(1)");
+            drop(unsafe { Box::from_raw(p.cast::<[PolyWord; 1]>()) });
+        }
+    }
+
+    #[test]
+    fn atomic_exch_add_legacy_semantics() {
+        // LEGACY opcode (compiler no longer emits it). Pops ONE addend,
+        // PEEKS the object, returns its old word0, writes word0 = old+addend
+        // (tagged arithmetic). Old handler popped TWO slots (underflow) and
+        // returned tagged(0). bytecode.cpp:1483-1494.
+        let code = vec![INSTR_ESCAPE, opcodes::ext::EXTINSTR_ATOMIC_EXCH_ADD];
+        let mut i = Interpreter::from_bytes(64, code);
+        let p = Box::into_raw(Box::new([PolyWord::tagged(10)])).cast::<PolyWord>();
+        i.test_seed_top(PolyWord::from_ptr(p.cast_const())); // object (deeper)
+        i.test_seed_top(PolyWord::tagged(5)); // addend (top)
+        let sp_before = i.test_sp();
+        let _ = i.step().unwrap();
+        assert_eq!(i.peek(0).unwrap().untag(), 10, "returns old word0");
+        assert_eq!(unsafe { (*p).untag() }, 15, "writes back old+addend = 15");
+        assert_eq!(i.test_sp(), sp_before + 1, "net stack effect -1");
+        drop(unsafe { Box::from_raw(p.cast::<[PolyWord; 1]>()) });
     }
 
     #[test]
