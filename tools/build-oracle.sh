@@ -20,9 +20,22 @@ BUILD="${POLY_BUILD_DIR:-/tmp/polybuild}"
 command -v g++  >/dev/null || { echo "FATAL: g++ not found"; exit 2; }
 command -v make >/dev/null || { echo "FATAL: make not found"; exit 2; }
 
-echo "=== configuring upstream PolyML (out-of-tree: $BUILD) ==="
+# `tools/build-oracle.sh interp` builds the BYTECODE-INTERPRETED upstream
+# (--enable-native-codegeneration=no) at /tmp/polybuild-interp/poly. This uses
+# the SAME bytecode backend + bytecode format as our `poly`, so it's the
+# reference for differential CODEGEN debugging (e.g. task #72: our basis build
+# mis-compiles IntInf.andb to a wrong complex form; upstream-interp compiles it
+# to the correct simple form, proving the backend source is fine and the bug is
+# our build's compiler execution).
+EXTRA_CONFIG=""
+if [ "${1:-}" = "interp" ]; then
+  BUILD="${POLY_BUILD_DIR:-/tmp/polybuild-interp}"
+  EXTRA_CONFIG="--enable-native-codegeneration=no"
+fi
+
+echo "=== configuring upstream PolyML (out-of-tree: $BUILD) ${EXTRA_CONFIG} ==="
 rm -rf "$BUILD"; mkdir -p "$BUILD"; cd "$BUILD"
-"$SRC/configure" --prefix="$BUILD/install" > "$BUILD/configure.log" 2>&1
+"$SRC/configure" --prefix="$BUILD/install" $EXTRA_CONFIG > "$BUILD/configure.log" 2>&1
 
 echo "=== building (self-bootstrap; several minutes) ==="
 make -j"$(nproc)" > "$BUILD/make.log" 2>&1

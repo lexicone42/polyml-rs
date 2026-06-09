@@ -102,10 +102,29 @@ the fixed disassembler:
   basis-build inlining context); the disassembled bytecode itself routes short-A to the
   word path bypassing the sign check.
 
-Fix is a deliberate choice (task #72): (A) deep fix in the bytecode-backend conditional
-lowering — the right fix, fixes the class, focused multi-step task; (B) tracked
-basis-workaround patch (andb/orb always RTS) — small + correct but masks the backend
-bug, needs all checkpoints rebuilt, and is a faithfulness deviation.
+### Decisive narrowing: it's OUR build's codegen, not the backend source
+
+Built upstream with the bytecode interpreter (`tools/build-oracle.sh interp` →
+`/tmp/polybuild-interp/poly`, `--enable-native-codegeneration=no`) — SAME bytecode
+backend + format as us. It compiles `andb` to the **correct simple form** (words=8,
+both `isShort` checks; identical to our fresh `myandb`) and returns `2^80`. **Our**
+basis build compiles `andb` to a **wrong complex form** (words=12, special-cased with
+the sign check left as dead code). So:
+- The bytecode-backend **source is fine** (upstream-interp is correct).
+- The bug is **our build producing wrong bytecode** — our interpreter mis-executes the
+  *compiler* (optimizer) in the basis-build context.
+- Trigger: only the real `Bootstrap.use` basis sequence produces the complex form
+  (REPL / `use`-from-file / opaque-sig structure / `maxInlineSize:=1000` all give the
+  correct simple form). Mechanism: during the build, `Word.andb`'s inline body is in
+  the compiler env and gets inlined into `IntInf.andb`; post-build the checkpoint has
+  no inline body, so it's unreproducible outside the build.
+
+Next decisive step (task #72): dump the **codetree** (pre-backend) for `andb` during
+the basis build, ours vs upstream-interp. Differ → our interpreter mis-executes the
+optimizer; same → our backend mis-lowers the complex conditional. Needs build
+instrumentation. The fix target is now an **interpreter mis-execution of the compiler**
+(not the backend source, not the runtime, not the RTS) — the scariest class (silent
+mis-compilation), but narrow (only andb/orb, only the basis-build context).
 
 Bonus fix found en route: `disasm.rs` mis-decoded `IS_TAGGED_LOCAL_B` (no operand →
 misaligned everything after); fixed (commit cc92c6b) — it feeds the JIT/profiler.
