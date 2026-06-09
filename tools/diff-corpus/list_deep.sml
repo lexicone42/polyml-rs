@@ -1,0 +1,34 @@
+(* diff-corpus category: list_deep (deep sweep 2026-06-09) *)
+
+val () = print ("@@tab=" ^ String.concatWith "," (List.tabulate (5, fn i => Int.toString (i*i))) ^ "\n");
+val () = print ("@@tab0=" ^ Int.toString (List.length (List.tabulate (0, fn i => i))) ^ "\n");
+val () = print ("@@tabneg=" ^ ((List.tabulate (~1, fn i => i); "NO") handle Size => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = print ("@@collate_eq=" ^ (case List.collate Int.compare ([1,2,3],[1,2,3]) of EQUAL => "EQ" | LESS => "LT" | GREATER => "GT") ^ "\n");
+val () = print ("@@collate_lt=" ^ (case List.collate Int.compare ([1,2],[1,2,3]) of EQUAL => "EQ" | LESS => "LT" | GREATER => "GT") ^ "\n");
+val () = print ("@@collate_gt=" ^ (case List.collate Int.compare ([1,3],[1,2,9]) of EQUAL => "EQ" | LESS => "LT" | GREATER => "GT") ^ "\n");
+val () = print ("@@collate_emptyL=" ^ (case List.collate Int.compare ([],[1]) of EQUAL => "EQ" | LESS => "LT" | GREATER => "GT") ^ "\n");
+val () = print ("@@collate_empties=" ^ (case List.collate Int.compare ([],[]) of EQUAL => "EQ" | LESS => "LT" | GREATER => "GT") ^ "\n");
+val () = print ("@@mapPartial=" ^ String.concatWith "," (List.mapPartial (fn x => if x mod 2 = 0 then SOME (Int.toString x) else NONE) [1,2,3,4,5,6]) ^ "\n");
+val () = print ("@@mapPartial_allNone=" ^ Int.toString (List.length (List.mapPartial (fn _ => NONE) [1,2,3])) ^ "\n");
+val () = print ("@@concat=" ^ String.concatWith "," (map Int.toString (List.concat [[1,2],[],[3],[4,5,6]])) ^ "\n");
+val () = print ("@@concat_empty=" ^ Int.toString (List.length (List.concat ([] : int list list))) ^ "\n");
+val () = print ("@@revAppend=" ^ String.concatWith "," (map Int.toString (List.revAppend ([1,2,3],[4,5,6]))) ^ "\n");
+val () = print ("@@revAppend_emptyfirst=" ^ String.concatWith "," (map Int.toString (List.revAppend ([],[7,8]))) ^ "\n");
+val () = print ("@@drop_exact=" ^ Int.toString (List.length (List.drop ([1,2,3,4],4))) ^ "\n");
+val () = print ("@@drop_over=" ^ ((List.drop ([1,2,3],5); "NO") handle Subscript => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = print ("@@take_exact=" ^ String.concatWith "," (map Int.toString (List.take ([1,2,3,4],4))) ^ "\n");
+val () = print ("@@take_over=" ^ ((List.take ([1,2,3],5); "NO") handle Subscript => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = print ("@@nth_last=" ^ Int.toString (List.nth ([10,20,30,40],3)) ^ "\n");
+val () = print ("@@nth_over=" ^ ((List.nth ([1,2,3],3); "NO") handle Subscript => "CAUGHT" | _ => "OTHER") ^ "\n");
+val () = print ("@@foldl_order=" ^ List.foldl (fn (x,acc) => acc ^ Int.toString x) "" [1,2,3,4] ^ "\n");
+val () = print ("@@foldr_order=" ^ List.foldr (fn (x,acc) => acc ^ Int.toString x) "" [1,2,3,4] ^ "\n");
+val () = print ("@@foldl_sub=" ^ Int.toString (List.foldl (fn (x,acc) => x - acc) 0 [1,2,3,4]) ^ "\n");
+val () = print ("@@foldr_sub=" ^ Int.toString (List.foldr (fn (x,acc) => x - acc) 0 [1,2,3,4]) ^ "\n");
+val () = let val (e,o2) = List.partition (fn x => x mod 2 = 0) [1,2,3,4,5,6] in print ("@@partition=" ^ String.concatWith "," (map Int.toString e) ^ "|" ^ String.concatWith "," (map Int.toString o2) ^ "\n") end;
+val () = print ("@@find_none=" ^ (case List.find (fn x => x > 100) [1,2,3] of NONE => "NONE" | SOME v => Int.toString v) ^ "\n");
+val () = print ("@@find_first=" ^ (case List.find (fn x => x mod 2 = 0) [1,3,4,6] of NONE => "NONE" | SOME v => Int.toString v) ^ "\n");
+val () = let fun ins (x, []) = [x] | ins (x, y::ys) = if x <= y then x::y::ys else y :: ins (x, ys) ; fun isort [] = [] | isort (z::zs) = ins (z, isort zs) in print ("@@isort=" ^ String.concatWith "," (map Int.toString (isort [5,3,8,1,9,2,7,4,6,0])) ^ "\n") end;
+val () = let fun qsort [] = [] | qsort (p::rest) = qsort (List.filter (fn x => x < p) rest) @ [p] @ qsort (List.filter (fn x => x >= p) rest) in print ("@@qsort=" ^ String.concatWith "," (map Int.toString (qsort [5,3,8,1,9,2,7,4,6,0,5,3])) ^ "\n") end;
+val () = print ("@@exists_all=" ^ (if List.exists (fn x => x = 3) [1,2,3] andalso List.all (fn x => x > 0) [1,2,3] then "TT" else "F") ^ "\n");
+val () = print ("@@getItem=" ^ (case List.getItem [42,43] of NONE => "NONE" | SOME (h,t) => Int.toString h ^ ":" ^ Int.toString (List.length t)) ^ "\n");
+val () = print ("@@tabulate_sum=" ^ Int.toString (List.foldl op+ 0 (List.tabulate (100, fn i => i))) ^ "\n");

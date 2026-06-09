@@ -58,6 +58,25 @@ Run: `tools/diff-oracle.sh --dir tools/diff-corpus`
 on the **baseline** too (verified by stashing all session changes) — a test-setup
 dependency issue, independent of the runtime. The two proving tests in that file pass.
 
+## Deep sweep (second pass, same day)
+
+A second parallel workflow added **18 more categories** (Substring, Char
+predicates/escapes, Word8, LargeWord, Vector/VectorSlice, Array/ArraySlice,
+`Real.fmt` all modes, Real classification, ListPair, deep List, Int radix
+fmt/scan, Option/Bool/General, deep String, more overflow corners, Real
+arithmetic incl. inf/nan, Math identities, Word conversions). Each agent
+self-ran the oracle on its own category.
+
+Result: **all 18 new categories agree with upstream — 0 new divergences.**
+Independently re-verified by re-running the full corpus from the main loop.
+The corpus is now **30 categories / ~1181 differential comparisons**, and the
+runtime matches upstream PolyML on **all of them except the single known
+`IntInf.andb` compiler bug** (#4 / task #72). Strong evidence the runtime is
+faithful across the Basis Library surface that HOL4/Isabelle exercise.
+
+Run the whole thing: `tools/diff-oracle.sh --dir tools/diff-corpus` (29/30 agree;
+the lone `intinf.sml` divergence is the documented andb case).
+
 ## Next levers
 - Wire the corpus into `tools/regression.sh` (gated on the oracle existing).
 - Expand the corpus (Substring, Time, Date format-independent bits, Array2, IEEE

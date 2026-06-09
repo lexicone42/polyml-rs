@@ -1,0 +1,33 @@
+(* diff-corpus category: int_overflow2 (deep sweep 2026-06-09) *)
+
+val () = print ("@@maxint=" ^ Int.toString (valOf Int.maxInt) ^ "\n");
+val () = print ("@@minint=" ^ Int.toString (valOf Int.minInt) ^ "\n");
+val () = print ("@@precision=" ^ Int.toString (valOf Int.precision) ^ "\n");
+val () = print ("@@max_plus_max=" ^ (let val m = valOf Int.maxInt in (Int.toString (m + m)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@min_plus_min=" ^ (let val m = valOf Int.minInt in (Int.toString (m + m)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@max_times_max=" ^ (let val m = valOf Int.maxInt in (Int.toString (m * m)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@min_times_min=" ^ (let val m = valOf Int.minInt in (Int.toString (m * m)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@max_minus_negone=" ^ (let val m = valOf Int.maxInt in (Int.toString (m - (~1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@min_minus_one=" ^ (let val m = valOf Int.minInt in (Int.toString (m - 1)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@quot_min_negone=" ^ (let val m = valOf Int.minInt in (Int.toString (Int.quot (m, ~1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@rem_min_negone=" ^ (let val m = valOf Int.minInt in (Int.toString (Int.rem (m, ~1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@div_min_negone=" ^ (let val m = valOf Int.minInt in (Int.toString (m div (~1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@mod_min_negone=" ^ (let val m = valOf Int.minInt in (Int.toString (m mod (~1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@pow2_steps=" ^ (let fun loop (v, n) = loop (v * 2, n + 1) in (Int.toString (loop (1, 0))) handle Overflow => "OVERFLOWED" end) ^ "\n");
+val () = print ("@@pow2_count=" ^ (let fun loop (v, n) = (loop (v * 2, n + 1)) handle Overflow => n in Int.toString (loop (1, 0)) end) ^ "\n");
+val () = print ("@@abs_min=" ^ (let val m = valOf Int.minInt in (Int.toString (Int.abs m)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@abs_min_plus1=" ^ (let val m = valOf Int.minInt in (Int.toString (Int.abs (m + 1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@neg_min_plus1=" ^ (let val m = valOf Int.minInt in (Int.toString (~(m + 1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@neg_min=" ^ (let val m = valOf Int.minInt in (Int.toString (~m)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@neg_max=" ^ (let val m = valOf Int.maxInt in (Int.toString (~m)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@max_plus_one=" ^ (let val m = valOf Int.maxInt in (Int.toString (m + 1)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@max_times_two=" ^ (let val m = valOf Int.maxInt in (Int.toString (m * 2)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@min_times_two=" ^ (let val m = valOf Int.minInt in (Int.toString (m * 2)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@min_times_negone=" ^ (let val m = valOf Int.minInt in (Int.toString (m * (~1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@max_times_negone=" ^ (let val m = valOf Int.maxInt in (Int.toString (m * (~1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@succ_via_add=" ^ (let val m = valOf Int.maxInt in (Int.toString (m + 0)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@quot_min_one=" ^ (let val m = valOf Int.minInt in (Int.toString (Int.quot (m, 1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@rem_max_negone=" ^ (let val m = valOf Int.maxInt in (Int.toString (Int.rem (m, ~1))) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@min_div_two=" ^ (let val m = valOf Int.minInt in (Int.toString (m div 2)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@max_sub_min=" ^ (let val a = valOf Int.maxInt val b = valOf Int.minInt in (Int.toString (a - b)) handle Overflow => "CAUGHT" end) ^ "\n");
+val () = print ("@@min_sub_max=" ^ (let val a = valOf Int.maxInt val b = valOf Int.minInt in (Int.toString (b - a)) handle Overflow => "CAUGHT" end) ^ "\n");

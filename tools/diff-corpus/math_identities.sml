@@ -1,0 +1,34 @@
+(* diff-corpus category: math_identities (deep sweep 2026-06-09) *)
+
+val () = print ("@@asin_sin_05=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.asin (Math.sin 0.5)) ^ "\n");
+val () = print ("@@acos_cos_05=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.acos (Math.cos 0.5)) ^ "\n");
+val () = print ("@@atan_tan_05=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.atan (Math.tan 0.5)) ^ "\n");
+val () = print ("@@sqrt_x2_7=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.sqrt (7.0 * 7.0)) ^ "\n");
+val () = print ("@@pow_e_ln5=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.pow (Math.e, Math.ln 5.0)) ^ "\n");
+val () = print ("@@log10_pow10_3=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.log10 (Math.pow (10.0, 3.0))) ^ "\n");
+val () = print ("@@cosh2_minus_sinh2=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (let val c = Math.cosh 0.7 val s = Math.sinh 0.7 in c*c - s*s end) ^ "\n");
+val () = print ("@@atan2_q1=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.atan2 (1.0, 1.0)) ^ "\n");
+val () = print ("@@atan2_q2=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.atan2 (1.0, ~1.0)) ^ "\n");
+val () = print ("@@atan2_q3=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.atan2 (~1.0, ~1.0)) ^ "\n");
+val () = print ("@@atan2_q4=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.atan2 (~1.0, 1.0)) ^ "\n");
+val () = print ("@@exp_0=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.exp 0.0) ^ "\n");
+val () = print ("@@ln_1=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.ln 1.0) ^ "\n");
+val () = print ("@@hypot_3_4=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (let val a = 3.0 val b = 4.0 in Math.sqrt (a*a + b*b) end) ^ "\n");
+val () = print ("@@exp_ln_42=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.exp (Math.ln 42.0)) ^ "\n");
+val () = print ("@@ln_exp_3=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.ln (Math.exp 3.0)) ^ "\n");
+val () = print ("@@sin2_cos2=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (let val s = Math.sin 1.2 val c = Math.cos 1.2 in s*s + c*c end) ^ "\n");
+val () = print ("@@tan_eq_sin_cos=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.tan 0.9 - Math.sin 0.9 / Math.cos 0.9) ^ "\n");
+val () = print ("@@sqrt_2_sq=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (let val r = Math.sqrt 2.0 in r * r end) ^ "\n");
+val () = print ("@@pow_2_10=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.pow (2.0, 10.0)) ^ "\n");
+val () = print ("@@pow_neg_base_int=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.pow (~2.0, 3.0)) ^ "\n");
+val () = print ("@@pow_x_0=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.pow (123.456, 0.0)) ^ "\n");
+val () = print ("@@pow_x_neg1=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.pow (4.0, ~1.0)) ^ "\n");
+val () = print ("@@pow_half=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.pow (9.0, 0.5)) ^ "\n");
+val () = print ("@@asinh_sinh=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.ln (Math.sinh 0.6 + Math.sqrt (Math.sinh 0.6 * Math.sinh 0.6 + 1.0))) ^ "\n");
+val () = print ("@@tanh_id=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.sinh 0.8 / Math.cosh 0.8 - Math.tanh 0.8) ^ "\n");
+val () = print ("@@log10_1000=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.log10 1000.0) ^ "\n");
+val () = print ("@@atan2_0_0=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.atan2 (0.0, 0.0)) ^ "\n");
+val () = print ("@@atan2_1_0=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.atan2 (1.0, 0.0)) ^ "\n");
+val () = print ("@@atan2_neg1_0=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.atan2 (~1.0, 0.0)) ^ "\n");
+val () = print ("@@exp_1=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.exp 1.0) ^ "\n");
+val () = print ("@@ln_e=" ^ Real.fmt (StringCvt.FIX (SOME 8)) (Math.ln Math.e) ^ "\n");
