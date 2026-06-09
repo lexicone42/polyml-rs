@@ -2174,10 +2174,15 @@ impl Interpreter {
                 Ok(StepResult::Continue)
             }
 
-            // ----- Fixed (tagged) integer arithmetic (wrapping)
-            INSTR_FIXED_ADD => self.bin_op_tagged(|x, y| Ok(x.wrapping_add(y))),
-            INSTR_FIXED_SUB => self.bin_op_tagged(|x, y| Ok(y.wrapping_sub(x))),
-            INSTR_FIXED_MULT => self.bin_op_tagged(|x, y| Ok(x.wrapping_mul(y))),
+            // ----- Fixed (tagged) integer arithmetic.
+            // FixedInt is NON-boxing fixed precision: out-of-tagged-range results
+            // RAISE Overflow (unlike INSTR_ARB_* which box into a bignum).
+            // bytecode.cpp:926-981 range-checks the result; mult has no portable
+            // signed-overflow test upstream (calls mult_longc, checks IsDataPtr),
+            // so we test in i128.
+            INSTR_FIXED_ADD => self.fixed_add(),
+            INSTR_FIXED_SUB => self.fixed_sub(),
+            INSTR_FIXED_MULT => self.fixed_mult(),
             INSTR_FIXED_QUOT => self.bin_op_tagged(|x, y| if x == 0 { Err(()) } else { Ok(y.wrapping_div(x)) }),
             INSTR_FIXED_REM => self.bin_op_tagged(|x, y| if x == 0 { Err(()) } else { Ok(y.wrapping_rem(x)) }),
 
@@ -2645,9 +2650,13 @@ impl Interpreter {
                 // operand byte (0=nearest, 1=floor, 2=ceil, 3=trunc), else PC
                 // lands on it and traps.
                 let mode = self.fetch_u8()?;
-                let i = Self::real_to_int_round(f, mode);
-                self.stack[self.sp] = PolyWord::tagged(i);
-                Ok(StepResult::Continue)
+                match Self::real_to_int_round(f, mode) {
+                    Some(i) => {
+                        self.stack[self.sp] = PolyWord::tagged(i);
+                        Ok(StepResult::Continue)
+                    }
+                    None => self.raise_overflow(),
+                }
             }
 
             // ----- Inline "fast call" RTS dispatch for typed FP
@@ -2723,9 +2732,13 @@ impl Interpreter {
                 let r = self.peek(0)?;
                 let f = unsafe { Self::read_real(r) };
                 let mode = self.fetch_u8()?;
-                let i = Self::real_to_int_round(f, mode);
-                self.stack[self.sp] = PolyWord::tagged(i);
-                Ok(StepResult::Continue)
+                match Self::real_to_int_round(f, mode) {
+                    Some(i) => {
+                        self.stack[self.sp] = PolyWord::tagged(i);
+                        Ok(StepResult::Continue)
+                    }
+                    None => self.raise_overflow(),
+                }
             }
 
             // ----- LargeWord arithmetic (boxed uintptr_t).
@@ -3067,6 +3080,46 @@ impl Interpreter {
         self.push_continue(PolyWord::tagged(r))
     }
 
+    /// `INSTR_FIXED_ADD`: tagged(x+y) or raise Overflow if out of range.
+    /// bytecode.cpp:926-939.
+    fn fixed_add(&mut self) -> Result<StepResult, InterpError> {
+        let x = self.pop()?;
+        let y = self.pop()?;
+        let t = (x.untag() as i128) + (y.untag() as i128);
+        if t >= crate::poly_word::MIN_TAGGED as i128 && t <= crate::poly_word::MAX_TAGGED as i128 {
+            self.push_continue(PolyWord::tagged(t as isize))
+        } else {
+            self.raise_overflow()
+        }
+    }
+
+    /// `INSTR_FIXED_SUB`: tagged(y-x) or raise Overflow. bytecode.cpp:941-954.
+    fn fixed_sub(&mut self) -> Result<StepResult, InterpError> {
+        let x = self.pop()?;
+        let y = self.pop()?;
+        let t = (y.untag() as i128) - (x.untag() as i128);
+        if t >= crate::poly_word::MIN_TAGGED as i128 && t <= crate::poly_word::MAX_TAGGED as i128 {
+            self.push_continue(PolyWord::tagged(t as isize))
+        } else {
+            self.raise_overflow()
+        }
+    }
+
+    /// `INSTR_FIXED_MULT`: tagged(x*y) or raise Overflow. Upstream has no
+    /// portable signed-overflow test (mult_longc + IsDataPtr check); we test in
+    /// i128 — same condition ARB_MULTIPLY uses to box, but RAISE here because
+    /// Int = FixedInt is non-boxing. bytecode.cpp:956-981.
+    fn fixed_mult(&mut self) -> Result<StepResult, InterpError> {
+        let x = self.pop()?;
+        let y = self.pop()?;
+        let t = (x.untag() as i128) * (y.untag() as i128);
+        if t >= crate::poly_word::MIN_TAGGED as i128 && t <= crate::poly_word::MAX_TAGGED as i128 {
+            self.push_continue(PolyWord::tagged(t as isize))
+        } else {
+            self.raise_overflow()
+        }
+    }
+
     /// On 64-bit, Float (f32) values are *tagged* — packed into the
     /// high 32 bits of a PolyWord with the low bit set. Helpers:
     fn unbox_float(w: PolyWord) -> f32 {
@@ -3259,14 +3312,27 @@ impl Interpreter {
     /// rounding. Truncation is the C default for any unexpected mode value.
     #[inline]
     #[allow(clippy::cast_possible_truncation)]
-    fn real_to_int_round(f: f64, mode: u8) -> isize {
+    fn real_to_int_round(f: f64, mode: u8) -> Option<isize> {
+        // bytecode.cpp:2024-2032 — reject inputs that would overflow the
+        // conversion BEFORE rounding (so rounding can't push an in-range value
+        // out). Limit = MAXTAGGED + MAXTAGGED/2.
+        let limit = (crate::poly_word::MAX_TAGGED as f64)
+            + (crate::poly_word::MAX_TAGGED as f64) / 2.0;
+        if !f.is_finite() || f > limit || f < -limit {
+            return None;
+        }
         let r = match mode {
             0 => f.round(),
             1 => f.floor(),
             2 => f.ceil(),
             _ => f.trunc(),
         };
-        r as isize
+        // bytecode.cpp:2051-2056 — check the rounded result is taggable.
+        let p = r as isize;
+        if p > crate::poly_word::MAX_TAGGED || p < crate::poly_word::MIN_TAGGED {
+            return None;
+        }
+        Some(p)
     }
 
     fn alloc_real(&mut self, v: f64) -> Result<PolyWord, InterpError> {
@@ -3606,6 +3672,28 @@ impl Interpreter {
         self.code_start = h_start;
         self.code_end = h_end;
         Ok(())
+    }
+
+    /// Build and raise the pervasive `Overflow` exception so a surrounding
+    /// `handle Overflow` catches it. Shared by the FIXED_ADD/SUB/MULT and
+    /// REAL_TO_INT/FLOAT_TO_INT overflow guards. Mirrors upstream's
+    /// `SetException(overflowPacket); goto RAISE_EXCEPTION;`
+    /// (bytecode.cpp:935-936): build the packet (ex_id == TAGGED(5),
+    /// EXC_overflow), push it on TOP (the pre-condition `do_raise_ex`
+    /// requires), then unwind. `do_raise_ex` returns
+    /// `Err(InterpError::UnhandledException)` if no handler is installed.
+    fn raise_overflow(&mut self) -> Result<StepResult, InterpError> {
+        let packet = {
+            let mut ctx = crate::rts::RtsContext {
+                alloc_space: self.alloc_space.as_mut(),
+                raised_exception: None,
+                rts: None,
+            };
+            crate::rts::make_overflow_exception(&mut ctx)
+        };
+        self.push(packet)?;
+        self.do_raise_ex()?;
+        Ok(StepResult::Continue)
     }
 
     /// Implement TAIL_B_B (and its extended sibling EXTINSTR_tail).
@@ -4137,6 +4225,20 @@ mod tests {
             Ok(StepResult::Returned(w)) => w.untag(),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn real_to_int_round_overflow_guard() {
+        // In range: Some(rounded). round(0)/floor(1)/ceil(2)/trunc(3).
+        assert_eq!(Interpreter::real_to_int_round(3.7, 0), Some(4)); // round
+        assert_eq!(Interpreter::real_to_int_round(3.7, 1), Some(3)); // floor
+        assert_eq!(Interpreter::real_to_int_round(3.2, 2), Some(4)); // ceil
+        assert_eq!(Interpreter::real_to_int_round(-3.7, 3), Some(-3)); // trunc
+        // Out of tagged range / non-finite -> None (the handler raises Overflow).
+        assert_eq!(Interpreter::real_to_int_round(1.0e30, 1), None);
+        assert_eq!(Interpreter::real_to_int_round(-1.0e30, 1), None);
+        assert_eq!(Interpreter::real_to_int_round(f64::INFINITY, 3), None);
+        assert_eq!(Interpreter::real_to_int_round(f64::NAN, 0), None);
     }
 
     #[test]

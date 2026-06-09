@@ -2792,6 +2792,35 @@ fn make_syserr_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
     PolyWord::from_ptr(p.cast_const())
 }
 
+/// Build the pervasive `Overflow` exception packet so that a handler
+/// `handle Overflow => ...` matches it. The matching identity is
+/// `ex_id == TAGGED(5)` (`EXC_overflow`, INITIALISE_.ML:512 / sys.h:32;
+/// the nullary constructor is `Global(mkConst(toMachineWord 5))`).
+/// `ex_name = "Overflow"` is for printing only (run_time.cpp:165).
+/// Mirrors upstream `makeExceptionPacket(taskData, EXC_overflow)`
+/// (run_time.cpp:206-209 -> make_exn, run_time.cpp:158-200): a 4-word
+/// ordinary object `[ex_id, ex_name, arg, ex_location]` with
+/// `arg = TAGGED(0)` (unit) and `ex_location = TAGGED(0)` (NoLocation).
+///
+/// NOTE: `make_simple_exception` would NOT be caught as `Overflow`
+/// because it uses a self-pointer ex_id, not TAGGED(5).
+pub fn make_overflow_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
+    let name = alloc_poly_string(ctx, b"Overflow");
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::ZERO;
+    };
+    let p = space.alloc(4);
+    // SAFETY: just allocated 4 words.
+    unsafe {
+        crate::space::set_length_word(p, 4, 0);
+        p.write(PolyWord::tagged(5)); // ex_id = EXC_overflow (the match key)
+        p.add(1).write(name); // ex_name = "Overflow"
+        p.add(2).write(PolyWord::tagged(0)); // arg = () (nullary exception)
+        p.add(3).write(PolyWord::tagged(0)); // ex_location = NoLocation
+    }
+    PolyWord::from_ptr(p.cast_const())
+}
+
 /// `PolyGetEnv(threadId, name)` — return the real environment value, or
 /// raise `SysErr` (so the basis `getEnv` returns `NONE`) when the
 /// variable is unset. Mirrors `process_env.cpp:433-436`. Previously a
