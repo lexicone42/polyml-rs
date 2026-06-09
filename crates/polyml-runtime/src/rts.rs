@@ -407,17 +407,42 @@ fn register_builtins(t: &mut RtsTable) {
         use num_traits::ToPrimitive;
         box_real(c, poly_word_to_bigint(x).and_then(|n| n.to_f64()).unwrap_or(0.0))
     }));
-    // Timing / system stubs.
+    // Timing / system. TICKS_PER_MICROSECOND==1 on Unix (timing.cpp:149).
     t.register("PolyTimingTicksPerMicroSec", RtsFn::Arity1(|_, _| PolyWord::tagged(1)));
-    t.register("PolyTimingGetNow", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // gettimeofday -> microseconds since the Unix epoch (timing.cpp:205,
+    // Make_arb_from_pair_scaled(...,1000000)). Time.sml:184 getNow.
+    t.register("PolyTimingGetNow", RtsFn::Arity1(|c, _| {
+        #[allow(clippy::cast_possible_wrap)]
+        let us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as i128)
+            .unwrap_or(0);
+        int_to_poly_word(c, us)
+    }));
     t.register("PolyTimingBaseYear", RtsFn::Arity1(|_, _| PolyWord::tagged(1970)));
     t.register("PolyTimingConvertDateStuct", RtsFn::Arity2(zero2));
     t.register("PolyTimingLocalOffset", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyTimingSummerApplies", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyTimingYearOffset", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyTimingGetUser", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyTimingGetSystem", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyTimingGetReal", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // CPU time used by this process, in microseconds (getrusage(RUSAGE_SELF);
+    // timing.cpp:452/483 ru_utime / ru_stime). LargeInt.int, Arity1.
+    t.register("PolyTimingGetUser", RtsFn::Arity1(|c, _| {
+        int_to_poly_word(c, getrusage_micros(RUSAGE_SELF, true))
+    }));
+    t.register("PolyTimingGetSystem", RtsFn::Arity1(|c, _| {
+        int_to_poly_word(c, getrusage_micros(RUSAGE_SELF, false))
+    }));
+    // Real (wall-clock) time since process start, in microseconds
+    // (timing.cpp:534, gettimeofday - startTime). Baseline captured on
+    // first call. Monotonic — important for the SML Timer/scheduler path.
+    t.register("PolyTimingGetReal", RtsFn::Arity1(|c, _| {
+        use std::sync::OnceLock;
+        static START: OnceLock<std::time::Instant> = OnceLock::new();
+        let base = START.get_or_init(std::time::Instant::now);
+        #[allow(clippy::cast_possible_wrap)]
+        let us = base.elapsed().as_micros() as i128;
+        int_to_poly_word(c, us)
+    }));
     t.register("PolyTimingGetGCUser", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyTimingGetGCSystem", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyTimingGetChildUser", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
@@ -598,9 +623,11 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyThreadTestInterrupt",
         RtsFn::Arity1(poly_thread_test_interrupt),
     );
+    // rtsCallFull1 (OS.sml:178) → CALL_FAST_RTS2 (threadId + syserr). Was
+    // Arity1, which fed errorName the threadId and dropped the syserr.
     t.register(
         "PolyProcessEnvErrorName",
-        RtsFn::Arity1(poly_process_env_error_name),
+        RtsFn::Arity2(poly_process_env_error_name),
     );
     t.register("PolyWaitForSignal", RtsFn::Arity1(poly_wait_for_signal));
     // rtsCallFull1 → CALL_FAST_RTS2 (threadId + 1 SML arg).
@@ -1197,9 +1224,82 @@ fn poly_thread_test_interrupt(_: &mut RtsContext<'_>, _tid: PolyWord) -> PolyWor
     PolyWord::tagged(0)
 }
 
+/// `PolyProcessEnvErrorName(threadId, syserr)` -> boxed string naming the
+/// system error code (e.g. "ENOENT"), or "ERROR<n>" if not in the table.
+/// `syserr` is a boxed `LargeWord.word` (SysWord.word); upstream reads word 0
+/// as the errno. Mirrors process_env.cpp:238-265 + errors.cpp:1312.
 #[allow(clippy::needless_pass_by_value)]
-fn poly_process_env_error_name(_: &mut RtsContext<'_>, _arg: PolyWord) -> PolyWord {
-    PolyWord::tagged(0)
+fn poly_process_env_error_name(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    syserr: PolyWord,
+) -> PolyWord {
+    // syserror = LargeWord.word (LibrarySupport.sml:220): a 1-word byte
+    // object whose word 0 holds the error number. Tagged fallback for
+    // safety (a small SysWord could in principle arrive untagged).
+    let e: i64 = if syserr.is_tagged() {
+        syserr.untag() as i64
+    } else if syserr.is_data_ptr() {
+        // SAFETY: caller passes a boxed SysWord (1-word byte object);
+        // read its first body word as the errno.
+        let p = syserr.as_ptr::<PolyWord>();
+        unsafe { (*p).0 as i64 }
+    } else {
+        0
+    };
+    match errno_name(e) {
+        Some(name) => alloc_poly_string(ctx, name.as_bytes()),
+        // Upstream: snprintf(buff, "ERROR%0d", e) (process_env.cpp:255).
+        None => alloc_poly_string(ctx, format!("ERROR{e}").as_bytes()),
+    }
+}
+
+/// errno -> canonical POSIX name, mirroring the Unix branch of `errortable`
+/// in vendor/polyml/libpolyml/errors.cpp:49-1310. Returns `None` for codes
+/// not in the table (caller emits the "ERROR<n>" fallback, matching
+/// errors.cpp:1320 returning 0). Values are the standard Linux/glibc errno
+/// numbers (EPERM=1, ENOENT=2, ...), faithful to upstream's platform errno
+/// macros for our target.
+fn errno_name(e: i64) -> Option<&'static str> {
+    Some(match e {
+        1 => "EPERM",
+        2 => "ENOENT",
+        3 => "ESRCH",
+        4 => "EINTR",
+        5 => "EIO",
+        6 => "ENXIO",
+        7 => "E2BIG",
+        8 => "ENOEXEC",
+        9 => "EBADF",
+        10 => "ECHILD",
+        11 => "EAGAIN",
+        12 => "ENOMEM",
+        13 => "EACCES",
+        14 => "EFAULT",
+        16 => "EBUSY",
+        17 => "EEXIST",
+        18 => "EXDEV",
+        19 => "ENODEV",
+        20 => "ENOTDIR",
+        21 => "EISDIR",
+        22 => "EINVAL",
+        23 => "ENFILE",
+        24 => "EMFILE",
+        25 => "ENOTTY",
+        27 => "EFBIG",
+        28 => "ENOSPC",
+        29 => "ESPIPE",
+        30 => "EROFS",
+        31 => "EMLINK",
+        32 => "EPIPE",
+        34 => "ERANGE",
+        36 => "ENAMETOOLONG",
+        40 => "ELOOP",
+        62 => "ETIME",
+        110 => "ETIMEDOUT",
+        111 => "ECONNREFUSED",
+        _ => return None,
+    })
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -2745,6 +2845,33 @@ fn int_to_poly_word(ctx: &mut RtsContext<'_>, v: i128) -> PolyWord {
     bigint_to_poly_word(ctx, &n)
 }
 
+/// CPU time used so far, in microseconds, via `getrusage`. `user` selects
+/// `ru_utime` (user CPU) vs `ru_stime` (system CPU). Mirrors upstream
+/// timing.cpp:452/483 (`Make_arb_from_pair_scaled(tv_sec, tv_usec, 1000000)`).
+/// Returns 0 on a getrusage failure (defensive; never panics).
+#[cfg(unix)]
+fn getrusage_micros(who: libc::c_int, user: bool) -> i128 {
+    // SAFETY: getrusage fills a caller-provided rusage; we zero it first and
+    // only read POD time fields. A non-zero return means failure -> 0.
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(who, &mut ru) } != 0 {
+        return 0;
+    }
+    let tv = if user { ru.ru_utime } else { ru.ru_stime };
+    i128::from(tv.tv_sec) * 1_000_000 + i128::from(tv.tv_usec)
+}
+
+#[cfg(unix)]
+use libc::RUSAGE_SELF;
+
+/// Non-Unix fallback: no getrusage; CPU timers read as 0.
+#[cfg(not(unix))]
+const RUSAGE_SELF: i32 = 0;
+#[cfg(not(unix))]
+fn getrusage_micros(_who: i32, _user: bool) -> i128 {
+    0
+}
+
 /// Extract a Rust `String` from a PolyString pointer. Returns
 /// `None` for non-pointer / non-string-shaped args.
 fn poly_string_to_rust(s: PolyWord) -> Option<String> {
@@ -3384,6 +3511,53 @@ mod tests {
     }
 
     #[test]
+    fn error_name_registered_arity2() {
+        // OS.errorName is rtsCallFull1 -> Arity2, matching sibling ErrorMessage.
+        let t = RtsTable::new();
+        let tok = t.token_for("PolyProcessEnvErrorName").unwrap();
+        assert_eq!(t.entry(tok).unwrap().func.arity(), 2);
+    }
+
+    #[test]
+    fn error_name_returns_string() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        // errno 2 == ENOENT (errors.cpp errortable). Must return a BOXED string.
+        let r = poly_process_env_error_name(&mut c, t(), PolyWord::tagged(2));
+        assert!(r.is_data_ptr(), "errorName must return a boxed string, not tagged(0)");
+        assert_eq!(poly_string_to_rust(r).as_deref(), Some("ENOENT"));
+        // Unknown code falls back to ERROR<n> (process_env.cpp:255).
+        let r = poly_process_env_error_name(&mut c, t(), PolyWord::tagged(99999));
+        assert_eq!(poly_string_to_rust(r).as_deref(), Some("ERROR99999"));
+    }
+
+    #[test]
+    fn timing_get_now_and_real_advance() {
+        let mut space = crate::space::MemorySpace::new(256, crate::space::SpaceKind::Mutable);
+        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let table = RtsTable::new();
+        let call = |c: &mut RtsContext<'_>, name: &str| -> i128 {
+            let tok = table.token_for(name).unwrap();
+            let w = match table.entry(tok).unwrap().func {
+                RtsFn::Arity1(f) => f(c, PolyWord::tagged(0)),
+                _ => panic!("arity"),
+            };
+            poly_word_to_bigint(w).and_then(|n| num_traits::ToPrimitive::to_i128(&n)).unwrap()
+        };
+        // GetNow is microseconds since the epoch — far larger than the old
+        // tagged(0) stub, and well past year-2020 in microseconds (1.5e15).
+        let now = call(&mut c, "PolyTimingGetNow");
+        assert!(now > 1_500_000_000_000_000, "getNow should be epoch microseconds, got {now}");
+        // GetReal is monotonic non-decreasing across two reads.
+        let r1 = call(&mut c, "PolyTimingGetReal");
+        let r2 = call(&mut c, "PolyTimingGetReal");
+        assert!(r2 >= r1 && r1 >= 0, "getReal should be monotonic, {r1} then {r2}");
+        // GetUser/GetSystem are non-negative CPU microseconds.
+        assert!(call(&mut c, "PolyTimingGetUser") >= 0);
+        assert!(call(&mut c, "PolyTimingGetSystem") >= 0);
+    }
+
+    #[test]
     fn arb_bitwise() {
         let a = PolyWord::tagged(0b1100);
         let b = PolyWord::tagged(0b1010);
@@ -3488,7 +3662,7 @@ mod tests {
         assert!(boxed.is_data_ptr(), "value should box");
         let res = poly_get_low_order_as_large_word(&mut c, t(), boxed);
         // low limb of magnitude (2^64+7) is 7; two's-complement-negated = -7.
-        let low = unsafe { (*res.as_ptr::<usize>()) };
+        let low = unsafe { *res.as_ptr::<usize>() };
         assert_eq!(low, 0usize.wrapping_sub(7), "negative boxed low word must be negated");
     }
 
