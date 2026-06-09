@@ -491,6 +491,7 @@ dependencies = [
 name = "polyml-runtime"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "num-bigint",
  "num-integer",
  "num-traits",
