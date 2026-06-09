@@ -335,6 +335,7 @@ pub fn imm_bytes(op: u8) -> usize {
         | INSTR_SET_STACK_VAL_B | INSTR_STACK_CONTAINER_B | INSTR_INDIRECT_CONTAINER_B
         | INSTR_INDIRECT_CLOSURE_B0 | INSTR_INDIRECT_CLOSURE_B1 | INSTR_INDIRECT_CLOSURE_B2
         | INSTR_INDIRECT_LOCAL_B0 | INSTR_INDIRECT_LOCAL_B1
+        | INSTR_IS_TAGGED_LOCAL_B
         | INSTR_MOVE_TO_MUT_CLOSURE_B | INSTR_ALLOC_MUT_CLOSURE_B
         | INSTR_CALL_LOCAL_B | INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1
         | INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1
@@ -411,5 +412,21 @@ mod tests {
         // Use a byte that's not a known opcode.
         let d = decode(&[0xfd], 0); // 0xfd alone (not after ESCAPE)
         assert_eq!(d.mnemonic, "?");
+    }
+
+    #[test]
+    fn decode_is_tagged_local_b_has_operand() {
+        // Regression: IS_TAGGED_LOCAL_B (0xc2) takes a 1-byte local index.
+        // It was missing from imm_bytes, so it decoded as length 1 and
+        // MISALIGNED every following instruction — which made the IntInf.andb
+        // bytecode (task #72) undecodable until fixed.
+        let d = decode(&[INSTR_IS_TAGGED_LOCAL_B, 0x01], 0);
+        assert_eq!(d.mnemonic, "IS_TAGGED_LOCAL_B");
+        assert_eq!(d.total_len, 2, "0xc2 must consume its local-index operand");
+        // A two-instruction stream must decode to exactly two ops, in step.
+        let stream = vec![INSTR_IS_TAGGED_LOCAL_B, 0x01, INSTR_JUMP8_FALSE, 0x05];
+        let ops = disassemble(&stream);
+        assert_eq!(ops.len(), 2, "operand must not be mis-decoded as a second opcode");
+        assert_eq!(ops[1].1.mnemonic, "JUMP8_FALSE");
     }
 }
