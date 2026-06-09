@@ -422,6 +422,43 @@ poly run --profile --trace-rts <image>
 histogram on exit. See `crates/polyml-runtime/tests/exec_bootstrap_profile.rs`
 for a deeper-stop-and-dump example.
 
+## Differential testing against upstream PolyML (the oracle — use it!)
+
+Built 2026-06-09. The foundation audit's deepest lesson was that latent bugs
+hide everywhere with no systematic detector — every Isabelle keystone turned
+out to be a runtime bug that had been silently wrong. The fix is a *ground-truth
+oracle*: run the same SML through the real upstream PolyML and through our `poly
+run`, diff the results. Any difference is a faithfulness bug in OUR port.
+
+- `tools/build-oracle.sh` → builds upstream PolyML at `/tmp/polybuild/poly`
+  (out-of-tree; vendor stays pristine). Default int config (FixedInt 63-bit,
+  `Int.maxInt = 4611686018427387903`) MATCHES `/tmp/basis_loaded` — so that
+  checkpoint is the right diff target (NOT `/tmp/arbint_image`).
+- `tools/build-oracle.sh interp` → builds upstream with the BYTECODE interpreter
+  (`--enable-native-codegeneration=no`) at `/tmp/polybuild-interp/poly`. Same
+  bytecode backend + format as us → the reference for differential CODEGEN
+  debugging (it proved the andb/orb bug is our build's compiler-execution, not
+  the backend source).
+- `tools/diff-oracle.sh [--dir <d>] <file.sml ...>` runs each snippet through
+  both and compares `@@<label>=<value>` lines (the filter strips REPL chatter).
+- `tools/diff-corpus/*.sml` — ~1300 deterministic comparisons across 40 files
+  (30 Basis categories + compiler-stress programs). Run:
+  `tools/diff-oracle.sh --dir tools/diff-corpus` (wired into `regression.sh full`).
+
+**Verdict (2026-06-09):** the interpreter is FAITHFUL to upstream across all
+~1300 cases EXCEPT one narrow, fully-diagnosed class — `IntInf.andb`/`orb` with
+a short operand in the special-case slot (`andb(~1,2^80)=0`, `orb(5,2^80)=5`).
+Our basis build mis-compiles them to a wrong specialized form (the sign check is
+left as dead code); upstream-interpreted (same backend) compiles them correctly,
+so it's our interpreter mis-executing the *compiler* during the basis build —
+the scariest class (silent mis-compilation) but narrow. See task #72 +
+`docs/differential-oracle-2026-06-09.md`. The interp-vs-JIT differential is
+clean (40/40 — the JIT matches the interpreter on everything the corpus runs).
+
+A bytecode dumper (`/tmp/dump.sml` pattern: closure word0 → code obj →
+`RunCall.loadByte`) + the `disasm` module (`crates/polyml-runtime/src/interpreter/
+disasm.rs`) decode a function's bytecode for codegen forensics.
+
 ## HOL4 / SML experiment harness
 
 Built 2026-05-30 to make SML reconstruction debugging repeatable (and to
