@@ -1541,6 +1541,17 @@ fn compile_with_consts_impl(
                     // bin_op_tagged in the interp pops x (top) and y;
                     // result_n = x_n + y_n; (commutative).
                     // tagged identity: (x_t + y_t) - 1
+                    //
+                    // KNOWN LIMITATION (foundation audit 2026-06-08): unlike the
+                    // interpreter's INSTR_FIXED_ADD (which range-checks in i128 and
+                    // raises SML `Overflow` — see Interpreter::fixed_add), this JIT
+                    // path WRAPS on i63 overflow. A correct fix needs an overflow
+                    // check that signals the trampoline to raise a packet mid-body
+                    // (an extern "C" JIT fn can't build/unwind an SML exception
+                    // itself). Bailing-to-interp instead was measured to cost ~9pp
+                    // coverage (74.7%→65.5%) and broke 10 JIT arithmetic tests, so
+                    // the wrap is kept as a documented gap; the JIT is off the
+                    // default (interpreter) path that runs HOL4/Isabelle.
                     let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
                     let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
                     let sum = builder.ins().iadd(x, y);
