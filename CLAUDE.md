@@ -766,8 +766,12 @@ off meson (`/tmp/hol4_metis`: metisLib resolution+paramodulation, full bool_ss).
 Headline proofs on `/tmp/hol4_simp`: the Drinker Paradox `⊢ ∃x. D x ⇒ ∀y. D y`,
 quantifier duality, `S K K = I` (`hol4_fancy.rs`); on `/tmp/hol4_num`: induction
 over ℕ + `APPEND_ASSOC` (`hol4_induction.rs`, `hol4_list.rs`); on
-`/tmp/hol4_arith`: ADD_COMM/MULT_COMM/EVEN_ADD (`hol4_arith.rs`); on
-`/tmp/hol4_order`: the `<=` laws (`hol4_order.rs`); on `/tmp/hol4_taut`:
+`/tmp/hol4_arith`: ADD_COMM/MULT_COMM/EVEN_ADD (`hol4_arith.rs`) + the
+**summation mini-development** `hol4_summation.rs` (define `sum`/`osum` via
+`num_Axiom`, then **Gauss** `⊢ ∀n. sum n + sum n = mult n (SUC n)` and
+**sum-of-odds** `⊢ ∀n. osum n = mult n n` by `INDUCT_TAC` — closed-form
+summation identities, no bool_ss/SAT, runs in ~2s on the existing arith
+checkpoint); on `/tmp/hol4_order`: the `<=` laws (`hol4_order.rs`); on `/tmp/hol4_taut`:
 `⊢ p ∨ ¬p`, De Morgan, Peirce (`hol4_taut.rs`); on `/tmp/hol4_meson`: the drinker
 paradox + a symmetric/transitive relation goal by `MESON_TAC` (`hol4_meson.rs`);
 on `/tmp/hol4_metis`: `AC_CHAIN` product-reversal + equality congruence by
