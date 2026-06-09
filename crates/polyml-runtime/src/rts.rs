@@ -346,18 +346,32 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyRealCeil", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).ceil())));
     t.register("PolyRealRound", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).round_ties_even())));
     t.register("PolyRealTrunc", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).trunc())));
-    // FLOAT (Real32) variants still stubbed — Real32 boxing differs; not on the
-    // Isabelle/HOL4 double path.
-    let real_unary_stubs = [
-        "PolyRealFSqrt", "PolyRealFSin", "PolyRealFCos", "PolyRealFTan",
-        "PolyRealFArcSin", "PolyRealFArcCos", "PolyRealFArctan",
-        "PolyRealFSinh", "PolyRealFCosh", "PolyRealFTanh",
-        "PolyRealFExp", "PolyRealFLog", "PolyRealFLog10",
-        "PolyRealFFloor", "PolyRealFCeil", "PolyRealFRound", "PolyRealFTrunc",
-    ];
-    for name in real_unary_stubs {
-        t.register(name, RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    }
+    // FLOAT (Real32) unary math (rtsCallFastF_F: Real32 -> Real32, no threadId).
+    // On 64-bit, Real32 args/results are TAGGED floats (f32 bits in the high 32,
+    // low bit = tag). The typed fast-call path (call_fast_f_to_f, mod.rs) passes
+    // the tagged arg directly and reads our result as a BOXED f64, then narrows
+    // `as f32` and re-tags — so we unpack via read_f32_tagged, compute in f32, and
+    // return the f32 widened to a boxed f64 via box_f32_tagged. Upstream
+    // reals.cpp:445-586 (sqrtf/sinf/...; FTrunc = trunc toward zero; FRound =
+    // round-half-to-even). Registration order is unchanged from the old stub array
+    // so baked RTS dispatch tokens in warm checkpoints stay valid.
+    t.register("PolyRealFSqrt", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).sqrt())));
+    t.register("PolyRealFSin", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).sin())));
+    t.register("PolyRealFCos", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).cos())));
+    t.register("PolyRealFTan", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).tan())));
+    t.register("PolyRealFArcSin", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).asin())));
+    t.register("PolyRealFArcCos", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).acos())));
+    t.register("PolyRealFArctan", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).atan())));
+    t.register("PolyRealFSinh", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).sinh())));
+    t.register("PolyRealFCosh", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).cosh())));
+    t.register("PolyRealFTanh", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).tanh())));
+    t.register("PolyRealFExp", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).exp())));
+    t.register("PolyRealFLog", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).ln())));
+    t.register("PolyRealFLog10", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).log10())));
+    t.register("PolyRealFFloor", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).floor())));
+    t.register("PolyRealFCeil", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).ceil())));
+    t.register("PolyRealFRound", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).round_ties_even())));
+    t.register("PolyRealFTrunc", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).trunc())));
     // DOUBLE binary math (rtsCallFastRR_R: real*real -> real, no threadId).
     t.register("PolyRealAtan2", RtsFn::Arity2(|c, y, x| box_real(c, read_real_word(y).atan2(read_real_word(x)))));
     t.register("PolyRealPow", RtsFn::Arity2(|c, b, e| box_real(c, read_real_word(b).powf(read_real_word(e)))));
@@ -366,13 +380,15 @@ fn register_builtins(t: &mut RtsTable) {
     // Real.nextAfter (Real.sml:480). Registered FIRST here to preserve the
     // dispatch-token ordinal it had as the head of the old stub array.
     t.register("PolyRealNextAfter", RtsFn::Arity2(|c, a, b| box_real(c, next_after(read_real_word(a), read_real_word(b)))));
-    let real_binary_stubs = [
-        "PolyRealFAtan2", "PolyRealFCopySign", "PolyRealFNextAfter",
-        "PolyRealFPow", "PolyRealFRem",
-    ];
-    for name in real_binary_stubs {
-        t.register(name, RtsFn::Arity2(zero2));
-    }
+    // FLOAT (Real32) binary math (rtsCallFastFF_F: Real32*Real32 -> Real32, no
+    // threadId). Same tagged-f32 in / boxed-f64 out convention as the unary
+    // F-variants above. Registration order unchanged so baked tokens stay valid.
+    // Upstream reals.cpp:531-600.
+    t.register("PolyRealFAtan2", RtsFn::Arity2(|c, y, x| box_f32_tagged(c, read_f32_tagged(y).atan2(read_f32_tagged(x)))));
+    t.register("PolyRealFCopySign", RtsFn::Arity2(|c, a, b| box_f32_tagged(c, read_f32_tagged(a).copysign(read_f32_tagged(b)))));
+    t.register("PolyRealFNextAfter", RtsFn::Arity2(|c, a, b| box_f32_tagged(c, next_after_f32(read_f32_tagged(a), read_f32_tagged(b)))));
+    t.register("PolyRealFPow", RtsFn::Arity2(|c, b, e| box_f32_tagged(c, real_f_pow(read_f32_tagged(b), read_f32_tagged(e)))));
+    t.register("PolyRealFRem", RtsFn::Arity2(|c, a, b| box_f32_tagged(c, read_f32_tagged(a) % read_f32_tagged(b))));
     // Real.fromManAndExp = ldexp(man, exp) = man * 2^exp (Real.sml:265,
     // rtsCallFastRI_R: real * int -> real). exp clamped to a range beyond which
     // the result is already inf/0 in f64.
@@ -2293,6 +2309,27 @@ fn read_real_word(x: PolyWord) -> f64 {
     }
 }
 
+/// Read a `PolyWord` argument as an `f32` under the 64-bit *tagged* Real32
+/// representation: the f32 bit pattern lives in the high 32 bits and the low
+/// bit is the tag. Mirrors upstream `float_arg` (reals.cpp:206-211,
+/// FLT_SHIFT=32) and the interpreter's `unbox_float` (mod.rs): arithmetic
+/// right-shift by 32 (sign-extending), then reinterpret the low 32 bits as f32.
+#[allow(clippy::cast_possible_truncation)]
+fn read_f32_tagged(x: PolyWord) -> f32 {
+    let i = ((x.0 as isize) >> 32) as i32;
+    f32::from_bits(i as u32)
+}
+
+/// Box an `f32` result of a Real32 RTS call as a boxed Real (1-word
+/// F_BYTE_OBJ holding the value widened to f64). The typed fast-call path
+/// (`dispatch_typed_fast_call`, mod.rs) reads this back as f64 and
+/// `call_fast_f_to_f` narrows `as f32` + re-tags via `box_float`. The
+/// f32->f64->f32 round-trip is lossless. Helper exists so the F-variant
+/// registrations read clearly; it just defers to `box_real`.
+fn box_f32_tagged(ctx: &mut RtsContext<'_>, v: f32) -> PolyWord {
+    box_real(ctx, f64::from(v))
+}
+
 /// IEEE-754 `nextafter(x, y)`: the next representable double after `x` in the
 /// direction of `y`. Rust std has no stable `next_after`, so do the standard
 /// bit-pattern walk (same-sign doubles order monotonically by bit pattern).
@@ -2310,6 +2347,46 @@ fn next_after(x: f64, y: f64) -> f64 {
     let bits = x.to_bits();
     let next = if (y > x) == (x > 0.0) { bits + 1 } else { bits - 1 };
     f64::from_bits(next)
+}
+
+/// IEEE-754 `nextafterf(x, y)` for f32 (mirrors `next_after` for f64).
+/// Rust std has no stable f32 next_after, so walk the bit pattern.
+fn next_after_f32(x: f32, y: f32) -> f32 {
+    if x.is_nan() || y.is_nan() {
+        return f32::NAN;
+    }
+    if x == y {
+        return y;
+    }
+    if x == 0.0 {
+        // Smallest subnormal toward y.
+        return f32::from_bits(1).copysign(y);
+    }
+    let bits = x.to_bits();
+    let next = if (y > x) == (x > 0.0) { bits + 1 } else { bits - 1 };
+    f32::from_bits(next)
+}
+
+/// f32 power with PolyML's special cases (reals.cpp:536-558 PolyRealFPow):
+/// nan base -> 1.0 if exp==0 else nan; nan exp -> exp; x==0 && y<0 ->
+/// +inf, or -inf when x is -0.0 and y is an odd integer; else powf.
+fn real_f_pow(x: f32, y: f32) -> f32 {
+    if x.is_nan() {
+        return if y == 0.0 { 1.0 } else { f32::NAN };
+    }
+    if y.is_nan() {
+        return y;
+    }
+    if x == 0.0 && y < 0.0 {
+        #[allow(clippy::cast_possible_truncation)]
+        let iy = y.floor() as i64;
+        #[allow(clippy::cast_precision_loss)]
+        if 1.0f32.copysign(x) < 0.0 && (iy as f32) == y && (iy & 1) != 0 {
+            return f32::NEG_INFINITY;
+        }
+        return f32::INFINITY;
+    }
+    x.powf(y)
 }
 
 /// Box an `f64` as a PolyML Real (1-word byte object).
@@ -3255,6 +3332,55 @@ mod tests {
         let g2 = bigint_to_poly_word(&mut c, &(BigInt::from(3u8) * (BigInt::from(1u8) << 65u32)));
         let g = poly_gcd_arbitrary(&mut c, t(), g1, g2);
         assert_eq!(poly_word_to_bigint(g).unwrap(), BigInt::from(1u8) << 65u32);
+    }
+
+    /// Pack an f32 the way the interpreter's `box_float` does: f32 bits in the
+    /// high 32, low bit = tag. Used to feed the Real32 RTS readers.
+    fn tf32(f: f32) -> PolyWord {
+        PolyWord::from_bits(((u64::from(f.to_bits()) << 32) | 1) as usize)
+    }
+
+    #[test]
+    fn real32_read_write_roundtrip() {
+        // read_f32_tagged is the exact inverse of the interpreter's box_float.
+        for v in [2.0f32, -3.5, 0.0, -0.0, 1e30, -1e-30, f32::INFINITY] {
+            assert_eq!(read_f32_tagged(tf32(v)).to_bits(), v.to_bits());
+        }
+    }
+
+    #[test]
+    fn real32_sqrt_floor_ceil() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        // RTS result is a BOXED f64 (the live dispatch path reads as_ptr::<f64>()).
+        let asf32 = |w: PolyWord| -> f32 {
+            assert!(w.is_data_ptr(), "Real32 RTS result must be a boxed f64");
+            unsafe { *w.as_ptr::<f64>() as f32 }
+        };
+        assert_eq!(asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(4.0)).sqrt())), 2.0);
+        assert_eq!(asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(3.7)).floor())), 3.0);
+        assert_eq!(asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(3.2)).ceil())), 4.0);
+        assert_eq!(asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(3.7)).trunc())), 3.0);
+    }
+
+    #[test]
+    fn real32_pow_rem_nextafter() {
+        assert_eq!(real_f_pow(2.0, 10.0), 1024.0);
+        assert_eq!(real_f_pow(f32::NAN, 0.0), 1.0);
+        assert!(real_f_pow(f32::NAN, 2.0).is_nan());
+        assert_eq!(real_f_pow(0.0, -1.0), f32::INFINITY);
+        assert_eq!(real_f_pow(-0.0, -3.0), f32::NEG_INFINITY); // -0 ** odd-neg
+        assert_eq!(5.0f32 % 3.0f32, 2.0); // FRem = fmod semantics
+        let up = next_after_f32(1.0, 2.0);
+        assert!(up > 1.0 && up == f32::from_bits(1.0f32.to_bits() + 1));
+        assert!(next_after_f32(f32::NAN, 1.0).is_nan());
+    }
+
+    #[test]
+    fn real32_round_half_even() {
+        assert_eq!(0.5f32.round_ties_even(), 0.0);
+        assert_eq!(2.5f32.round_ties_even(), 2.0);
+        assert_eq!((-1.5f32).round_ties_even(), -2.0);
     }
 
     #[test]
