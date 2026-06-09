@@ -51,6 +51,16 @@ if [ "$MODE" = "full" ]; then
     [ -z "$r" ] && { echo "    (no result — likely skipped: missing checkpoint/vendor)"; }
   done
   echo "  headline integration: $ipass passed, $ifail failed"
+
+  echo; echo "--- differential vs upstream PolyML (if oracle built) ---"
+  if [ -x /tmp/polybuild/poly ] && [ -f /tmp/basis_loaded ]; then
+    # 11/12 expected: the lone known divergence is the basis-compiled
+    # IntInf.andb compiler bug (docs/differential-oracle-2026-06-09.md).
+    tools/diff-oracle.sh --dir tools/diff-corpus || \
+      echo "  (differential reported divergences — expected: intinf.sml andb, else investigate)"
+  else
+    echo "  (skipped — build the oracle: tools/build-oracle.sh)"
+  fi
 fi
 
 echo
