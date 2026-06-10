@@ -1,6 +1,6 @@
-(* arithmetic_sweep.sml — Stage 4: sweep the REAL arithmeticScript.sml
+(* arithmetic_sweep.sml — Stage 4: sweep the REAL numeralScript.sml
    (5759 lines, 524 Theorem blocks) per-theorem on /tmp/hol4_relation and
-   export /tmp/hol4_arithmetic. Same harness as relation_tail_sweep with:
+   export /tmp/hol4_numeral. Same harness as relation_tail_sweep with:
      * sweep from line 1 (chunk 0 = the Theory header: new_theory + opens);
      * a REBIND shim injected right after the header chunk — the header's
        `open boolLib BasicProvers ...` spills the image's OLD bindings over
@@ -23,7 +23,7 @@ val HOL = case OS.Process.getEnv "HOL4_DIR" of
 infix THEN THENL THEN1 ORELSE;
 infix 8 by;
 
-pr "\nARITHMETIC_SWEEP_START\n";
+pr "\nNUMERAL_SWEEP_START\n";
 val () = Globals.interactive := true;
 val () =
     app (fn (nm, ax) =>
@@ -69,7 +69,7 @@ structure BasicProvers = struct
       in
         if ty = Type.bool then Tactic.ASM_CASES_TAC tm g
         else if ty = numty then
-          (case current_thm "num_CASES" of
+          (case current_thm "numeral_distrib" of
                SOME th => Tactic.FULL_STRUCT_CASES_TAC (Thm.SPEC tm th) g
              | NONE => raise Feedback.mk_HOL_ERR "BasicProvers(shim)" "Cases_on"
                              "num_CASES not yet proved")
@@ -135,7 +135,7 @@ val () = (PolyML.use ((HOL ^ "/../../crates/polyml-bin/tests/hol4_support")
 
 val lines =
     String.fields (fn c => c = #"\n")
-                  (readFile (HOL ^ "/src/num/theories/arithmeticScript.sml"));
+                  (readFile (HOL ^ "/src/num/theories/numeralScript.sml"));
 
 fun isBoundary l =
     String.isPrefix "Theorem " l orelse String.isPrefix "Definition " l
@@ -151,11 +151,11 @@ fun chunkName l =
 val ok = ref 0 and bad = ref 0;
 (* expbase family: simp loops (GC churn at 2% retained) — pass-3/4 hangs.
    Both are [local] helpers; their consumer may fail benignly. *)
-val skip : string list = ["expbase_le_mono", "expbase_lt_mono", "MIN_MAX_EQ", "MIN_MAX_LT", "MIN_MAX_LE", "MIN_MAX_PRED"];
+val skip : string list = [];
 
 (* re-runnable (pass 2 on the exported image): chunks whose name is already
    saved are skipped; the header's new_theory is neutralized when the
-   current theory is already "arithmetic" (re-running it would WIPE the
+   current theory is already "numeral" (re-running it would WIPE the
    previously banked segment). *)
 fun replaceAll (s, old, new) =
     let val (pre, suf) = Substring.position old (Substring.full s)
@@ -180,7 +180,7 @@ fun runChunk (name, chunkLines) =
         val filtered0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()}
                                             "/tmp/asweep_src.sml"
         val filtered =
-            if name = "HEADER" andalso Theory.current_theory () = "arithmetic"
+            if name = "HEADER" andalso Theory.current_theory () = "numeral"
             then replaceAll (filtered0,
                              "Theory.new_theory \"arithmetic\"", "()")
             else filtered0
@@ -232,29 +232,29 @@ val () = app (fn (n, th) =>
                  then (seen := n :: !seen; btbl := (n, th) :: !btbl) else ())
              all_named;
 fun bt n = #2 (valOf (List.find (fn (m, _) => m = n) (!btbl)));
-val () = pr ("ARITHMETICTHEORY_NAMES " ^ Int.toString (length (!btbl)) ^ "\n");
+val () = pr ("NUMERALTHEORY_NAMES " ^ Int.toString (length (!btbl)) ^ "\n");
 val () =
-    let val os = TextIO.openOut "/tmp/arithmeticTheory_gen.sml"
-    in TextIO.output (os, "structure arithmeticTheory = struct\n");
+    let val os = TextIO.openOut "/tmp/numeralTheory_gen.sml"
+    in TextIO.output (os, "structure numeralTheory = struct\n");
        app (fn (n, _) =>
                TextIO.output (os, "  val " ^ n ^ " = bt \"" ^ n ^ "\";\n"))
            (!btbl);
        TextIO.output (os, "end;\n"); TextIO.closeOut os
     end;
-val () = (PolyML.use "/tmp/arithmeticTheory_gen.sml"; pr "STRUCT_OK\n")
+val () = (PolyML.use "/tmp/numeralTheory_gen.sml"; pr "STRUCT_OK\n")
          handle e => pr ("STRUCT_FAIL :: " ^ exnMessage e ^ "\n");
 
 val smoke = ref true;
 fun need tag b = if b then pr ("OK " ^ tag ^ "\n")
                  else (smoke := false; pr ("MISSING " ^ tag ^ "\n"));
-val () = need "arithmetic-current" (Theory.current_theory () = "arithmetic");
-val () = need "num_CASES"    ((ignore (bt "num_CASES");    true) handle _ => false);
-val () = need "ADD_CLAUSES"  ((ignore (bt "ADD_CLAUSES");  true) handle _ => false);
-val () = need "MULT_CLAUSES" ((ignore (bt "MULT_CLAUSES"); true) handle _ => false);
-val () = pr (if !smoke then "ARITH_SMOKE_PASS\n" else "ARITH_SMOKE_FAIL\n");
+val () = need "arithmetic-current" (Theory.current_theory () = "numeral");
+val () = need "numeral_distrib"    ((ignore (bt "num_CASES");    true) handle _ => false);
+val () = need "numeral_suc"  ((ignore (bt "ADD_CLAUSES");  true) handle _ => false);
+val () = need "numeral_add" ((ignore (bt "MULT_CLAUSES"); true) handle _ => false);
+val () = pr (if !smoke then "NUMERAL_SMOKE_PASS\n" else "NUMERAL_SMOKE_FAIL\n");
 val () =
     if !smoke then
-      (pr "EXPORTING /tmp/hol4_arithmetic\n";
-       PolyML.export ("/tmp/hol4_arithmetic", PolyML.rootFunction);
-       pr "ARITHMETIC_SWEEP_DONE\n")
-    else pr "ARITHMETIC_EXPORT_SKIPPED\n";
+      (pr "EXPORTING /tmp/hol4_numeral\n";
+       PolyML.export ("/tmp/hol4_numeral", PolyML.rootFunction);
+       pr "NUMERAL_SWEEP_DONE\n")
+    else pr "NUMERAL_EXPORT_SKIPPED\n";
