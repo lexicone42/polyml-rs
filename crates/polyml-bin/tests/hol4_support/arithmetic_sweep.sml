@@ -48,16 +48,31 @@ end;
 
 structure BasicProvers = struct
   open BasicProvers
+  (* THE checkpoint-wide root (fleet diagnosis): our markerLib stub's
+     process_taclist_then drops `map ASSUME asl`, so simpLib.ASM_SIMP_TAC
+     has been silently identical to SIMP_TAC since the simp build — every
+     inductive proof closing with ASM_SIMP+IH failed. Inject the
+     assumptions ourselves. *)
+  fun ASM_SIMP_TAC ss thl (g as (asl, _)) =
+      simpLib.SIMP_TAC ss (List.map Thm.ASSUME asl @ thl) g
+  fun FULL_SIMP_TAC ss thl =
+      Tactical.THEN (simpLib.FULL_SIMP_TAC ss thl,
+                     Tactical.TRY (ASM_SIMP_TAC ss thl))
   val closer =
       Tactical.TRY (Tactical.THEN (Rewrite.ONCE_ASM_REWRITE_TAC [],
         Tactical.THEN (Rewrite.REWRITE_TAC [], Tactical.NO_TAC)))
   fun RW_TAC ss thl =
       Tactical.THEN (Tactical.THEN (Tactical.REPEAT Tactic.STRIP_TAC,
-        simpLib.FULL_SIMP_TAC ss thl), closer)
+        FULL_SIMP_TAC ss thl), closer)
   val rw_tac = RW_TAC
   fun SRW_TAC frags thl =
       RW_TAC (List.foldl (fn (f, ss) => simpLib.++ (ss, f)) (srw_ss ()) frags) thl
-  fun simp thl = simpLib.ASM_SIMP_TAC (srw_ss ()) thl
+  fun simp thl = ASM_SIMP_TAC (srw_ss ()) thl
+  fun SPOSE_NOT_THEN ttac =
+      Tactical.THEN (Tactic.CCONTR_TAC,
+        Tactical.POP_ASSUM (fn th =>
+          ttac (simpLib.SIMP_RULE boolSimps.bool_ss
+                  [Conv.GSYM boolTheory.IMP_DISJ_THM] th)))
   fun parse_ctxt q (asl, w) =
       Parse.parse_in_context (Term.free_varsl (w :: asl)) q
   val numty = Type.mk_thy_type {Thy = "num", Tyop = "num", Args = []}
@@ -101,6 +116,10 @@ end;
 fun (q by tac) =
     Tactical.THEN1 (Q.SUBGOAL_THEN q Tactic.STRIP_ASSUME_TAC,
                     Tactical.THEN (tac, Tactical.NO_TAC));
+infix 8 suffices_by;
+fun (q suffices_by tac) =
+    Tactical.THEN1 (Tactical.Q_TAC Tactic.SUFF_TAC q,
+                    Tactical.THEN (tac, Tactical.NO_TAC));
 
 fun readFile path =
     let val is = TextIO.openIn path
@@ -124,6 +143,12 @@ val () = writeFile ("/tmp/asweep_rebind.sml",
     "val Cases_on = BasicProvers.Cases_on;",
     "val Induct_on = BasicProvers.Induct_on;",
     "val PROVE_TAC = BasicProvers.PROVE_TAC;",
+    "val ASM_SIMP_TAC = BasicProvers.ASM_SIMP_TAC;",
+    "val FULL_SIMP_TAC = BasicProvers.FULL_SIMP_TAC;",
+    "val asm_simp_tac = BasicProvers.ASM_SIMP_TAC;",
+    "val full_simp_tac = BasicProvers.FULL_SIMP_TAC;",
+    "val fs = BasicProvers.FULL_SIMP_TAC (BasicProvers.srw_ss());",
+    "val SPOSE_NOT_THEN = BasicProvers.SPOSE_NOT_THEN;",
     ""]);
 (* restore prim_rec's cut TC block (LESS_ALT etc.) — relationTheory's TC/RTC
    machinery makes the upstream proofs runnable now; arithmeticScript

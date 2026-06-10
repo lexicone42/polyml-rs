@@ -1,0 +1,12 @@
+val SUB_LESS = Tactical.prove(
+  Parse.Term [QUOTE "!m n. 0 < n /\\ n <= m ==> m-n < m"],
+  REPEAT STRIP_TAC THEN
+  IMP_RES_TAC LESS_EQ_EXISTS THEN
+  ASM_REWRITE_TAC [] THEN
+  ONCE_REWRITE_TAC [ADD_SYM] THEN
+  REWRITE_TAC [ADD_SUB] THEN
+  MATCH_MP_TAC LESS_ADD_NONZERO THEN
+  ASM_REWRITE_TAC [NOT_ZERO_LT_ZERO]);
+val SUB_LESS = Theory.save_thm("SUB_LESS", SUB_LESS);
+val () = print "SPLICE_OK\n";
+
