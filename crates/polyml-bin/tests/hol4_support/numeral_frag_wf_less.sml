@@ -7,7 +7,7 @@
 val WF_PRED = Tactical.prove(
   Parse.Term [QUOTE "WF \\x y. y = SUC x"],
   REWRITE_TAC [relationTheory.WF_DEF] THEN BETA_TAC THEN GEN_TAC
-   THEN Conv.CONV_TAC Conv.CONTRAPOS_CONV
+   THEN Tactic.CONV_TAC Conv.CONTRAPOS_CONV
    THEN Ho_Rewrite.REWRITE_TAC
          [boolTheory.NOT_FORALL_THM, boolTheory.NOT_EXISTS_THM,
           boolTheory.NOT_IMP, boolTheory.DE_MORGAN_THM]
@@ -19,7 +19,7 @@ val WF_PRED = Tactical.prove(
    THEN RULE_ASSUM_TAC
           (REWRITE_RULE [prim_recTheory.INV_SUC_EQ, GSYM numTheory.NOT_SUC])
    THENL (map FIRST_ASSUM [ACCEPT_TAC, MATCH_MP_TAC])
-   THEN Tactic.FILTER_ASM_REWRITE_TAC boolSyntax.is_eq []
+   THEN Rewrite.FILTER_ASM_REWRITE_TAC boolSyntax.is_eq []
    THEN ASM_REWRITE_TAC []);
 
 val WF_LESS = Tactical.prove(
