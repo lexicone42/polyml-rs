@@ -80,7 +80,20 @@ val modPatches =
     [("val SOME bool_grammars = Parse.grammarDB {thyname=\"bool\"}",
       "val bool_grammars = Parse.current_grammars ()"),
      ("val SOME bool_grammars = Parse.grammarDB { thyname = \"bool\" }",
-      "val bool_grammars = Parse.current_grammars ()")])];
+      "val bool_grammars = Parse.current_grammars ()")]),
+   (* numeral_redns is a STATIC list; 4 names are still unproved on our
+      numeral segment (MIN/MAX <- arithmetic's skip-listed section,
+      TWO_EXP_THM <- expbase cascade, enumeral_mult <- sub_eq' THENL
+      mismatch). Drop them: REDUCE loses the MIN/MAX/2^n fast paths only;
+      restore by deleting these patches after a richer numeral re-sweep.
+      Both raw and filtered token-spacings (no-op when absent). *)
+   ("reduceLib",
+    [("numeral_MAX, numeral_MIN, numeral_div2,", "numeral_div2,"),
+     ("numeral_MAX , numeral_MIN , numeral_div2 ,", "numeral_div2 ,"),
+     ("TWO_EXP_THM, numeral_texp_help,", "numeral_texp_help,"),
+     ("TWO_EXP_THM , numeral_texp_help ,", "numeral_texp_help ,"),
+     (", enumeral_mult]", "]"),
+     (", enumeral_mult ]", " ]")])];
 fun useFiltered tag src =
     let val txt0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()} src
         val txt = case List.find (fn (n, _) => n = tag) modPatches of
