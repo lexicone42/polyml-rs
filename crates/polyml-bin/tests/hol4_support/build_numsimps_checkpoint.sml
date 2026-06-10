@@ -40,7 +40,8 @@ fun useFiltered tag src =
 val arithDir = HOL ^ "/src/num/arith/src/";
 val reduceDir = HOL ^ "/src/num/reduce/src/";
 val mods =
-  List.map (fn m => arithDir ^ m)
+  [HOL ^ "/src/num/theories/numSyntax"]   (* num term syntax — the stack's base *)
+  @ List.map (fn m => arithDir ^ m)
     ["Arith_cons", "Term_coeffs", "GenPolyCanon", "GenRelNorm", "Int_extra",
      "Thm_convs", "Norm_bool", "Norm_ineqs", "Norm_arith", "NumRelNorms",
      "RJBConv", "Sub_and_cond", "Theorems", "Sol_ranges", "Solve_ineqs",
