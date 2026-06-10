@@ -67,18 +67,32 @@ fun useFiltered tag src =
         val tmp = "/tmp/ns_filtered.sml"
     in writeFile (tmp, txt); PolyML.use tmp end;
 
-(* module list in rough dependency order; fixpoint sorts out the rest. *)
+(* module list in TOPO order (v6 timed out: the old rough order needed
+   multiple 30-min fixpoint rounds; opens-mapped order makes round 1 carry).
+   Cross-deps found by grep '^open': Thm_convs<-Theorems; Sol_ranges<-
+   Rationals/Sup_Inf/Streams; reduceLib<-Arithconv+computeLib(+Boolconv);
+   Exists_arith<-reduceLib. computeLib's LoadableThyData/ThmSetData are
+   already baked in the image (relation stage). Arithconv = the LEGACY
+   conv-old one (the conv/ one needs cvTheory — the roadmap sidestep). *)
 val arithDir = HOL ^ "/src/num/arith/src/";
 val reduceDir = HOL ^ "/src/num/reduce/src/";
+val computeDir = HOL ^ "/src/compute/src/";
 val mods =
   [HOL ^ "/src/num/theories/numSyntax"]   (* num term syntax — the stack's base *)
   @ List.map (fn m => arithDir ^ m)
     ["Arith_cons", "Term_coeffs", "GenPolyCanon", "GenRelNorm", "Int_extra",
+     "RJBConv", "Theorems",
      "Thm_convs", "Norm_bool", "Norm_ineqs", "Norm_arith", "NumRelNorms",
-     "RJBConv", "Sub_and_cond", "Theorems", "Sol_ranges", "Solve_ineqs",
-     "Solve", "Rationals", "Streams", "Sup_Inf", "Exists_arith",
-     "Gen_arith", "Instance", "Prenex", "qtools", "Arith", "numSimps"]
-  @ List.map (fn m => reduceDir ^ m) ["Boolconv", "reduceLib"];
+     "Sub_and_cond",
+     "Streams", "Rationals", "Sup_Inf", "Sol_ranges",
+     "Solve_ineqs", "Solve"]
+  @ List.map (fn m => computeDir ^ m)
+    ["compute_rules", "clauses", "equations", "computeLib"]
+  @ [HOL ^ "/src/num/reduce/conv-old/Arithconv"]
+  @ List.map (fn m => reduceDir ^ m) ["Boolconv", "reduceLib"]
+  @ List.map (fn m => arithDir ^ m)
+    ["Exists_arith", "Gen_arith", "Instance", "Prenex", "qtools", "Arith",
+     "numSimps"];
 
 val loaded = ref ([] : string list);
 fun isLoaded m = List.exists (fn x => x = m) (!loaded);
@@ -119,6 +133,9 @@ val () = need "numSimps-ARITH_ss"
 val () = need "reduceLib-REDUCE_CONV"
               ((ignore (PolyML.makestring reduceLib.REDUCE_CONV); true) handle _ => false)
          handle _ => need "reduceLib-REDUCE_CONV" false;
+val () = need "computeLib-CBV_CONV"
+              ((ignore (PolyML.makestring computeLib.CBV_CONV); true) handle _ => false)
+         handle _ => need "computeLib-CBV_CONV" false;
 val () = pr (if !smoke then "NUMSIMPS_SMOKE_PASS\n" else "NUMSIMPS_SMOKE_FAIL\n");
 
 val () =
