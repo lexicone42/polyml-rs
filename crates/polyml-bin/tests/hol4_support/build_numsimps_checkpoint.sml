@@ -48,7 +48,16 @@ val modPatches =
         same-type placeholder term so the mk_/dest_ entries typecheck (any
         actual use would dest-fail loudly, not silently succeed). *)
      ("prim_mk_const { Name = \"measure\" , Thy = \"prim_rec\" }",
-      "Term.mk_var (\"measure_placeholder\", Type.alpha)")])];
+      "Term.mk_var (\"measure_placeholder\", Type.alpha)"),
+     (* same class: constants whose defining chunks need later stages
+        (DIVMOD <- pairTheory; WHILE/LEAST <- whileTheory). Batched probe
+        showed these are the ONLY 4 misses of numSyntax's ~22 constants. *)
+     ("prim_mk_const { Name = \"DIVMOD\" , Thy = \"arithmetic\" }",
+      "Term.mk_var (\"DIVMOD_placeholder\", Type.alpha)"),
+     ("prim_mk_const { Name = \"WHILE\" , Thy = \"while\" }",
+      "Term.mk_var (\"WHILE_placeholder\", Type.alpha)"),
+     ("prim_mk_const { Name = \"LEAST\" , Thy = \"while\" }",
+      "Term.mk_var (\"LEAST_placeholder\", Type.alpha)")])];
 fun useFiltered tag src =
     let val txt0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()} src
         val txt = case List.find (fn (n, _) => n = tag) modPatches of
