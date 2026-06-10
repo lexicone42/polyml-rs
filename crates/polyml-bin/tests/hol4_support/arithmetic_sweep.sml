@@ -201,11 +201,25 @@ val chunkPatches =
    ("DIV_def", [("DIV m n =", "m DIV n =")]),
    ("MOD_def", [("MOD m n =", "m MOD n =")])];
 
+(* verified hand-splices (plain SML, fleet-engineered) override their chunk. *)
+val SPLICEDIR = HOL ^ "/../../crates/polyml-bin/tests/hol4_support/arith_splices";
+fun spliceFile name = SPLICEDIR ^ "/" ^ name ^ ".sml";
+fun hasSplice name =
+    (let val is = TextIO.openIn (spliceFile name) in TextIO.closeIn is; true end)
+    handle _ => false;
+
 fun runChunk (name, chunkLines) =
   if skipped name
   then pr ("CHUNK_SKIP " ^ name ^ "\n")
   else if name <> "HEADER" andalso alreadySaved name
   then (ok := !ok + 1; pr ("CHUNK_HAVE " ^ name ^ "\n"))
+  else if hasSplice name
+  then ((PolyML.use (spliceFile name);
+         ok := !ok + 1; pr ("CHUNK_SPLICED " ^ name ^ "\n"); maybeSnap ())
+        handle e =>
+          (bad := !bad + 1;
+           pr ("CHUNK_FAIL " ^ name ^ " (splice) :: " ^
+               (case e of Fail m => m | _ => exnMessage e) ^ "\n")))
   else
     let val () = pr ("CHUNK_TRY  " ^ name ^ "\n")
         val src0 = String.concatWith "\n" chunkLines
