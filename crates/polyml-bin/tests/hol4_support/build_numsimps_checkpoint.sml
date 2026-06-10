@@ -57,7 +57,30 @@ val modPatches =
      ("prim_mk_const { Name = \"WHILE\" , Thy = \"While\" }",
       "Term.mk_var (\"WHILE_placeholder\", Type.alpha)"),
      ("prim_mk_const { Name = \"LEAST\" , Thy = \"While\" }",
-      "Term.mk_var (\"LEAST_placeholder\", Type.alpha)")])];
+      "Term.mk_var (\"LEAST_placeholder\", Type.alpha)")]),
+   (* grammarDB stub returns NONE for ancestor segments -> Bind. The
+      established fix: current grammars ARE the arithmetic grammars on this
+      image. Both raw and filtered token-spacings listed (no-op if absent). *)
+   ("Thm_convs",
+    [("val SOME arithmetic_grammars = grammarDB {thyname=\"arithmetic\"}",
+      "val arithmetic_grammars = Parse.current_grammars ()"),
+     ("val SOME arithmetic_grammars = grammarDB { thyname = \"arithmetic\" }",
+      "val arithmetic_grammars = Parse.current_grammars ()")]),
+   ("numSimps",
+    [("val SOME arithmetic_grammars = grammarDB {thyname=\"arithmetic\"}",
+      "val arithmetic_grammars = Parse.current_grammars ()"),
+     ("val SOME arithmetic_grammars = grammarDB { thyname = \"arithmetic\" }",
+      "val arithmetic_grammars = Parse.current_grammars ()")]),
+   ("Arithconv",
+    [("Parse.temp_set_grammars $ valOf $ grammarDB {thyname=\"arithmetic\"}",
+      "Parse.temp_set_grammars (Parse.current_grammars ())"),
+     ("Parse.temp_set_grammars $ valOf $ grammarDB { thyname = \"arithmetic\" }",
+      "Parse.temp_set_grammars (Parse.current_grammars ())")]),
+   ("Boolconv",
+    [("val SOME bool_grammars = Parse.grammarDB {thyname=\"bool\"}",
+      "val bool_grammars = Parse.current_grammars ()"),
+     ("val SOME bool_grammars = Parse.grammarDB { thyname = \"bool\" }",
+      "val bool_grammars = Parse.current_grammars ()")])];
 fun useFiltered tag src =
     let val txt0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()} src
         val txt = case List.find (fn (n, _) => n = tag) modPatches of
@@ -82,17 +105,19 @@ val mods =
   @ List.map (fn m => arithDir ^ m)
     ["Arith_cons", "Term_coeffs", "GenPolyCanon", "GenRelNorm", "Int_extra",
      "RJBConv", "Theorems",
-     "Thm_convs", "Norm_bool", "Norm_ineqs", "Norm_arith", "NumRelNorms",
-     "Sub_and_cond",
-     "Streams", "Rationals", "Sup_Inf", "Sol_ranges",
-     "Solve_ineqs", "Solve"]
+     "Thm_convs", "Norm_bool", "Norm_ineqs", "Norm_arith", "NumRelNorms"]
+  (* Streams lives in portableML in this HOL4 (qtools doesn't exist at all) *)
+  @ [HOL ^ "/src/portableML/Streams"]
+  @ List.map (fn m => arithDir ^ m)
+    ["Rationals", "Sup_Inf", "Sol_ranges", "Solve_ineqs", "Solve"]
   @ List.map (fn m => computeDir ^ m)
     ["compute_rules", "clauses", "equations", "computeLib"]
   @ [HOL ^ "/src/num/reduce/conv-old/Arithconv"]
   @ List.map (fn m => reduceDir ^ m) ["Boolconv", "reduceLib"]
+  (* Sub_and_cond qualifies reduceLib.LE_CONV (no open) -> after reduceLib *)
   @ List.map (fn m => arithDir ^ m)
-    ["Exists_arith", "Gen_arith", "Instance", "Prenex", "qtools", "Arith",
-     "numSimps"];
+    ["Sub_and_cond", "Exists_arith", "Gen_arith", "Instance", "Prenex",
+     "Arith", "numSimps"];
 
 val loaded = ref ([] : string list);
 fun isLoaded m = List.exists (fn x => x = m) (!loaded);
@@ -103,6 +128,11 @@ fun tryLoad m =
           val smlf = m ^ ".sml"
           val name = List.last (String.fields (fn c => c = #"/") m)
       in
+        if not (fileExists smlf) then
+          (* missing files must not raise: "Cannot open" propagating through
+             use trips the exn-unwinding VM halt (killed v7 at Streams). *)
+          pr ("NS_MISSING " ^ name ^ " (" ^ smlf ^ ")\n")
+        else
         (if fileExists sigf then (PolyML.use sigf handle _ => ()) else ();
          useFiltered name smlf;
          loaded := m :: !loaded;
