@@ -110,12 +110,14 @@ fun writeFile (path, s) =
     let val os = TextIO.openOut path in TextIO.output (os, s); TextIO.closeOut os end;
 
 (* the rebind shim, injected after the header chunk (whose opens re-spill
-   the image's old bindings into the global env). *)
+   the image's old bindings into the global env). srw_tac is the lowercase
+   alias `val rw = srw_tac[]` (script line 43) wants. *)
 val () = writeFile ("/tmp/asweep_rebind.sml",
   String.concatWith "\n" [
     "val new_definition = boolLib.new_definition;",
     "val save_thm = boolLib.save_thm;",
     "val SRW_TAC = BasicProvers.SRW_TAC;",
+    "val srw_tac = BasicProvers.SRW_TAC;",
     "val RW_TAC = BasicProvers.RW_TAC;",
     "val rw_tac = BasicProvers.rw_tac;",
     "val simp = BasicProvers.simp;",
@@ -123,6 +125,13 @@ val () = writeFile ("/tmp/asweep_rebind.sml",
     "val Induct_on = BasicProvers.Induct_on;",
     "val PROVE_TAC = BasicProvers.PROVE_TAC;",
     ""]);
+(* restore prim_rec's cut TC block (LESS_ALT etc.) — relationTheory's TC/RTC
+   machinery makes the upstream proofs runnable now; arithmeticScript
+   references these unqualified. *)
+val () = (PolyML.use ((HOL ^ "/../../crates/polyml-bin/tests/hol4_support")
+                      ^ "/arith_frag_tc_block.sml");
+          pr "TC_BLOCK_LOADED\n")
+         handle e => pr ("TC_BLOCK_FAIL :: " ^ exnMessage e ^ "\n");
 
 val lines =
     String.fields (fn c => c = #"\n")
