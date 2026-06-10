@@ -31,8 +31,24 @@ fun writeFile (path, s) =
 fun fileExists p =
     (let val is = TextIO.openIn p in TextIO.closeIn is; true end) handle _ => false;
 
+fun replaceAll (s, old, new) =
+    let val (pre, suf) = Substring.position old (Substring.full s)
+    in if Substring.size suf = 0 then s
+       else Substring.string pre ^ new
+            ^ replaceAll (Substring.string (Substring.triml (size old) suf), old, new)
+    end;
+(* numSyntax's only WhileTheory reference is a load-forcing `local open` —
+   nothing is used from it (whileTheory is post-Stage-5 material). *)
+val modPatches =
+  [("numSyntax",
+    [("local open arithmeticTheory WhileTheory numeralTheory in end",
+      "local open arithmeticTheory numeralTheory in end")])];
 fun useFiltered tag src =
-    let val txt = HOLSource.inputFile {quietOpen = false, print = fn _ => ()} src
+    let val txt0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()} src
+        val txt = case List.find (fn (n, _) => n = tag) modPatches of
+                      NONE => txt0
+                    | SOME (_, ps) =>
+                        List.foldl (fn ((a, b), t) => replaceAll (t, a, b)) txt0 ps
         val tmp = "/tmp/ns_filtered.sml"
     in writeFile (tmp, txt); PolyML.use tmp end;
 
