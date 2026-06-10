@@ -125,6 +125,12 @@ val () = writeFile ("/tmp/asweep_rebind.sml",
     "val Induct_on = BasicProvers.Induct_on;",
     "val PROVE_TAC = BasicProvers.PROVE_TAC;",
     ""]);
+(* WF_LESS (cut WF tail) — numeralScript needs prim_recTheory.WF_LESS *)
+val () = (PolyML.use ((HOL ^ "/../../crates/polyml-bin/tests/hol4_support")
+                      ^ "/numeral_frag_wf_less.sml");
+          pr "WF_LESS_LOADED\n")
+         handle e => pr ("WF_LESS_FAIL :: " ^ exnMessage e ^ "\n");
+
 (* restore prim_rec's cut TC block (LESS_ALT etc.) — relationTheory's TC/RTC
    machinery makes the upstream proofs runnable now; arithmeticScript
    references these unqualified. *)
@@ -195,11 +201,14 @@ fun runChunk (name, chunkLines) =
     end;
 
 (* chunk the whole file; chunk 0 = header (Theory/Ancestors/Libs + prelude). *)
+val inLocal = ref false;
 fun go (cur, curName, acc) [] = List.rev ((curName, List.rev cur) :: acc)
   | go (cur, curName, acc) (l :: t) =
-      if isBoundary l andalso not (null cur)
-      then go ([l], chunkName l, (curName, List.rev cur) :: acc) t
-      else go (l :: cur, curName, acc) t;
+      (if String.isPrefix "local" l then inLocal := true
+       else if String.isPrefix "end" l then inLocal := false else ();
+       if isBoundary l andalso not (null cur) andalso not (!inLocal)
+       then go ([l], chunkName l, (curName, List.rev cur) :: acc) t
+       else go (l :: cur, curName, acc) t);
 val chunks =
     case lines of
         [] => []
