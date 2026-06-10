@@ -54,9 +54,9 @@ val modPatches =
         showed these are the ONLY 4 misses of numSyntax's ~22 constants. *)
      ("prim_mk_const { Name = \"DIVMOD\" , Thy = \"arithmetic\" }",
       "Term.mk_var (\"DIVMOD_placeholder\", Type.alpha)"),
-     ("prim_mk_const { Name = \"WHILE\" , Thy = \"while\" }",
+     ("prim_mk_const { Name = \"WHILE\" , Thy = \"While\" }",
       "Term.mk_var (\"WHILE_placeholder\", Type.alpha)"),
-     ("prim_mk_const { Name = \"LEAST\" , Thy = \"while\" }",
+     ("prim_mk_const { Name = \"LEAST\" , Thy = \"While\" }",
       "Term.mk_var (\"LEAST_placeholder\", Type.alpha)")])];
 fun useFiltered tag src =
     let val txt0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()} src
