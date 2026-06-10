@@ -732,9 +732,19 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
     `boolLib.save_thm_at` (widen the narrow synthesized boolLib); never name a
     build-script helper `U` (part1's `open HolKernel` rebinds Lib's list-union over
     it for all later decls).
-  - Stage 2-3 — `relationTheory` (2618 lines; or just the `transitive_def`/`RTC`
-    fragment arithmetic needs) + real `TypeBase`/`TypeBasePure` (replace the
-    build_simp typed stubs) + `BasicProvers` (needs a working `srw_ss()`). HARD.
+  - **Stage 2 — PARTIAL (2026-06-09)**: `/tmp/hol4_relation`
+    (`build_relation_checkpoint.sml`) carries the COMPLETE arithmetic-critical
+    fragment — TC/RTC (rules/induct/cases, EXTEND_RTC_TC*) + reflexive/symmetric/
+    transitive_def + WF core (WF_DEF, WF_INDUCTION_THM) — built from the real
+    relationScript with a BasicProvers SHIM (srw_ss=bool_ss ref; SRW/RW_TAC =
+    strip+FULL_SIMP+ASM_REWRITE-closer; PROVE_TAC=ASM_MESON; `by`=Q.SUBGOAL_THEN;
+    Induct_on = rule-induction via the REAL IndDefLib map). **IndDefLib loads and
+    runs for real** (Inductive RTC → xHol_reln works; InductiveDefinition
+    quote-filtered + grammarDB patch; ThmSetData on a widened DB stub) — Stage 8's
+    core, banked early. REMAINING for full Stage 2: the EQC tail + WF_PULL
+    (real-SRW coupling) and the inv_image/WFREC tail (gates `Define`; the
+    attr-strip save_thm_at fix is in, the WFREC run needs a longer step budget /
+    per-theorem splits). Real TypeBase/TypeBasePure + BasicProvers stay Stage 3. HARD→IN PROGRESS.
   - Stage 4 — `numeralTheory` + `arithmeticTheory` (5759 lines, 81 METIS — watch the
     METIS cumulative Time-exception; split or swap small METIS_PROVE→MESON). UNCERTAIN.
   - Stage 5 — `computeLib` (first build ever) + `reduceLib` + `numSimps` (~25 pure-SML
