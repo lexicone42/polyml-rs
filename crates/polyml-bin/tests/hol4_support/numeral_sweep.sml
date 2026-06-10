@@ -218,6 +218,11 @@ fun runChunk (name, chunkLines) =
   if List.exists (fn s => s = name) skip
   then pr ("CHUNK_SKIP " ^ name ^ "\n")
   else if name <> "HEADER" andalso alreadySaved name
+       (* [local] chunks always re-run: session val-bindings consumed by
+          later proofs; names collide across a Script (see arithmetic's two
+          `lemma[local]`s) — skipping binds the WRONG theorem. *)
+       andalso not (String.isSubstring "[local]"
+                      (case chunkLines of l :: _ => l | [] => ""))
   then (ok := !ok + 1; pr ("CHUNK_HAVE " ^ name ^ "\n"))
   else
     let val () = pr ("CHUNK_TRY  " ^ name ^ "\n")
@@ -254,11 +259,18 @@ fun runChunk (name, chunkLines) =
 val inLocal = ref false;
 fun go (cur, curName, acc) [] = List.rev ((curName, List.rev cur) :: acc)
   | go (cur, curName, acc) (l :: t) =
-      (if String.isPrefix "local" l then inLocal := true
-       else if String.isPrefix "end" l then inLocal := false else ();
-       if isBoundary l andalso not (null cur) andalso not (!inLocal)
-       then go ([l], chunkName l, (curName, List.rev cur) :: acc) t
-       else go (l :: cur, curName, acc) t);
+      if String.isPrefix "local" l andalso not (!inLocal) then
+        (* a column-0 local STARTS its own chunk (the old logic appended it
+           to the previous chunk, where an alreadySaved name silently skipped
+           the whole block). LOCALBLOCK always re-runs; safe. *)
+        (inLocal := true;
+         if null cur then go (l :: cur, curName, acc) t
+         else go ([l], "LOCALBLOCK", (curName, List.rev cur) :: acc) t)
+      else
+        (if String.isPrefix "end" l then inLocal := false else ();
+         if isBoundary l andalso not (null cur) andalso not (!inLocal)
+         then go ([l], chunkName l, (curName, List.rev cur) :: acc) t
+         else go (l :: cur, curName, acc) t);
 val chunks =
     case lines of
         [] => []

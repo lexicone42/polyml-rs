@@ -237,6 +237,12 @@ fun runChunk (name, chunkLines) =
   if skipped name
   then pr ("CHUNK_SKIP " ^ name ^ "\n")
   else if name <> "HEADER" andalso alreadySaved name
+       (* [local] chunks must ALWAYS re-run: they are session val-bindings
+          consumed by later proofs, and names collide (two `lemma[local]`s
+          here) — skipping leaves `lemma` bound to the WRONG theorem
+          (MOD_UNIQUE's "No resolvents" root). *)
+       andalso not (String.isSubstring "[local]"
+                      (case chunkLines of l :: _ => l | [] => ""))
   then (ok := !ok + 1; pr ("CHUNK_HAVE " ^ name ^ "\n"))
   else if hasSplice name
   then ((PolyML.use (spliceFile name);
@@ -279,11 +285,19 @@ fun runChunk (name, chunkLines) =
 val inLocal = ref false;
 fun go (cur, curName, acc) [] = List.rev ((curName, List.rev cur) :: acc)
   | go (cur, curName, acc) (l :: t) =
-      (if String.isPrefix "local" l then inLocal := true
-       else if String.isPrefix "end" l then inLocal := false else ();
-       if isBoundary l andalso not (null cur) andalso not (!inLocal)
-       then go ([l], chunkName l, (curName, List.rev cur) :: acc) t
-       else go (l :: cur, curName, acc) t);
+      if String.isPrefix "local" l andalso not (!inLocal) then
+        (* a column-0 local STARTS its own chunk (v2 appended it to the
+           previous chunk, where an alreadySaved name silently skipped the
+           whole block). LOCALBLOCK is never a saved name -> always re-runs;
+           store_thm overwriting already-saved members is safe. *)
+        (inLocal := true;
+         if null cur then go (l :: cur, curName, acc) t
+         else go ([l], "LOCALBLOCK", (curName, List.rev cur) :: acc) t)
+      else
+        (if String.isPrefix "end" l then inLocal := false else ();
+         if isBoundary l andalso not (null cur) andalso not (!inLocal)
+         then go ([l], chunkName l, (curName, List.rev cur) :: acc) t
+         else go (l :: cur, curName, acc) t);
 val chunks =
     case lines of
         [] => []
