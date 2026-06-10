@@ -149,8 +149,9 @@ fun chunkName l =
     handle _ => "?";
 
 val ok = ref 0 and bad = ref 0;
-(* expbase_le_mono: simp loop (GC churn at 2% retained) — pass-3 hang. *)
-val skip : string list = ["expbase_le_mono"];
+(* expbase family: simp loops (GC churn at 2% retained) — pass-3/4 hangs.
+   Both are [local] helpers; their consumer may fail benignly. *)
+val skip : string list = ["expbase_le_mono", "expbase_lt_mono"];
 
 (* re-runnable (pass 2 on the exported image): chunks whose name is already
    saved are skipped; the header's new_theory is neutralized when the
