@@ -41,6 +41,7 @@ if [ "$MODE" = "full" ]; then
            isabelle_kernel isabelle_theorem_kernel intflip_basis \
            hol4_taut hol4_meson hol4_metis hol4_pelletier hol4_num_prover \
            hol4_arith hol4_order hol4_induction hol4_list hol4_simp hol4_fancy \
+           hol4_prim_rec hol4_summation \
            hol4_rewrite hol4_tactic hol4_parse hol4_theory hol4_theories hol4_recon; do
     r=$(cargo test --release -p polyml-bin --test "$t" -- --ignored 2>&1 \
         | grep -oE "[0-9]+ passed; [0-9]+ failed" | head -1)

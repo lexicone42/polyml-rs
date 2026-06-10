@@ -17,7 +17,7 @@
 #   /tmp/hol4_meson     + mesonLib (MESON_TAC)  (build_meson_checkpoint.sml)
 #   /tmp/hol4_metis     + metisLib (METIS_TAC)  (build_metis_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|prim|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|prim|relation|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -33,7 +33,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|taut|meson|metis|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|prim|relation|taut|meson|metis|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -306,6 +306,26 @@ build_prim() {
   fi
 }
 
+build_relation() {
+  [ -f /tmp/hol4_prim_rec ] || { echo "relation: need /tmp/hol4_prim_rec first"; build_prim || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_relation ]; then
+    echo "relation: /tmp/hol4_relation exists ($(wc -c </tmp/hol4_relation) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "relation: building /tmp/hol4_relation …"
+  # build_relation_checkpoint.sml runs the REAL relationScript (Datatype
+  # roadmap Stage 2, PARTIAL): full TC/RTC + WF core via real IndDefLib
+  # (Inductive RTC -> xHol_reln) with a BasicProvers shim; EQC/WFREC tails
+  # skipped (documented in the script). Export gated on the critical names.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 400000000000 /tmp/hol4_prim_rec \
+      < "$SUPPORT/build_relation_checkpoint.sml" ) >/tmp/build-relation.log 2>&1
+  if [ -f /tmp/hol4_relation ] && grep -qa "RELATION_CHECKPOINT_DONE" /tmp/build-relation.log; then
+    echo "relation: OK ($(wc -c </tmp/hol4_relation) bytes; $(grep -aoE 'RELATIONTHEORY_NAMES [0-9]+' /tmp/build-relation.log | tail -1) names; TC/RTC+WF core present)"
+  else
+    echo "relation: FAILED — see /tmp/build-relation.log"; tail -12 /tmp/build-relation.log; return 1
+  fi
+}
+
 build_taut() {
   [ -f /tmp/hol4_combin ] || { echo "taut: need /tmp/hol4_combin first"; build_combin || return 1; }
   if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_taut ]; then
@@ -380,6 +400,7 @@ case "$TARGET" in
   arith)   build_arith;;
   order)   build_order;;
   prim)    build_prim;;
+  relation) build_relation;;
   taut)    build_taut;;
   meson)   build_meson;;
   metis)   build_metis;;
@@ -387,5 +408,5 @@ case "$TARGET" in
              && build_bool && build_tactic && build_rewrite && build_marker \
              && build_combin && build_simp && build_taut && build_meson \
              && build_metis && build_num && build_arith && build_order \
-             && build_prim;;
+             && build_prim && build_relation;;
 esac
