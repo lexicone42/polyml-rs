@@ -271,12 +271,19 @@ fun runChunk (name, chunkLines) =
              (case e of Fail m => m | _ => exnMessage e) ^ "\n"))
     end;
 
-(* chunk the whole file; chunk 0 = header (Theory/Ancestors/Libs + prelude). *)
+(* chunk the whole file; chunk 0 = header (Theory/Ancestors/Libs + prelude).
+   inLocal: column-0 local..end blocks (e.g. DIV_UNIQUE's `local val (eq,ls)
+   = ... in Theorem ... end`) must NOT be split at Theorem boundaries — the
+   in-scope local bindings are lost (the v1 sweep failed the whole DIV
+   family this way; same fix as numeral_sweep). *)
+val inLocal = ref false;
 fun go (cur, curName, acc) [] = List.rev ((curName, List.rev cur) :: acc)
   | go (cur, curName, acc) (l :: t) =
-      if isBoundary l andalso not (null cur)
-      then go ([l], chunkName l, (curName, List.rev cur) :: acc) t
-      else go (l :: cur, curName, acc) t;
+      (if String.isPrefix "local" l then inLocal := true
+       else if String.isPrefix "end" l then inLocal := false else ();
+       if isBoundary l andalso not (null cur) andalso not (!inLocal)
+       then go ([l], chunkName l, (curName, List.rev cur) :: acc) t
+       else go (l :: cur, curName, acc) t);
 val chunks =
     case lines of
         [] => []

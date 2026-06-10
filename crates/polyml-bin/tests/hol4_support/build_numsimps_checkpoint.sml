@@ -100,24 +100,49 @@ fun useFiltered tag src =
 val arithDir = HOL ^ "/src/num/arith/src/";
 val reduceDir = HOL ^ "/src/num/reduce/src/";
 val computeDir = HOL ^ "/src/compute/src/";
-val mods =
-  [HOL ^ "/src/num/theories/numSyntax"]   (* num term syntax — the stack's base *)
+(* mods1 = through computeLib; then reduceTheory is built INLINE (3 thms,
+   needs computeLib.lazyfy_thm + re-swept DIV_UNIQUE/MOD_UNIQUE); mods2 =
+   the consumers. Num_conv: Norm_arith/Solve_ineqs/Arithconv want it.
+   Norm_arith/Norm_ineqs/NumRelNorms/Solve* qualify reduceLib directly ->
+   all after reduceLib. Cache (src/simp) is numSimps.sig's dep (not baked). *)
+val mods1 =
+  [HOL ^ "/src/num/theories/numSyntax",
+   HOL ^ "/src/num/theories/Num_conv"]
   @ List.map (fn m => arithDir ^ m)
     ["Arith_cons", "Term_coeffs", "GenPolyCanon", "GenRelNorm", "Int_extra",
-     "RJBConv", "Theorems",
-     "Thm_convs", "Norm_bool", "Norm_ineqs", "Norm_arith", "NumRelNorms"]
+     "RJBConv", "Theorems", "Thm_convs", "Norm_bool"]
   (* Streams lives in portableML in this HOL4 (qtools doesn't exist at all) *)
   @ [HOL ^ "/src/portableML/Streams"]
   @ List.map (fn m => arithDir ^ m)
-    ["Rationals", "Sup_Inf", "Sol_ranges", "Solve_ineqs", "Solve"]
+    ["Rationals", "Sup_Inf", "Sol_ranges"]
   @ List.map (fn m => computeDir ^ m)
-    ["compute_rules", "clauses", "equations", "computeLib"]
-  @ [HOL ^ "/src/num/reduce/conv-old/Arithconv"]
+    ["compute_rules", "clauses", "equations", "computeLib"];
+val mods2 =
+  [HOL ^ "/src/num/reduce/conv-old/Arithconv"]
   @ List.map (fn m => reduceDir ^ m) ["Boolconv", "reduceLib"]
-  (* Sub_and_cond qualifies reduceLib.LE_CONV (no open) -> after reduceLib *)
   @ List.map (fn m => arithDir ^ m)
-    ["Sub_and_cond", "Exists_arith", "Gen_arith", "Instance", "Prenex",
-     "Arith", "numSimps"];
+    ["Norm_arith", "Norm_ineqs", "NumRelNorms", "Solve_ineqs", "Solve",
+     "Sub_and_cond", "Exists_arith", "Gen_arith", "Instance", "Prenex",
+     "Arith"]
+  @ [HOL ^ "/src/simp/src/Cache"]
+  @ [arithDir ^ "numSimps"];
+val mods = mods1 @ mods2;
+
+(* clauses needs 3 TypeBase(Pure) names beyond the build_simp typed stubs.
+   Shadow-widen (baked modules keep the old stub; only newly compiled code
+   sees these). Empty typeBase is semantically right: no datatypes are
+   registered on this image, so listItems = [] and constructors_of is
+   unreachable. *)
+structure TypeBasePure = struct
+  open TypeBasePure
+  type typeBase = unit
+  fun listItems (_ : typeBase) : tyinfo list = []
+  fun constructors_of (_ : tyinfo) : Term.term list = []
+end;
+structure TypeBase = struct
+  open TypeBase
+  fun theTypeBase () : TypeBasePure.typeBase = ()
+end;
 
 val loaded = ref ([] : string list);
 fun isLoaded m = List.exists (fn x => x = m) (!loaded);
@@ -141,15 +166,47 @@ fun tryLoad m =
                         (case e of Fail msg => msg | _ => exnMessage e) ^ "\n")
       end;
 
-fun round n =
+fun rounds ms n =
     let val before_n = length (!loaded)
         val () = pr ("NS_ROUND " ^ Int.toString n ^ "\n")
-        val () = List.app tryLoad mods
+        val () = List.app tryLoad ms
+        val now = length (List.filter (fn m => isLoaded m) ms)
     in
-      if length (!loaded) > before_n andalso length (!loaded) < length mods
-      then round (n + 1) else ()
+      if length (!loaded) > before_n andalso now < length ms
+      then rounds ms (n + 1) else ()
     end;
-val () = round 1;
+val () = rounds mods1 1;
+
+(* reduceTheory, inline (reduceScript.sml is 3 theorems; the Script->Theory
+   recipe is overkill). div/mod_thm proofs are upstream's verbatim. Written
+   to a temp file + use'd-with-catch so a missing computeLib/DIV_UNIQUE
+   can't statically kill the piped driver. *)
+val () =
+  (writeFile ("/tmp/ns_reduce_thy.sml",
+     "infix THEN THENL THEN1 ORELSE;\n\
+     \structure reduceTheory = struct\n\
+     \  local open boolLib in\n\
+     \  val num_case_compute_lazy =\n\
+     \      computeLib.lazyfy_thm arithmeticTheory.num_case_compute\n\
+     \  val div_thm = Tactical.prove (\n\
+     \      Parse.Term [QUOTE\n\
+     \        \"!x y q r. x DIV y = if (x = q * y + r) /\\\\ (r < y) then q else x DIV y\"],\n\
+     \      REPEAT STRIP_TAC THEN COND_CASES_TAC THEN REWRITE_TAC [] THEN\n\
+     \      MATCH_MP_TAC arithmeticTheory.DIV_UNIQUE THEN\n\
+     \      EXISTS_TAC (Parse.Term [QUOTE \"r:num\"]) THEN ASM_REWRITE_TAC [])\n\
+     \  val mod_thm = Tactical.prove (\n\
+     \      Parse.Term [QUOTE\n\
+     \        \"!x y q r. x MOD y = if (x = q * y + r) /\\\\ r < y then r else x MOD y\"],\n\
+     \      REPEAT STRIP_TAC THEN COND_CASES_TAC THEN REWRITE_TAC [] THEN\n\
+     \      MATCH_MP_TAC arithmeticTheory.MOD_UNIQUE THEN\n\
+     \      EXISTS_TAC (Parse.Term [QUOTE \"q:num\"]) THEN ASM_REWRITE_TAC [])\n\
+     \  end\n\
+     \end;\n");
+   PolyML.use "/tmp/ns_reduce_thy.sml";
+   pr "REDUCE_THY_OK\n")
+  handle e => pr ("REDUCE_THY_FAIL :: " ^ exnMessage e ^ "\n");
+
+val () = rounds mods2 1;
 val () = pr ("NS_LOADED " ^ Int.toString (length (!loaded)) ^ "/" ^
              Int.toString (length mods) ^ "\n");
 

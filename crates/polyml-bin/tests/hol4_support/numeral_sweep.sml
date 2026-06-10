@@ -198,6 +198,22 @@ fun alreadySaved name =
                 (Theory.current_theorems () @ Theory.current_definitions ()
                  @ Theory.current_axioms ());
 
+(* whole-chunk overrides (used verbatim, NO quote-filter): ncases uses the
+   HOL88-era (==`:num`==) type-quotation that the modern filter passes
+   through, so SML chokes on the (== token. Rewritten with Parse.Type. *)
+val overrides =
+  [("ncases",
+    "fun ncases str n0 =\n\
+    \  DISJ_CASES_THEN2 SUBST_ALL_TAC\n\
+    \    (X_CHOOSE_THEN (Term.mk_var(n0, Parse.Type [QUOTE \":num\"])) SUBST_ALL_TAC)\n\
+    \    (SPEC (Term.mk_var(str, Parse.Type [QUOTE \":num\"])) num_CASES);\n")];
+
+(* post-filter patches: TypeBase stub has no axiom_of; for :num the recursion
+   axiom IS prim_recTheory.num_Axiom. *)
+val chunkPatches =
+  [("texp_help_def",
+    [("TypeBase.axiom_of", "(fn _ => prim_recTheory.num_Axiom)")])];
+
 fun runChunk (name, chunkLines) =
   if List.exists (fn s => s = name) skip
   then pr ("CHUNK_SKIP " ^ name ^ "\n")
@@ -207,13 +223,23 @@ fun runChunk (name, chunkLines) =
     let val () = pr ("CHUNK_TRY  " ^ name ^ "\n")
         val () = writeFile ("/tmp/asweep_src.sml",
                             String.concatWith "\n" chunkLines)
-        val filtered0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()}
-                                            "/tmp/asweep_src.sml"
         val filtered =
-            if name = "HEADER" andalso Theory.current_theory () = "numeral"
-            then replaceAll (filtered0,
-                             "Theory.new_theory \"arithmetic\"", "()")
-            else filtered0
+          case List.find (fn (n, _) => n = name) overrides of
+              SOME (_, txt) => (pr ("CHUNK_OVERRIDE " ^ name ^ "\n"); txt)
+            | NONE =>
+              let val filtered0 =
+                      HOLSource.inputFile {quietOpen = false, print = fn _ => ()}
+                                          "/tmp/asweep_src.sml"
+                  val f1 =
+                      if name = "HEADER" andalso Theory.current_theory () = "numeral"
+                      then replaceAll (filtered0,
+                                       "Theory.new_theory \"numeral\"", "()")
+                      else filtered0
+              in case List.find (fn (n, _) => n = name) chunkPatches of
+                     NONE => f1
+                   | SOME (_, ps) =>
+                       List.foldl (fn ((a, b), t) => replaceAll (t, a, b)) f1 ps
+              end
         val () = writeFile ("/tmp/asweep_chunk.sml", filtered)
     in
       (PolyML.use "/tmp/asweep_chunk.sml";
