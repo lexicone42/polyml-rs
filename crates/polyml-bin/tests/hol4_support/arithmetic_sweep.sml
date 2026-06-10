@@ -149,9 +149,13 @@ fun chunkName l =
     handle _ => "?";
 
 val ok = ref 0 and bad = ref 0;
-(* expbase family: simp loops (GC churn at 2% retained) — pass-3/4 hangs.
-   Both are [local] helpers; their consumer may fail benignly. *)
-val skip : string list = ["expbase_le_mono", "expbase_lt_mono", "MIN_MAX_EQ", "MIN_MAX_LT", "MIN_MAX_LE", "MIN_MAX_PRED"];
+(* Known simp-loop hangs (GC churn at ~2% retained). The MIN/MAX section is
+   loop-prone wholesale -> prefix skips. *)
+val skip : string list = ["expbase_le_mono", "expbase_lt_mono"];
+val skipPrefixes : string list = ["MIN_", "MAX_"];
+fun skipped name =
+    List.exists (fn s => s = name) skip orelse
+    List.exists (fn p => String.isPrefix p name) skipPrefixes;
 
 (* re-runnable (pass 2 on the exported image): chunks whose name is already
    saved are skipped; the header's new_theory is neutralized when the
@@ -168,8 +172,19 @@ fun alreadySaved name =
                 (Theory.current_theorems () @ Theory.current_definitions ()
                  @ Theory.current_axioms ());
 
+(* periodic snapshot: hangs killed by timeout were eating the END-only
+   export three runs straight; snapshot every 40 banked chunks. *)
+val sinceSnap = ref 0;
+fun maybeSnap () =
+    (sinceSnap := !sinceSnap + 1;
+     if !sinceSnap >= 40 then
+       (sinceSnap := 0;
+        PolyML.export ("/tmp/hol4_arithmetic_snap", PolyML.rootFunction);
+        pr "SNAP_EXPORTED\n")
+     else ());
+
 fun runChunk (name, chunkLines) =
-  if List.exists (fn s => s = name) skip
+  if skipped name
   then pr ("CHUNK_SKIP " ^ name ^ "\n")
   else if name <> "HEADER" andalso alreadySaved name
   then (ok := !ok + 1; pr ("CHUNK_HAVE " ^ name ^ "\n"))
@@ -187,7 +202,7 @@ fun runChunk (name, chunkLines) =
         val () = writeFile ("/tmp/asweep_chunk.sml", filtered)
     in
       (PolyML.use "/tmp/asweep_chunk.sml";
-       ok := !ok + 1; pr ("CHUNK_OK   " ^ name ^ "\n"))
+       ok := !ok + 1; pr ("CHUNK_OK   " ^ name ^ "\n"); maybeSnap ())
       handle e =>
         (bad := !bad + 1;
          pr ("CHUNK_FAIL " ^ name ^ " :: " ^
