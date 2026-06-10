@@ -320,7 +320,17 @@ build_relation() {
   ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 400000000000 /tmp/hol4_prim_rec \
       < "$SUPPORT/build_relation_checkpoint.sml" ) >/tmp/build-relation.log 2>&1
   if [ -f /tmp/hol4_relation ] && grep -qa "RELATION_CHECKPOINT_DONE" /tmp/build-relation.log; then
-    echo "relation: OK ($(wc -c </tmp/hol4_relation) bytes; $(grep -aoE 'RELATIONTHEORY_NAMES [0-9]+' /tmp/build-relation.log | tail -1) names; TC/RTC+WF core present)"
+    echo "relation: core OK ($(grep -aoE 'RELATIONTHEORY_NAMES [0-9]+' /tmp/build-relation.log | tail -1) names) — sweeping the tail …"
+    # per-theorem sweep of the remaining ranges (EQC + WFREC + algebra tail);
+    # banks whatever proves, then promotes the enriched image over the core.
+    ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 1500000000000 /tmp/hol4_relation \
+        < "$SUPPORT/relation_tail_sweep.sml" ) >/tmp/build-relation-sweep.log 2>&1
+    if [ -f /tmp/hol4_relation_swept ] && grep -qa "SWEEP_DONE" /tmp/build-relation-sweep.log; then
+      cat /tmp/hol4_relation_swept > /tmp/hol4_relation
+      echo "relation: OK ($(wc -c </tmp/hol4_relation) bytes; $(grep -aoE 'RELATIONTHEORY_NAMES [0-9]+' /tmp/build-relation-sweep.log | tail -1) names after sweep; WFREC/WF_inv_image present)"
+    else
+      echo "relation: core OK but sweep FAILED — see /tmp/build-relation-sweep.log (keeping core image)"
+    fi
   else
     echo "relation: FAILED — see /tmp/build-relation.log"; tail -12 /tmp/build-relation.log; return 1
   fi

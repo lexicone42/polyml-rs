@@ -36,6 +36,10 @@ structure boolLib = struct
       Theory.Definition.new_definition
         (hd (String.fields (fn c => c = #"[") n), tm)
 end;
+(* chunks call these UNQUALIFIED (the original file's `open boolLib` header
+   is not part of a chunk) — bind the stripped versions at top level too. *)
+val new_definition = boolLib.new_definition;
+val save_thm = boolLib.save_thm;
 
 (* shadow the image's BasicProvers: its SRW/RW closer used ASM_REWRITE_TAC,
    which LOOPS on permutative assumptions (e.g. `!x y. R x y <=> R y x` from
