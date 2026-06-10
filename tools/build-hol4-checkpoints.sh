@@ -17,7 +17,7 @@
 #   /tmp/hol4_meson     + mesonLib (MESON_TAC)  (build_meson_checkpoint.sml)
 #   /tmp/hol4_metis     + metisLib (METIS_TAC)  (build_metis_checkpoint.sml)
 #
-# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|all]
+# Usage: tools/build-hol4-checkpoints.sh [--force] [basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|prim|all]
 #   --force   rebuild even if the image already exists
 #   target    which checkpoint(s) to build (default: all)
 #
@@ -286,6 +286,26 @@ build_order() {
   fi
 }
 
+build_prim() {
+  [ -f /tmp/hol4_num ] || { echo "prim: need /tmp/hol4_num first"; build_num || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_prim_rec ]; then
+    echo "prim: /tmp/hol4_prim_rec exists ($(wc -c </tmp/hol4_prim_rec) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "prim: building /tmp/hol4_prim_rec …"
+  # build_prim_rec_checkpoint.sml runs the REAL prim_recScript (Datatype
+  # roadmap Stage 1): quote-filtered, TC block + WF tail cut, LESS_LEMMA1 +
+  # SIMP_REC + SIMP_REC_THM swapped for the trophy's relationTheory-free
+  # proofs. Exports the real prim_recTheory (num_Axiom etc.), smoke-gated.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 400000000000 /tmp/hol4_num \
+      < "$SUPPORT/build_prim_rec_checkpoint.sml" ) >/tmp/build-prim.log 2>&1
+  if [ -f /tmp/hol4_prim_rec ] && grep -qa "PRIM_REC_CHECKPOINT_DONE" /tmp/build-prim.log; then
+    echo "prim: OK ($(wc -c </tmp/hol4_prim_rec) bytes; $(grep -aoE 'PRIMRECTHEORY_NAMES [0-9]+' /tmp/build-prim.log | tail -1) names; num_Axiom present)"
+  else
+    echo "prim: FAILED — see /tmp/build-prim.log"; tail -12 /tmp/build-prim.log; return 1
+  fi
+}
+
 build_taut() {
   [ -f /tmp/hol4_combin ] || { echo "taut: need /tmp/hol4_combin first"; build_combin || return 1; }
   if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_taut ]; then
@@ -359,11 +379,13 @@ case "$TARGET" in
   num)     build_num;;
   arith)   build_arith;;
   order)   build_order;;
+  prim)    build_prim;;
   taut)    build_taut;;
   meson)   build_meson;;
   metis)   build_metis;;
   all)     build_basis && build_kernel && build_theory && build_parse \
              && build_bool && build_tactic && build_rewrite && build_marker \
              && build_combin && build_simp && build_taut && build_meson \
-             && build_metis && build_num && build_arith && build_order;;
+             && build_metis && build_num && build_arith && build_order \
+             && build_prim;;
 esac

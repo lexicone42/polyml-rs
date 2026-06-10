@@ -719,11 +719,19 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   - **Stage 0 — DONE**: real `numTheory` on the prover base. `build_num` re-based on
     `/tmp/hol4_metis`; `/tmp/hol4_num` now has real `numScript` INDUCTION + live
     `bool_ss`(∃!)/`MESON`/`METIS`; arith/order rebuild on it (`hol4_num_prover.rs`).
-  - Stage 1 — `prim_recTheory` truncated at `num_Axiom` (line 549): patch out the
-    `relationTheory`-dependent TC block + WF tail, swap `LESS_LEMMA1` to the TC-free
-    proof from `num_arith_trophy.sml`, and fix `UNIQUE_SKOLEM_THM` (the upstream LCF
-    proof needs `CONV_TAC (DEPTH_CONV FORALL_AND_CONV)` to fix the normal form, then
-    an explicit witness for the 2nd-order branch — MESON goes Too-deep). LIKELY.
+  - **Stage 1 — DONE** (2026-06-09): the REAL `prim_recTheory` on `/tmp/hol4_prim_rec`
+    (`build_prim_rec_checkpoint.sml`, target `prim`, test `hol4_prim_rec.rs`). The
+    actual `prim_recScript.sml` runs quote-filtered and split at decl boundaries,
+    with three trophy-proof splices: TC-free `LESS_LEMMA1`, the hand-proved
+    `UNIQUE_SKOLEM_THM`+`HO_REWR_CONV` SIMP_REC specification, and the trophy
+    `SIMP_REC_THM` (upstream's AP_TERM_TAC step fails here). TC block + WF tail cut
+    (return with relationTheory at Stage 2-3); `local open BasicProvers` dropped;
+    TypeBase.export cut. 37 names; `num_Axiom`/`PRIM_REC_THM`/`LESS_THM` all
+    hypothesis-free; `define_case_constant num_Axiom` (num_case_def) WORKS. Two
+    new-found footguns: the filter's `Theorem x = expr` form needs
+    `boolLib.save_thm_at` (widen the narrow synthesized boolLib); never name a
+    build-script helper `U` (part1's `open HolKernel` rebinds Lib's list-union over
+    it for all later decls).
   - Stage 2-3 — `relationTheory` (2618 lines; or just the `transitive_def`/`RTC`
     fragment arithmetic needs) + real `TypeBase`/`TypeBasePure` (replace the
     build_simp typed stubs) + `BasicProvers` (needs a working `srw_ss()`). HARD.

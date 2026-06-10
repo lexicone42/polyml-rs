@@ -128,6 +128,14 @@ pub fn order_checkpoint_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Warm checkpoint with the REAL prim_recTheory (Datatype roadmap Stage 1:
+/// num_Axiom, SIMP_REC/PRIM_REC, the LESS theory)
+/// (`tools/build-hol4-checkpoints.sh prim`).
+pub fn prim_rec_checkpoint_path() -> Option<PathBuf> {
+    let p = PathBuf::from("/tmp/hol4_prim_rec");
+    p.exists().then_some(p)
+}
+
 /// Warm checkpoint with HolSatLib + tautLib (propositional tautology proving
 /// via the pure-SML DPLL solver) (`tools/build-hol4-checkpoints.sh taut`).
 pub fn taut_checkpoint_path() -> Option<PathBuf> {
