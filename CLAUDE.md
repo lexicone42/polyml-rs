@@ -741,7 +741,7 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
     Induct_on = rule-induction via the REAL IndDefLib map). **IndDefLib loads and
     runs for real** (Inductive RTC → xHol_reln works; InductiveDefinition
     quote-filtered + grammarDB patch; ThmSetData on a widened DB stub) — Stage 8's
-    core, banked early. REMAINING for full Stage 2: the EQC tail + WF_PULL
+    core, banked early. 2026-06-10: WFREC LANDED via the per-theorem sweep (relation_tail_sweep.sml; builder chains build→sweep→promote): 186 names incl. WFREC_THM/WF_RECURSION_THM/WFP/WF_inv_image — the Define foundation is banked. Remaining: the EQC tail + WF_PULL
     (real-SRW coupling) and the inv_image/WFREC tail (gates `Define`; the
     attr-strip save_thm_at fix is in, the WFREC run needs a longer step budget /
     per-theorem splits). Real TypeBase/TypeBasePure + BasicProvers stay Stage 3. HARD→IN PROGRESS.
