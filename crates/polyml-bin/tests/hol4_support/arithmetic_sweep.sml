@@ -142,15 +142,37 @@ fun chunkName l =
 val ok = ref 0 and bad = ref 0;
 val skip : string list = [];
 
+(* re-runnable (pass 2 on the exported image): chunks whose name is already
+   saved are skipped; the header's new_theory is neutralized when the
+   current theory is already "arithmetic" (re-running it would WIPE the
+   previously banked segment). *)
+fun replaceAll (s, old, new) =
+    let val (pre, suf) = Substring.position old (Substring.full s)
+    in if Substring.size suf = 0 then s
+       else Substring.string pre ^ new
+            ^ replaceAll (Substring.string (Substring.triml (size old) suf), old, new)
+    end;
+fun alreadySaved name =
+    List.exists (fn (n, _) => n = name)
+                (Theory.current_theorems () @ Theory.current_definitions ()
+                 @ Theory.current_axioms ());
+
 fun runChunk (name, chunkLines) =
   if List.exists (fn s => s = name) skip
   then pr ("CHUNK_SKIP " ^ name ^ "\n")
+  else if name <> "HEADER" andalso alreadySaved name
+  then (ok := !ok + 1; pr ("CHUNK_HAVE " ^ name ^ "\n"))
   else
     let val () = pr ("CHUNK_TRY  " ^ name ^ "\n")
         val () = writeFile ("/tmp/asweep_src.sml",
                             String.concatWith "\n" chunkLines)
-        val filtered = HOLSource.inputFile {quietOpen = false, print = fn _ => ()}
-                                           "/tmp/asweep_src.sml"
+        val filtered0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()}
+                                            "/tmp/asweep_src.sml"
+        val filtered =
+            if name = "HEADER" andalso Theory.current_theory () = "arithmetic"
+            then replaceAll (filtered0,
+                             "Theory.new_theory \"arithmetic\"", "()")
+            else filtered0
         val () = writeFile ("/tmp/asweep_chunk.sml", filtered)
     in
       (PolyML.use "/tmp/asweep_chunk.sml";
