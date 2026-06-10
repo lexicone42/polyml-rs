@@ -281,9 +281,9 @@ val smoke = ref true;
 fun need tag b = if b then pr ("OK " ^ tag ^ "\n")
                  else (smoke := false; pr ("MISSING " ^ tag ^ "\n"));
 val () = need "arithmetic-current" (Theory.current_theory () = "numeral");
-val () = need "numeral_distrib"    ((ignore (bt "num_CASES");    true) handle _ => false);
-val () = need "numeral_suc"  ((ignore (bt "ADD_CLAUSES");  true) handle _ => false);
-val () = need "numeral_add" ((ignore (bt "MULT_CLAUSES"); true) handle _ => false);
+val () = need "numeral_distrib"    ((ignore (bt "numeral_distrib");    true) handle _ => false);
+val () = need "numeral_suc"  ((ignore (bt "numeral_suc");  true) handle _ => false);
+val () = need "numeral_add" ((ignore (bt "numeral_add"); true) handle _ => false);
 val () = pr (if !smoke then "NUMERAL_SMOKE_PASS\n" else "NUMERAL_SMOKE_FAIL\n");
 val () =
     if !smoke then
