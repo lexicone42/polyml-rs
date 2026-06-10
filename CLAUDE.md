@@ -445,15 +445,21 @@ run`, diff the results. Any difference is a faithfulness bug in OUR port.
   (30 Basis categories + compiler-stress programs). Run:
   `tools/diff-oracle.sh --dir tools/diff-corpus` (wired into `regression.sh full`).
 
-**Verdict (2026-06-09):** the interpreter is FAITHFUL to upstream across all
-~1300 cases EXCEPT one narrow, fully-diagnosed class — `IntInf.andb`/`orb` with
-a short operand in the special-case slot (`andb(~1,2^80)=0`, `orb(5,2^80)=5`).
-Our basis build mis-compiles them to a wrong specialized form (the sign check is
-left as dead code); upstream-interpreted (same backend) compiles them correctly,
-so it's our interpreter mis-executing the *compiler* during the basis build —
-the scariest class (silent mis-compilation) but narrow. See task #72 +
-`docs/differential-oracle-2026-06-09.md`. The interp-vs-JIT differential is
-clean (40/40 — the JIT matches the interpreter on everything the corpus runs).
+**Verdict (2026-06-09, final):** the interpreter is FAITHFUL to upstream on all
+~1300 cases. The one apparent divergence (`IntInf.andb`/`orb` with a short operand
+in the special-case slot: `andb(~1,2^80)=0`) turned out to be a **latent UPSTREAM
+bug**: the stage-0 bootstrap compiler (`bootstrap64.txt`, a checked-in image from
+an older PolyML) mis-specializes andb/orb when compiling the basis. Upstream's own
+`polyimport` over the same stage-0 image + same `basis/build.sml` emits the
+BYTE-IDENTICAL wrong bytecode and computes the SAME wrong answers; upstream's
+shipped `poly` is unaffected only because its basis is recompiled by the stage-2+
+self-compiled compiler (full 7-stage chain) — and our self-bootstrapped
+`vendor/polyml/polyexport` (the chain run on OUR runtime) likewise has the correct
+form. So we reproduce upstream's stage-0 behavior *including its bug, byte for
+byte* — the strongest faithfulness statement available. The corpus `intinf`
+divergence is an artifact of comparing our stage-0-built basis against their
+stage-N-built poly. See `docs/differential-oracle-2026-06-09.md` (RESOLVED
+section). The interp-vs-JIT differential is clean (40/40).
 
 A bytecode dumper (`/tmp/dump.sml` pattern: closure word0 → code obj →
 `RunCall.loadByte`) + the `disasm` module (`crates/polyml-runtime/src/interpreter/

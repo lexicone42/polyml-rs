@@ -24,6 +24,10 @@
 # Env: POLY = poly binary (default <repo>/target/release/poly)
 set -uo pipefail
 
+# Checkpoints persist across reboots: the real files live in /var/tmp/polyml-rs
+# and the /tmp/* names above are symlinks (tools/persist-ckpts.sh, idempotent).
+"$(dirname "$0")/persist-ckpts.sh" || true
+
 FORCE=0
 TARGET=all
 while [ $# -gt 0 ]; do

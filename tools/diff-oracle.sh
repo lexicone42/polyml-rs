@@ -22,7 +22,12 @@
 #   POLY_MAXSTEPS (default 20000000000)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-UPSTREAM="${POLY_UPSTREAM:-/tmp/polybuild/poly}"
+# Prefer the persistent store (see persist-ckpts.sh); legacy /tmp path works
+# too because persist-ckpts.sh maintains /tmp/polybuild as a symlink.
+STORE="${POLYML_CKPT_DIR:-/var/tmp/polyml-rs}"
+DEFAULT_UPSTREAM="$STORE/polybuild/poly"
+[ -x "$DEFAULT_UPSTREAM" ] || DEFAULT_UPSTREAM=/tmp/polybuild/poly
+UPSTREAM="${POLY_UPSTREAM:-$DEFAULT_UPSTREAM}"
 OURS="${POLY_OURS:-$ROOT/target/release/poly}"
 CKPT="${POLY_CKPT:-/tmp/basis_loaded}"
 MAXSTEPS="${POLY_MAXSTEPS:-20000000000}"

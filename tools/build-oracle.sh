@@ -14,7 +14,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/vendor/polyml"
-BUILD="${POLY_BUILD_DIR:-/tmp/polybuild}"
+# Build into the persistent store (survives reboots); /tmp/polybuild* stay
+# usable as symlinks maintained by persist-ckpts.sh.
+STORE="${POLYML_CKPT_DIR:-/var/tmp/polyml-rs}"
+"$ROOT/tools/persist-ckpts.sh" >/dev/null 2>&1 || true
+BUILD="${POLY_BUILD_DIR:-$STORE/polybuild}"
 
 [ -x "$SRC/configure" ] || { echo "FATAL: $SRC/configure missing (vendor/polyml not present)"; exit 2; }
 command -v g++  >/dev/null || { echo "FATAL: g++ not found"; exit 2; }
@@ -29,7 +33,7 @@ command -v make >/dev/null || { echo "FATAL: make not found"; exit 2; }
 # our build's compiler execution).
 EXTRA_CONFIG=""
 if [ "${1:-}" = "interp" ]; then
-  BUILD="${POLY_BUILD_DIR:-/tmp/polybuild-interp}"
+  BUILD="${POLY_BUILD_DIR:-$STORE/polybuild-interp}"
   EXTRA_CONFIG="--enable-native-codegeneration=no"
 fi
 
