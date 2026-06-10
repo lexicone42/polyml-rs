@@ -177,12 +177,12 @@ structure BasicProvers = struct
       Tactical.THEN (Tactical.THEN (Tactical.REPEAT Tactic.STRIP_TAC,
         simpLib.FULL_SIMP_TAC
           (List.foldl (fn (f, ss) => simpLib.++ (ss, f)) (srw_ss ()) frags) thl),
-        Tactical.TRY (Tactical.THEN (Rewrite.ASM_REWRITE_TAC [], Tactical.NO_TAC)))
+        Tactical.TRY (Tactical.THEN (Rewrite.ONCE_ASM_REWRITE_TAC [], Tactical.THEN (Rewrite.REWRITE_TAC [], Tactical.NO_TAC))))
   (* lowercase aliases the script uses (real defs from BasicProvers). *)
   fun RW_TAC ss thl =
       Tactical.THEN (Tactical.THEN (Tactical.REPEAT Tactic.STRIP_TAC,
         simpLib.FULL_SIMP_TAC ss thl),
-        Tactical.TRY (Tactical.THEN (Rewrite.ASM_REWRITE_TAC [], Tactical.NO_TAC)))
+        Tactical.TRY (Tactical.THEN (Rewrite.ONCE_ASM_REWRITE_TAC [], Tactical.THEN (Rewrite.REWRITE_TAC [], Tactical.NO_TAC))))
   val rw_tac = RW_TAC
   fun simp thl = simpLib.ASM_SIMP_TAC (srw_ss ()) thl
   fun parse_ctxt q (asl, w) =

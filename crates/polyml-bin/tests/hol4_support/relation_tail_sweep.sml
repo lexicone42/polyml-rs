@@ -24,11 +24,34 @@ fun (q by tac) =
 
 pr "\nRELATION_SWEEP_START\n";
 
-(* the image's boolLib.save_thm_at is the naive one; strip [attr] suffixes. *)
+(* the image's boolLib.save_thm_at is the naive one; strip [attr] suffixes.
+   Same for Definition X[attr]: -> new_definition with the raw tagged name
+   (this single failure cascaded 70+ static errors in the algebra tail:
+   inv_DEF[simp] rejected -> inv unbound -> everything downstream). *)
 structure boolLib = struct
   open boolLib
   fun save_thm_at _ (n, th) =
       Theory.save_thm (hd (String.fields (fn c => c = #"[") n), th)
+  fun new_definition (n, tm) =
+      Theory.Definition.new_definition
+        (hd (String.fields (fn c => c = #"[") n), tm)
+end;
+
+(* shadow the image's BasicProvers: its SRW/RW closer used ASM_REWRITE_TAC,
+   which LOOPS on permutative assumptions (e.g. `!x y. R x y <=> R y x` from
+   symmetric_def — 20 min at 100% cpu). ONCE_ASM_REWRITE + REWRITE is bounded
+   and still closes the "use an assumption once" goals. *)
+structure BasicProvers = struct
+  open BasicProvers
+  val closer =
+      Tactical.TRY (Tactical.THEN (Rewrite.ONCE_ASM_REWRITE_TAC [],
+        Tactical.THEN (Rewrite.REWRITE_TAC [], Tactical.NO_TAC)))
+  fun RW_TAC ss thl =
+      Tactical.THEN (Tactical.THEN (Tactical.REPEAT Tactic.STRIP_TAC,
+        simpLib.FULL_SIMP_TAC ss thl), closer)
+  val rw_tac = RW_TAC
+  fun SRW_TAC frags thl =
+      RW_TAC (List.foldl (fn (f, ss) => simpLib.++ (ss, f)) (srw_ss ()) frags) thl
 end;
 
 fun readFile path =
@@ -57,8 +80,16 @@ fun findIdx p =
 
 val ok = ref 0  and bad = ref 0  and failed = ref ([] : string list);
 
+(* known-looping chunks (FULL_SIMP allocation storm on permutative asms —
+   e.g. the symmetric_def rewrite `R x y <=> R y x`); skipped, spliced later. *)
+val skip = ["symmetric_inv_image"];
+
 fun runChunk (name, chunkLines) =
-    let val src = String.concatWith "\n" chunkLines
+  if List.exists (fn s => s = name) skip
+  then pr ("CHUNK_SKIP " ^ name ^ " (known loop)\n")
+  else
+    let val () = pr ("CHUNK_TRY  " ^ name ^ "\n")
+        val src = String.concatWith "\n" chunkLines
         val () = writeFile ("/tmp/rsweep_src.sml", src)
         val filtered = HOLSource.inputFile {quietOpen = false, print = fn _ => ()}
                                            "/tmp/rsweep_src.sml"
