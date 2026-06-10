@@ -183,6 +183,24 @@ fun maybeSnap () =
         pr "SNAP_EXPORTED\n")
      else ());
 
+(* per-chunk SOURCE patches. MOD_exists/MOD_DIV_exist bind variables named
+   MOD/DIV — upstream's parser tolerates binder-shadowing of grammar infixes,
+   ours raises "No rule for [MOD]". Alpha-rename (statements stay
+   alpha-equivalent; new_specification names its constants explicitly).
+   THE keystone: the whole DIVISION layer (~50 MOD_*/DIV_* theorems)
+   cascades from these two. *)
+val chunkPatches =
+  [("MOD_exists",
+    [("?MOD.", "?MODf."), ("MOD k n", "MODf k n")]),
+   ("MOD_DIV_exist",
+    [("?MOD DIV.", "?MODf DIVf."), ("DIV k n", "DIVf k n"),
+     ("MOD k n", "MODf k n"),
+     ("MOD:num->num->num", "MODf:num->num->num")]),
+   (* pass-1's set_fixity chunks are baked into the image grammar, so the
+      prefix-style definitions can't reparse — write them infix (same defs). *)
+   ("DIV_def", [("DIV m n =", "m DIV n =")]),
+   ("MOD_def", [("MOD m n =", "m MOD n =")])];
+
 fun runChunk (name, chunkLines) =
   if skipped name
   then pr ("CHUNK_SKIP " ^ name ^ "\n")
@@ -190,8 +208,13 @@ fun runChunk (name, chunkLines) =
   then (ok := !ok + 1; pr ("CHUNK_HAVE " ^ name ^ "\n"))
   else
     let val () = pr ("CHUNK_TRY  " ^ name ^ "\n")
-        val () = writeFile ("/tmp/asweep_src.sml",
-                            String.concatWith "\n" chunkLines)
+        val src0 = String.concatWith "\n" chunkLines
+        val src =
+            case List.find (fn (n, _) => n = name) chunkPatches of
+                NONE => src0
+              | SOME (_, ps) =>
+                  List.foldl (fn ((old, new), t) => replaceAll (t, old, new)) src0 ps
+        val () = writeFile ("/tmp/asweep_src.sml", src)
         val filtered0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()}
                                             "/tmp/asweep_src.sml"
         val filtered =
