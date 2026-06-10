@@ -37,7 +37,7 @@ rc=$?
 echo "intflip: exit $rc" | tee -a "$LOG"
 [ "$rc" -ne 0 ] && exit $rc
 [ -f polyexport ] || { echo "intflip: no polyexport produced" | tee -a "$LOG"; exit 1; }
-cp polyexport /tmp/arbint_image
+cat polyexport > /tmp/arbint_image   # cat (not cp): writes THROUGH the persist-ckpts symlink
 # Smoke: the new image's default int must be arbitrary precision.
 smoke=$(printf 'val()=print("PREC="^(case Int.precision of NONE=>"NONE" | SOME n=>Int.toString n)^"\\n");' \
     | POLYML_GC_QUIET=1 "$POLY" run --max-steps 2000000000 /tmp/arbint_image 2>/dev/null \
