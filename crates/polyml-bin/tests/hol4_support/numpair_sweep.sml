@@ -22,6 +22,8 @@ val HOL = case OS.Process.getEnv "HOL4_DIR" of
             | NONE => "../hol4";
 infix THEN THENL THEN1 ORELSE;
 infix 8 by;
+(* numpairScript uses the modern tactic combinators >> >- \\ (and >| ) *)
+infix >> >- \\ >|;
 
 pr "\nNUMPAIR_SWEEP_START\n";
 val () = Globals.interactive := true;
@@ -34,7 +36,22 @@ val () =
          ("SELECT_AX",     boolTheory.SELECT_AX),
          ("INFINITY_AX",   boolTheory.INFINITY_AX)];
 
-structure DefnBase = struct end;
+(* /tmp/hol4_defn HAS the real DefnBase (Define machinery) baked in — do NOT
+   shadow it with an empty stub (would break Define/tDefine that numpair uses). *)
+
+(* register `pair` in TypeBase (only num was, by build_defn) so Define accepts
+   the tupled domain of invtri0 (Pmatch: "Pattern (n,a) is not a constructor"
+   otherwise). Same gen_datatype_info recipe as num. *)
+val () = (let val pinfo = TypeBasePure.gen_datatype_info
+                  {ax = pairTheory.pair_Axiom, ind = pairTheory.pair_induction,
+                   case_defs = [pairTheory.pair_case_def]}
+          in TypeBase.write pinfo; pr "PAIR_TYPEBASE_OK\n" end)
+         handle e => pr ("PAIR_TYPEBASE_FAIL :: " ^ exnMessage e ^ "\n");
+
+(* DECIDE/DECIDE_TAC (numLib absent) — built from EQT_ELIM o ARITH_CONV *)
+val () = (PolyML.use ((HOL ^ "/../../crates/polyml-bin/tests/hol4_support")
+                      ^ "/decide_shim.sml"))
+         handle e => pr ("DECIDE_SHIM_FAIL :: " ^ exnMessage e ^ "\n");
 
 (* ---- the fixed tactic/store layer (rebound via the injected shim too) ---- *)
 structure boolLib = struct
@@ -148,6 +165,11 @@ val () = writeFile ("/tmp/asweep_rebind.sml",
     "val asm_simp_tac = BasicProvers.ASM_SIMP_TAC;",
     "val full_simp_tac = BasicProvers.FULL_SIMP_TAC;",
     "val SPOSE_NOT_THEN = BasicProvers.SPOSE_NOT_THEN;",
+    (* numpairScript uses `theorem "invtri0_ind"` (lines 86,95) — top-level
+       `theorem` is absent; fetch it from the current segment. *)
+    "fun theorem nm = #2 (valOf (List.find (fn (n,_) => n = nm)",
+    "  (Theory.current_theorems () @ Theory.current_definitions ())));",
+    "infix >> >- \\\\ >|;",
     ""]);
 (* WF_LESS (cut WF tail) — numpairScript needs prim_recTheory.WF_LESS *)
 val () = (PolyML.use ((HOL ^ "/../../crates/polyml-bin/tests/hol4_support")
@@ -202,7 +224,17 @@ fun alreadySaved name =
    HOL88-era (==`:num`==) type-quotation that the modern filter passes
    through, so SML chokes on the (== token. Rewritten with Parse.Type. *)
 val overrides =
-  [("ncases",
+  [(* invtri0_def is non-structural recursion (decreasing on the 1st arg) with
+      NO Termination block; HOL4 auto-proves it but our (degraded) termination
+      prover can't. Use tDefine with an explicit measure-FST tactic (validated
+      live + by the recon fleet). tDefine auto-saves invtri0_def + invtri0_ind. *)
+   ("invtri0_def",
+    "val _ = TotalDefn.tDefine \"invtri0\"\n\
+    \  [QUOTE \"invtri0 n a = if n < a + 1 then (n,a) else invtri0 (n - (a + 1)) (a + 1)\"]\n\
+    \  (Tactical.THEN (TotalDefn.WF_REL_TAC [QUOTE \"measure FST\"],\n\
+    \     Tactical.THEN (Rewrite.REWRITE_TAC [prim_recTheory.measure_thm, pairTheory.FST],\n\
+    \       Tactic.CONV_TAC (Drule.EQT_INTRO o DECIDE))));\n"),
+   ("ncases",
     "fun ncases str n0 =\n\
     \  DISJ_CASES_THEN2 SUBST_ALL_TAC\n\
     \    (X_CHOOSE_THEN (Term.mk_var(n0, Parse.Type [QUOTE \":num\"])) SUBST_ALL_TAC)\n\
