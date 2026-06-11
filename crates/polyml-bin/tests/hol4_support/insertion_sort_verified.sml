@@ -119,4 +119,19 @@ val count_isort = Tactical.prove(
 val _ = Theory.save_thm("count_isort", count_isort);
 val () = pr "OK count_isort\n";
 
+(* === COMPUTE, not just prove: actually RUN the verified algorithm via the
+   computeLib call-by-value engine. Each result is a kernel-checked theorem
+   (the global compset carries bool/COND + numeral <= reductions; we copy it
+   and add the isort equations — EVAL over a USER datatype). === *)
+val cs = computeLib.copy (!computeLib.the_compset);
+val _ = computeLib.add_thms [INS, ISORT] cs;
+fun runsort q =
+    let val th = computeLib.CBV_CONV cs (Parse.Term [QUOTE q])
+    in pr ("  EVAL isort: " ^ Parse.term_to_string (rhs (concl th)) ^ "\n"); th end;
+val sort_demo = runsort "isort (Cons 3 (Cons 1 (Cons 4 (Cons 1 (Cons 5 (Cons 9 (Cons 2 (Cons 6 Nil))))))))";
+(* assert the computed result IS the sorted list (kernel-checked equality) *)
+val expected = Parse.Term [QUOTE "Cons 1 (Cons 1 (Cons 2 (Cons 3 (Cons 4 (Cons 5 (Cons 6 (Cons 9 Nil)))))))"];
+val () = if Term.aconv (rhs (concl sort_demo)) expected
+         then pr "EVAL_SORTED_OK\n" else pr "EVAL_SORTED_WRONG\n";
+
 val () = pr "ALL_DONE\n";

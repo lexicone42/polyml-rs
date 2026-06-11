@@ -121,5 +121,12 @@ fn verified_insertion_sort() {
     let (out, _) = run_image_env(&image, &driver, 300_000_000_000, &[]).expect("run");
     assert!(out.contains("OK sorted_isort"), "sortedness failed:\n{out}");
     assert!(out.contains("OK count_isort"), "permutation failed:\n{out}");
+    // and the algorithm RUNS (computeLib EVAL over the user datatype): the
+    // computed sort of [3,1,4,1,5,9,2,6] is kernel-checked equal to the sorted
+    // list — proved correct AND executed, both certified by the kernel.
+    assert!(
+        out.contains("EVAL_SORTED_OK"),
+        "EVAL of isort did not produce the sorted list:\n{out}"
+    );
     assert!(out.contains("ALL_DONE"), "verification incomplete:\n{out}");
 }
