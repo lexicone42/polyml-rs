@@ -32,6 +32,10 @@ if [ "$MODE" = "full" ]; then
   echo; echo "--- building checkpoints (if missing) ---"
   [ -f /tmp/basis_loaded ]  || run tools/build-hol4-checkpoints.sh basis
   [ -f /tmp/hol4_metis ]    || run tools/build-hol4-checkpoints.sh all
+  # the datatype chain (num→…→defn→numpair→ind_type→datatype) chains its own
+  # prerequisites; expensive, so only built when absent (it persists via
+  # tools/persist-ckpts.sh on the dev box).
+  [ -f /tmp/hol4_datatype ] || run tools/build-hol4-checkpoints.sh datatype
   [ -f /tmp/arbint_image ]  || run tools/intflip-bootstrap.sh
   run tools/isabelle-pure-probe.sh >/dev/null   # applies isabelle patches idempotently
 
@@ -42,6 +46,7 @@ if [ "$MODE" = "full" ]; then
            hol4_taut hol4_meson hol4_metis hol4_pelletier hol4_num_prover \
            hol4_arith hol4_order hol4_induction hol4_list hol4_simp hol4_fancy \
            hol4_prim_rec hol4_summation \
+           hol4_numsimps hol4_pair hol4_defn hol4_datatype \
            hol4_rewrite hol4_tactic hol4_parse hol4_theory hol4_theories hol4_recon; do
     r=$(cargo test --release -p polyml-bin --test "$t" -- --ignored 2>&1 \
         | grep -oE "[0-9]+ passed; [0-9]+ failed" | head -1)
