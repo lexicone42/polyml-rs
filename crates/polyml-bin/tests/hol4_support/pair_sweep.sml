@@ -186,7 +186,9 @@ fun chunkName l =
 val ok = ref 0 and bad = ref 0;
 (* expbase family: simp loops (GC churn at 2% retained) — pass-3/4 hangs.
    Both are [local] helpers; their consumer may fail benignly. *)
-val skip : string list = [];
+(* PAIR_REL_TRANS hangs (GC-churn simp loop, the permutative-asm signature —
+   PAIR_REL_SYM in the assumptions). v2 confirmed 91 chunks OK before it. *)
+val skip : string list = ["PAIR_REL_TRANS"];
 
 (* re-runnable (pass 2 on the exported image): chunks whose name is already
    saved are skipped; the header's new_theory is neutralized when the
