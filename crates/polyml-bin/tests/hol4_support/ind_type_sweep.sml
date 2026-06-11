@@ -53,6 +53,22 @@ val () = (PolyML.use ((HOL ^ "/../../crates/polyml-bin/tests/hol4_support")
                       ^ "/decide_shim.sml"))
          handle e => pr ("DECIDE_SHIM_FAIL :: " ^ exnMessage e ^ "\n");
 
+(* ind_typeScript references numLib.INDUCT_TAC (FCONS_UNDO) + numLib.arith_ss
+   (FCONS_DEST). numLib isn't loaded — provide just those two. *)
+structure numLib = struct
+  val INDUCT_TAC = Prim_rec.INDUCT_THEN numTheory.INDUCTION Tactic.ASSUME_TAC
+  val arith_ss = simpLib.++ (boolSimps.bool_ss, numSimps.ARITH_ss)
+end;
+
+(* UNIQUE_SKOLEM_ALT: CONSTR_REC rewrites with it; absent from our boolTheory.
+   Provable by MESON (recon-verified). *)
+val UNIQUE_SKOLEM_ALT =
+    (boolLib.prove
+       (Parse.Term [QUOTE "!P:'a->'b->bool. (!x. ?!y. P x y) = (?f. !x y. (P x y = (f x = y)))"],
+        mesonLib.MESON_TAC [])
+     handle e => (pr ("USKOLEM_FAIL :: " ^ exnMessage e ^ "\n"); boolTheory.TRUTH));
+val () = pr "USKOLEM_OK\n";
+
 (* ---- the fixed tactic/store layer (rebound via the injected shim too) ---- *)
 structure boolLib = struct
   open boolLib
