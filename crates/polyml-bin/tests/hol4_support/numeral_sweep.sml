@@ -206,7 +206,50 @@ val overrides =
     "fun ncases str n0 =\n\
     \  DISJ_CASES_THEN2 SUBST_ALL_TAC\n\
     \    (X_CHOOSE_THEN (Term.mk_var(n0, Parse.Type [QUOTE \":num\"])) SUBST_ALL_TAC)\n\
-    \    (SPEC (Term.mk_var(str, Parse.Type [QUOTE \":num\"])) num_CASES);\n")];
+    \    (SPEC (Term.mk_var(str, Parse.Type [QUOTE \":num\"])) num_CASES);\n"),
+   (* fleet-verified 2026-06-10: upstream's SRW_TAC THENL counts don't
+      survive our simp shim ("lists of different length" = TACS_TO_LT).
+      Both rebuilt with structural-only THENL / THENL-free scripts. *)
+   ("sub_eq'",
+    "val sub_eq' = Tactical.prove(\n\
+    \  Parse.Term [QUOTE \"(m - n = p) = (if n <= m then m = p + n else p = 0)\"],\n\
+    \  ASM_CASES_TAC (Parse.Term [QUOTE \"n <= m\"]) THEN ASM_REWRITE_TAC []\n\
+    \  THENL [\n\
+    \    EQ_TAC THENL [\n\
+    \      DISCH_THEN (SUBST1_TAC o SYM) THEN\n\
+    \      ONCE_REWRITE_TAC [boolTheory.EQ_SYM_EQ] THEN\n\
+    \      MATCH_MP_TAC arithmeticTheory.SUB_ADD THEN\n\
+    \      FIRST_ASSUM ACCEPT_TAC\n\
+    \      ,\n\
+    \      DISCH_THEN SUBST1_TAC THEN\n\
+    \      REWRITE_TAC [arithmeticTheory.ADD_SUB]\n\
+    \    ],\n\
+    \    EQ_TAC THENL [\n\
+    \      DISCH_THEN (SUBST1_TAC o SYM),\n\
+    \      DISCH_THEN SUBST1_TAC\n\
+    \    ] THEN\n\
+    \    REWRITE_TAC [arithmeticTheory.SUB_EQ_0] THEN\n\
+    \    MATCH_MP_TAC arithmeticTheory.LESS_IMP_LESS_OR_EQ THEN\n\
+    \    ASM_REWRITE_TAC [GSYM arithmeticTheory.NOT_LESS_EQUAL]\n\
+    \  ]);\n"),
+   ("sub_add'",
+    "val sub_add' = Tactical.prove(\n\
+    \  Parse.Term [QUOTE \"(m:num) - n + p = (if n <= m then m + p - n else p)\"],\n\
+    \  REWRITE_TAC [arithmeticTheory.SUB_RIGHT_ADD]\n\
+    \  THEN ASM_CASES_TAC (Parse.Term [QUOTE \"(m:num) <= n\"])\n\
+    \  THEN ASM_CASES_TAC (Parse.Term [QUOTE \"(n:num) <= m\"])\n\
+    \  THEN ASM_REWRITE_TAC []\n\
+    \  THEN ((MP_TAC (SPECL [Parse.Term [QUOTE \"m:num\"], Parse.Term [QUOTE \"n:num\"]]\n\
+    \                       arithmeticTheory.LESS_EQUAL_ANTISYM)\n\
+    \         THEN ASM_REWRITE_TAC []\n\
+    \         THEN DISCH_THEN SUBST1_TAC\n\
+    \         THEN ONCE_REWRITE_TAC [arithmeticTheory.ADD_SYM]\n\
+    \         THEN REWRITE_TAC [arithmeticTheory.ADD_SUB])\n\
+    \        ORELSE\n\
+    \        (IMP_RES_TAC arithmeticTheory.NOT_LESS_EQUAL\n\
+    \         THEN MP_TAC (SPECL [Parse.Term [QUOTE \"m:num\"], Parse.Term [QUOTE \"n:num\"]]\n\
+    \                            arithmeticTheory.LESS_ANTISYM)\n\
+    \         THEN ASM_REWRITE_TAC [])));\n")];
 
 (* post-filter patches: TypeBase stub has no axiom_of; for :num the recursion
    axiom IS prim_recTheory.num_Axiom. *)

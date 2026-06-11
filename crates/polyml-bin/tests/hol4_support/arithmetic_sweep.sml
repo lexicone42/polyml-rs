@@ -228,6 +228,8 @@ val chunkPatches =
    (* markerLib stub lacks RM_ALL_ABBREVS_TAC; leftover Abbrev assumptions
       are benign here. Root of the whole MODEQ_* family (numSimps' MOD_ss). *)
    ("MODEQ_NONZERO_MODEQUALITY",
+    [("markerLib.RM_ALL_ABBREVS_TAC", "Tactical.ALL_TAC")]),
+   ("DIV_MOD_MOD_DIV",
     [("markerLib.RM_ALL_ABBREVS_TAC", "Tactical.ALL_TAC")])];
 
 (* verified hand-splices (plain SML, fleet-engineered) override their chunk. *)
@@ -238,16 +240,18 @@ fun hasSplice name =
     handle _ => false;
 
 fun runChunk (name, chunkLines) =
-  if skipped name
-  then pr ("CHUNK_SKIP " ^ name ^ "\n")
-  else if name <> "HEADER" andalso alreadySaved name
-       (* [local] chunks must ALWAYS re-run: they are session val-bindings
-          consumed by later proofs, and names collide (two `lemma[local]`s
-          here) — skipping leaves `lemma` bound to the WRONG theorem
-          (MOD_UNIQUE's "No resolvents" root). *)
-       andalso not (String.isSubstring "[local]"
-                      (case chunkLines of l :: _ => l | [] => ""))
+  if name <> "HEADER" andalso alreadySaved name
+     (* [local] chunks must ALWAYS re-run: they are session val-bindings
+        consumed by later proofs, and names collide (two `lemma[local]`s
+        here) — skipping leaves `lemma` bound to the WRONG theorem
+        (MOD_UNIQUE's "No resolvents" root). *)
+     andalso not (String.isSubstring "[local]"
+                    (case chunkLines of l :: _ => l | [] => ""))
   then (ok := !ok + 1; pr ("CHUNK_HAVE " ^ name ^ "\n"))
+  (* splice beats skip: MIN_0/MAX_0 have verified splices but sit behind
+     the MIN_/MAX_ skip prefixes *)
+  else if skipped name andalso not (hasSplice name)
+  then pr ("CHUNK_SKIP " ^ name ^ "\n")
   else if hasSplice name
   then ((PolyML.use (spliceFile name);
          ok := !ok + 1; pr ("CHUNK_SPLICED " ^ name ^ "\n"); maybeSnap ())

@@ -93,22 +93,11 @@ val modPatches =
       "val bool_grammars = Parse.current_grammars ()"),
      ("val SOME bool_grammars = Parse.grammarDB { thyname = \"bool\" }",
       "val bool_grammars = Parse.current_grammars ()")]),
-   (* numeral_redns is a STATIC list; 4 names are still unproved on our
-      numeral segment (MIN/MAX <- arithmetic's skip-listed section,
-      TWO_EXP_THM <- expbase cascade, enumeral_mult <- sub_eq' THENL
-      mismatch). Drop them: REDUCE loses the MIN/MAX/2^n fast paths only;
-      restore by deleting these patches after a richer numeral re-sweep.
-      Both raw and filtered token-spacings (no-op when absent). *)
+   (* full numeral_redns restored 2026-06-10 (fleet splices + re-sweeps
+      flipped numeral_MIN/MAX, TWO_EXP_THM, enumeral_mult). Only the TFL
+      reference remains patched (Defn is Stage 6). *)
    ("reduceLib",
-    [("numeral_MAX, numeral_MIN, numeral_div2,", "numeral_div2,"),
-     ("numeral_MAX , numeral_MIN , numeral_div2 ,", "numeral_div2 ,"),
-     ("TWO_EXP_THM, numeral_texp_help,", "numeral_texp_help,"),
-     ("TWO_EXP_THM , numeral_texp_help ,", "numeral_texp_help ,"),
-     (* own-line entry: swap for a harmless duplicate (compset add is
-        set-like) instead of comma surgery *)
-     ("enumeral_mult", "numeral_distrib"),
-     (* Defn is TFL (Stage 6); const_eq_ref tuning is a no-op until then *)
-     ("val _ = Defn.const_eq_ref := NEQ_CONV", "val _ = ()")])];
+    [("val _ = Defn.const_eq_ref := NEQ_CONV", "val _ = ()")])];
 fun useFiltered tag src =
     let val txt0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()} src
         val txt = case List.find (fn (n, _) => n = tag) modPatches of
