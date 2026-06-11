@@ -170,6 +170,10 @@ val () = writeFile ("/tmp/asweep_rebind.sml",
     "fun theorem nm = #2 (valOf (List.find (fn (n,_) => n = nm)",
     "  (Theory.current_theorems () @ Theory.current_definitions ())));",
     "infix >> >- \\\\ >|;",
+    (* numpairScript uses ARITH_ss / REDUCE_ss unqualified (from open numSimps,
+       which the header's numLib failure had aborted) *)
+    "val ARITH_ss = numSimps.ARITH_ss;",
+    "val REDUCE_ss = numSimps.REDUCE_ss;",
     ""]);
 (* WF_LESS (cut WF tail) — numpairScript needs prim_recTheory.WF_LESS *)
 val () = (PolyML.use ((HOL ^ "/../../crates/polyml-bin/tests/hol4_support")
@@ -286,8 +290,10 @@ val overrides =
 (* post-filter patches: TypeBase stub has no axiom_of; for :num the recursion
    axiom IS prim_recTheory.num_Axiom. *)
 val chunkPatches =
-  [("texp_help_def",
-    [("TypeBase.axiom_of", "(fn _ => prim_recTheory.num_Axiom)")])];
+  [(* the header's Libs opens numLib (absent) which aborts the whole open line,
+      so numSimps (-> ARITH_ss) never opens. Drop numLib; numSimps + ARITH_ss
+      are present and that is all the script actually uses. *)
+   ("HEADER", [(" numLib", ""), ("numLib ", "")])];
 
 (* verified hand-splices (plain SML, fleet-engineered) override their chunk —
    for proofs too large to inline as `overrides` strings. *)
