@@ -1,14 +1,26 @@
 //! Isabelle's LCF THEOREM kernel (`Pure/thm.ML`) runs on the polyml-rs interpreter.
 //!
 //! Beyond the term/type kernel (`isabelle_kernel.rs`), the full LCF theorem kernel
-//! `thm.ML` loads on the arbitrary-int image and we derive real Isabelle theorems
-//! with its primitive inferences: `reflexive` (⊢ x ≡ x), `symmetric`, `transitive`,
-//! `beta_conversion` (⊢ (λu. u) x ≡ x), and — after declaring the `prop` type into
-//! the empty proto-Pure theory — the implication laws `⊢ A ⟹ A` (assume +
-//! implies_intr), the weakening law `⊢ A ⟹ B ⟹ A` (nested implies_intr), and modus
-//! ponens via `implies_elim` (discharging A, B from `⊢ A ⟹ B ⟹ A` to get `A, B ⊢ A`).
-//! Each is a checked `thm` from Isabelle's actual kernel — the Isabelle analogue of
-//! the HOL4 LCF-kernel milestone.
+//! `thm.ML` loads on the arbitrary-int image and we exercise the WHOLE set of Pure's
+//! primitive inference rules, each producing a checked `thm` from Isabelle's actual
+//! kernel:
+//!   - equality:    `reflexive` (⊢ x ≡ x), `symmetric`, `transitive`,
+//!                  `beta_conversion` (⊢ (λu. u) x ≡ x)
+//!   - implication: (after declaring the `prop` type into the empty proto-Pure theory)
+//!                  `⊢ A ⟹ A` (assume + implies_intr), the weakening law
+//!                  `⊢ A ⟹ B ⟹ A` (nested implies_intr), and modus ponens via
+//!                  `implies_elim` (`⊢ A ⟹ B ⟹ A` ↦ `A, B ⊢ A`)
+//!   - quantifier:  `forall_intr` (⊢ ⋀x. x ≡ x) and `forall_elim` (instantiate it at
+//!                  a compound term `f c`)
+//!   - structural:  `combination` — application congruence (⊢ f x ≡ f x), and
+//!                  `abstract_rule` (⊢ (λu. g u) ≡ (λu. g u))
+//!   - derived:     composing assume + implies_intr + forall_intr to build the
+//!                  universally-quantified identity implication `⊢ ⋀A. A ⟹ A`
+//! This is the Isabelle analogue of the HOL4 LCF-kernel milestone — the complete
+//! primitive proof kernel of Isabelle/Pure running on the polyml-rs interpreter.
+//! (`fun`/`prop` are declared into the proto-Pure theory so manually-built
+//! function/prop-typed terms certify; the kernel itself knows `Pure.{eq,imp,all}`
+//! intrinsically, so the inference rules build those constants without certification.)
 //!
 //! The keystone that unlocked this was a runtime fix: `INSTR_GET_THREAD_ID` now
 //! returns a STABLE singleton object, so `Thread.self()`/`Thread_Data` work and
@@ -83,9 +95,11 @@ val cbeta = Thm.global_cterm_of thy ((Abs ("u", aT, Bound 0)) $ Free ("x", aT));
 val b = Thm.beta_conversion false cbeta;
 val brhs = case Thm.prop_of b of (Const("Pure.eq",_) $ _) $ Free("x",_) => true | _ => false;
 val () = pr ("=THM= beta " ^ Bool.toString (isEq b andalso brhs) ^ "\n");
-(* Implication kernel: declare the `prop` type (proto-Pure is empty), then derive
-   |- A ==> A and the weakening law |- A ==> B ==> A via assume/implies_intr. *)
-val pthy = Sign.add_types_global [(Binding.name "prop", 0, NoSyn)] thy;
+(* Implication kernel: declare the `prop` type (proto-Pure is empty) — and `fun`,
+   so function-typed terms certify for the quantifier/congruence rules below — then
+   derive |- A ==> A and the weakening law |- A ==> B ==> A via assume/implies_intr. *)
+val pthy = Sign.add_types_global
+  [(Binding.name "fun", 2, NoSyn), (Binding.name "prop", 0, NoSyn)] thy;
 val propT = Type ("prop", []);
 val cA = Thm.global_cterm_of pthy (Free ("A", propT));
 val cB = Thm.global_cterm_of pthy (Free ("B", propT));
@@ -104,6 +118,37 @@ val mp = Thm.implies_elim (Thm.implies_elim thK (Thm.assume cA)) (Thm.assume cB)
 val okMP = (case Thm.prop_of mp of Free ("A", _) => true | _ => false)
            andalso length (Thm.hyps_of mp) = 2;
 val () = pr ("=THM= mp " ^ Bool.toString okMP ^ "\n");
+(* The remaining Pure primitive inference rules: quantification (forall_intr/elim),
+   application congruence (combination), abstraction (abstract_rule), and a derived
+   rule composing them — so the WHOLE primitive kernel is exercised. *)
+val funT = aT --> aT;
+val cx2 = Thm.global_cterm_of pthy (Free ("x", aT));
+val gen = Thm.forall_intr cx2 (Thm.reflexive cx2);                 (* |- !!x. x == x *)
+val okFI = (case Thm.prop_of gen of Const("Pure.all",_) $ Abs(_,_,_) => true | _ => false)
+           andalso null (Thm.hyps_of gen);
+val () = pr ("=THM= forall_intr " ^ Bool.toString okFI ^ "\n");
+val fcT = Thm.global_cterm_of pthy (Free ("f", funT) $ Free ("c", aT));
+val finst = Thm.forall_elim fcT gen;                               (* |- f c == f c *)
+val okFE = isEq finst andalso
+   (case Thm.prop_of finst of (Const("Pure.eq",_) $ (Free("f",_) $ Free("c",_))) $ (Free("f",_) $ Free("c",_)) => true | _ => false);
+val () = pr ("=THM= forall_elim " ^ Bool.toString okFE ^ "\n");
+val cf = Thm.global_cterm_of pthy (Free ("f", funT));
+val comb = Thm.combination (Thm.reflexive cf) (Thm.reflexive cx2); (* |- f x == f x *)
+val okC = isEq comb andalso
+   (case Thm.prop_of comb of (Const("Pure.eq",_) $ (Free("f",_) $ Free("x",_))) $ (Free("f",_) $ Free("x",_)) => true | _ => false);
+val () = pr ("=THM= combination " ^ Bool.toString okC ^ "\n");
+val cu = Thm.global_cterm_of pthy (Free ("u", aT));
+val guT = Thm.global_cterm_of pthy (Free ("g", funT) $ Free ("u", aT));
+val absr = Thm.abstract_rule "u" cu (Thm.reflexive guT);          (* |- (%u. g u) == (%u. g u) *)
+val okAB = isEq absr andalso
+   (case Thm.prop_of absr of (Const("Pure.eq",_) $ Abs(_,_,_)) $ Abs(_,_,_) => true | _ => false);
+val () = pr ("=THM= abstract_rule " ^ Bool.toString okAB ^ "\n");
+(* Derived rule: compose assume + implies_intr + forall_intr  =>  |- !!A. A ==> A *)
+val cAp = Thm.global_cterm_of pthy (Free ("A", propT));
+val genK = Thm.forall_intr cAp (Thm.implies_intr cAp (Thm.assume cAp));
+val okDR = null (Thm.hyps_of genK) andalso
+   (case Thm.prop_of genK of Const("Pure.all",_) $ Abs(_, _, (Const("Pure.imp",_) $ Bound 0) $ Bound 0) => true | _ => false);
+val () = pr ("=THM= forall_imp " ^ Bool.toString okDR ^ "\n");
 pr "=THM= DONE\n";
 "#
     );
@@ -118,7 +163,10 @@ pr "=THM= DONE\n";
         return;
     };
     assert!(out.contains("=THM= DONE"), "theorem kernel demo did not finish.\n{}", tail(&out, 40));
-    for op in ["reflexive", "symmetric", "transitive", "beta", "imp_refl", "imp_weaken", "mp"] {
+    for op in [
+        "reflexive", "symmetric", "transitive", "beta", "imp_refl", "imp_weaken", "mp",
+        "forall_intr", "forall_elim", "combination", "abstract_rule", "forall_imp",
+    ] {
         assert!(
             out.contains(&format!("=THM= {op} true")),
             "LCF primitive `{op}` did not produce a checked theorem.\n{}",
