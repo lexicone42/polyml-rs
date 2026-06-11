@@ -145,6 +145,13 @@ structure DefnBase = struct
 end;
 
 
+(* the "userdef" thm-attribute is normally registered by DefnBaseCore's
+   export_with_ancestry (which we stubbed); Define tags every definition with
+   it, so register a no-op handler or store_at raises "No such attribute". *)
+val () = (ThmAttribute.register_attribute
+            ("userdef", {localf = fn _ => (), storedf = fn _ => ()}))
+         handle _ => ();
+
 (* variant_of_term: a boolLib fn absent from our checkpoint's boolLib
    (pairTools/pairLib call it unqualified via `open boolLib`); copied verbatim
    from src/1/boolLib.sml:388. Top-level so it's visible inside those units. *)
@@ -287,6 +294,17 @@ structure basicSize = basicSizeTheory;
 val _ = useFilt (HOL ^ "/src/num/termination/TotalDefn");
 val () = need "TotalDefn-Define"
               ((ignore (PolyML.makestring TotalDefn.Define); true) handle _ => false);
+
+(* register `num` in TypeBase so Pmatch recognizes 0/SUC patterns in recursive
+   Define (Pmatch.mk_case: "Pattern 0 is not a constructor" otherwise).
+   gen_datatype_info proves cases/one-one/distinct from num_Axiom. *)
+val () = (let val numinfo = TypeBasePure.gen_datatype_info
+                    {ax = prim_recTheory.num_Axiom,
+                     ind = numTheory.INDUCTION,
+                     case_defs = [arithmeticTheory.num_case_def]}
+          in TypeBase.write numinfo end;
+          pr "NUM_TYPEBASE_OK\n")
+         handle e => pr ("NUM_TYPEBASE_FAIL :: " ^ exnMessage e ^ "\n");
 
 (* smoke: actually DEFINE something. Non-recursive first (no termination),
    then a structural recursion over num. *)
