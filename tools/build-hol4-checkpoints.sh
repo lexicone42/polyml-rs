@@ -336,6 +336,64 @@ build_relation() {
   fi
 }
 
+build_arithmetic() {
+  [ -f /tmp/hol4_relation ] || { echo "arithmetic: need /tmp/hol4_relation first"; build_relation || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_arithmetic ]; then
+    echo "arithmetic: /tmp/hol4_arithmetic exists ($(wc -c </tmp/hol4_arithmetic) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "arithmetic: sweeping arithmeticScript (Stage 4; 2 passes, re-runnable) …"
+  # arithmetic_sweep.sml is re-runnable: CHUNK_HAVE skips saved names; the
+  # header new_theory is neutralized when current=arithmetic. Pass 2 flips
+  # cascades unlocked by pass 1.
+  local base=/tmp/hol4_num
+  for pass in 1 2; do
+    ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 2000000000000 "$base" \
+        < "$SUPPORT/arithmetic_sweep.sml" ) >/tmp/build-arithmetic.log 2>&1
+    [ -f /tmp/hol4_arithmetic ] && base=/tmp/hol4_arithmetic
+  done
+  if [ -f /tmp/hol4_arithmetic ] && grep -qa "ARITHMETIC_SWEEP_DONE" /tmp/build-arithmetic.log; then
+    echo "arithmetic: OK ($(wc -c </tmp/hol4_arithmetic) bytes; $(grep -aoE 'ARITHMETICTHEORY_NAMES [0-9]+' /tmp/build-arithmetic.log | tail -1) names)"
+  else
+    echo "arithmetic: FAILED — see /tmp/build-arithmetic.log"; tail -12 /tmp/build-arithmetic.log; return 1
+  fi
+}
+
+build_numeral() {
+  [ -f /tmp/hol4_arithmetic ] || { echo "numeral: need /tmp/hol4_arithmetic first"; build_arithmetic || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_numeral ]; then
+    echo "numeral: /tmp/hol4_numeral exists ($(wc -c </tmp/hol4_numeral) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "numeral: sweeping numeralScript (Stage 4.5) …"
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 2000000000000 /tmp/hol4_arithmetic \
+      < "$SUPPORT/numeral_sweep.sml" ) >/tmp/build-numeral.log 2>&1
+  if [ -f /tmp/hol4_numeral ] && grep -qa "NUMERAL_SWEEP_DONE" /tmp/build-numeral.log; then
+    echo "numeral: OK ($(wc -c </tmp/hol4_numeral) bytes; $(grep -aoE 'NUMERALTHEORY_NAMES [0-9]+' /tmp/build-numeral.log | tail -1) names)"
+  else
+    echo "numeral: FAILED — see /tmp/build-numeral.log"; tail -12 /tmp/build-numeral.log; return 1
+  fi
+}
+
+build_numsimps() {
+  [ -f /tmp/hol4_numeral ] || { echo "numsimps: need /tmp/hol4_numeral first"; build_numeral || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_numsimps ]; then
+    echo "numsimps: /tmp/hol4_numsimps exists ($(wc -c </tmp/hol4_numsimps) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "numsimps: loading the arith dproc + compute stack (Stage 5) …"
+  # numSyntax/Num_conv + the src/num/arith/src Presburger stack (ARITH_CONV)
+  # + the first-ever computeLib + Arithconv(conv-old)/Boolconv/reduceLib +
+  # Cache + numSimps (ARITH_ss). Smoke-gated; exports /tmp/hol4_numsimps.
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 2000000000000 /tmp/hol4_numeral \
+      < "$SUPPORT/build_numsimps_checkpoint.sml" ) >/tmp/build-numsimps.log 2>&1
+  if [ -f /tmp/hol4_numsimps ] && grep -qa "NUMSIMPS_CHECKPOINT_DONE" /tmp/build-numsimps.log; then
+    echo "numsimps: OK ($(wc -c </tmp/hol4_numsimps) bytes; ARITH_CONV + ARITH_ss + REDUCE_CONV live)"
+  else
+    echo "numsimps: FAILED — see /tmp/build-numsimps.log"; tail -12 /tmp/build-numsimps.log; return 1
+  fi
+}
+
 build_taut() {
   [ -f /tmp/hol4_combin ] || { echo "taut: need /tmp/hol4_combin first"; build_combin || return 1; }
   if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_taut ]; then
@@ -411,6 +469,9 @@ case "$TARGET" in
   order)   build_order;;
   prim)    build_prim;;
   relation) build_relation;;
+  arithmetic) build_arithmetic;;
+  numeral) build_numeral;;
+  numsimps) build_numsimps;;
   taut)    build_taut;;
   meson)   build_meson;;
   metis)   build_metis;;
