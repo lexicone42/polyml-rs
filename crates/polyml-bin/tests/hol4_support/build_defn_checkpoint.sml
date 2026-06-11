@@ -306,6 +306,13 @@ val () = (let val numinfo = TypeBasePure.gen_datatype_info
           pr "NUM_TYPEBASE_OK\n")
          handle e => pr ("NUM_TYPEBASE_FAIL :: " ^ exnMessage e ^ "\n");
 
+(* Defn's SUC_TO_NUMERAL_DEFN_CONV_hook (normally set by numLib) normalises
+   SUC-recursion eqns to numeral form; it's cosmetic, so identity (ALL_CONV)
+   keeps Define correct without pulling in numLib. *)
+val () = (Defn.SUC_TO_NUMERAL_DEFN_CONV_hook := Conv.ALL_CONV;
+          pr "SUC_HOOK_OK\n")
+         handle e => pr ("SUC_HOOK_FAIL :: " ^ exnMessage e ^ "\n");
+
 (* smoke: actually DEFINE something. Non-recursive first (no termination),
    then a structural recursion over num. *)
 val smoke = ref true;
