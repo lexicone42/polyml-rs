@@ -448,6 +448,25 @@ build_defn() {
   fi
 }
 
+build_numpair() {
+  [ -f /tmp/hol4_defn ] || { echo "numpair: need /tmp/hol4_defn first"; build_defn || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_numpair ]; then
+    echo "numpair: /tmp/hol4_numpair exists ($(wc -c </tmp/hol4_numpair) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "numpair: sweeping numpairScript (Stage 6c — the N×N→N bijection) …"
+  # numpairScript on /tmp/hol4_defn: pair registered in TypeBase, invtri0 via
+  # tDefine + measure-FST termination, the invtri->nfst_npair/nsnd_npair
+  # bijection chain spliced from the fleet-verified proof (DECIDE-based).
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 2000000000000 /tmp/hol4_defn \
+      < "$SUPPORT/numpair_sweep.sml" ) >/tmp/build-numpair.log 2>&1
+  if [ -f /tmp/hol4_numpair ] && grep -qa "NUMPAIR_SWEEP_DONE" /tmp/build-numpair.log; then
+    echo "numpair: OK ($(wc -c </tmp/hol4_numpair) bytes; $(grep -aoE 'NUMPAIRTHEORY_NAMES [0-9]+' /tmp/build-numpair.log | tail -1) names; nfst_npair/nsnd_npair present)"
+  else
+    echo "numpair: FAILED — see /tmp/build-numpair.log"; tail -12 /tmp/build-numpair.log; return 1
+  fi
+}
+
 build_taut() {
   [ -f /tmp/hol4_combin ] || { echo "taut: need /tmp/hol4_combin first"; build_combin || return 1; }
   if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_taut ]; then
@@ -528,6 +547,7 @@ case "$TARGET" in
   numsimps) build_numsimps;;
   pair)    build_pair;;
   defn)    build_defn;;
+  numpair) build_numpair;;
   taut)    build_taut;;
   meson)   build_meson;;
   metis)   build_metis;;
