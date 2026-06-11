@@ -44,6 +44,10 @@ structure boolLib = struct
   fun new_definition (n, tm) =
       Theory.Definition.new_definition
         (hd (String.fields (fn c => c = #"[") n), tm)
+  (* pairScript: val PAIR = new_specification("PAIR[simp]", ...) *)
+  fun new_specification (n, vs, th) =
+      Definition.new_specification
+        (hd (String.fields (fn c => c = #"[") n), vs, th)
 end;
 
 structure BasicProvers = struct
@@ -134,6 +138,7 @@ fun writeFile (path, s) =
 val () = writeFile ("/tmp/asweep_rebind.sml",
   String.concatWith "\n" [
     "val new_definition = boolLib.new_definition;",
+    "val new_specification = boolLib.new_specification;",
     "val save_thm = boolLib.save_thm;",
     "val SRW_TAC = BasicProvers.SRW_TAC;",
     "val srw_tac = BasicProvers.SRW_TAC;",
