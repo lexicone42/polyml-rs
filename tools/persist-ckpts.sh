@@ -25,7 +25,7 @@ ARTIFACTS=(
   basis_loaded arbint_image
   hol4_kernel hol4_theory hol4_parse hol4_bool hol4_tactic hol4_rewrite
   hol4_marker hol4_combin hol4_simp hol4_taut hol4_meson hol4_metis
-  hol4_num hol4_arith hol4_order hol4_prim_rec hol4_relation hol4_arithmetic hol4_numeral hol4_numsimps hol4_pair hol4_sum hol4_one hol4_option hol4_defn hol4_numpair hol4_ind_type
+  hol4_num hol4_arith hol4_order hol4_prim_rec hol4_relation hol4_arithmetic hol4_numeral hol4_numsimps hol4_pair hol4_sum hol4_one hol4_option hol4_defn hol4_numpair hol4_ind_type hol4_datatype
 )
 
 migrated=0; linked=0; kept=0

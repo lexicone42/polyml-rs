@@ -47,12 +47,61 @@ structure numLib = struct
   val REDUCE_TAC = Tactic.CONV_TAC reduceLib.REDUCE_CONV
   fun DECIDE tm = ARITH_PROVE tm
                   handle _ => tautLib.TAUT_PROVE tm
+  (* numLib re-exports numSyntax — EnumType opens numLib and uses these
+     unqualified (num type, term_of_int, mk_less/leq, mk_numeral). *)
+  val num = numSyntax.num
+  val term_of_int = numSyntax.term_of_int
+  val mk_less = numSyntax.mk_less
+  val mk_leq = numSyntax.mk_leq
+  val mk_numeral = numSyntax.mk_numeral
+  val dest_numeral = numSyntax.dest_numeral
+  val int_of_term = numSyntax.int_of_term
+  val zero_tm = numSyntax.zero_tm
+  val dest_less = numSyntax.dest_less
 end;
+
+(* ind_types' load-time code calls TypeBase.induction_of for sum$sum (and the
+   Datatype package needs sum/option registered for sum-of-products encodings).
+   Register them like num/pair were. *)
+fun regTy tag rcd = (TypeBase.write (TypeBasePure.gen_datatype_info rcd);
+                     pr ("REGTY_OK " ^ tag ^ "\n"))
+                    handle e => pr ("REGTY_FAIL " ^ tag ^ " :: " ^ exnMessage e ^ "\n");
+val () = regTy "sum" {ax = sumTheory.sum_Axiom, ind = sumTheory.sum_INDUCT,
+                      case_defs = [sumTheory.sum_case_def]};
+val () = regTy "option" {ax = optionTheory.option_Axiom,
+                         ind = optionTheory.option_induction,
+                         case_defs = [optionTheory.option_case_def]};
 val () = pr "PRELUDE_OK\n";
 
-(* per-module post-filter patches (grammarDB -> current_grammars is the usual
-   one; filled in as failures surface). *)
-val modPatches : (string * (string * string) list) list = [];
+(* per-module post-filter patches. grammarDB returns NONE for ancestor
+   segments -> the `val SOME g = grammarDB{..}` bindings raise Bind; current
+   grammars are the right ones on this image. *)
+val modPatches : (string * (string * string) list) list =
+  [("ind_types",
+    [("val SOME ind_type_grammars = grammarDB { thyname = \"ind_type\" }",
+      "val ind_type_grammars = Parse.current_grammars ()"),
+     ("val SOME ind_type_grammars = grammarDB {thyname=\"ind_type\"}",
+      "val ind_type_grammars = Parse.current_grammars ()")]),
+   ("RecordType",
+    [("val SOME bool_grammars = grammarDB { thyname = \"bool\" }",
+      "val bool_grammars = Parse.current_grammars ()"),
+     ("val SOME bool_grammars = grammarDB {thyname=\"bool\"}",
+      "val bool_grammars = Parse.current_grammars ()")]),
+   ("EnumType",
+    [("val SOME arithmetic_grammars = Parse.grammarDB { thyname = \"arithmetic\" }",
+      "val arithmetic_grammars = Parse.current_grammars ()"),
+     ("val SOME arithmetic_grammars = Parse.grammarDB {thyname=\"arithmetic\"}",
+      "val arithmetic_grammars = Parse.current_grammars ()")]),
+   ("Datatype",
+    (* the baked computeLib.write_datatype_info was compiled against the OLD
+       stub TypeBasePure, so it can't take the REAL tyinfo Datatype produces
+       (type mismatch). It only registers the datatype into the EVAL compset
+       (so EVAL reduces constructors) — drop it; TypeBase.export still runs. *)
+    [("app computeLib.write_datatype_info tyinfos", "()"),
+     ("val SOME arithmetic_grammars = Parse.grammarDB { thyname = \"arithmetic\" }",
+      "val arithmetic_grammars = Parse.current_grammars ()"),
+     ("val SOME arithmetic_grammars = Parse.grammarDB {thyname=\"arithmetic\"}",
+      "val arithmetic_grammars = Parse.current_grammars ()")])];
 
 fun useFilt path =
     let val name = List.last (String.fields (fn c => c = #"/") path)

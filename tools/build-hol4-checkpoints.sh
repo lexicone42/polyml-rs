@@ -467,6 +467,38 @@ build_numpair() {
   fi
 }
 
+build_ind_type() {
+  [ -f /tmp/hol4_numpair ] || { echo "ind_type: need /tmp/hol4_numpair first"; build_numpair || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_ind_type ]; then
+    echo "ind_type: /tmp/hol4_ind_type exists ($(wc -c </tmp/hol4_ind_type) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "ind_type: sweeping ind_typeScript (Stage 7 — JRH inductive types) …"
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 3000000000000 /tmp/hol4_numpair \
+      < "$SUPPORT/ind_type_sweep.sml" ) >/tmp/build-ind_type.log 2>&1
+  if [ -f /tmp/hol4_ind_type ] && grep -qa "INDTYPE_SWEEP_DONE" /tmp/build-ind_type.log; then
+    echo "ind_type: OK ($(wc -c </tmp/hol4_ind_type) bytes; $(grep -aoE 'INDTYPETHEORY_NAMES [0-9]+' /tmp/build-ind_type.log | tail -1) names; CONSTR_REC present)"
+  else
+    echo "ind_type: FAILED — see /tmp/build-ind_type.log"; tail -12 /tmp/build-ind_type.log; return 1
+  fi
+}
+
+build_datatype_pkg() {
+  [ -f /tmp/hol4_ind_type ] || { echo "datatype: need /tmp/hol4_ind_type first"; build_ind_type || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_datatype ]; then
+    echo "datatype: /tmp/hol4_datatype exists ($(wc -c </tmp/hol4_datatype) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "datatype: assembling the Datatype package (Stage 8 — FINAL) …"
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 600000000000 /tmp/hol4_ind_type \
+      < "$SUPPORT/build_datatype_checkpoint.sml" ) >/tmp/build-datatype.log 2>&1
+  if [ -f /tmp/hol4_datatype ] && grep -qa "DATATYPE_CHECKPOINT_DONE" /tmp/build-datatype.log; then
+    echo "datatype: OK ($(wc -c </tmp/hol4_datatype) bytes; Datatype runs — recursive types + induction + recursion)"
+  else
+    echo "datatype: FAILED — see /tmp/build-datatype.log"; tail -12 /tmp/build-datatype.log; return 1
+  fi
+}
+
 build_taut() {
   [ -f /tmp/hol4_combin ] || { echo "taut: need /tmp/hol4_combin first"; build_combin || return 1; }
   if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_taut ]; then
@@ -548,6 +580,8 @@ case "$TARGET" in
   pair)    build_pair;;
   defn)    build_defn;;
   numpair) build_numpair;;
+  ind_type) build_ind_type;;
+  datatype) build_datatype_pkg;;
   taut)    build_taut;;
   meson)   build_meson;;
   metis)   build_metis;;
