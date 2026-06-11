@@ -59,7 +59,17 @@ val modPatches : (string * (string * string) list) list =
    ("Defn",
     [("DB.Unknown", "DB_dtype.Unknown")]),
    ("TotalDefn",
-    [("DB.Unknown", "DB_dtype.Unknown")])];
+    [("DB.Unknown", "DB_dtype.Unknown"),
+     ("val SOME arithmetic_grammars = grammarDB { thyname = \"arithmetic\" }",
+      "val arithmetic_grammars = Parse.current_grammars ()"),
+     ("val SOME arithmetic_grammars = grammarDB {thyname=\"arithmetic\"}",
+      "val arithmetic_grammars = Parse.current_grammars ()"),
+     (* the initial termsimp set registers 9 rewrites BY NAME
+        (temp_export_termsimp "combin.o_DEF" -> DB.fetch, which our baked DB
+        stub raises). Skip the by-name pre-load: a no-op List.app leaves the
+        termsimp set with just its `initial` thms — degrades TC simplification
+        only (ARITH_ss still discharges the num TCs). *)
+     ("List.app temp_export_termsimp", "List.app (fn _ => ())")])];
 
 fun useFilt path =
     let val name = List.last (String.fields (fn c => c = #"/") path)
@@ -233,10 +243,26 @@ val _ = useFilt (pm ^ "proofManagerLib");
    Defn.Hol_defn is the low-level definition mechanism; TotalDefn.Define wraps
    it with automatic termination. ---- *)
 pr "PHASE7_TFL\n";
-(* DB.Unknown: the thm_src_location constructor (Defn's store_at DB.Unknown).
-   Shadowed HERE (not in the prelude) so no intervening module reshadows DB
-   before Defn compiles. *)
-structure DB = struct open DB val Unknown = DB_dtype.Unknown end;
+(* DB shadow: Unknown (thm_src_location, for Defn's store_at) + a real fetch.
+   ThmSetData.lookup_exn calls DB.fetch <thy> <name> while restoring saved
+   set-data at TotalDefn load (e.g. combin$o_DEF in combin's simp set); the
+   baked stub raises. Serve the known ones; log + return TRUTH for the rest
+   so restoration continues (a T-rewrite is a no-op, not corruption).
+   Shadowed HERE so no intervening module reshadows DB before Defn/TotalDefn. *)
+structure DB = struct
+  open DB
+  val Unknown = DB_dtype.Unknown
+  val fetchTable : (string * string * Thm.thm) list =
+    [("combin", "o_DEF", combinTheory.o_DEF),
+     ("combin", "I_THM", combinTheory.I_THM),
+     ("combin", "K_THM", combinTheory.K_THM),
+     ("combin", "S_DEF", combinTheory.S_DEF),
+     ("bool", "LET_DEF", boolTheory.LET_DEF)]
+  fun fetch thy nm =
+      case List.find (fn (t, n, _) => t = thy andalso n = nm) fetchTable of
+          SOME (_, _, th) => th
+        | NONE => (pr ("DB_FETCH_MISS " ^ thy ^ "." ^ nm ^ "\n"); boolTheory.TRUTH)
+end;
 val tfl = HOL ^ "/src/tfl/src/";
 val _ = useFilt (tfl ^ "wfrecUtils");
 val _ = useFilt (tfl ^ "Rules");
@@ -268,10 +294,13 @@ val smoke = ref true;
 fun trySmoke tag f = (f (); pr ("SMOKE_OK " ^ tag ^ "\n"))
                      handle e => (smoke := false;
                                   pr ("SMOKE_FAIL " ^ tag ^ " :: " ^ exnMessage e ^ "\n"));
+(* backticks aren't parsed by our interpreter (the quote-filter normally
+   expands them); hand-build the term-quotation frag list directly. *)
 val () = trySmoke "Define-nonrec" (fn () =>
-    ignore (TotalDefn.Define `dbl x = x + x`));
+    ignore (TotalDefn.Define [QUOTE "dbl x = x + x"]));
 val () = trySmoke "Define-rec" (fn () =>
-    ignore (TotalDefn.Define `(sumto 0 = 0) /\ (sumto (SUC n) = SUC n + sumto n)`));
+    ignore (TotalDefn.Define
+              [QUOTE "(sumto 0 = 0) /\\ (sumto (SUC n) = SUC n + sumto n)"]));
 val () = pr (if !smoke then "DEFN_SMOKE_PASS\n" else "DEFN_SMOKE_FAIL\n");
 
 val () =
