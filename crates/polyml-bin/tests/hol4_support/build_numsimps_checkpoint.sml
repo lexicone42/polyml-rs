@@ -70,7 +70,13 @@ val modPatches =
     [("val SOME arithmetic_grammars = grammarDB {thyname=\"arithmetic\"}",
       "val arithmetic_grammars = Parse.current_grammars ()"),
      ("val SOME arithmetic_grammars = grammarDB { thyname = \"arithmetic\" }",
-      "val arithmetic_grammars = Parse.current_grammars ()")]),
+      "val arithmetic_grammars = Parse.current_grammars ()"),
+     (* BasicProvers shim has no srw_ss fragment registry; registering
+        numeral frags is meaningless until real BasicProvers (Stage 3) *)
+     ("BasicProvers.logged_addfrags {thyname = \"numeral\"}",
+      "(fn (_ : simpLib.ssfrag list) => ())"),
+     ("BasicProvers.logged_addfrags { thyname = \"numeral\" }",
+      "(fn (_ : simpLib.ssfrag list) => ())")]),
    ("Arithconv",
     (* filter emits: ... $ ( valOf $ grammarDB { thyname = "arithmetic" } ) *)
     [("( valOf $ grammarDB { thyname = \"arithmetic\" } )",

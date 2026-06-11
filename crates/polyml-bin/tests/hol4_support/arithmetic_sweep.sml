@@ -224,7 +224,11 @@ val chunkPatches =
    (* pass-1's set_fixity chunks are baked into the image grammar, so the
       prefix-style definitions can't reparse — write them infix (same defs). *)
    ("DIV_def", [("DIV m n =", "m DIV n =")]),
-   ("MOD_def", [("MOD m n =", "m MOD n =")])];
+   ("MOD_def", [("MOD m n =", "m MOD n =")]),
+   (* markerLib stub lacks RM_ALL_ABBREVS_TAC; leftover Abbrev assumptions
+      are benign here. Root of the whole MODEQ_* family (numSimps' MOD_ss). *)
+   ("MODEQ_NONZERO_MODEQUALITY",
+    [("markerLib.RM_ALL_ABBREVS_TAC", "Tactical.ALL_TAC")])];
 
 (* verified hand-splices (plain SML, fleet-engineered) override their chunk. *)
 val SPLICEDIR = HOL ^ "/../../crates/polyml-bin/tests/hol4_support/arith_splices";
