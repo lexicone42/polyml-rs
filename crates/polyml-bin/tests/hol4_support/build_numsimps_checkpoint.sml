@@ -98,8 +98,11 @@ val modPatches =
      ("numeral_MAX , numeral_MIN , numeral_div2 ,", "numeral_div2 ,"),
      ("TWO_EXP_THM, numeral_texp_help,", "numeral_texp_help,"),
      ("TWO_EXP_THM , numeral_texp_help ,", "numeral_texp_help ,"),
-     (", enumeral_mult]", "]"),
-     (", enumeral_mult ]", " ]")])];
+     (* own-line entry: swap for a harmless duplicate (compset add is
+        set-like) instead of comma surgery *)
+     ("enumeral_mult", "numeral_distrib"),
+     (* Defn is TFL (Stage 6); const_eq_ref tuning is a no-op until then *)
+     ("val _ = Defn.const_eq_ref := NEQ_CONV", "val _ = ()")])];
 fun useFiltered tag src =
     let val txt0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()} src
         val txt = case List.find (fn (n, _) => n = tag) modPatches of
