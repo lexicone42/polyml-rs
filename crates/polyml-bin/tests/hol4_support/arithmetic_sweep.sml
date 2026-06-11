@@ -158,6 +158,20 @@ val () = (PolyML.use ((HOL ^ "/../../crates/polyml-bin/tests/hol4_support")
           pr "TC_BLOCK_LOADED\n")
          handle e => pr ("TC_BLOCK_FAIL :: " ^ exnMessage e ^ "\n");
 
+(* MIN_0/MAX_0 live inside the giant one-line-header local block at
+   arithmeticScript:3860 (`local fun Cases_on ... in`) which the chunker
+   merges into one always-failing LOCALBLOCK — load the fleet-verified
+   splices directly instead (they only need MIN_DEF/MAX_DEF, both banked). *)
+fun loadFrag name =
+    if List.exists (fn (n, _) => n = name)
+                   (Theory.current_theorems () @ Theory.current_definitions ())
+    then pr ("FRAG_HAVE " ^ name ^ "\n")
+    else (PolyML.use (HOL ^ "/../../crates/polyml-bin/tests/hol4_support/arith_splices/"
+                      ^ name ^ ".sml");
+          pr ("FRAG_OK " ^ name ^ "\n"))
+         handle e => pr ("FRAG_FAIL " ^ name ^ " :: " ^ exnMessage e ^ "\n");
+val () = List.app loadFrag ["MIN_0", "MAX_0"];
+
 val lines =
     String.fields (fn c => c = #"\n")
                   (readFile (HOL ^ "/src/num/theories/arithmeticScript.sml"));
