@@ -175,6 +175,23 @@ structure TypeBase = struct
   fun register_update_fn (_ : TypeBasePure.tyinfo -> TypeBasePure.tyinfo) = ()
 end;
 
+(* DB shadow: numSimps' arithmetic_rewrites does 40+ DB.fetch "arithmetic"
+   calls at load; the baked DB stub has no ancestor data. The sweeps now
+   bake a dbTable into each synthesized theory structure — serve from it
+   (metis-build precedent, generalized). *)
+structure DB = struct
+  open DB
+  fun fetch thy s =
+      let val tbl = case thy of
+                        "arithmetic" => arithmeticTheory.dbTable
+                      | "numeral" => numeralTheory.dbTable
+                      | _ => []
+      in case List.find (fn (n, _) => n = s) tbl of
+             SOME (_, th) => th
+           | NONE => DB.fetch thy s
+      end
+end;
+
 val loaded = ref ([] : string list);
 fun isLoaded m = List.exists (fn x => x = m) (!loaded);
 fun tryLoad m =

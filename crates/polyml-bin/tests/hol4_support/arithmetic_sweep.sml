@@ -378,6 +378,9 @@ val () =
        app (fn (n, _) =>
                TextIO.output (os, "  val " ^ n ^ " = bt \"" ^ n ^ "\";\n"))
            (!btbl);
+       (* name->thm table so later builds can serve DB.fetch "arithmetic"
+          (numSimps' arithmetic_rewrites list does 40+ such fetches) *)
+       TextIO.output (os, "  val dbTable : (string * Thm.thm) list = !btbl;\n");
        TextIO.output (os, "end;\n"); TextIO.closeOut os
     end;
 val () = (PolyML.use "/tmp/arithmeticTheory_gen.sml"; pr "STRUCT_OK\n")

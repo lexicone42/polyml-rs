@@ -353,6 +353,8 @@ val () =
        app (fn (n, _) =>
                TextIO.output (os, "  val " ^ n ^ " = bt \"" ^ n ^ "\";\n"))
            (!btbl);
+       (* name->thm table for later DB.fetch "numeral" serving *)
+       TextIO.output (os, "  val dbTable : (string * Thm.thm) list = !btbl;\n");
        TextIO.output (os, "end;\n"); TextIO.closeOut os
     end;
 val () = (PolyML.use "/tmp/numeralTheory_gen.sml"; pr "STRUCT_OK\n")
