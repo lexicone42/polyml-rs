@@ -191,3 +191,27 @@ fn verified_compiler() {
     assert!(out.contains("EVAL_OK"), "EVAL demo (machine run = source eval) failed:\n{out}");
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
+
+#[test]
+#[ignore = "needs /tmp/hol4_datatype (tools/build-hol4-checkpoints.sh datatype)"]
+fn verified_bst() {
+    // Data-structure verification with an INVARIANT: a binary search tree
+    // (tree = Leaf | Node tree num tree) with insert/member. Prove BOTH
+    //   member_insert : |- !t x y. member x (insert y t) <=> (x=y) \/ member x t
+    //                   (membership is correct: insert adds exactly y)
+    //   insert_bst    : |- !t x. bst t ==> bst (insert x t)
+    //                   (insert PRESERVES the BST ordering invariant)
+    // both zero-hypothesis, by structural tree induction. Then EVAL membership
+    // on a concrete tree (member 3 -> T, member 4 -> F). Engineered by a 3-seat
+    // fleet (wf_6bef35bc-140); all three seats verified independently.
+    let Some(image) = ckpt() else { return };
+    let driver = std::fs::read_to_string(common::support_file("verified_bst.sml"))
+        .expect("read verified_bst.sml");
+    let (out, _) = run_image_env(&image, &driver, 200_000_000_000, &[]).expect("run");
+    assert!(out.contains("OK member_insert [0 hyps]"), "membership-correctness failed:\n{out}");
+    assert!(out.contains("OK insert_bst [0 hyps]"), "BST-invariant preservation failed:\n{out}");
+    // membership actually computes on a concrete tree (kernel-checked)
+    assert!(out.contains("EVAL_OK"), "EVAL of member on a concrete tree failed:\n{out}");
+    assert!(out.contains("BST_DONE"), "verification incomplete:\n{out}");
+    assert!(!out.contains("Exception-"), "exception:\n{out}");
+}

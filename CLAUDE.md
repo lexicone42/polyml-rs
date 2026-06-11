@@ -797,6 +797,16 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
     `exec_capp` is false; exec needs `tDefine` with `measure (code_size o FST)`
     (Define's guesser is defeated by the shape-changing stack); case splits via
     `STRUCT_CASES_TAC` over the TypeBase nchotomy theorems.
+  - **Verified BST** (`verified_bst.sml`) — data-structure verification with an
+    INVARIANT: `tree = Leaf | Node tree num tree` with insert/member. Proves
+    `member_insert` (membership is correct — insert adds exactly y) and
+    `insert_bst : |- !t x. bst t ==> bst (insert x t)` (insert PRESERVES the BST
+    ordering invariant), both 0-hyp, by tree induction + COND_CASES + the
+    trichotomy facts. Pitfall: STRIP_TAC strips `bst (Node ..)` into the
+    assumptions as a FOLDED term (doesn't expand defs) — use `FULL_SIMP_TAC`
+    with the defs + the `all_lt_insert`/`all_gt_insert` push-through lemmas, then
+    close the residual from the IH by `METIS_TAC[]` (EMPTY set — feeding the
+    iff-shaped lemmas to METIS explodes its search).
   These proofs were each engineered by a 3-seat ultracode fleet (diverse
   automation: explicit-witness / metis-assisted / simp-assisted); all seats
   verifying independently is the correctness signal, and the most robust (least
