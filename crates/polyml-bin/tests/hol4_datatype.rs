@@ -160,6 +160,11 @@ fn verified_euclid_gcd() {
         "gcd greatest-common-divisor (universal property) failed:\n{out}"
     );
     assert!(out.contains("SAVED gcd_greatest"), "gcd_greatest not saved:\n{out}");
+    // commutativity proved ALGEBRAICALLY from the characterisation (no induction)
+    assert!(
+        out.contains("OK gcd_comm"),
+        "gcd commutativity (via divides antisymmetry) failed:\n{out}"
+    );
     assert!(out.contains("ALL_DONE"), "verification incomplete:\n{out}");
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }

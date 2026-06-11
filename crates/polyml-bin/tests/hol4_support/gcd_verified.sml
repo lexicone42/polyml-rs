@@ -21,6 +21,11 @@
        Together they fully characterise gcd as the greatest common divisor in
        the divisibility order. Both are ZERO-hypothesis theorems — genuine
        elementary number theory.
+     - From that characterisation, COMMUTATIVITY follows ALGEBRAICALLY (no
+       induction): gcd a b and gcd b a each divide the other, so antisymmetry
+       of `divides` over the naturals gives
+         gcd_comm : |- !a b. gcd a b = gcd b a
+       — demonstrating the characterised gcd is now a reusable algebraic object.
 
    The two proof chains (ring1 -> divides_lin -> gcd_divides; then
    divides_mult/divides_sub/mod_decompose -> divides_mod -> gcd_greatest) were
@@ -254,4 +259,41 @@ val () = pr "OK gcd_greatest\n";
 val () = pr (Parse.thm_to_string gcd_greatest ^ "\n");
 val _ = Theory.save_thm("gcd_greatest", gcd_greatest);
 val () = pr "SAVED gcd_greatest\n";
+
+(* ===================================================================== *)
+(* === gcd_comm: COMMUTATIVITY, proved ALGEBRAICALLY from the         === *)
+(* === characterisation — no induction. With gcd_divides + gcd_greatest=== *)
+(* === fixing gcd uniquely (up to the divisibility order), gcd a b and === *)
+(* === gcd b a each divide the other, so antisymmetry of `divides`     === *)
+(* === over the naturals gives equality. Demonstrates the characterised=== *)
+(* === gcd is now a reusable algebraic object.                         === *)
+(* ===================================================================== *)
+
+(* divides antisymmetry: a|b /\ b|a ==> a=b. a=0: b=0*k=0. a<>0: a=a*(k*k')
+   cancels to k*k'=1, so k=1, hence b=a*k=a. METIS over a SMALL set — NB do
+   NOT add MULT_COMM (it explodes the search; the chain is commutativity-free). *)
+val divides_antisym = Tactical.prove(
+  q "!a b. divides a b /\\ divides b a ==> (a = b)",
+  Rewrite.REWRITE_TAC[DIV] THEN
+  Tactical.REPEAT Tactic.STRIP_TAC THEN
+  Tactic.ASM_CASES_TAC (q "a = 0") THENL
+  [ metisLib.METIS_TAC[MULT_CLAUSES],
+    metisLib.METIS_TAC[MULT_EQ_1, MULT_ASSOC, EQ_MULT_LCANCEL, MULT_RIGHT_1] ]);
+val () = pr "OK divides_antisym\n";
+
+(* gcd a b and gcd b a each divide the other (gcd_divides + gcd_greatest),
+   so they are equal by antisymmetry — an algebraic proof, no recursion. *)
+val gcd_comm = Tactical.prove(
+  q "!a b. gcd a b = gcd b a",
+  Tactical.REPEAT Tactic.GEN_TAC THEN
+  Tactic.MATCH_MP_TAC divides_antisym THEN
+  Tactic.CONJ_TAC THENL
+  [ Tactic.MATCH_MP_TAC gcd_greatest THEN
+    Rewrite.REWRITE_TAC[Q.SPECL [[QUOTE "a"], [QUOTE "b"]] gcd_divides],
+    Tactic.MATCH_MP_TAC gcd_greatest THEN
+    Rewrite.REWRITE_TAC[Q.SPECL [[QUOTE "b"], [QUOTE "a"]] gcd_divides] ]);
+val () = pr "OK gcd_comm\n";
+val () = pr (Parse.thm_to_string gcd_comm ^ "\n");
+val _ = Theory.save_thm("gcd_comm", gcd_comm);
+val () = pr "SAVED gcd_comm\n";
 val () = pr "ALL_DONE\n";
