@@ -42,7 +42,24 @@ val modPatches : (string * (string * string) list) list =
    ("pairLib",
     (* filter spaces the list: `[ o_UNCURRY_R , C_UNCURRY_L , ... ]` *)
     [("[ o_UNCURRY_R , C_UNCURRY_L , S_UNCURRY_R , FORALL_UNCURRY ]",
-      "([] : Thm.thm list)")])];
+      "([] : Thm.thm list)")]),
+   (* Extract: grammarDB returns NONE for ancestor segments -> valOf raises
+      Option. Current grammars ARE bool's on this image. *)
+   ("Extract",
+    [("valOf $ grammarDB { thyname = \"bool\" }", "Parse.current_grammars ()"),
+     ("valOf $ grammarDB {thyname=\"bool\"}", "Parse.current_grammars ()")]),
+   (* proofManagerLib installs an LSP dump hook absent from our boolLib;
+      the hook is cosmetic (proof-state dumping). *)
+   ("proofManagerLib",
+    [("val _ = boolLib.dump_setup_hook := ( fn g => ignore ( set_goal g ) )",
+      "val _ = ()"),
+     ("boolLib.dump_setup_hook := (fn g => ignore (set_goal g))", "()")]),
+   (* Defn/TotalDefn: DB.Unknown (thm_src_location) — our baked DB shadow
+      lacks it; reference DB_dtype.Unknown directly. *)
+   ("Defn",
+    [("DB.Unknown", "DB_dtype.Unknown")]),
+   ("TotalDefn",
+    [("DB.Unknown", "DB_dtype.Unknown")])];
 
 fun useFilt path =
     let val name = List.last (String.fields (fn c => c = #"/") path)
@@ -70,22 +87,53 @@ fun useFilt path =
    stub the rest. (TypeBasePure is the REAL one — loaded in Phase 1.) ---- *)
 pr "PHASE0_PRELUDE\n";
 structure DefnBase = struct
-  (* the small set TFL/TotalDefn actually call; the heavy registry/congruence
-     machinery (read_congs/write_congs/...) is stubbed since Define's core
-     path on simple defns doesn't consult it. *)
-  fun register_indn (_ : Thm.thm * Term.term list) : unit = ()
+  (* the `defn` datatype IS exported here (Defn.sml does `open DefnBase` for
+     the constructors; Defn.sig has `type defn = DefnBase.defn`). Copied
+     verbatim from src/coretypes/DefnBase.sml:14. *)
+  type term = Term.term
+  type thm = Thm.thm
+  datatype defn
+     = ABBREV  of {eqn:thm, bind:string}
+     | PRIMREC of {eqs:thm, ind:thm, bind:string}
+     | NONREC  of {eqs:thm, ind:thm, SV:term list, stem:string}
+     | STDREC  of {eqs:thm list, ind:thm, R:term, SV:term list, stem:string}
+     | MUTREC  of {eqs:thm list, ind:thm, R:term, SV:term list,
+                   stem:string, union:defn}
+     | NESTREC of {eqs:thm list, ind:thm, R:term, SV:term list,
+                   stem:string, aux:defn}
+     | TAILREC of {eqs:thm list, ind:thm, R:term, SV:term list, stem:string}
+  type kname = {Thy:string, Name:string}
+  (* the small set TFL/TotalDefn CALL; the heavy registry/congruence machinery
+     (read_congs/write_congs/...) is stubbed — Define's core path on simple
+     defns doesn't consult it (just registration side effects). *)
   val tupled_suffix = "_tupled"
-  fun delete_support (_ : Term.term list) : unit = ()
-  fun constants_of_defn (tm : Term.term) : Term.term list =
-      HolKernel.find_terms Term.is_const tm
+  fun register_indn (_ : thm * kname list) : unit = ()
+  fun delete_support (_ : defn) (_ : term list) (_ : term list) : unit = ()
+  fun constants_of_defn (_ : thm) : kname list = []
   (* registration no-ops referenced by sum/option/basicSize Scripts *)
-  fun store (_ : string * Thm.thm * Thm.thm) : unit = ()
-  fun read_congs () : Thm.thm list = []
-  fun write_congs (_ : Thm.thm list) : unit = ()
-  fun add_cong (_ : Thm.thm) : unit = ()
+  fun store (_ : string * thm * thm) : unit = ()
+  fun read_congs () : thm list = []
+  fun write_congs (_ : thm list) : unit = ()
+  fun add_cong (_ : thm) : unit = ()
   fun register_defn _ : unit = ()
   fun export_cong (_ : string) : unit = ()
+  (* elim_triv_literal_CONV + const_eq_ref: copied verbatim from
+     src/coretypes/DefnBase.sml:233 (Defn.sml uses it via `open DefnBase`).
+     boolLib re-exports TRY_CONV/REWR_CONV/THENC/BETA_CONV/RATOR_CONV/
+     RAND_CONV/PURE_ONCE_REWRITE_CONV. *)
+  val const_eq_ref = ref Conv.NO_CONV
+  local open boolLib infix THENC in
+  fun elim_triv_literal_CONV tm =
+     let val const_eq_conv = !const_eq_ref
+         val cnv = TRY_CONV (REWR_CONV boolTheory.literal_case_THM THENC BETA_CONV)
+                   THENC
+                   RATOR_CONV (RATOR_CONV (RAND_CONV const_eq_conv))
+                   THENC
+                   PURE_ONCE_REWRITE_CONV [boolTheory.COND_CLAUSES]
+     in cnv tm end
+  end
 end;
+
 
 (* variant_of_term: a boolLib fn absent from our checkpoint's boolLib
    (pairTools/pairLib call it unqualified via `open boolLib`); copied verbatim
@@ -111,6 +159,21 @@ structure BasicProvers = struct
      tracks none, so an empty frag (pairSimps' PAIR_ss becomes empty — fine,
      the structural pair rewrites live in pairTheory regardless). *)
   fun thy_ssfrag (_ : string) : simpLib.ssfrag = simpLib.rewrites []
+  (* PRIM_STP_TAC ss finisher: simp-then-prove. TotalDefn uses it (after a
+     SIMP_CONV) to discharge termination conditions; ASM_SIMP + the finisher
+     is enough for the simple TCs (n < SUC n etc.) ARITH_ss reduces. *)
+  fun PRIM_STP_TAC (ss : simpLib.simpset) (finisher : Abbrev.tactic)
+                 : Abbrev.tactic =
+      Tactical.THEN (simpLib.ASM_SIMP_TAC ss [],
+                     Tactical.ORELSE (finisher, Tactical.ALL_TAC))
+end;
+
+(* tailrecLib: only TotalDefn.tailrecDefine (the [tailrecursive] attribute
+   path) calls gen_tailrec_define; normal Define never does. Stub it. *)
+structure tailrecLib = struct
+  fun gen_tailrec_define
+        (_ : {name:string, def:Term.term, loc:DB_dtype.thm_src_location})
+        : Thm.thm = raise Fail "tailrecLib stub (no [tailrecursive] support)"
 end;
 val () = pr "PRELUDE_OK\n";
 
@@ -150,6 +213,7 @@ val _ = (PolyML.use (HOL ^ "/../../crates/polyml-bin/tests/hol4_support/basicsiz
    Defn/TotalDefn need). ---- *)
 pr "PHASE3_SYNTAX\n";
 val _ = useFilt (ct ^ "sumSyntax");
+val _ = useFilt (HOL ^ "/src/combin/combinSyntax");  (* Defn uses it *)
 val _ = useFilt (HOL ^ "/src/num/theories/basicSizeSyntax");
 
 (* ---- Phase 4: proofman subsystem (Defn's interactive tgoal/tprove path uses
@@ -169,6 +233,10 @@ val _ = useFilt (pm ^ "proofManagerLib");
    Defn.Hol_defn is the low-level definition mechanism; TotalDefn.Define wraps
    it with automatic termination. ---- *)
 pr "PHASE7_TFL\n";
+(* DB.Unknown: the thm_src_location constructor (Defn's store_at DB.Unknown).
+   Shadowed HERE (not in the prelude) so no intervening module reshadows DB
+   before Defn compiles. *)
+structure DB = struct open DB val Unknown = DB_dtype.Unknown end;
 val tfl = HOL ^ "/src/tfl/src/";
 val _ = useFilt (tfl ^ "wfrecUtils");
 val _ = useFilt (tfl ^ "Rules");
@@ -182,9 +250,14 @@ val () = need "Defn"    ((ignore (PolyML.makestring Defn.Hol_defn); true) handle
 val () = pr "DEFN_PHASE7_DONE\n";
 
 (* ---- Phase 8: TotalDefn (defines Define). Needs basicSize/DefnBase/numSyntax/
-   simpLib + DefnBase (our minimal one). ---- *)
+   simpLib. ---- *)
 pr "PHASE8_TOTALDEFN\n";
-val _ = useFilt (HOL ^ "/src/num/termination/basicSize");  (* SML, not the thy *)
+(* measure_def/WF_measure/measure_thm/WF_PRED (cut with the prim_rec WF tail)
+   + the `basicSize` alias TotalDefn opens. *)
+val _ = (PolyML.use (HOL ^ "/../../crates/polyml-bin/tests/hol4_support/measure_frag.sml");
+         pr "MEASURE_DONE\n")
+        handle e => pr ("MEASURE_FAIL :: " ^ exnMessage e ^ "\n");
+structure basicSize = basicSizeTheory;
 val _ = useFilt (HOL ^ "/src/num/termination/TotalDefn");
 val () = need "TotalDefn-Define"
               ((ignore (PolyML.makestring TotalDefn.Define); true) handle _ => false);
