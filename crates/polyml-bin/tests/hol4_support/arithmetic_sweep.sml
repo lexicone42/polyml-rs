@@ -149,6 +149,25 @@ val () = writeFile ("/tmp/asweep_rebind.sml",
     "val full_simp_tac = BasicProvers.FULL_SIMP_TAC;",
     "val fs = BasicProvers.FULL_SIMP_TAC (BasicProvers.srw_ss());",
     "val SPOSE_NOT_THEN = BasicProvers.SPOSE_NOT_THEN;",
+    (* REAL simplified Q.ABBREV_TAC: the baked markerLib's is a raise-stub,
+       and Script proofs here use the `Q.ABBREV_TAC q THEN POP_ASSUM (K
+       ALL_TAC)` rename idiom (MOD_TIMES2, MODEQ family) — choose fresh v,
+       SUBST_ALL e=v, assume the PLAIN equation (no Abbrev marker; the very
+       next POP_ASSUM drops it anyway). UNABBREV-style uses would fail
+       loudly, not silently. *)
+    "structure Q = struct",
+    "  open Q",
+    "  fun ABBREV_TAC q (g as (asl, w)) =",
+    "    let val eq = Parse.parse_in_context (Term.free_varsl (w :: asl)) q",
+    "        val (v, e) = boolSyntax.dest_eq eq",
+    "        val exth = Thm.EXISTS",
+    "              (boolSyntax.mk_exists (v, boolSyntax.mk_eq (e, v)), e)",
+    "              (Thm.REFL e)",
+    "    in Thm_cont.CHOOSE_THEN",
+    "         (fn th => Tactical.THEN (Tactic.SUBST_ALL_TAC th,",
+    "                                  Tactic.ASSUME_TAC th)) exth g",
+    "    end",
+    "end;",
     ""]);
 (* restore prim_rec's cut TC block (LESS_ALT etc.) — relationTheory's TC/RTC
    machinery makes the upstream proofs runnable now; arithmeticScript
