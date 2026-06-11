@@ -10,18 +10,26 @@
        only sound way to reason about the function:
          gcd_ind = |- !P. (!a b. (b <> 0 ==> P b (a MOD b)) ==> P a b)
                           ==> !v v1. P v v1
-     - The headline correctness theorem (gcd is a COMMON DIVISOR) is then
-       proved by `HO_MATCH_MP_TAC gcd_ind`, threading divisibility through the
-       Euclid step via the division identity a = (a DIV b)*b + (a MOD b):
-         gcd_divides : |- !a b. divides (gcd a b) a /\ divides (gcd a b) b
-       a ZERO-hypothesis theorem — genuine elementary number theory.
+     - Both halves of gcd's specification are proved by `HO_MATCH_MP_TAC
+       gcd_ind`, threading divisibility through the Euclid step via the
+       division identity a = (a DIV b)*b + (a MOD b):
+         gcd_divides  : |- !a b. divides (gcd a b) a /\ divides (gcd a b) b
+                        (gcd a b is a COMMON DIVISOR of a and b)
+         gcd_greatest : |- !a b d. divides d a /\ divides d b
+                                   ==> divides d (gcd a b)
+                        (it is the GREATEST — every common divisor divides it)
+       Together they fully characterise gcd as the greatest common divisor in
+       the divisibility order. Both are ZERO-hypothesis theorems — genuine
+       elementary number theory.
 
-   The proof chain (ring1 -> divides_lin -> gcd_divides) was engineered by a
-   3-seat proof fleet (wf_dac9e4a5-fe2); all three seats converged on this
-   lemma-first architecture and verified independently. This is the robust
-   variant: METIS is confined to the tiny nonlinear ring identity; the main
-   induction uses explicit MATCH_MP_TAC/ACCEPT_TAC so it never risks the
-   METIS search-explosion or the recursive-rewrite loop (see the pitfall
+   The two proof chains (ring1 -> divides_lin -> gcd_divides; then
+   divides_mult/divides_sub/mod_decompose -> divides_mod -> gcd_greatest) were
+   each engineered by a 3-seat proof fleet (wf_dac9e4a5-fe2 / wf_9aa3fd1e-5a7);
+   all three seats converged independently in both. This is the robust variant:
+   METIS is confined to the tiny nonlinear ring identity (and divides_mult
+   reuses divides_lin, so the greatest-property chain needs no METIS at all);
+   the main inductions use explicit MATCH_MP_TAC/ACCEPT_TAC so they never risk
+   the METIS search-explosion or the recursive-rewrite loop (see the pitfall
    notes below).
 
    Run: tools/sml-exp.sh /tmp/hol4_datatype \
@@ -162,4 +170,88 @@ val () = pr "OK gcd_divides\n";
 val () = pr (Parse.thm_to_string gcd_divides ^ "\n");
 val _ = Theory.save_thm("gcd_divides", gcd_divides);
 val () = pr "SAVED gcd_divides\n";
+
+(* ===================================================================== *)
+(* === gcd_greatest: the UNIVERSAL PROPERTY — every common divisor d  === *)
+(* === of a,b divides gcd a b.  With gcd_divides this fully           === *)
+(* === characterises gcd as the GREATEST common divisor in the        === *)
+(* === divisibility order.  (2nd 3-seat fleet: wf_9aa3fd1e-5a7,        === *)
+(* === all 3 converged.)                                              === *)
+(* ===================================================================== *)
+
+(* d | b  ==>  d | q*b.   Reuse divides_lin (q*b = q*b + 0) — no new ring
+   identity, no METIS, so zero loop risk. *)
+val divides_mult = Tactical.prove(
+  q "!d b q. divides d b ==> divides d (q * b)",
+  Tactical.REPEAT Tactic.STRIP_TAC THEN
+  Tactic.MATCH_MP_TAC divides_lin THEN
+  Tactic.EXISTS_TAC (q "b:num") THEN
+  Tactic.EXISTS_TAC (q "q:num") THEN
+  Tactic.EXISTS_TAC (q "0") THEN
+  Tactical.REPEAT Tactic.CONJ_TAC THENL
+  [ Tactical.FIRST_ASSUM Tactic.ACCEPT_TAC,
+    Rewrite.REWRITE_TAC[divides_zero],
+    Rewrite.REWRITE_TAC[ADD_CLAUSES] ]);
+val () = pr "OK divides_mult\n";
+
+(* d | m  /\  d | n  ==>  d | (m - n).  Truncated nat subtraction;
+   LEFT_SUB_DISTRIB distributes UNCONDITIONALLY (no n<=m needed). *)
+val divides_sub = Tactical.prove(
+  q "!d m n. divides d m /\\ divides d n ==> divides d (m - n)",
+  Rewrite.REWRITE_TAC[DIV] THEN
+  Tactical.REPEAT Tactic.STRIP_TAC THEN
+  Tactic.EXISTS_TAC (q "k - k'") THEN
+  Rewrite.ASM_REWRITE_TAC[] THEN
+  Rewrite.REWRITE_TAC[GSYM LEFT_SUB_DISTRIB]);
+val () = pr "OK divides_sub\n";
+
+(* b<>0 ==> a MOD b = a - (a DIV b * b).  Linear in a, a MOD b with
+   (a DIV b * b) opaque: from div_id (a = adb*b + amodb) and x=y+z ==> z=x-y. *)
+val mod_decompose = Tactical.prove(
+  q "!a b. b <> 0 ==> (a MOD b = a - a DIV b * b)",
+  Tactical.REPEAT Tactic.STRIP_TAC THEN
+  Tactic.MP_TAC (Drule.MATCH_MP (Q.SPECL [[QUOTE "a"], [QUOTE "b"]] div_id)
+                                (Thm.ASSUME (q "b <> 0"))) THEN
+  ARITH_TAC);
+val () = pr "OK mod_decompose\n";
+
+(* b<>0 /\ d|a /\ d|b ==> d | (a MOD b). *)
+val divides_mod = Tactical.prove(
+  q "!d a b. b <> 0 ==> divides d a ==> divides d b ==> divides d (a MOD b)",
+  Tactical.REPEAT Tactic.STRIP_TAC THEN
+  Rewrite.REWRITE_TAC[Drule.MATCH_MP (Q.SPECL [[QUOTE "a"], [QUOTE "b"]] mod_decompose)
+                                     (Thm.ASSUME (q "b <> 0"))] THEN
+  Tactic.MATCH_MP_TAC divides_sub THEN
+  Tactic.CONJ_TAC THENL
+  [ Tactical.FIRST_ASSUM Tactic.ACCEPT_TAC,
+    Tactic.MATCH_MP_TAC divides_mult THEN
+    Tactical.FIRST_ASSUM Tactic.ACCEPT_TAC ]);
+val () = pr "OK divides_mod\n";
+
+(* ====================== MAIN: gcd_greatest ====================== *)
+val gcd_greatest = Tactical.prove(
+  q "!a b d. divides d a /\\ divides d b ==> divides d (gcd a b)",
+  Tactic.HO_MATCH_MP_TAC gcd_ind THEN
+  Tactical.REPEAT Tactic.STRIP_TAC THEN
+  Tactic.ASM_CASES_TAC (q "b = 0") THENL
+  [ (* ---- base: b = 0 ---- *)
+    Rewrite.ASM_REWRITE_TAC[gcd_0] THEN
+    Tactical.FIRST_ASSUM Tactic.ACCEPT_TAC,
+    (* ---- step: b <> 0 ---- *)
+    Rewrite.REWRITE_TAC[Drule.MATCH_MP gcd_step (Thm.ASSUME (q "b <> 0"))] THEN
+    Tactical.FIRST_X_ASSUM (fn ih =>
+        Tactic.MATCH_MP_TAC (Drule.MATCH_MP ih (Thm.ASSUME (q "b <> 0")))) THEN
+    Tactic.CONJ_TAC THENL
+    [ (* divides d b *)
+      Tactical.FIRST_ASSUM Tactic.ACCEPT_TAC,
+      (* divides d (a MOD b) *)
+      Tactic.MATCH_MP_TAC (Drule.MATCH_MP
+          (Drule.MATCH_MP (Q.SPECL [[QUOTE "d"], [QUOTE "a"], [QUOTE "b"]] divides_mod)
+                          (Thm.ASSUME (q "b <> 0")))
+          (Thm.ASSUME (q "divides d a"))) THEN
+      Tactical.FIRST_ASSUM Tactic.ACCEPT_TAC ] ]);
+val () = pr "OK gcd_greatest\n";
+val () = pr (Parse.thm_to_string gcd_greatest ^ "\n");
+val _ = Theory.save_thm("gcd_greatest", gcd_greatest);
+val () = pr "SAVED gcd_greatest\n";
 val () = pr "ALL_DONE\n";

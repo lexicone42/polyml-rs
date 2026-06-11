@@ -136,22 +136,30 @@ fn verified_insertion_sort() {
 fn verified_euclid_gcd() {
     // NON-STRUCTURAL recursion verified: define Euclid's gcd by `tDefine` with a
     // `measure SND` and an auto-discharged termination obligation (a MOD b < b),
-    // then prove the COMMON-DIVISOR property
-    //   gcd_divides : |- !a b. divides (gcd a b) a /\ divides (gcd a b) b
-    // by `HO_MATCH_MP_TAC gcd_ind` — the recursion-induction principle tDefine
-    // emits. Elementary number theory threaded through the Euclid step
-    // a = (a DIV b)*b + (a MOD b). Proof engineered by a 3-seat fleet
-    // (wf_dac9e4a5-fe2, all 3 converged + verified independently).
+    // then FULLY CHARACTERISE it via the recursion-induction principle gcd_ind
+    // (which tDefine emits), threading divisibility through the Euclid step
+    // a = (a DIV b)*b + (a MOD b):
+    //   gcd_divides  : |- !a b. divides (gcd a b) a /\ divides (gcd a b) b
+    //                  (gcd is a COMMON DIVISOR)
+    //   gcd_greatest : |- !a b d. divides d a /\ divides d b
+    //                             ==> divides d (gcd a b)
+    //                  (it is the GREATEST common divisor)
+    // Both ZERO-hypothesis theorems, engineered by two 3-seat fleets
+    // (wf_dac9e4a5-fe2 / wf_9aa3fd1e-5a7, all seats converged independently).
     let Some(image) = ckpt() else { return };
     let driver =
         std::fs::read_to_string(common::support_file("gcd_verified.sml")).expect("read gcd_verified.sml");
-    let (out, _) = run_image_env(&image, &driver, 150_000_000_000, &[]).expect("run");
+    let (out, _) = run_image_env(&image, &driver, 200_000_000_000, &[]).expect("run");
     assert!(out.contains("GCD_SETUP_OK"), "gcd tDefine setup failed:\n{out}");
     assert!(
         out.contains("OK gcd_divides"),
         "gcd common-divisor theorem failed:\n{out}"
     );
-    assert!(out.contains("SAVED gcd_divides"), "gcd_divides not saved:\n{out}");
+    assert!(
+        out.contains("OK gcd_greatest"),
+        "gcd greatest-common-divisor (universal property) failed:\n{out}"
+    );
+    assert!(out.contains("SAVED gcd_greatest"), "gcd_greatest not saved:\n{out}");
     assert!(out.contains("ALL_DONE"), "verification incomplete:\n{out}");
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
