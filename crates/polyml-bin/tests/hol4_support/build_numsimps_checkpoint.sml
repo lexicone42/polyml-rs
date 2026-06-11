@@ -76,6 +76,11 @@ val modPatches =
       "Parse.temp_set_grammars (Parse.current_grammars ())"),
      ("Parse.temp_set_grammars $ valOf $ grammarDB { thyname = \"arithmetic\" }",
       "Parse.temp_set_grammars (Parse.current_grammars ())")]),
+   ("Num_conv",
+    [("val SOME arithmetic_grammars = grammarDB {thyname=\"arithmetic\"}",
+      "val arithmetic_grammars = Parse.current_grammars ()"),
+     ("val SOME arithmetic_grammars = grammarDB { thyname = \"arithmetic\" }",
+      "val arithmetic_grammars = Parse.current_grammars ()")]),
    ("Boolconv",
     [("val SOME bool_grammars = Parse.grammarDB {thyname=\"bool\"}",
       "val bool_grammars = Parse.current_grammars ()"),
@@ -149,12 +154,20 @@ val mods = mods1 @ mods2;
 structure TypeBasePure = struct
   open TypeBasePure
   type typeBase = unit
+  datatype shared = ORIG of Thm.thm | COPY of (string * string) * Thm.thm
   fun listItems (_ : typeBase) : tyinfo list = []
   fun constructors_of (_ : tyinfo) : Term.term list = []
+  (* computeLib.add_datatype_info pattern-matches these; with listItems = []
+     and fetch = NONE it is unreachable, so NONE/raise are honest. *)
+  fun size_of0 (_ : tyinfo) : (Term.term * shared) option = NONE
+  fun encode_of0 (_ : tyinfo) : (Term.term * shared) option = NONE
+  fun case_const_of (_ : tyinfo) : Term.term =
+      raise Fail "case_const_of: no datatypes registered"
 end;
 structure TypeBase = struct
   open TypeBase
   fun theTypeBase () : TypeBasePure.typeBase = ()
+  fun register_update_fn (_ : TypeBasePure.tyinfo -> TypeBasePure.tyinfo) = ()
 end;
 
 val loaded = ref ([] : string list);
