@@ -394,6 +394,27 @@ build_numsimps() {
   fi
 }
 
+build_pair() {
+  [ -f /tmp/hol4_numsimps ] || { echo "pair: need /tmp/hol4_numsimps first"; build_numsimps || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_pair ]; then
+    echo "pair: /tmp/hol4_pair exists ($(wc -c </tmp/hol4_pair) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "pair: sweeping pairScript (Stage 6a — the prod type + TFL prerequisites) …"
+  # pairScript: quotientLib is attr-tags only; the prod type is built by
+  # new_type_definition. All 18 TFL-critical names land (PAIR/FST/SND/
+  # pair_CASES/FORALL_PROD/EXISTS_PROD/pair_induction/UNCURRY/...). The
+  # cosmetic SWAP + PAIR_REL relation-algebra family lags (~44 fails) but
+  # isn't on the Define path. PAIR_REL_TRANS is skip-listed (GC-churn loop).
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 2000000000000 /tmp/hol4_numsimps \
+      < "$SUPPORT/pair_sweep.sml" ) >/tmp/build-pair.log 2>&1
+  if [ -f /tmp/hol4_pair ] && grep -qa "PAIR_SWEEP_DONE" /tmp/build-pair.log; then
+    echo "pair: OK ($(wc -c </tmp/hol4_pair) bytes; $(grep -aoE 'PAIRTHEORY_NAMES [0-9]+' /tmp/build-pair.log | tail -1) names; prod type + TFL prereqs)"
+  else
+    echo "pair: FAILED — see /tmp/build-pair.log"; tail -12 /tmp/build-pair.log; return 1
+  fi
+}
+
 build_taut() {
   [ -f /tmp/hol4_combin ] || { echo "taut: need /tmp/hol4_combin first"; build_combin || return 1; }
   if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_taut ]; then
@@ -472,6 +493,7 @@ case "$TARGET" in
   arithmetic) build_arithmetic;;
   numeral) build_numeral;;
   numsimps) build_numsimps;;
+  pair)    build_pair;;
   taut)    build_taut;;
   meson)   build_meson;;
   metis)   build_metis;;
