@@ -95,16 +95,24 @@ structure BasicProvers = struct
   val numty = Type.mk_thy_type {Thy = "num", Tyop = "num", Args = []}
   fun current_thm nm =
       Option.map #2 (List.find (fn (n, _) => n = nm) (Theory.current_theorems ()))
+  fun isNumTy ty =
+      (case Type.dest_thy_type ty of {Tyop="num", ...} => true | _ => false)
+      handle _ => false
   fun Cases_on q (g as (asl, w)) =
       let val tm = parse_ctxt q g
           val ty = Term.type_of tm
       in
         if ty = Type.bool then Tactic.ASM_CASES_TAC tm g
-        else if ty = numty then
-          (case current_thm "num_CASES" of
-               SOME th => Tactic.FULL_STRUCT_CASES_TAC (Thm.SPEC tm th) g
-             | NONE => raise Feedback.mk_HOL_ERR "BasicProvers(shim)" "Cases_on"
-                             "num_CASES not yet proved")
+        else if isNumTy ty then
+          (* num_CASES lives in arithmeticTheory (an ANCESTOR of numpair), not
+             the current segment — use it directly. num type-equality can be
+             representation-sensitive, so match by Tyop name. *)
+          Tactic.FULL_STRUCT_CASES_TAC (Thm.SPEC tm arithmeticTheory.num_CASES) g
+        else if Type.is_vartype ty then
+          (* the var is still ∀-bound in the goal, so parse_in_context gave it a
+             fresh polymorphic type. Introduce the leading ∀(s) and retry —
+             numpair is all-num, so once free it resolves to num. *)
+          Tactical.THEN (Tactic.GEN_TAC, Cases_on q) g
         else raise Feedback.mk_HOL_ERR "BasicProvers(shim)" "Cases_on"
                    "only bool/num supported"
       end
@@ -112,7 +120,7 @@ structure BasicProvers = struct
       let val tm = parse_ctxt q g
           val ty = Term.type_of tm
       in
-        if ty = numty then
+        if isNumTy ty then
           Tactical.THEN (Q.ID_SPEC_TAC q,
             Prim_rec.INDUCT_THEN numTheory.INDUCTION Tactic.ASSUME_TAC) g
         else
@@ -159,6 +167,9 @@ val () = writeFile ("/tmp/asweep_rebind.sml",
     "val simp = BasicProvers.simp;",
     "val Cases_on = BasicProvers.Cases_on;",
     "val Induct_on = BasicProvers.Induct_on;",
+    (* bare Induct (numpairScript uses `Induct THEN ...`): num induction on the
+       leading universally-quantified var. *)
+    "val Induct = Prim_rec.INDUCT_THEN numTheory.INDUCTION Tactic.ASSUME_TAC;",
     "val PROVE_TAC = BasicProvers.PROVE_TAC;",
     "val ASM_SIMP_TAC = BasicProvers.ASM_SIMP_TAC;",
     "val FULL_SIMP_TAC = BasicProvers.FULL_SIMP_TAC;",
@@ -418,8 +429,8 @@ fun need tag b = if b then pr ("OK " ^ tag ^ "\n")
                  else (smoke := false; pr ("MISSING " ^ tag ^ "\n"));
 val () = need "arithmetic-current" (Theory.current_theory () = "numpair");
 val () = need "npair_def" ((ignore (bt "npair_def"); true) handle _ => false);
-val () = need "nfst_npair" ((ignore (bt "nfst_npair"); true) handle _ => false);
-val () = need "npair_11" ((ignore (bt "npair_11"); true) handle _ => false);
+val () = need "nfst_def" ((ignore (bt "nfst_def"); true) handle _ => false);
+val () = need "nsnd_def" ((ignore (bt "nsnd_def"); true) handle _ => false);
 val () = pr (if !smoke then "NUMPAIR_SMOKE_PASS\n" else "NUMPAIR_SMOKE_FAIL\n");
 val () =
     if !smoke then
