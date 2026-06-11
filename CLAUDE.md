@@ -709,12 +709,16 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   (mlibOmega's `Time.fromSeconds`); resets per fresh image, NOT a soundness issue,
   so prove one goal-group per process. Earlier "blocked on proofManagerLib" was
   overblown — the real markerLib only uses it in one interactive helper.
-- **`Datatype` package — STAGED ROADMAP** (mapped 2026-06-06; Stage 0 DONE). The
-  real `Datatype`/`define_type` needs `ind_typeTheory`, whose `Ancestors` are
-  `num prim_rec arithmetic numpair` and which simplifies with `bool_ss ++ numSimps`.
-  So the cost is the **arithmetic MIDDLE of the stack**, not the (light) Datatype top
-  layer. The historical "too SIMP/SAT-saturated" verdict is OBSOLETE — the real
-  `bool_ss`/`SIMP`/`MESON`/`METIS` now exist. Staged path from `/tmp/hol4_metis`
+- **`Datatype` package — DONE (2026-06-11, task #68). The whole stack RUNS.**
+  `Datatype.Datatype [QUOTE "tree = Leaf | Node tree tree"]` builds the type +
+  constructors, generates structural induction + case nchotomy + the recursion
+  theorem, and registers it in TypeBase; then `Define`/`tDefine` define
+  (recursive, incl. non-structural) functions over it. Final checkpoint
+  `/tmp/hol4_datatype` (build target `datatype`, `hol4_datatype.rs`); full chain
+  kernel→…→numsimps→pair→sum→one→option→**defn**(Define)→**numpair**→
+  **ind_type**(JRH `define_type`, 41/41)→**Datatype**. The staged roadmap below
+  is kept as the historical build record; its "UNCERTAIN/HARD" labels are
+  superseded — every stage landed. **Original staged path** from `/tmp/hol4_metis`
   (build each via the Script→Theory recipe, checkpoint each layer):
   - **Stage 0 — DONE**: real `numTheory` on the prover base. `build_num` re-based on
     `/tmp/hol4_metis`; `/tmp/hol4_num` now has real `numScript` INDUCTION + live
@@ -756,10 +760,49 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
     `Datatype` assembly (`ParseDatatype`/`RecordType`/`DataSize`). LIKELY once the
     arithmetic middle exists. SMOKE: `Datatype \`tree = Leaf | Node tree tree\`` →
     check generated induction/recursion theorems.
-  Bottom line: reachable but a multi-session effort dominated by the arithmetic
-  middle. Hand-rolling each datatype num-style (`new_type_definition` + recursion
-  theorem + `INDUCT_TAC`, see `pair_tydef_milestone.sml`) remains a viable parallel
-  shortcut for specific types.
+  Bottom line (RETROSPECT): the arithmetic middle (relation→arithmetic→numeral→
+  numSimps) was indeed the cost, built via the per-theorem sweep harness; the
+  ind_type/Datatype top assembled cleanly once it existed. All landed 2026-06-11.
+
+- **Verified programs on the Datatype package** (the capstones — what it's FOR;
+  all on `/tmp/hol4_datatype`, all in `hol4_datatype.rs`, all fenced by
+  `regression.sh full`). NOTE: this checkpoint has NO `listTheory` (no `::`/`[]`/
+  `:num list`), so every list-like type is a USER datatype (e.g. `lst = Nil |
+  Cons num lst`). Caveat: numeral *multiplication* does not reduce here
+  (reduceLib/REDUCE/DECIDE leave `3*4` as a symbolic `NUMERAL(numeral$iZ …)` —
+  the known `enumeral_mult` numsimps degradation; addition and `<`/`=` reduce
+  fine), so computeLib EVAL demos stay additive.
+  - **Polymorphic list theory** (`lst = Nil | Cons 'a lst`): `rev(rev l)=l` by
+    structural induction (`TypeBasePure.induction_of` → `HO_MATCH_MP_TAC`).
+  - **Verified insertion sort** (`insertion_sort_verified.sml`): proves
+    `sorted(isort l)` + count-preservation (permutation), then computeLib EVAL
+    actually RUNS it (`[3,1,4,1,5,9,2,6]`→sorted, kernel-checked). Reusable
+    trick: selective `ASM_ARITH_TAC` (MP_TAC only the pure-numeric assumptions
+    before the assumption-blind `ARITH_CONV`).
+  - **Verified Euclid GCD** (`gcd_verified.sml`) — NON-STRUCTURAL recursion:
+    `gcd` via `tDefine` (`measure SND`, termination by `MOD_LESS`), reasoned via
+    the `tDefine`-emitted recursion-induction `gcd_ind`. FULLY CHARACTERISED:
+    `gcd_divides` (common divisor) + `gcd_greatest` (universal property — every
+    common divisor divides it), both 0-hyp. Idioms: unfold `gcd` ONLY via
+    `gcd_0`/`gcd_step` (`CONV_TAC LHS_CONV ONCE_REWRITE` — never `REWRITE_TAC[GCD]`,
+    the recursive eqn loops); divides through MOD via `LEFT_SUB_DISTRIB` (truncated
+    nat sub distributes unconditionally); close with `FIRST_ASSUM ACCEPT_TAC` not
+    ASM_REWRITE-with-a-self-referential-eqn (loops); annotate witnesses `:num`.
+  - **Verified compiler** (`verified_compiler.sml`) — the Bahr-Hutton result:
+    compile `expr = Const|Plus|Times` to a stack machine (`instr`/`code`/`stack`
+    user datatypes), prove `compile_correct: |- !e s. exec (compile e) s =
+    SPush (eval e) s` (0-hyp) by expr induction resting on `exec_capp` (exec
+    distributes over code concatenation, by code induction). Subtleties: exec's
+    underflow catch-alls must CONTINUE (`exec is s`) not short-circuit (`= s`) or
+    `exec_capp` is false; exec needs `tDefine` with `measure (code_size o FST)`
+    (Define's guesser is defeated by the shape-changing stack); case splits via
+    `STRUCT_CASES_TAC` over the TypeBase nchotomy theorems.
+  These proofs were each engineered by a 3-seat ultracode fleet (diverse
+  automation: explicit-witness / metis-assisted / simp-assisted); all seats
+  verifying independently is the correctness signal, and the most robust (least
+  automation) variant is banked. Hand-rolling a datatype num-style
+  (`new_type_definition` + recursion theorem + `INDUCT_TAC`, see
+  `pair_tydef_milestone.sml`) remains a viable shortcut for specific types.
 
 - **Arithmetic library — DONE** (`/tmp/hol4_arith`, `build_arith_checkpoint.sml`,
   `hol4_arith.rs`, `structure numArith`). `add`/`mult`/`EVEN`/`ODD` defined from
