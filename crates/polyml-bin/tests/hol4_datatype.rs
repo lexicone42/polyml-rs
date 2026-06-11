@@ -63,3 +63,44 @@ val () = if List.null (Thm.hyp cnt) then pr "REC_DEF_OK\n" else pr "HYPS\n";
         "recursive function over the new datatype failed:\n{out}"
     );
 }
+
+#[test]
+#[ignore = "needs /tmp/hol4_datatype (tools/build-hol4-checkpoints.sh datatype)"]
+fn polymorphic_list_theory_by_induction() {
+    // The capstone: build the canonical POLYMORPHIC list datatype, define
+    // app/rev via Define, and prove REVERSE_REVERSE (rev (rev l) = l) and its
+    // lemma REVERSE_APPEND by structural induction — a complete little theory.
+    let Some(image) = ckpt() else { return };
+    let driver = r#"
+fun pr s = (print s; TextIO.flushOut TextIO.stdOut);
+infix THEN;
+open boolLib;
+val () = Datatype.Datatype [QUOTE "lst = Nil | Cons 'a lst"];
+val ty = Type.mk_thy_type {Thy=Theory.current_theory(), Tyop="lst", Args=[Type.alpha]};
+val SOME tyi = TypeBase.fetch ty;
+val list_ind = TypeBasePure.induction_of tyi;
+fun byInduction tac =
+    Tactical.THEN (Tactic.HO_MATCH_MP_TAC list_ind,
+      Tactical.THEN (Tactical.REPEAT Tactic.STRIP_TAC, tac));
+val APP = TotalDefn.Define [QUOTE "(app Nil m = m) /\\ (app (Cons a l) m = Cons a (app l m))"];
+val REV = TotalDefn.Define [QUOTE "(rev Nil = Nil) /\\ (rev (Cons a l) = app (rev l) (Cons a Nil))"];
+val app_Nil = Tactical.prove(Parse.Term [QUOTE "!l. app l Nil = l"],
+  byInduction (ASM_REWRITE_TAC [APP]));
+val app_assoc = Tactical.prove(
+  Parse.Term [QUOTE "!l1 l2 l3. app (app l1 l2) l3 = app l1 (app l2 l3)"],
+  byInduction (ASM_REWRITE_TAC [APP]));
+val rev_app = Tactical.prove(
+  Parse.Term [QUOTE "!l1 l2. rev (app l1 l2) = app (rev l2) (rev l1)"],
+  byInduction (ASM_REWRITE_TAC [APP, REV, app_Nil, app_assoc]));
+val rev_rev = Tactical.prove(
+  Parse.Term [QUOTE "!l. rev (rev l) = l"],
+  byInduction (ASM_REWRITE_TAC [REV, rev_app, APP]));
+val () = if List.null (Thm.hyp rev_rev) then pr "REV_REV_OK\n" else pr "HYPS\n";
+"#;
+    let (out, _) = run_image_env(&image, driver, 300_000_000_000, &[]).expect("run");
+    assert!(
+        out.contains("REV_REV_OK"),
+        "polymorphic list theory (rev(rev l)=l) failed:\n{out}"
+    );
+    assert!(!out.contains("Exception-"), "exception:\n{out}");
+}
