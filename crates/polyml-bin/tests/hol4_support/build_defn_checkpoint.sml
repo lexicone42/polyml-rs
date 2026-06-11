@@ -138,9 +138,36 @@ val _ = useFilt (ct ^ "pairLib");
 
 val () = pr "DEFN_PHASE12_DONE\n";
 
-(* ---- Phase 7: TFL core (needs pairLib; NOT the size theories). Defn.Hol_defn
-   is the low-level definition mechanism; TotalDefn.Define wraps it with
-   automatic termination. ---- *)
+(* ---- Phase 5: basicSizeTheory, built INLINE now that pairLib's
+   new_definition_hook is installed (paired (x,y) defs work). ---- *)
+pr "PHASE5_BASICSIZE\n";
+val _ = (PolyML.use (HOL ^ "/../../crates/polyml-bin/tests/hol4_support/basicsize_inline.sml");
+         pr "BASICSIZE_DONE\n")
+        handle e => pr ("BASICSIZE_FAIL :: " ^ exnMessage e ^ "\n");
+
+(* ---- Phase 3: sum/basicSize term syntax (the theories are baked into the
+   base image by the sum/option sweeps; here we load the SML syntax libs
+   Defn/TotalDefn need). ---- *)
+pr "PHASE3_SYNTAX\n";
+val _ = useFilt (ct ^ "sumSyntax");
+val _ = useFilt (HOL ^ "/src/num/theories/basicSizeSyntax");
+
+(* ---- Phase 4: proofman subsystem (Defn's interactive tgoal/tprove path uses
+   Manager + proofManagerLib; needed only to COMPILE Defn). Order found by
+   '^open': History -> goalStack -> goalFrag -> goalTree -> Manager ->
+   proofManagerLib. ---- *)
+pr "PHASE4_PROOFMAN\n";
+val pm = HOL ^ "/src/proofman/";
+val _ = useFilt (pm ^ "History");
+val _ = useFilt (pm ^ "goalStack");
+val _ = useFilt (pm ^ "goalFrag");
+val _ = useFilt (pm ^ "goalTree");
+val _ = useFilt (pm ^ "Manager");
+val _ = useFilt (pm ^ "proofManagerLib");
+
+(* ---- Phase 7: TFL core (needs pairLib + real TypeBase + sumSyntax + Manager).
+   Defn.Hol_defn is the low-level definition mechanism; TotalDefn.Define wraps
+   it with automatic termination. ---- *)
 pr "PHASE7_TFL\n";
 val tfl = HOL ^ "/src/tfl/src/";
 val _ = useFilt (tfl ^ "wfrecUtils");
@@ -153,3 +180,30 @@ fun need tag b = pr ((if b then "OK " else "MISSING ") ^ tag ^ "\n");
 val () = need "pairLib" ((ignore (PolyML.makestring pairLib.PAIRED_BETA_CONV); true) handle _ => false);
 val () = need "Defn"    ((ignore (PolyML.makestring Defn.Hol_defn); true) handle _ => false);
 val () = pr "DEFN_PHASE7_DONE\n";
+
+(* ---- Phase 8: TotalDefn (defines Define). Needs basicSize/DefnBase/numSyntax/
+   simpLib + DefnBase (our minimal one). ---- *)
+pr "PHASE8_TOTALDEFN\n";
+val _ = useFilt (HOL ^ "/src/num/termination/basicSize");  (* SML, not the thy *)
+val _ = useFilt (HOL ^ "/src/num/termination/TotalDefn");
+val () = need "TotalDefn-Define"
+              ((ignore (PolyML.makestring TotalDefn.Define); true) handle _ => false);
+
+(* smoke: actually DEFINE something. Non-recursive first (no termination),
+   then a structural recursion over num. *)
+val smoke = ref true;
+fun trySmoke tag f = (f (); pr ("SMOKE_OK " ^ tag ^ "\n"))
+                     handle e => (smoke := false;
+                                  pr ("SMOKE_FAIL " ^ tag ^ " :: " ^ exnMessage e ^ "\n"));
+val () = trySmoke "Define-nonrec" (fn () =>
+    ignore (TotalDefn.Define `dbl x = x + x`));
+val () = trySmoke "Define-rec" (fn () =>
+    ignore (TotalDefn.Define `(sumto 0 = 0) /\ (sumto (SUC n) = SUC n + sumto n)`));
+val () = pr (if !smoke then "DEFN_SMOKE_PASS\n" else "DEFN_SMOKE_FAIL\n");
+
+val () =
+    if !smoke then
+      (pr "EXPORTING /tmp/hol4_defn\n";
+       PolyML.export ("/tmp/hol4_defn", PolyML.rootFunction);
+       pr "DEFN_CHECKPOINT_DONE\n")
+    else pr "DEFN_EXPORT_SKIPPED\n";
