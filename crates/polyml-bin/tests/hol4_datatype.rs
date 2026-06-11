@@ -104,3 +104,22 @@ val () = if List.null (Thm.hyp rev_rev) then pr "REV_REV_OK\n" else pr "HYPS\n";
     );
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
+
+#[test]
+#[ignore = "needs /tmp/hol4_datatype (tools/build-hol4-checkpoints.sh datatype)"]
+fn verified_insertion_sort() {
+    // The whole point of a theorem prover: a VERIFIED PROGRAM. Define insertion
+    // sort over a datatype, prove it outputs a SORTED list (sorted_isort) that
+    // is a PERMUTATION of its input (count_isort, multiset-preserving). The
+    // proof chain (ins_leall / leall_trans / ins_sorted / ins_count) was
+    // engineered by a 3-seat proof fleet.
+    let Some(image) = ckpt() else { return };
+    let driver = std::fs::read_to_string(
+        common::support_file("insertion_sort_verified.sml"),
+    )
+    .expect("read insertion_sort_verified.sml");
+    let (out, _) = run_image_env(&image, &driver, 300_000_000_000, &[]).expect("run");
+    assert!(out.contains("OK sorted_isort"), "sortedness failed:\n{out}");
+    assert!(out.contains("OK count_isort"), "permutation failed:\n{out}");
+    assert!(out.contains("ALL_DONE"), "verification incomplete:\n{out}");
+}
