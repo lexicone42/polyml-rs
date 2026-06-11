@@ -415,6 +415,39 @@ build_pair() {
   fi
 }
 
+build_defn() {
+  # the coretypes chain pair->sum->one->option, then the TFL/Define SML stack.
+  [ -f /tmp/hol4_pair ] || { echo "defn: need /tmp/hol4_pair first"; build_pair || return 1; }
+  if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_defn ]; then
+    echo "defn: /tmp/hol4_defn exists ($(wc -c </tmp/hol4_defn) bytes) — skip (--force to rebuild)"
+    return 0
+  fi
+  echo "defn: building the coretypes chain (sum/one/option) + TFL/Define stack (Stage 6b) …"
+  local S="$SUPPORT"
+  # sum on pair, one on sum, option on one (each Script->Theory sweep)
+  for step in "sum:hol4_pair:sum_sweep:SUM_SWEEP_DONE" \
+              "one:hol4_sum:one_sweep:ONE_SWEEP_DONE" \
+              "option:hol4_one:option_sweep:OPTION_SWEEP_DONE"; do
+    local nm="${step%%:*}"; local rest="${step#*:}"
+    local base="${rest%%:*}"; rest="${rest#*:}"
+    local script="${rest%%:*}"; local marker="${rest##*:}"
+    if [ "$FORCE" -eq 1 ] || [ ! -f "/tmp/hol4_$nm" ]; then
+      ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 2000000000000 "/tmp/$base" \
+          < "$S/$script.sml" ) >"/tmp/build-$nm.log" 2>&1
+      grep -qa "$marker" "/tmp/build-$nm.log" || { echo "defn: $nm sweep FAILED — /tmp/build-$nm.log"; tail -8 "/tmp/build-$nm.log"; return 1; }
+      echo "defn:   $nm OK ($(grep -aoE '[A-Z]+THEORY_NAMES [0-9]+' /tmp/build-$nm.log | tail -1))"
+    fi
+  done
+  # the TFL/Define SML stack on /tmp/hol4_option -> /tmp/hol4_defn
+  ( cd "$VPOLY" && HOL4_DIR="$HOL" "$POLY" run --max-steps 600000000000 /tmp/hol4_option \
+      < "$S/build_defn_checkpoint.sml" ) >/tmp/build-defn.log 2>&1
+  if [ -f /tmp/hol4_defn ] && grep -qa "DEFN_CHECKPOINT_DONE" /tmp/build-defn.log; then
+    echo "defn: OK ($(wc -c </tmp/hol4_defn) bytes; Define runs — recursive + auto-termination)"
+  else
+    echo "defn: FAILED — see /tmp/build-defn.log"; tail -12 /tmp/build-defn.log; return 1
+  fi
+}
+
 build_taut() {
   [ -f /tmp/hol4_combin ] || { echo "taut: need /tmp/hol4_combin first"; build_combin || return 1; }
   if [ "$FORCE" -eq 0 ] && [ -f /tmp/hol4_taut ]; then
@@ -494,6 +527,7 @@ case "$TARGET" in
   numeral) build_numeral;;
   numsimps) build_numsimps;;
   pair)    build_pair;;
+  defn)    build_defn;;
   taut)    build_taut;;
   meson)   build_meson;;
   metis)   build_metis;;
