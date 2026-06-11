@@ -26,6 +26,11 @@
        of `divides` over the naturals gives
          gcd_comm : |- !a b. gcd a b = gcd b a
        — demonstrating the characterised gcd is now a reusable algebraic object.
+     - lcm is then DEFINED via gcd (lcm a b = (a*b) DIV (gcd a b)) and the
+       classic GCD-LCM DUALITY proved:
+         gcd_lcm : |- !a b. gcd a b * lcm a b = a * b
+       (the product of gcd and lcm equals the product of the arguments) — via
+       d|n /\ d<>0 ==> d*(n DIV d)=n, since gcd a b divides a*b.
 
    The two proof chains (ring1 -> divides_lin -> gcd_divides; then
    divides_mult/divides_sub/mod_decompose -> divides_mod -> gcd_greatest) were
@@ -296,4 +301,91 @@ val () = pr "OK gcd_comm\n";
 val () = pr (Parse.thm_to_string gcd_comm ^ "\n");
 val _ = Theory.save_thm("gcd_comm", gcd_comm);
 val () = pr "SAVED gcd_comm\n";
+
+(* ============================================================== *)
+(* === lcm via gcd, and the GCD-LCM DUALITY (the classic       === *)
+(* === number-theory identity), reusing the gcd characterisation=== *)
+(* ============================================================== *)
+
+(* (a) DEFINE lcm via gcd *)
+val LCM = TotalDefn.Define [QUOTE "lcm a b = (a * b) DIV (gcd a b)"];
+val () = pr "OK LCM\n";
+
+(* Helper 1: d | a ==> d | a*b.  divides_mult gives d | (b*a); commute b*a -> a*b
+   with a SINGLE targeted rewrite (never inside METIS). *)
+val divides_mult_r = Tactical.prove(
+  q "!d a b. divides d a ==> divides d (a * b)",
+  Tactical.REPEAT Tactic.STRIP_TAC THEN
+  Tactic.MP_TAC (Drule.MATCH_MP
+      (Q.SPECL [[QUOTE "d"], [QUOTE "a"], [QUOTE "b"]] divides_mult)
+      (Thm.ASSUME (q "divides d a"))) THEN
+  Tactic.SUBST1_TAC (Q.SPECL [[QUOTE "b"], [QUOTE "a"]] MULT_COMM) THEN
+  Rewrite.REWRITE_TAC[]);
+val () = pr "OK divides_mult_r\n";
+
+(* Helper 2: d | n /\ d<>0 ==> d * (n DIV d) = n.
+   divides d n gives n = d*k.  n DIV d = (d*k) DIV d = (k*d) DIV d = k by MULT_DIV
+   (needs 0<d).  Then d*(n DIV d) = d*k = n. *)
+val div_exact = Tactical.prove(
+  q "!d n. divides d n /\\ d <> 0 ==> (d * (n DIV d) = n)",
+  Rewrite.REWRITE_TAC[DIV] THEN
+  Tactical.REPEAT Tactic.STRIP_TAC THEN
+  (* now: assumptions  n = d*k,  d<>0 ;  goal  d * (n DIV d) = n *)
+  Rewrite.ASM_REWRITE_TAC[] THEN
+  (* goal:  d * ((d * k) DIV d) = d * k *)
+  Tactic.SUBST1_TAC (Q.SPECL [[QUOTE "d"], [QUOTE "k"]] MULT_COMM) THEN
+  (* goal:  d * ((k * d) DIV d) = k * d *)
+  Tactic.MP_TAC (Drule.MATCH_MP nz_lt (Thm.ASSUME (q "d <> 0"))) THEN
+  Tactic.STRIP_TAC THEN
+  (* now have  0 < d *)
+  Rewrite.ASM_REWRITE_TAC[Drule.MATCH_MP
+      (Q.SPECL [[QUOTE "d"], [QUOTE "k"]] MULT_DIV)
+      (Thm.ASSUME (q "0 < d"))] THEN
+  (* goal:  d * k = k * d  — close directly with the MULT_COMM instance.
+     (REWRITE_TAC[MULT_COMM inst] LOOPS even on a ground instance in this
+      rewriter; ACCEPT_TAC the exact instance instead.) *)
+  Tactic.ACCEPT_TAC (Q.SPECL [[QUOTE "d"], [QUOTE "k"]] MULT_COMM));
+val () = pr "OK div_exact\n";
+
+(* Helper 3: gcd a b = 0 ==> a = 0.  gcd_divides gives divides (gcd a b) a;
+   with gcd a b = 0 that is divides 0 a, i.e. a = 0*k = 0. *)
+val gcd_eq_0 = Tactical.prove(
+  q "!a b. (gcd a b = 0) ==> (a = 0)",
+  Tactical.REPEAT Tactic.STRIP_TAC THEN
+  (* divides (gcd a b) a  (first conjunct of gcd_divides) *)
+  Tactic.MP_TAC (Thm.CONJUNCT1 (Q.SPECL [[QUOTE "a"], [QUOTE "b"]] gcd_divides)) THEN
+  (* gcd a b = 0  rewrites it, then DIV unfolds:  (?k. a = 0 * k) ==> a = 0 *)
+  Rewrite.ASM_REWRITE_TAC[DIV, MULT_CLAUSES] THEN
+  Tactic.STRIP_TAC THEN
+  Rewrite.ASM_REWRITE_TAC[]);
+val () = pr "OK gcd_eq_0\n";
+
+(* ====================== HEADLINE: gcd_lcm ====================== *)
+(* gcd a b * lcm a b = a * b.
+   Reduce lcm via LCM to g * ((a*b) DIV g) where g = gcd a b.
+   g=0 : a=0 (gcd_eq_0) so a*b=0 and lhs = 0*... = 0 = rhs.
+   g<>0: g | a*b (gcd_divides a + divides_mult_r), so div_exact closes. *)
+val gcd_lcm = Tactical.prove(
+  q "!a b. gcd a b * lcm a b = a * b",
+  Tactical.REPEAT Tactic.GEN_TAC THEN
+  Rewrite.REWRITE_TAC[LCM] THEN
+  Tactic.ASM_CASES_TAC (q "gcd a b = 0") THENL
+  [ (* ---- g = 0 ---- *)
+    Tactic.MP_TAC (Drule.MATCH_MP
+        (Q.SPECL [[QUOTE "a"], [QUOTE "b"]] gcd_eq_0)
+        (Thm.ASSUME (q "gcd a b = 0"))) THEN
+    Tactic.STRIP_TAC THEN
+    Rewrite.ASM_REWRITE_TAC[MULT_CLAUSES],
+    (* ---- g <> 0 ----  goal: gcd a b * ((a*b) DIV (gcd a b)) = a*b *)
+    Tactic.MATCH_MP_TAC div_exact THEN
+    Tactic.CONJ_TAC THENL
+    [ (* divides (gcd a b) (a * b) *)
+      Tactic.MATCH_MP_TAC divides_mult_r THEN
+      Rewrite.REWRITE_TAC[Q.SPECL [[QUOTE "a"], [QUOTE "b"]] gcd_divides],
+      (* gcd a b <> 0 *)
+      Tactical.FIRST_ASSUM Tactic.ACCEPT_TAC ] ]);
+val () = pr "OK gcd_lcm\n";
+val () = pr (Parse.thm_to_string gcd_lcm ^ "\n");
+val _ = Theory.save_thm("gcd_lcm", gcd_lcm);
+val () = pr "SAVED gcd_lcm\n";
 val () = pr "ALL_DONE\n";

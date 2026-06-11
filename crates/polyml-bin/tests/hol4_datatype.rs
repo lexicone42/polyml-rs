@@ -165,6 +165,11 @@ fn verified_euclid_gcd() {
         out.contains("OK gcd_comm"),
         "gcd commutativity (via divides antisymmetry) failed:\n{out}"
     );
+    // lcm via gcd + the classic gcd*lcm = a*b duality
+    assert!(
+        out.contains("OK gcd_lcm"),
+        "gcd-lcm duality (gcd a b * lcm a b = a * b) failed:\n{out}"
+    );
     assert!(out.contains("ALL_DONE"), "verification incomplete:\n{out}");
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
