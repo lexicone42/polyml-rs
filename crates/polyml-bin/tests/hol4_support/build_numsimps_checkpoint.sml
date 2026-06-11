@@ -93,16 +93,15 @@ val modPatches =
       "val bool_grammars = Parse.current_grammars ()"),
      ("val SOME bool_grammars = Parse.grammarDB { thyname = \"bool\" }",
       "val bool_grammars = Parse.current_grammars ()")]),
-   (* numeral_redns mostly restored (TWO_EXP_THM/texp/div2/DIV2_BIT1 landed
-      via fleet splices + re-sweeps). 3 entries still unproved: numeral_MIN/
-      MAX ("unsolved goals" under our shims) + enumeral_mult (onecount THENL
-      chain) — dropped; REDUCE loses MIN/MAX + enhanced-mult fast paths only
+   (* numeral_redns almost fully restored: TWO_EXP_THM/texp/div2/DIV2_BIT1 +
+      now numeral_MIN/MAX (fleet splices, 2026-06-11). Only enumeral_mult
+      stays dropped — its onecount→exactlog→gen_case chain isn't fully swept
+      yet (onecount_characterisation IS proved, but enhanced_numeral_mult's
+      tail remains); REDUCE loses the enhanced-mult fast path only
       (internal_mult_characterisation still covers mult). Defn is TFL
       (Stage 6). *)
    ("reduceLib",
-    [("numeral_MAX, numeral_MIN, numeral_div2,", "numeral_div2,"),
-     ("numeral_MAX , numeral_MIN , numeral_div2 ,", "numeral_div2 ,"),
-     ("enumeral_mult", "numeral_distrib"),
+    [("enumeral_mult", "numeral_distrib"),
      ("val _ = Defn.const_eq_ref := NEQ_CONV", "val _ = ()")])];
 fun useFiltered tag src =
     let val txt0 = HOLSource.inputFile {quietOpen = false, print = fn _ => ()} src

@@ -257,6 +257,14 @@ val chunkPatches =
   [("texp_help_def",
     [("TypeBase.axiom_of", "(fn _ => prim_recTheory.num_Axiom)")])];
 
+(* verified hand-splices (plain SML, fleet-engineered) override their chunk —
+   for proofs too large to inline as `overrides` strings. *)
+val SPLICEDIR = HOL ^ "/../../crates/polyml-bin/tests/hol4_support/numeral_splices";
+fun spliceFile name = SPLICEDIR ^ "/" ^ name ^ ".sml";
+fun hasSplice name =
+    (let val is = TextIO.openIn (spliceFile name) in TextIO.closeIn is; true end)
+    handle _ => false;
+
 fun runChunk (name, chunkLines) =
   if List.exists (fn s => s = name) skip
   then pr ("CHUNK_SKIP " ^ name ^ "\n")
@@ -267,6 +275,13 @@ fun runChunk (name, chunkLines) =
        andalso not (String.isSubstring "[local]"
                       (case chunkLines of l :: _ => l | [] => ""))
   then (ok := !ok + 1; pr ("CHUNK_HAVE " ^ name ^ "\n"))
+  else if hasSplice name
+  then ((PolyML.use (spliceFile name);
+         ok := !ok + 1; pr ("CHUNK_SPLICED " ^ name ^ "\n"))
+        handle e =>
+          (bad := !bad + 1;
+           pr ("CHUNK_FAIL " ^ name ^ " (splice) :: " ^
+               (case e of Fail m => m | _ => exnMessage e) ^ "\n")))
   else
     let val () = pr ("CHUNK_TRY  " ^ name ^ "\n")
         val () = writeFile ("/tmp/asweep_src.sml",
