@@ -396,6 +396,16 @@ val () =
 val () = pr ("SWEEP_SUMMARY ok=" ^ Int.toString (!ok) ^ " fail=" ^
              Int.toString (!bad) ^ "\n");
 
+(* the invtri->nfst_npair/nsnd_npair bijection chain — the arith-reasoning-heavy
+   theorems our SRW/by/DECIDE_TAC shim can't carry. 3-seat proof fleet
+   (wf_99c054d6) all independently proved the full 14-theorem chain; this is
+   the verified self-contained splice (fetches the defs, proves + save_thm's
+   each). Run after the sweep so the definitions are present. *)
+val () = (PolyML.use ((HOL ^ "/../../crates/polyml-bin/tests/hol4_support")
+                      ^ "/numpair_bijection_splice.sml");
+          pr "BIJECTION_SPLICE_OK\n")
+         handle e => pr ("BIJECTION_SPLICE_FAIL :: " ^ exnMessage e ^ "\n");
+
 (* synthesize arithmeticTheory; smoke; export. *)
 val all_named =
     Theory.current_axioms () @ Theory.current_definitions () @
@@ -429,8 +439,8 @@ fun need tag b = if b then pr ("OK " ^ tag ^ "\n")
                  else (smoke := false; pr ("MISSING " ^ tag ^ "\n"));
 val () = need "arithmetic-current" (Theory.current_theory () = "numpair");
 val () = need "npair_def" ((ignore (bt "npair_def"); true) handle _ => false);
-val () = need "nfst_def" ((ignore (bt "nfst_def"); true) handle _ => false);
-val () = need "nsnd_def" ((ignore (bt "nsnd_def"); true) handle _ => false);
+val () = need "nfst_npair" ((ignore (bt "nfst_npair"); true) handle _ => false);
+val () = need "nsnd_npair" ((ignore (bt "nsnd_npair"); true) handle _ => false);
 val () = pr (if !smoke then "NUMPAIR_SMOKE_PASS\n" else "NUMPAIR_SMOKE_FAIL\n");
 val () =
     if !smoke then
