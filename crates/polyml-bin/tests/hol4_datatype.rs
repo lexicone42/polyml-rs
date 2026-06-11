@@ -163,3 +163,31 @@ fn verified_euclid_gcd() {
     assert!(out.contains("ALL_DONE"), "verification incomplete:\n{out}");
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
+
+#[test]
+#[ignore = "needs /tmp/hol4_datatype (tools/build-hol4-checkpoints.sh datatype)"]
+fn verified_compiler() {
+    // The crown-jewel formal-methods result (Bahr-Hutton): compile an
+    // arithmetic-expression language (expr = Const|Plus|Times) to a stack
+    // machine (instr = Push|Add|Mul over user-defined code/stack list types)
+    // and PROVE the compiler correct:
+    //   compile_correct : |- !e s. exec (compile e) s = SPush (eval e) s
+    // a ZERO-hypothesis theorem, by structural induction on e resting on the
+    // exec-distributes-over-concatenation lemma exec_capp (code induction).
+    // Then EVAL a concrete program: the compiled code RUNS on the stack
+    // machine and agrees with the source eval. Engineered by a 3-seat fleet
+    // (wf_a9867385-1d0); all three seats verified independently.
+    let Some(image) = ckpt() else { return };
+    let driver = std::fs::read_to_string(common::support_file("verified_compiler.sml"))
+        .expect("read verified_compiler.sml");
+    let (out, _) = run_image_env(&image, &driver, 200_000_000_000, &[]).expect("run");
+    assert!(out.contains("OK exec_capp"), "exec_capp lemma failed:\n{out}");
+    assert!(
+        out.contains("OK compile_correct"),
+        "compiler correctness theorem failed:\n{out}"
+    );
+    assert!(out.contains("ZERO_HYP_OK"), "compile_correct has hypotheses:\n{out}");
+    // the compiled code actually RUNS and agrees with eval (kernel-checked)
+    assert!(out.contains("EVAL_OK"), "EVAL demo (machine run = source eval) failed:\n{out}");
+    assert!(!out.contains("Exception-"), "exception:\n{out}");
+}
