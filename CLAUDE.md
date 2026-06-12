@@ -284,6 +284,21 @@ basis load under --jit Tagged(0) (the gate that was failing), and a
 JIT==interp differential with a negative control
 (`tests/tail_b_b_differential.rs`).
 
+**PERF REALITY CHECK (measured 2026-06-12 — read before chasing more
+install coverage).** Installing TAIL_B_B/CASE16 is a *correctness*
+unblock, NOT yet a wall-clock win. On the basis load (`Bootstrap.use
+"basis/build.sml"`, 1.6B steps) `--jit` with 727 installs is ~5% SLOWER
+than the plain interpreter (25.2s vs 24.1s, 3 runs each). Reason: only
+the OUTERMOST JIT dispatch takes the fast path — nested calls fall back
+to the interpreter (the MAX_JIT_DEPTH=0 gate), so for deeply-nested
+bootstrap code the trampoline/args-buffer overhead at the JIT boundary
+dominates the native-code saving. So "+N installed opcodes" does not
+imply "+speed" until nested JIT→JIT dispatch works. **The real perf
+lever is fixing the nested-dispatch SEGV (the separate bug at
+MAX_JIT_DEPTH>0, install=53), not more install coverage.** Until then
+the JIT's value is the translation/execution-correctness testbed (the
+differential harness, opcode semantics), not throughput.
+
 Top remaining translation blockers (= functions that don't even
 translate, much less install):
 - CALL_CLOSURE (0x0c, 268 functions) — needs runtime arity discovery
