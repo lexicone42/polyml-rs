@@ -970,22 +970,54 @@ fn recon_compiles_simple_buffer() {
 #[test]
 #[ignore = "slow: loads HOL4 source through full basis (~5-7 min)"]
 fn recon_compiles_portable() {
+    // Compile HOL4's portableML/Portable through the FROM-SCRATCH basis
+    // bootstrap (Bootstrap.use "basis/build.sml"), complementing
+    // recon_via_checkpoint_compiles_portable which uses the warm /tmp/basis_loaded
+    // checkpoint. Portable.sig references HOLPP / OldPP / Arbnum, so its
+    // dependency closure (the same sequence the checkpoint test loads) must be
+    // compiled first — loading Portable.sig in isolation fails with
+    // "Structure (HOLPP) has not been declared".
     if skip_if_missing().is_none() {
         eprintln!("SKIP: missing vendor dirs");
         return;
     }
     let hol = hol4_dir().unwrap();
+    let pm = format!("{}/src/portableML", hol.display());
+    let hfs = format!("{}/tools/Holmake/hfs", hol.display());
+    let hpoly = format!("{}/tools/Holmake/poly", hol.display());
     let driver = format!(
         "val () = Bootstrap.use \"basis/build.sml\";\n\
-         val () = PolyML.use \"{path}/src/portableML/Portable.sig\";\n\
-         val () = PolyML.use \"{path}/src/portableML/Portable.sml\";\n\
+         fun U f = PolyML.use (\"{pm}/\" ^ f);\n\
+         fun H f = PolyML.use (\"{hfs}/\" ^ f);\n\
+         fun HP f = PolyML.use (\"{hpoly}/\" ^ f);\n\
+         U \"quotation_dtype.sml\";\n\
+         U \"poly/PrettyImpl.sml\";\n\
+         U \"poly/Exn.sig\"; U \"poly/Exn.sml\";\n\
+         U \"Uref.sig\"; U \"Uref.sml\";\n\
+         U \"UTF8.sig\"; U \"UTF8.sml\";\n\
+         U \"HOLPP.sig\"; U \"HOLPP.sml\";\n\
+         U \"OldPP.sig\"; U \"OldPP.sml\";\n\
+         U \"poly/Arbnumcore.sig\"; U \"poly/Arbnumcore.sml\";\n\
+         U \"Arbnum.sig\"; U \"Arbnum.sml\";\n\
+         H \"HOLFS_dtype.sml\";\n\
+         H \"HFS_NameMunge.sig\";\n\
+         HP \"HFS_NameMunge.sml\";\n\
+         H \"HOLFileSys.sig\"; H \"HOLFileSys.sml\";\n\
+         U \"poly/MD5.sig\"; U \"poly/MD5.sml\";\n\
+         U \"poly/Susp.sig\"; U \"poly/Susp.sml\";\n\
+         U \"poly/Thread_Attributes.sml\";\n\
+         U \"poly/Thread_Data.sml\";\n\
+         U \"poly/Unsynchronized.sml\";\n\
+         U \"poly/ConcIsaLib.sml\";\n\
+         U \"poly/Multithreading.sml\";\n\
+         U \"poly/Synchronized.sml\";\n\
+         U \"HOLquotation.sig\"; U \"HOLquotation.sml\";\n\
+         U \"poly/MLSYSPortable.sml\";\n\
+         U \"Portable.sig\"; U \"Portable.sml\";\n\
          print \"HOL_OK\\n\";\n",
-        path = hol.display(),
     );
-    let (out, code) = run_with_driver(&driver, 20_000_000_000)
+    let (out, code) = run_with_driver(&driver, 30_000_000_000)
         .expect("run");
-    // Note: this may fail today — that's the point of recon.
-    // We capture the output for diagnosis even on failure.
     if code != 0 || !out.contains("HOL_OK") {
         panic!(
             "Portable.sml didn't compile (code={code}).\n\
