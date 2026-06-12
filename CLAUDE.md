@@ -797,6 +797,15 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
     `exec_capp` is false; exec needs `tDefine` with `measure (code_size o FST)`
     (Define's guesser is defeated by the shape-changing stack); case splits via
     `STRUCT_CASES_TAC` over the TypeBase nchotomy theorems.
+  - **Verified merge sort** (`merge_sort_verified.sml`) — a harder sort than
+    insertion sort (NON-structural recursion). Tamed with a FUEL parameter so
+    the top-level `msort` is structurally recursive (plain Define), with
+    `merge`/`split` via `tDefine` (measure on length). Proves BOTH
+    `msort_count` (permutation) and `msort_sorted` (sortedness), each 0-hyp,
+    then EVALs `[3,1,2,5,4]→[1,2,3,4,5]`. Pitfalls: `merge`'s termination needs
+    `pairLib.PAIRED_BETA_CONV` to reduce the paired-lambda measure (FST/SND
+    rewrites don't); the selective `ASM_ARITH_TAC` (lift only pure-numeric
+    assumptions) recurs here too.
   - **Verified BST** (`verified_bst.sml`) — data-structure verification with an
     INVARIANT: `tree = Leaf | Node tree num tree` with insert/member. Proves
     `member_insert` (membership is correct — insert adds exactly y) and

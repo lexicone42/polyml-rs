@@ -204,6 +204,30 @@ fn verified_compiler() {
 
 #[test]
 #[ignore = "needs /tmp/hol4_datatype (tools/build-hol4-checkpoints.sh datatype)"]
+fn verified_merge_sort() {
+    // A harder verified sort than insertion sort: NON-STRUCTURAL recursion,
+    // tamed with a FUEL parameter so the top-level msort is structurally
+    // recursive (plain Define), with `merge`/`split` via tDefine (measure on
+    // length). Prove BOTH correctness properties, each zero-hypothesis:
+    //   msort_count  : |- !z l. count z (msort l) = count z l   (PERMUTATION)
+    //   msort_sorted : |- !l. sorted (msort l)                  (SORTEDNESS)
+    // then EVAL a concrete sort ([3,1,2,5,4] -> [1,2,3,4,5]), kernel-checked.
+    // Engineered by a 3-seat fleet (wf_0158176e-c65); all 3 got both + EVAL.
+    let Some(image) = ckpt() else { return };
+    let driver = std::fs::read_to_string(common::support_file("merge_sort_verified.sml"))
+        .expect("read merge_sort_verified.sml");
+    let (out, _) = run_image_env(&image, &driver, 150_000_000_000, &[]).expect("run");
+    assert!(out.contains("OK msort_count"), "merge sort permutation property failed:\n{out}");
+    assert!(out.contains("OK msort_sorted"), "merge sort sortedness failed:\n{out}");
+    assert!(out.contains("msort_count hyps=0"), "msort_count has hypotheses:\n{out}");
+    assert!(out.contains("msort_sorted hyps=0"), "msort_sorted has hypotheses:\n{out}");
+    assert!(out.contains("EVAL_OK"), "EVAL of msort did not produce the sorted list:\n{out}");
+    assert!(out.contains("ALL_DONE"), "verification incomplete:\n{out}");
+    assert!(!out.contains("Exception-"), "exception:\n{out}");
+}
+
+#[test]
+#[ignore = "needs /tmp/hol4_datatype (tools/build-hol4-checkpoints.sh datatype)"]
 fn verified_bst() {
     // Data-structure verification with an INVARIANT: a binary search tree
     // (tree = Leaf | Node tree num tree) with insert/member. Prove BOTH
