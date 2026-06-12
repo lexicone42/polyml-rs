@@ -768,10 +768,14 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
   all on `/tmp/hol4_datatype`, all in `hol4_datatype.rs`, all fenced by
   `regression.sh full`). NOTE: this checkpoint has NO `listTheory` (no `::`/`[]`/
   `:num list`), so every list-like type is a USER datatype (e.g. `lst = Nil |
-  Cons num lst`). Caveat: numeral *multiplication* does not reduce here
-  (reduceLib/REDUCE/DECIDE leave `3*4` as a symbolic `NUMERAL(numeral$iZ …)` —
-  the known `enumeral_mult` numsimps degradation; addition and `<`/`=` reduce
-  fine), so computeLib EVAL demos stay additive.
+  Cons num lst`). Numeral arithmetic in **computeLib EVAL now reduces `*`**
+  (`3*4 → 12`): the numeral sweep had banked degraded DB theorems
+  (`DB.fetch "numeral" "numeral_distrib" = ⊢ T`), so the global compset could
+  pull `NUMERAL` out over `*` but not reduce the bit-level product; the
+  datatype-checkpoint build (`build_datatype_checkpoint.sml`) repairs it by
+  re-adding the correct *structure-value* `numeralTheory.numeral_mult` family
+  to `the_compset`. (`reduceLib.REDUCE_CONV` still stalls on `*` — a separate
+  baked compset — so EVAL demos use `computeLib.CBV_CONV`, not `REDUCE`.)
   - **Polymorphic list theory** (`lst = Nil | Cons 'a lst`): `rev(rev l)=l` by
     structural induction (`TypeBasePure.induction_of` → `HO_MATCH_MP_TAC`).
   - **Verified insertion sort** (`insertion_sort_verified.sml`): proves

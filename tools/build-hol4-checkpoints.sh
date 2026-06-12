@@ -33,7 +33,7 @@ TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
-    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|prim|relation|taut|meson|metis|all) TARGET="$1"; shift;;
+    basis|kernel|theory|parse|bool|tactic|rewrite|marker|combin|simp|num|arith|order|prim|relation|taut|meson|metis|arithmetic|numeral|numsimps|pair|defn|numpair|ind_type|datatype|all) TARGET="$1"; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac

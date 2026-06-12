@@ -22,6 +22,33 @@ fn ckpt() -> Option<PathBuf> {
 
 #[test]
 #[ignore = "needs /tmp/hol4_datatype (tools/build-hol4-checkpoints.sh datatype)"]
+fn computelib_reduces_numeral_multiplication() {
+    // The numeral sweep banked degraded DB theorems (numeral_distrib = |- T),
+    // so the global computeLib compset could pull NUMERAL out over * but not
+    // reduce the bit-level product, leaving 3*4 stuck as NUMERAL(BIT*BIT). The
+    // datatype-checkpoint build repairs it by re-adding the correct
+    // structure-value numeralTheory.numeral_mult family to the_compset. This
+    // fences that fix: computeLib EVAL must reduce 3*4 -> 12.
+    let Some(image) = ckpt() else { return };
+    let driver = r#"
+fun pr s = (print s; TextIO.flushOut TextIO.stdOut);
+val cs = computeLib.copy (!computeLib.the_compset);
+fun ev s = Parse.term_to_string (boolSyntax.rhs (Thm.concl
+             (computeLib.CBV_CONV cs (Parse.Term [QUOTE s]))));
+val () = pr ("3*4 = " ^ ev "3 * 4" ^ "\n");
+val () = pr ("12*13 = " ^ ev "12 * 13" ^ "\n");
+val () = pr ("(2+3)*5 = " ^ ev "(2 + 3) * 5" ^ "\n");
+val () = pr "MULT_EVAL_DONE\n";
+"#;
+    let (out, _) = run_image_env(&image, driver, 50_000_000_000, &[]).expect("run");
+    assert!(out.contains("3*4 = 12"), "computeLib did not reduce 3*4 to 12:\n{out}");
+    assert!(out.contains("12*13 = 156"), "computeLib did not reduce 12*13 to 156:\n{out}");
+    assert!(out.contains("(2+3)*5 = 25"), "computeLib did not reduce (2+3)*5 to 25:\n{out}");
+    assert!(out.contains("MULT_EVAL_DONE"), "incomplete:\n{out}");
+}
+
+#[test]
+#[ignore = "needs /tmp/hol4_datatype (tools/build-hol4-checkpoints.sh datatype)"]
 fn datatype_builds_recursive_type_and_registers_it() {
     let Some(image) = ckpt() else { return };
     let driver = r#"

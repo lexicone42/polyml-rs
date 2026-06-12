@@ -168,6 +168,29 @@ val () = trySmoke "tree-in-TypeBase" (fn () =>
          | NONE => raise Fail "tree not registered in TypeBase" end);
 val () = pr (if !smoke then "DATATYPE_SMOKE_PASS\n" else "DATATYPE_SMOKE_FAIL\n");
 
+(* ---- Repair numeral MULTIPLICATION in the global computeLib compset ----
+   The numeral sweep that built the arithmetic checkpoints banked DEGRADED DB
+   entries for the numeral-reduction theorems (DB.fetch "numeral" "numeral_distrib"
+   = `T`, etc. — the logged DB_FETCH_FILLER fallback), so the global compset can
+   pull NUMERAL out over `*` but cannot reduce the bit-level product, leaving
+   3*4 stuck as NUMERAL(BIT1(BIT1 ZERO) * BIT2(BIT1 ZERO)). Addition reduces fine.
+   The STRUCTURE-value theorems (numeralTheory.numeral_mult etc.) are CORRECT —
+   reduceLib.MUL_CONV uses them and computes 3*4=12 — so re-adding them to the
+   global compset repairs computeLib EVAL of multiplication. (These are exactly
+   the conv-old Arithconv MUL_RW theorems.) Verified before baking: a copy of
+   the_compset with these added reduces 3*4 -> 12 and 12*13 -> 156. *)
+val () = (ignore (computeLib.add_thms
+   [numeralTheory.numeral_distrib, numeralTheory.numeral_add, numeralTheory.numeral_suc,
+    numeralTheory.numeral_iisuc, numeralTheory.numeral_mult, numeralTheory.iDUB_removal,
+    numeralTheory.numeral_pre] (!computeLib.the_compset));
+   pr "NUMERAL_MULT_COMPSET_PATCHED\n")
+  handle e => pr ("NUMERAL_MULT_PATCH_FAIL :: " ^ exnMessage e ^ "\n");
+(* sanity: the patched global compset now reduces 3*4 to 12 *)
+val () = (let val th = computeLib.CBV_CONV (computeLib.copy (!computeLib.the_compset))
+                          (Parse.Term [QUOTE "3 * 4"])
+          in pr ("NUMERAL_MULT_CHECK 3*4 = " ^ Parse.term_to_string (boolSyntax.rhs (Thm.concl th)) ^ "\n") end)
+         handle e => pr ("NUMERAL_MULT_CHECK_FAIL :: " ^ exnMessage e ^ "\n");
+
 val () =
     if !smoke then
       (pr "EXPORTING /tmp/hol4_datatype\n";

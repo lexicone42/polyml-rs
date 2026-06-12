@@ -42,12 +42,14 @@
       bool/num). For Add/Mul, exec only reduces once the stack is split to
       depth 2 (SNil / SPush v SNil / SPush b (SPush a s)).
 
-   The EVAL bonus uses a Plus-ONLY program (2+(3+4)=9): numeral MULTIPLICATION
-   does not reduce on this checkpoint (reduceLib/REDUCE/DECIDE leave 3*4 as a
-   symbolic NUMERAL(numeral$iZ ..) form — a known degradation, see the
-   numsimps notes), while addition reduces fine. The Plus-only demo still fully
-   exercises Push + Add + code concatenation, proved as two real 0-hyp theorems
-   (the machine RUN agrees with the source EVAL).
+   The EVAL bonus RUNS a Times program (2 + 3*4 = 14) through the computeLib
+   call-by-value engine: the compiled code executes on the stack machine to
+   SPush 14 SNil and the source eval agrees (14). numeral MULTIPLICATION now
+   reduces in computeLib — the datatype-checkpoint build repairs the
+   numeral-mult compset rules (the numeral sweep had banked degraded DB
+   theorems; build_datatype_checkpoint.sml re-adds the correct structure-value
+   numeralTheory.numeral_mult family). (reduceLib.REDUCE_CONV still stalls on *
+   — a separate baked compset — so the EVAL uses computeLib CBV, not REDUCE.)
 
    OPTIMIZING-COMPILER EXTENSION (appended below, after compile_correct):
    a constant-folding source-to-source OPTIMIZER `simplify` is defined and
@@ -179,34 +181,31 @@ val nhyp = length (Thm.hyp compile_correct);
 pr ("NHYP = " ^ Int.toString nhyp ^ "\n");
 val () = if nhyp = 0 then pr "ZERO_HYP_OK\n" else pr "HAS HYPOTHESES!\n";
 
-(* ---- BONUS: prove a concrete compiled program RUNS and agrees with eval ----
-   PITFALL: this checkpoint's numeral arithmetic only evaluates ADDITION
-   (reduceLib/ARITH/DECIDE compute 2+3=5 but leave 3*4 symbolic — numeral
-   multiplication is non-functional in /tmp/hol4_datatype).  So the demo uses
-   a Plus-only program, which still fully exercises Push + Add + code
-   concatenation on the stack machine:
-       exec (compile (Plus (Const 2) (Plus (Const 3) (Const 4)))) SNil
-         = SPush 9 SNil       (and eval of the source = 9 too).
-   REWRITE with the function defs reduces the structural part to
-   SPush (2 + (3 + 4)) SNil; REDUCE_CONV finishes the addition to 9. *)
+(* ---- BONUS: actually RUN a concrete compiled program and check it agrees
+   with eval, including MULTIPLICATION.  We use the call-by-value computeLib
+   engine over the global compset (copied + the function defs added), which on
+   this checkpoint reduces numeral * as well as + (the build repairs the
+   numeral-mult compset rules — see build_datatype_checkpoint.sml).  The program
+       Plus (Const 2) (Times (Const 3) (Const 4))     -- eval = 2 + 3*4 = 14
+   exercises Push + Add + Mul + code concatenation; the compiled code runs on
+   the stack machine to SPush 14 SNil and the source eval agrees (14), both
+   kernel-checked equalities. *)
 val () = (
   let
-    val concrete = Tactical.prove(
-      Parse.Term [QUOTE
-        "exec (compile (Plus (Const 2) (Plus (Const 3) (Const 4)))) SNil = SPush 9 SNil"],
-      Tactical.THEN (Rewrite.REWRITE_TAC [compile, capp, exec],
-                     Tactic.CONV_TAC reduceLib.REDUCE_CONV));
-    (* and check the source eval agrees: eval (...) = 9 *)
-    val evalThm = Tactical.prove(
-      Parse.Term [QUOTE "eval (Plus (Const 2) (Plus (Const 3) (Const 4))) = 9"],
-      Tactical.THEN (Rewrite.REWRITE_TAC [eval],
-                     Tactic.CONV_TAC reduceLib.REDUCE_CONV));
+    val cs = computeLib.copy (!computeLib.the_compset);
+    val _ = computeLib.add_thms [compile, capp, exec, eval] cs;
+    val prog = "Plus (Const 2) (Times (Const 3) (Const 4))"
+    val machine = computeLib.CBV_CONV cs (Parse.Term [QUOTE ("exec (compile (" ^ prog ^ ")) SNil")])
+    val source  = computeLib.CBV_CONV cs (Parse.Term [QUOTE ("eval (" ^ prog ^ ")")])
+    val mrhs = boolSyntax.rhs (Thm.concl machine)
+    val srhs = boolSyntax.rhs (Thm.concl source)
   in
-    pr ("EVAL THEOREM (machine run): " ^ Parse.thm_to_string concrete ^ "\n");
-    pr ("EVAL THEOREM (source eval): " ^ Parse.thm_to_string evalThm ^ "\n");
-    if length (Thm.hyp concrete) = 0 andalso length (Thm.hyp evalThm) = 0
+    pr ("EVAL machine run: " ^ Parse.term_to_string mrhs ^ "\n");
+    pr ("EVAL source eval: " ^ Parse.term_to_string srhs ^ "\n");
+    if Term.aconv mrhs (Parse.Term [QUOTE "SPush 14 SNil"])
+       andalso Term.aconv srhs (Parse.Term [QUOTE "14"])
     then pr "EVAL_OK\n"
-    else pr "EVAL HAS HYPS\n"
+    else pr "EVAL_WRONG\n"
   end
 ) handle e => pr ("EVAL FAILED: " ^ General.exnMessage e ^ "\n");
 
@@ -306,9 +305,11 @@ val nhyp_oc = length (Thm.hyp opt_compile_correct);
 pr ("OPT_COMPILE_CORRECT NHYP = " ^ Int.toString nhyp_oc ^ "\n");
 val () = if nhyp_sc = 0 andalso nhyp_oc = 0 then pr "ZERO_HYP_OK\n" else pr "HAS HYPOTHESES!\n";
 
-(* ---- BONUS: EVAL simplify on a constant-heavy ADDITIVE expr ----
-   simplify (Plus (Plus (Const 2) (Const 3)) (Const 4)) should fold to Const 9
-   (addition only; numeral * does not reduce on this checkpoint).
+(* ---- BONUS: EVAL the optimizer folding a MIXED +/* expr ----
+   simplify (Plus (Times (Const 3) (Const 4)) (Const 2)) should fold the whole
+   tree to a single Const 14 (3*4=12, +2 = 14) — the constant-folder runs and
+   the numeral MULTIPLICATION reduces in computeLib (the datatype build repairs
+   the numeral-mult compset rules).
    IDIOM: the_compset is a REF -> use computeLib.copy (!computeLib.the_compset);
    add_thms : thm list -> compset -> unit. *)
 val () = (
@@ -316,14 +317,14 @@ val () = (
     val cs = computeLib.copy (!computeLib.the_compset);
     val _ = computeLib.add_thms [simplify, mkPlus, mkTimes, eval] cs;
     val res = computeLib.CBV_CONV cs
-      (Parse.Term [QUOTE "simplify (Plus (Plus (Const 2) (Const 3)) (Const 4))"]);
+      (Parse.Term [QUOTE "simplify (Plus (Times (Const 3) (Const 4)) (Const 2))"]);
     val rhs = boolSyntax.rhs (Thm.concl res);
-    val expected = Parse.Term [QUOTE "Const 9"];
+    val expected = Parse.Term [QUOTE "Const 14"];
   in
     pr ("EVAL simplify result: " ^ Parse.thm_to_string res ^ "\n");
     if Term.aconv rhs expected
     then pr "EVAL_OK\n"
-    else pr "EVAL DID NOT FOLD TO Const 9\n"
+    else pr "EVAL DID NOT FOLD TO Const 14\n"
   end
 ) handle e => pr ("EVAL FAILED: " ^ General.exnMessage e ^ "\n");
 
