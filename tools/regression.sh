@@ -38,11 +38,14 @@ if [ "$MODE" = "full" ]; then
   [ -f /tmp/hol4_datatype ] || run tools/build-hol4-checkpoints.sh datatype
   [ -f /tmp/arbint_image ]  || run tools/intflip-bootstrap.sh
   run tools/isabelle-pure-probe.sh >/dev/null   # applies isabelle patches idempotently
+  # warm Isabelle/Pure checkpoint (load the 261 logical-Pure files + export);
+  # needed by isabelle_proving. Built when absent (persists on the dev box).
+  [ -f /tmp/isabelle_pure ] || run tools/build-isabelle-pure.sh
 
   echo; echo "--- headline #[ignore] integration suite ---"
   ipass=0; ifail=0
   for t in real_math parsetree_introspect isabelle_pure isabelle_pure_arbint \
-           isabelle_kernel isabelle_theorem_kernel intflip_basis \
+           isabelle_kernel isabelle_theorem_kernel isabelle_proving intflip_basis \
            hol4_taut hol4_meson hol4_metis hol4_pelletier hol4_num_prover \
            hol4_arith hol4_order hol4_induction hol4_list hol4_simp hol4_fancy \
            hol4_prim_rec hol4_summation \
