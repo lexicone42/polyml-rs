@@ -49,6 +49,15 @@
    exercises Push + Add + code concatenation, proved as two real 0-hyp theorems
    (the machine RUN agrees with the source EVAL).
 
+   OPTIMIZING-COMPILER EXTENSION (appended below, after compile_correct):
+   a constant-folding source-to-source OPTIMIZER `simplify` is defined and
+   proved semantics-preserving, then COMPOSED with the compiler — the CompCert
+   pattern of composing two independently-verified passes:
+     simplify_correct    : |- !e. eval (simplify e) = eval e
+     opt_compile_correct : |- !e s. exec (compile (simplify e)) s = SPush (eval e) s
+   The composition is a 2-line corollary (REWRITE[compile_correct,
+   simplify_correct]); neither proof re-opens the other's internals.
+
    Run: tools/sml-exp.sh /tmp/hol4_datatype \
           crates/polyml-bin/tests/hol4_support/verified_compiler.sml *)
 
@@ -200,3 +209,122 @@ val () = (
     else pr "EVAL HAS HYPS\n"
   end
 ) handle e => pr ("EVAL FAILED: " ^ General.exnMessage e ^ "\n");
+
+(* ================================================================== *)
+(* === OPTIMIZING COMPILER: a constant-folding source-to-source     === *)
+(* === optimizer (simplify), proved semantics-preserving, and       === *)
+(* === COMPOSED with the verified compiler above (CompCert-style):   === *)
+(* ===   simplify_correct    : |- !e. eval (simplify e) = eval e     === *)
+(* ===   opt_compile_correct : |- !e s. exec (compile (simplify e)) s === *)
+(* ===                                  = SPush (eval e) s           === *)
+(* === The composition is a 2-line corollary of compile_correct +    === *)
+(* === simplify_correct — neither proof re-opens the other.          === *)
+(* === (3-seat fleet wf_b7e907bb-345; all 3 verified + EVAL.)        === *)
+(* ================================================================== *)
+(* ===== NEW CODE: constant-folding optimizer + correctness + composition ===== *)
+
+(* nchotomy for expr (to case-split arguments of mkPlus/mkTimes) *)
+val expr_nchot = TypeBasePure.nchotomy_of expr_tyi;
+
+(* (a) smart constructors that fold constant subterms.
+   The Const/Const row is FIRST so first-match folds constants;
+   the catch-all (Plus/Times) fires otherwise. Non-recursive. *)
+val mkPlus = TotalDefn.Define [QUOTE
+  "(mkPlus (Const m) (Const n) = Const (m + n)) /\\ (mkPlus a b = Plus a b)"];
+pr "OK mkPlus\n";
+
+val mkTimes = TotalDefn.Define [QUOTE
+  "(mkTimes (Const m) (Const n) = Const (m * n)) /\\ (mkTimes a b = Times a b)"];
+pr "OK mkTimes\n";
+
+(* simplify recurses structurally on expr *)
+val simplify = TotalDefn.Define [QUOTE
+  "(simplify (Const n) = Const n) /\\ (simplify (Plus a b) = mkPlus (simplify a) (simplify b)) /\\ (simplify (Times a b) = mkTimes (simplify a) (simplify b))"];
+pr "OK simplify\n";
+
+(* case-split a:expr / b:expr via the expr nchotomy *)
+fun splitExpr v = Tactic.STRUCT_CASES_TAC
+  (Drule.ISPEC (Parse.Term [QUOTE (v ^ ":expr")]) expr_nchot);
+
+(* ---- mkPlus_correct : !a b. eval (mkPlus a b) = eval a + eval b ----
+   Split a then b over the expr nchotomy. Only Const/Const folds specially;
+   every other branch hits the catch-all mkPlus a b = Plus a b. In all 9
+   cases REWRITE[mkPlus, eval] closes the goal (the Const/Const case
+   reduces eval (Const (m+n)) = m + n = eval(Const m)+eval(Const n)). *)
+val mkPlus_correct = Tactical.prove(
+  Parse.Term [QUOTE "!a b. eval (mkPlus a b) = eval a + eval b"],
+  Tactical.THEN (Tactic.GEN_TAC,
+    Tactical.THEN (splitExpr "a",
+      Tactical.THEN (Tactic.GEN_TAC,
+        Tactical.THEN (splitExpr "b",
+          Rewrite.REWRITE_TAC [mkPlus, eval]))))
+  ) handle e => (pr ("MKPLUS_CORRECT FAILED: " ^ General.exnMessage e ^ "\n"); raise e);
+pr "OK mkPlus_correct\n";
+
+(* ---- mkTimes_correct : !a b. eval (mkTimes a b) = eval a * eval b ---- *)
+val mkTimes_correct = Tactical.prove(
+  Parse.Term [QUOTE "!a b. eval (mkTimes a b) = eval a * eval b"],
+  Tactical.THEN (Tactic.GEN_TAC,
+    Tactical.THEN (splitExpr "a",
+      Tactical.THEN (Tactic.GEN_TAC,
+        Tactical.THEN (splitExpr "b",
+          Rewrite.REWRITE_TAC [mkTimes, eval]))))
+  ) handle e => (pr ("MKTIMES_CORRECT FAILED: " ^ General.exnMessage e ^ "\n"); raise e);
+pr "OK mkTimes_correct\n";
+
+(* ---- (b) HEADLINE 1: simplify_correct : !e. eval (simplify e) = eval e ----
+   expr induction. Const: REWRITE[simplify, eval]. Plus/Times: REWRITE[simplify]
+   then mkPlus_correct/mkTimes_correct then ASM_REWRITE[eval] with the two IHs. *)
+val simplify_correct = Tactical.prove(
+  Parse.Term [QUOTE "!e. eval (simplify e) = eval e"],
+  byInd expr_ind (
+    Tactical.THEN (Rewrite.REWRITE_TAC [simplify, mkPlus_correct, mkTimes_correct],
+      Rewrite.ASM_REWRITE_TAC [eval]))
+  ) handle e => (pr ("SIMPLIFY_CORRECT FAILED: " ^ General.exnMessage e ^ "\n"); raise e);
+pr "OK simplify_correct\n";
+
+pr "THEOREM simplify_correct: ";
+pr (Parse.thm_to_string simplify_correct);
+pr "\n";
+val nhyp_sc = length (Thm.hyp simplify_correct);
+pr ("SIMPLIFY_CORRECT NHYP = " ^ Int.toString nhyp_sc ^ "\n");
+
+(* ---- (c) HEADLINE 2: opt_compile_correct ----
+   2-line corollary: compile_correct gives
+     exec (compile (simplify e)) s = SPush (eval (simplify e)) s,
+   then rewrite with simplify_correct. *)
+val opt_compile_correct = Tactical.prove(
+  Parse.Term [QUOTE "!e s. exec (compile (simplify e)) s = SPush (eval e) s"],
+  Rewrite.REWRITE_TAC [compile_correct, simplify_correct]
+  ) handle e => (pr ("OPT_COMPILE_CORRECT FAILED: " ^ General.exnMessage e ^ "\n"); raise e);
+pr "OK opt_compile_correct\n";
+
+pr "THEOREM opt_compile_correct: ";
+pr (Parse.thm_to_string opt_compile_correct);
+pr "\n";
+val nhyp_oc = length (Thm.hyp opt_compile_correct);
+pr ("OPT_COMPILE_CORRECT NHYP = " ^ Int.toString nhyp_oc ^ "\n");
+val () = if nhyp_sc = 0 andalso nhyp_oc = 0 then pr "ZERO_HYP_OK\n" else pr "HAS HYPOTHESES!\n";
+
+(* ---- BONUS: EVAL simplify on a constant-heavy ADDITIVE expr ----
+   simplify (Plus (Plus (Const 2) (Const 3)) (Const 4)) should fold to Const 9
+   (addition only; numeral * does not reduce on this checkpoint).
+   IDIOM: the_compset is a REF -> use computeLib.copy (!computeLib.the_compset);
+   add_thms : thm list -> compset -> unit. *)
+val () = (
+  let
+    val cs = computeLib.copy (!computeLib.the_compset);
+    val _ = computeLib.add_thms [simplify, mkPlus, mkTimes, eval] cs;
+    val res = computeLib.CBV_CONV cs
+      (Parse.Term [QUOTE "simplify (Plus (Plus (Const 2) (Const 3)) (Const 4))"]);
+    val rhs = boolSyntax.rhs (Thm.concl res);
+    val expected = Parse.Term [QUOTE "Const 9"];
+  in
+    pr ("EVAL simplify result: " ^ Parse.thm_to_string res ^ "\n");
+    if Term.aconv rhs expected
+    then pr "EVAL_OK\n"
+    else pr "EVAL DID NOT FOLD TO Const 9\n"
+  end
+) handle e => pr ("EVAL FAILED: " ^ General.exnMessage e ^ "\n");
+
+pr "ALL_DONE\n";

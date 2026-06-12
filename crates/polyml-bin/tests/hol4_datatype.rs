@@ -185,8 +185,14 @@ fn verified_compiler() {
     // a ZERO-hypothesis theorem, by structural induction on e resting on the
     // exec-distributes-over-concatenation lemma exec_capp (code induction).
     // Then EVAL a concrete program: the compiled code RUNS on the stack
-    // machine and agrees with the source eval. Engineered by a 3-seat fleet
-    // (wf_a9867385-1d0); all three seats verified independently.
+    // machine and agrees with the source eval. (3-seat fleet wf_a9867385-1d0.)
+    //
+    // PLUS the OPTIMIZING-COMPILER extension (CompCert-style compositional
+    // verification): a constant-folding optimizer `simplify` proved
+    // semantics-preserving (simplify_correct: eval (simplify e) = eval e) and
+    // COMPOSED with the compiler into opt_compile_correct:
+    //   |- !e s. exec (compile (simplify e)) s = SPush (eval e) s
+    // a 2-line corollary of the two passes. (3-seat fleet wf_b7e907bb-345.)
     let Some(image) = ckpt() else { return };
     let driver = std::fs::read_to_string(common::support_file("verified_compiler.sml"))
         .expect("read verified_compiler.sml");
@@ -199,6 +205,17 @@ fn verified_compiler() {
     assert!(out.contains("ZERO_HYP_OK"), "compile_correct has hypotheses:\n{out}");
     // the compiled code actually RUNS and agrees with eval (kernel-checked)
     assert!(out.contains("EVAL_OK"), "EVAL demo (machine run = source eval) failed:\n{out}");
+    // OPTIMIZING-COMPILER EXTENSION: a constant-folding optimizer proved
+    // semantics-preserving (simplify_correct) and COMPOSED with the compiler
+    // (opt_compile_correct) — CompCert-style two-pass composition.
+    assert!(
+        out.contains("OK simplify_correct"),
+        "optimizer correctness (eval (simplify e) = eval e) failed:\n{out}"
+    );
+    assert!(
+        out.contains("OK opt_compile_correct"),
+        "optimization-through-compilation composition failed:\n{out}"
+    );
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
 
