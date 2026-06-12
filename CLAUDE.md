@@ -877,11 +877,42 @@ alpha-renamed Fp,Sp since F=false / S=combinator in HOL4.)
 `theory_dev_proof` remains the kernel-level proof. `tools/closure-probe.sh
 /tmp/hol4_theory src/parse` measures parse-layer load on the Theory base.
 
-## Isabelle reconnaissance (the north star) — GO SIGNAL, 2026-06-06
+## Isabelle (the north star) — LOADS, PROVES, does MATH (2026-06-12)
+
+**THE NORTH STAR IS REACHED.** Isabelle's logical Pure runs on the interpreter and
+proves real mathematics. The "months away" verdict below (2026-06-06 recon, kept for
+history) was wrong by an order of magnitude — the "wall" was three stacked
+measurement/stub bugs, not a port. Current state (tests in `crates/polyml-bin/tests/
+isabelle_*.rs`, all fenced by `regression.sh full`):
+- **Pure logical core LOADS: 261/285** files (kernel + Isar + proof + locale + class +
+  specification + simplifier + method + syntax). The remaining 24 are the external/
+  system/Scala frontend (message_digest via Scala SHA1, base64/xz/zstd, isabelle_process/
+  scala_compiler/build, PIDE document/session, jedit/find_theorems) — genuinely need
+  Scala/sockets, not logic. Probe: `tools/isabelle-pure-probe.sh` (per-statement load).
+- **Warm checkpoint** `/tmp/isabelle_pure` (`tools/build-isabelle-pure.sh`): exports the
+  loaded Pure, reloads in ~2s and PROVES. Reloader's FIRST line must be
+  `restore_pure_context ()` (the generic context is thread-local, lost on reload); the
+  REPL namespace is Isabelle ML (`out`/`writeln`, NOT `print`).
+- **Isabelle PROVES** (`isabelle_proving.rs`): the tactic framework (`Goal.prove` +
+  `resolve_tac`/`assume_tac`), the simplifier, theory+axiom development, resolution
+  (`RS`), the parser (`Syntax.read_prop`).
+- **A first-order OBJECT LOGIC** (`isabelle_object_logic.rs`): built programmatically
+  IFOL-style (type `o`, `Trueprop`, connectives, natural-deduction rules as axioms —
+  `.thy` loading needs PIDE, so build in ML), proving `A∧B⟹B∧A`, the K/S implication
+  axioms, `A∨B⟹B∨A`, `∀`-distribution, `=`-symmetry.
+- **PEANO ARITHMETIC by induction** (`isabelle_arithmetic.rs`): `n+0=n`, `add_comm`,
+  `add_assoc`, `n*0=0` — the Isabelle analogue of the HOL4 INDUCT_TAC trophies.
+KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
+not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
+before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
+does not beta-reduce (beta-normalise first). The bulk of this was driven by ultracode
+proving workflows on the warm checkpoint.
+
+--- historical recon (2026-06-06), kept for context ---
 
 After completing HOL4's prover stack, probed whether our Rust PolyML can run
-**Isabelle**. Verdict: reachable but FAR (months) — yet **no missing C-RTS
-primitive blocks a minimal Isabelle/Pure source load**; the hard PolyML coupling
+**Isabelle**. Verdict (since SUPERSEDED): reachable but FAR (months) — yet **no missing
+C-RTS primitive blocks a minimal Isabelle/Pure source load**; the hard PolyML coupling
 (`PolyML.NameSpace`, structural `PolyML.pretty`, the `CPCompilerResultFun` parse-tree
 path at ROOT.ML #226) is vendored SML already compiled into our image. Isabelle/Pure
 has a Scala-free ML entry (`poly --eval "val SML_file = PolyML.use" --use ROOT.ML`),
