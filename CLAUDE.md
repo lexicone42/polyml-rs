@@ -240,21 +240,49 @@ end-to-end:
 - All 6 HOL4 tests pass with JIT enabled (kernel construction,
   primitive inference rules, derived theorems)
 
-**Current coverage** (2026-05-28): 3,265 / 4,436 code objects
-translate (73.6%), 592 install (the install filter rejects functions
-whose bytecode contains opcodes whose translations we don't yet
-trust). The big jump from 60% → 73% happened on 2026-05-28 by
-implementing STACK_CONTAINER_B (+122), LOCK/CLEAR_MUTABLE (+170),
-BLOCK_EQUAL_BYTE (+65), GET_THREAD_ID (+16), and a handful of
-smaller opcodes.
+**Current coverage**: 3,410 / 4,436 code objects translate (76.9%),
+**727 install** (2026-06-12; was 592 on 2026-05-28, then 612, then 727
+after the TAIL_B_B fix below). The install filter rejects functions
+whose bytecode contains opcodes whose translations we don't yet trust.
+The 60% → 73% jump (2026-05-28) implemented STACK_CONTAINER_B (+122),
+LOCK/CLEAR_MUTABLE (+170), BLOCK_EQUAL_BYTE (+65), GET_THREAD_ID (+16),
+and a handful of smaller opcodes; CASE16 added +97 translate (2026-06-12);
+TAIL_B_B added +115 install (2026-06-12).
 
 The opcodes we currently SKIP at install time (`install_all_jit_entries`
 in `polyml-jit/src/lib.rs`):
-- CALL_LOCAL_B (0x16), TAIL_B_B (0x7b) — peek-don't-pop calling
-  conventions our trampoline path doesn't fully model.
+- CALL_LOCAL_B (0x16) — peek-don't-pop calling convention our
+  trampoline path doesn't fully model (it deliberately over-pushes
+  and reuses leftover slots after the call returns, so `n_args` can't
+  be inferred statically — unlike TAIL_B_B, which forwards exactly its
+  args).
 - CALL_CONST_ADDR variants (0x57/0x58/0x17/0x18) — translation
   loads closure pointer at runtime, but the call still SEGVs
   downstream in unisolated cases.
+
+TAIL_B_B (0x7b) — **NOW INSTALLS** (2026-06-12, +115 functions, the
+next perf lever after CASE16). It was SKIPPED because "re-enabling
+breaks the basis-loaded HOL4 workload" — root-caused by a 3-seat
+ultracode fleet (all three converged on the SAME bug independently):
+the JIT translation popped the tail-call group in the WRONG ORDER. The
+group is `[retPC, closure, args...]` top→bottom (mirrors do_tail_call,
+mod.rs:3757 / upstream bytecode.cpp:387-406); the old code popped
+`tail_count-2` items off the top as args FIRST, then grabbed the next
+slot as the "closure" — so it never discarded the retPC placeholder and
+dispatched a real data arg (a tagged int) AS the closure → "call to
+non-closure value: Tagged(0)" / SEGV on tail-recursive code
+(List.map/tabF, DATATYPE_REP constructors). Fix (translate.rs
+INSTR_TAIL_B_B): pop+discard the retPC placeholder, then the closure,
+then the N args; underflow guard widened to `tail_count` in both the
+translate path and scan_one_opcode. The `skip` immediate is correctly
+ignored — it only governs in-place caller-frame collapse on the
+interpreter's shared PolyWord stack; the JIT returns the callee result
+directly. NOT an arity bug: `JIT_TRAMP_VERIFY_ARITY=1` reports ZERO
+mismatches across the full 1.675B-step basis load, so tail_count-2 ==
+callee arity always. Verified: simple bootstrap Tagged(0), the full
+basis load under --jit Tagged(0) (the gate that was failing), and a
+JIT==interp differential with a negative control
+(`tests/tail_b_b_differential.rs`).
 
 Top remaining translation blockers (= functions that don't even
 translate, much less install):

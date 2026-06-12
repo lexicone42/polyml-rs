@@ -2044,11 +2044,28 @@ fn compile_with_consts_impl(
                 }
                 INSTR_TAIL_B_B => {
                     // tail_count + skip immediates. Per upstream
-                    // `bytecode.cpp:387`, tail_count counts the
-                    // [retPC, closure, args] group at top; SML arity
-                    // is `tail_count - 2`. `skip` is the caller-
-                    // frame slots to drop below — irrelevant for our
-                    // JIT which returns directly to the trampoline.
+                    // `bytecode.cpp:387-406`, the top `tail_count` stack
+                    // slots are (top → bottom):
+                    //   sp[0]            = retPC placeholder (popped as pc)
+                    //   sp[1]            = closure          (popped as closure)
+                    //   sp[2..tail_count]= the `tail_count-2` args
+                    // i.e. upstream consumes `tail_count` items: it pops
+                    // the retPC placeholder FIRST, then the closure, then
+                    // leaves the args (re-pushing retPC+closure for the
+                    // CALL_CLOSURE protocol). The callee reads its own
+                    // arity off its enter-int prologue.
+                    //
+                    // The earlier translation popped only `n_args + 1`
+                    // items (forgetting the retPC placeholder), so the
+                    // value it treated as "closure" was actually the
+                    // bottom-most arg, and one real arg leaked into the
+                    // args buffer as the spurious top. That mis-dispatch
+                    // produced "call to non-closure value" / SEGV on
+                    // tail-recursive code (e.g. List.map / List.tabF).
+                    //
+                    // `skip` (rc) is the caller-frame slots dropped below
+                    // the shifted group; irrelevant for our JIT which
+                    // returns the callee result directly to the trampoline.
                     if pc + 1 >= bytecode.len() {
                         return Err(TranslateError::Truncated(pc));
                     }
@@ -2060,14 +2077,22 @@ fn compile_with_consts_impl(
                         return Err(TranslateError::Unsupported { op, at: pc });
                     }
                     let n_args = tail_count - 2;
-                    if stack.len() < n_args + 1 {
+                    // Need tail_count items on the compile-time stack:
+                    // retPC placeholder + closure + n_args args.
+                    if stack.len() < tail_count {
                         return Err(TranslateError::Underflow(pc));
                     }
+                    // Pop the retPC placeholder (top of stack) and discard
+                    // it — our JIT returns directly, so there is no real
+                    // return address to thread through.
+                    let _ret_pc_placeholder = stack.pop().unwrap();
+                    // Now the closure is on top.
+                    let closure = stack.pop().unwrap();
+                    // Finally the args (top → bottom = arg_{n-1} → arg_0).
                     let mut args_vec: Vec<Value> = Vec::with_capacity(n_args);
                     for _ in 0..n_args {
                         args_vec.push(stack.pop().unwrap());
                     }
-                    let closure = stack.pop().unwrap();
                     let slot_size = std::cmp::max(8, (n_args * 8) as u32);
                     let slot = builder.create_sized_stack_slot(
                         cranelift::prelude::StackSlotData::new(
@@ -3759,8 +3784,11 @@ fn scan_one_opcode(
                 if tc < 2 {
                     return Err(TranslateError::Unsupported { op, at: pc - 3 });
                 }
-                let n_args = tc - 2;
-                if depth < n_args + 1 {
+                // Pass-2 consumes the full `tail_count` group off the
+                // stack: retPC placeholder + closure + (tail_count-2)
+                // args. Require that many slots present so the pop in
+                // INSTR_TAIL_B_B (translate path) can't underflow.
+                if depth < tc {
                     return Err(TranslateError::Underflow(pc - 3));
                 }
                 return Ok(OpScan::terminator());

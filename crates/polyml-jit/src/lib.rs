@@ -215,8 +215,34 @@ pub fn install_all_jit_entries(
                 .iter()
                 .any(|&b| (INSTR_CALL_FAST_RTS_BASE..=INSTR_CALL_FAST_RTS_LAST).contains(&b));
             let const_addr_rts_wrapper = has_const_addr && has_call_fast_rts;
+            // TAIL_B_B (0x7b) is now SAFE to install (2026-06-12).
+            //
+            // Root cause of the old break: the JIT translation of
+            // TAIL_B_B consumed only `tail_count - 1` stack slots
+            // (closure + n_args args), forgetting the retPC placeholder
+            // that the SML compiler pushes on TOP of the call group.
+            // Upstream (bytecode.cpp:387-406) consumes `tail_count`
+            // items: it pops the retPC placeholder FIRST, then the
+            // closure, then forwards the `tail_count-2` args. The
+            // off-by-one made the value treated as "closure" actually
+            // be the bottom-most arg (often a tagged int), producing
+            // "call to non-closure value" / SEGV on tail-recursive code
+            // (List.map / List.tabF). Fixed in translate.rs
+            // (INSTR_TAIL_B_B): pop+discard the retPC placeholder before
+            // popping the closure. Verified: simple bootstrap Tagged(0)
+            // (+115 installed), the full basis load Tagged(0) with
+            // JIT_TRAMP_VERIFY_ARITY=1 reporting ZERO arity mismatches
+            // (tail_count-2 == callee arity holds for every dispatch —
+            // a tail call forwards exactly its args, unlike CALL_LOCAL_B
+            // which deliberately over-pushes), and a focused
+            // JIT==interp differential (tail_b_b_differential.rs).
+            //
+            // We still exclude TAIL_B_B functions that ALSO contain a
+            // currently-untrusted opcode (CALL_LOCAL_B / CALL_CONST_ADDR
+            // / a CONST_ADDR-RTS wrapper) — those remain blocked by their
+            // own filters below, independent of the tail-call fix.
+            let _ = has_tail_b_b;
             if has_call_local_b
-                || has_tail_b_b
                 || has_call_const_addr
                 || const_addr_rts_wrapper
             {
