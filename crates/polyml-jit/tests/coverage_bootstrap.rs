@@ -172,6 +172,110 @@ fn jit_coverage_on_bootstrap_code_objects() {
     assert!(total > 0, "should have walked some code objects");
 }
 
+/// Focused probe: count how many CASE16 (0x0a) -containing code
+/// objects translate, and report the first-failure reason for the rest.
+/// Run with: cargo test --release -p polyml-jit --test coverage_bootstrap
+///   -- --nocapture case16_coverage
+#[test]
+fn case16_coverage() {
+    let bs = workspace_root().join("vendor/polyml/bootstrap/bootstrap64.txt");
+    if !bs.exists() {
+        eprintln!("SKIP: bootstrap64.txt not present");
+        return;
+    }
+    let bytes = std::fs::read(&bs).unwrap();
+    let image = Image::parse(&bytes).unwrap();
+    let loaded = load_image(&image).unwrap();
+
+    let mut with_case16 = 0usize;
+    let mut case16_ok = 0usize;
+    let mut blockers: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut first_fail_bytes: Option<(usize, Vec<u8>)> = None;
+    // (full_body, bytecode_len) of the first jit-error CASE16 fn, for IR dump.
+    let mut first_jit_fail: Option<(Vec<u8>, usize)> = None;
+    let mut jit = Jit::new().unwrap();
+
+    for space in [&loaded.immutable, &loaded.mutable, &loaded.code] {
+        walk_code_objects(space, |code_obj_ptr, lw| {
+            let n_words = length_of(lw);
+            let (cp, _count) = unsafe { length_word::const_segment_for_code(code_obj_ptr) };
+            let body_start = code_obj_ptr as usize;
+            let cp_start = cp as usize;
+            let bytecode_len = cp_start
+                .saturating_sub(body_start)
+                .saturating_sub(std::mem::size_of::<usize>());
+            let max_bytes = n_words * std::mem::size_of::<usize>();
+            let bytecode_len = bytecode_len.min(max_bytes);
+            let full_body: &[u8] = unsafe {
+                std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes)
+            };
+            let bc = &full_body[..bytecode_len];
+            if !translate::has_real_case16(bc) {
+                return;
+            }
+            // Exclude functions that ALSO contain a TRANSLATION blocker
+            // unrelated to CASE16 (ESCAPE 0xfe, CALL_CLOSURE 0x0c). Note
+            // CALL_LOCAL_B/TAIL_B_B/CALL_CONST_ADDR DO translate (they're
+            // only filtered at install time), so they don't block the
+            // coverage count and are NOT excluded here.
+            let other_blocker = bc.iter().any(|&b| matches!(b, 0x0c | 0xfe));
+            if other_blocker {
+                return;
+            }
+            with_case16 += 1;
+            match translate::compile_with_consts(&mut jit, full_body, bytecode_len) {
+                Ok(_) => case16_ok += 1,
+                Err(e) => {
+                    let key = match &e {
+                        translate::TranslateError::Unsupported { op, .. } => format!("op 0x{op:02x}"),
+                        translate::TranslateError::Truncated(_) => "truncated".into(),
+                        translate::TranslateError::Underflow(_) => "underflow".into(),
+                        translate::TranslateError::FellOffEnd => "fell-off-end".into(),
+                        translate::TranslateError::Jit(_) => "jit".into(),
+                    };
+                    if matches!(e, translate::TranslateError::Jit(_))
+                        && first_jit_fail.is_none()
+                    {
+                        first_jit_fail = Some((full_body.to_vec(), bytecode_len));
+                    }
+                    // Capture the SMALLEST failing function for offline
+                    // tracing (now that non-CASE16 blockers are excluded,
+                    // any failure here is CASE16-related).
+                    if first_fail_bytes.as_ref().is_none_or(|(s, _)| bytecode_len < *s)
+                    {
+                        first_fail_bytes = Some((bytecode_len, bc.to_vec()));
+                    }
+                    *blockers.entry(key).or_insert(0) += 1;
+                }
+            }
+        });
+    }
+
+    eprintln!("CASE16 coverage over bootstrap64.txt:");
+    eprintln!("  code objects containing 0x0a: {with_case16}");
+    eprintln!("  of those, JIT-translate OK:    {case16_ok}");
+    let mut bv: Vec<(String, usize)> = blockers.into_iter().collect();
+    bv.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    eprintln!("  first-failure reasons:");
+    for (k, n) in &bv {
+        eprintln!("    {k:<14}: {n}");
+    }
+    if let Some((len, bytes)) = &first_fail_bytes {
+        eprintln!("  first failing function ({len} bytes):");
+        let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        eprintln!("    {}", hex.join(" "));
+    }
+    if let Some((full_body, bclen)) = &first_jit_fail {
+        eprintln!("\n=== Re-translating first jit-error CASE16 fn with IR dump ===");
+        // Safety: JIT_DUMP_IR is read inside compile; set it for this one.
+        unsafe { std::env::set_var("JIT_DUMP_IR", "1"); }
+        let mut j2 = Jit::new().unwrap();
+        let r = translate::compile_with_consts(&mut j2, full_body, *bclen);
+        unsafe { std::env::remove_var("JIT_DUMP_IR"); }
+        eprintln!("=== jit-fail re-translate result: {:?}", r.map(|_| ()));
+    }
+}
+
 /// Walk every F_CODE_OBJ in a space, calling `f(body_ptr, length_word)`
 /// for each. Length-word and trailing-offset must be well-formed.
 fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(
@@ -197,4 +301,23 @@ fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(
         }
         i += 1 + n;
     }
+}
+
+/// Offline trace of the smallest CASE16 function that fails to
+/// translate. Bytes captured from `case16_coverage`.
+#[test]
+fn trace_one_case16() {
+    let bc: Vec<u8> = vec![
+        0x2c,0x57,0x5d,0x29,0x16,0x04,0x2f,0x16,0x01,0x64,0xc7,0x01,0x0a,0x07,0x00,0x19,
+        0x00,0x1c,0x00,0x1f,0x00,0x31,0x00,0x3d,0x00,0x40,0x00,0x0e,0x00,0xc1,0x01,0xc6,
+        0x2b,0x2a,0x31,0x30,0x32,0x7b,0x05,0x09,0x29,0x02,0x31,0x29,0x02,0x2e,0xc1,0x01,
+        0x21,0x02,0x02,0x2b,0x2a,0x31,0x16,0x07,0x29,0x2c,0x32,0x31,0x33,0x7b,0x05,0x0a,
+        0xc1,0x01,0x29,0x2d,0x30,0x2d,0x56,0x18,0x32,0x7b,0x06,0x08,0x29,0x02,0x0d,0xc1,
+        0x01,0x29,0x2d,0x30,0x2d,0x15,0x08,0x02,0x32,0x7b,0x06,0x08,0x65,0x44,0x3b,0x3b,
+    ];
+    let mut jit = Jit::new().unwrap();
+    // This function reads CONST_ADDR (0x57/0x56...) which need a const
+    // pool; with bytecode-only it'll fail on those. Pad full_body.
+    let r = translate::compile_with_consts(&mut jit, &bc, bc.len());
+    eprintln!("trace result: {r:?}");
 }

@@ -2176,14 +2176,16 @@ fn compile_with_consts_impl(
                     let table_start = pc;
                     let selector =
                         stack.pop().ok_or(TranslateError::Underflow(pc - 3))?;
-                    // Untag: arith shift right by 1.
+                    // Untag: arithmetic shift right by 1 → SIGNED i64
+                    // selector value `u`, matching the interpreter's
+                    // `selector.untag()` (bytecode.cpp:376-385).
                     let untagged = builder.ins().sshr_imm(selector, 1);
-                    // Default block (out-of-range).
+                    // Default block (out-of-range): u < 0 || u >= arg1.
                     let default_target = table_start + arg1 * 2;
                     let default_blk = *block_at
                         .get(&default_target)
                         .expect("CASE16 default target should be registered in pass 1");
-                    // Build per-case blocks list for br_table.
+                    // Resolve each case entry's real target block.
                     let mut case_blks: Vec<cranelift::prelude::Block> =
                         Vec::with_capacity(arg1);
                     for i in 0..arg1 {
@@ -2201,22 +2203,23 @@ fn compile_with_consts_impl(
                         );
                         case_blks.push(blk);
                     }
-                    // Cranelift br_table requires "leaf" blocks per case
-                    // (no extra args). Since our blocks take stack args,
-                    // we emit per-case trampoline blocks that jump to
-                    // the real block with the current stack.
+                    // Cranelift `br_table` requires "leaf" blocks (no args)
+                    // per case and an i32 (UNSIGNED) index. Our real
+                    // target blocks take the live stack as params, so we
+                    // emit a per-case leaf that `jump real_blk(stack)`.
                     let stack_args: Vec<BlockArg> =
                         stack.iter().copied().map(BlockArg::from).collect();
-                    // Create a leaf block per unique target that does
-                    // `jump real_blk(args)`.
-                    let make_leaf = |builder: &mut FunctionBuilder, target: cranelift::prelude::Block| -> cranelift::prelude::Block {
+                    // Capture the CASE16 block BEFORE switching to any
+                    // leaf (switching moves the builder's insertion point).
+                    let cur_blk = builder.current_block().expect("must be in a block");
+                    // Default leaf (shared by the explicit out-of-range
+                    // guard AND as br_table's default).
+                    let default_leaf = {
                         let leaf = builder.create_block();
                         builder.switch_to_block(leaf);
-                        builder.ins().jump(target, &stack_args);
+                        builder.ins().jump(default_blk, &stack_args);
                         leaf
                     };
-                    // Save current block so we restore.
-                    let cur_blk = builder.current_block().expect("must be in a block");
                     let leaves: Vec<cranelift::prelude::Block> = case_blks
                         .iter()
                         .map(|&blk| {
@@ -2226,16 +2229,30 @@ fn compile_with_consts_impl(
                             leaf
                         })
                         .collect();
-                    let default_leaf = {
-                        let leaf = builder.create_block();
-                        builder.switch_to_block(leaf);
-                        builder.ins().jump(default_blk, &stack_args);
-                        leaf
-                    };
-                    let _ = make_leaf;
-                    // Back to current block for emitting br_table.
+                    // Dispatch block: reached only when `u` is in
+                    // [0, arg1), so the i64→i32 narrowing is exact and
+                    // `br_table`'s index is a valid case ordinal.
+                    let dispatch_blk = builder.create_block();
+                    // Explicit bounds guard. A single UNSIGNED compare
+                    // `u >=u arg1` covers BOTH `u >= arg1` and `u < 0`
+                    // (a negative i64 untags to a huge unsigned), exactly
+                    // matching the interpreter's `u < 0 || u >= arg1`.
+                    // This also protects against the i64→i32 truncation
+                    // hazard: a large in-i64 selector that would wrap to
+                    // a small i32 is caught here and sent to default.
                     builder.switch_to_block(cur_blk);
-                    // Build JumpTable for br_table.
+                    let arg1_v = builder.ins().iconst(int, arg1 as i64);
+                    let oob = builder.ins().icmp(
+                        IntCC::UnsignedGreaterThanOrEqual,
+                        untagged,
+                        arg1_v,
+                    );
+                    builder
+                        .ins()
+                        .brif(oob, default_leaf, &[], dispatch_blk, &[]);
+                    // In-range dispatch via br_table.
+                    builder.switch_to_block(dispatch_blk);
+                    let idx32 = builder.ins().ireduce(types::I32, untagged);
                     let default_call = builder.func.dfg.block_call(default_leaf, &[]);
                     let case_calls: Vec<_> = leaves
                         .iter()
@@ -2246,7 +2263,7 @@ fn compile_with_consts_impl(
                         &case_calls,
                     );
                     let jt = builder.create_jump_table(jtd);
-                    builder.ins().br_table(untagged, jt);
+                    builder.ins().br_table(idx32, jt);
                     pc = table_start + arg1 * 2;
                     returned = true;
                 }
@@ -2638,6 +2655,23 @@ pub fn arity_from_return_scan_pub(bytecode: &[u8]) -> Option<usize> {
     arity_from_terminator_scan(bytecode, false)
 }
 
+/// Diagnostic helper: walk `bytecode` opcode-aware and report whether it
+/// contains a genuine CASE16 (0x0a) OPCODE (not a 0x0a immediate byte).
+/// Stops at the first unknown opcode. Used by coverage probes only.
+pub fn has_real_case16(bytecode: &[u8]) -> bool {
+    let mut pc = function_prologue(bytecode).0;
+    while pc < bytecode.len() {
+        if bytecode[pc] == INSTR_CASE16 {
+            return true;
+        }
+        match opcode_total_len(bytecode, pc) {
+            Ok(step) if step > 0 => pc += step,
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn arity_from_return_scan(bytecode: &[u8]) -> Option<usize> {
     arity_from_terminator_scan(bytecode, false)
 }
@@ -2691,11 +2725,150 @@ fn function_entry_pc(bytecode: &[u8]) -> usize {
 /// bytecode hits unsupported opcodes during scanning (we'll
 /// surface the same error later in scan_branch_targets).
 fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
-    let mut depth: i32 = 0;
+    // CFG-aware min-depth inference. The straight-line walk below
+    // marches a single basic block; control-flow opcodes (jumps,
+    // CASE16) enqueue their successor PCs at the depth control reaches
+    // them, so the case-target bodies AFTER a CASE16 are explored too
+    // (the linear scan used to stop dead at the first CASE16/RETURN,
+    // missing the deep LOCAL_N reads inside case bodies — which is what
+    // sets the function's true arg_count).
+    //
+    // We track the MINIMUM entry depth seen per PC and re-explore a PC
+    // when reached at a strictly shallower depth: a shallower entry
+    // makes depth-relative peeks reach further below the baseline, so
+    // the binding (most negative) min_depth comes from the shallowest
+    // entry. Depths are bounded for well-formed bytecode, so the
+    // fixpoint terminates; a hard iteration cap guards against
+    // pathological/garbage input.
     let mut min_depth: i32 = 0;
-    let mut pc = start_pc;
-    while pc < bytecode.len() {
+    let mut entry_depth: std::collections::HashMap<usize, i32> =
+        std::collections::HashMap::new();
+    let mut work: Vec<(usize, i32)> = vec![(start_pc, 0)];
+    entry_depth.insert(start_pc, 0);
+    let mut budget: usize = bytecode.len().saturating_mul(8).max(1024);
+
+    while let Some((mut pc, mut depth)) = work.pop() {
+      'block: while pc < bytecode.len() {
+        budget = match budget.checked_sub(1) {
+            Some(b) => b,
+            None => return Some((-min_depth).max(0) as usize),
+        };
         let op = bytecode[pc];
+        // --- Control-flow opcodes: compute successors and break the
+        //     straight-line walk. Stack effects mirror the main match.
+        match op {
+            INSTR_JUMP8 | INSTR_JUMP16 => {
+                let wide = op == INSTR_JUMP16;
+                let imm = if wide { 2 } else { 1 };
+                if pc + imm >= bytecode.len() { return None; }
+                let off = if wide {
+                    u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize
+                } else {
+                    bytecode[pc + 1] as usize
+                };
+                let next = pc + 1 + imm;
+                let target = next + off;
+                infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                break 'block; // unconditional: no fall-through
+            }
+            INSTR_JUMP_BACK8 | INSTR_JUMP_BACK16 => {
+                let wide = op == INSTR_JUMP_BACK16;
+                let imm = if wide { 2 } else { 1 };
+                if pc + imm >= bytecode.len() { return None; }
+                let off = if wide {
+                    u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize
+                } else {
+                    bytecode[pc + 1] as usize
+                };
+                let opcode_total = 1 + imm;
+                let next = pc + opcode_total;
+                if next < off + opcode_total { return None; }
+                let target = next - off - opcode_total;
+                infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                break 'block; // unconditional back-jump
+            }
+            INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE
+            | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
+                let wide = matches!(op, INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE);
+                let imm = if wide { 2 } else { 1 };
+                if pc + imm >= bytecode.len() { return None; }
+                let off = if wide {
+                    u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize
+                } else {
+                    bytecode[pc + 1] as usize
+                };
+                let next = pc + 1 + imm;
+                // pops the boolean condition.
+                depth -= 1;
+                min_depth = std::cmp::min(min_depth, depth);
+                let target = next + off;
+                infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                // fall-through continues this block at `next`.
+                pc = next;
+                continue 'block;
+            }
+            INSTR_JUMP_TAGGED_LOCAL => {
+                // [depth, off]; peek-only conditional, both arms at depth.
+                if pc + 2 >= bytecode.len() { return None; }
+                let d = bytecode[pc + 1] as usize;
+                let off = bytecode[pc + 2] as usize;
+                let needed = (d as i32) + 1;
+                if depth < needed {
+                    min_depth = std::cmp::min(min_depth, depth - needed);
+                }
+                let next = pc + 3;
+                let target = next + off;
+                infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                pc = next;
+                continue 'block;
+            }
+            INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => {
+                // [depth, want, off]; peek-only conditional, both arms.
+                if pc + 3 >= bytecode.len() { return None; }
+                let d = bytecode[pc + 1] as usize;
+                let off = bytecode[pc + 3] as usize;
+                let needed = (d as i32) + 1;
+                if depth < needed {
+                    min_depth = std::cmp::min(min_depth, depth - needed);
+                }
+                let next = pc + 4;
+                let target = next + off;
+                infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                pc = next;
+                continue 'block;
+            }
+            INSTR_CASE16 => {
+                // Pops the selector, then branches to one of N table
+                // targets or the default, all entered at depth-1.
+                if pc + 2 >= bytecode.len() { return None; }
+                let arg1 = u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize;
+                depth -= 1; // pop selector
+                min_depth = std::cmp::min(min_depth, depth);
+                let table_start = pc + 3;
+                let default_target = table_start + arg1 * 2;
+                infer_enqueue(&mut work, &mut entry_depth, default_target, depth);
+                for i in 0..arg1 {
+                    let entry_pos = table_start + i * 2;
+                    if entry_pos + 1 >= bytecode.len() { return None; }
+                    let off = u16::from_le_bytes([
+                        bytecode[entry_pos],
+                        bytecode[entry_pos + 1],
+                    ]) as usize;
+                    let target = table_start + off;
+                    infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                }
+                break 'block; // no fall-through past the table
+            }
+            INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3
+            | INSTR_RETURN_B | INSTR_RETURN_W
+            | INSTR_RAISE_EX | INSTR_TAIL_B_B | INSTR_CALL_CLOSURE => {
+                // Terminators: no successors. (The straight-line code
+                // below would have returned early on these; here we
+                // simply stop this block and move to the worklist.)
+                break 'block;
+            }
+            _ => {}
+        }
         pc += 1;
         let (push_count, pop_count, peek_depth, immediate_bytes): (i32, i32, Option<usize>, usize) =
             match op {
@@ -2942,8 +3115,28 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
         }
         depth += push_count;
         pc += immediate_bytes;
+      }
     }
     Some((-min_depth).max(0) as usize)
+}
+
+/// Worklist helper for [`infer_arg_count`]: enqueue `target` at
+/// `depth` if it hasn't been visited yet, or has only been visited at
+/// a strictly deeper entry depth (a shallower entry is more demanding
+/// for depth-relative peeks, so we re-explore it).
+fn infer_enqueue(
+    work: &mut Vec<(usize, i32)>,
+    entry_depth: &mut std::collections::HashMap<usize, i32>,
+    target: usize,
+    depth: i32,
+) {
+    match entry_depth.get(&target) {
+        Some(&prev) if prev <= depth => {}
+        _ => {
+            entry_depth.insert(target, depth);
+            work.push((target, depth));
+        }
+    }
 }
 
 /// Compute the JIT-internal arg_count for a bytecode body.
@@ -2966,73 +3159,213 @@ fn compute_arg_count(bytecode: &[u8], entry_pc: usize, prologue_arg_count: usize
     inferred.max(from_return)
 }
 
+/// One outgoing control-flow edge produced by scanning a single
+/// opcode. `pc` is where control flows next; `depth` is the operand-
+/// stack depth at the START of the opcode at `pc`.
+///
+/// `is_block_target` distinguishes a *branch* edge (whose destination
+/// pass-2 materialises as a Cranelift block with `depth` params — the
+/// taken side of a jump, a conditional fall-through, a CASE16 case/
+/// default) from a plain *sequential* fall-through after a non-branch
+/// opcode (which pass-2 walks straight into, no block needed). Both
+/// kinds feed the worklist's depth propagation; only block-target
+/// edges populate the `targets` map that pass-2 consumes.
+struct ControlEdge {
+    pc: usize,
+    depth: usize,
+    is_block_target: bool,
+}
+
+/// Result of scanning ONE opcode at a known start depth: the set of
+/// successor edges. A terminator (RETURN/RAISE/tail-call/unconditional
+/// jump) emits no sequential fall-through edge.
+struct OpScan {
+    edges: Vec<ControlEdge>,
+}
+
+impl OpScan {
+    fn fallthrough(pc: usize, depth: usize) -> Self {
+        OpScan {
+            edges: vec![ControlEdge { pc, depth, is_block_target: false }],
+        }
+    }
+    fn terminator() -> Self {
+        OpScan { edges: Vec::new() }
+    }
+}
+
+/// Pass-1 (CFG depth propagation): compute the operand-stack depth at
+/// the start of every reachable opcode by following control-flow edges
+/// to a fixpoint (worklist), then return the `branch-target pc -> depth`
+/// map that pass-2 consumes.
+///
+/// This replaces the older LINEAR depth scan, which was wrong for
+/// CASE16 (0x0a): a CASE16 case-target is entered at CASE16's post-pop
+/// depth (depth-1) via a control EDGE, but the linear scan reached it
+/// by falling through the intervening code at a DIFFERENT depth, so the
+/// recorded depth (and every subsequent LOCAL_K read) was wrong and the
+/// function refused to translate. Following CFG edges fixes CASE16 (and
+/// any other genuine multi-predecessor merge) directly.
+///
+/// Merge policy — kept FAITHFUL to the old linear scan so pass-2 (which
+/// still walks linearly and passes its *untruncated* operand stack as
+/// block args at explicit branch/jump edges) stays correct:
+///
+///  * A BRANCH-target pc (jump target, conditional taken/fall-through,
+///    CASE16 case/default) is materialised by pass-2 as a Cranelift
+///    block whose param count equals the recorded `targets[pc]`. Every
+///    explicit branch edge into it passes EXACTLY that many values, so
+///    its depth must be IDENTICAL across all branch predecessors —
+///    strict equality, bail (`0xFE`) on a genuine conflict.
+///  * A SEQUENTIAL fall-through that lands ON a block-target is the one
+///    place truncation applies: pass-2's top-of-loop reconciliation
+///    drops dead temporaries when the fall-through stack is DEEPER than
+///    the block expects, and bails (`0xFD`) when it is SHALLOWER. We
+///    reconcile identically here against `targets[pc]`.
+///
+/// The ONLY conceptual change from the old scan is following control-
+/// flow EDGES (so CASE16 case-targets are entered at CASE16's post-pop
+/// depth via the jump-table edge, not at whatever depth the linear walk
+/// happened to have when it marched into the table region).
 fn scan_branch_targets(
     bytecode: &[u8],
     full_body: &[u8],
 ) -> Result<std::collections::BTreeMap<usize, usize>, TranslateError> {
+    let debug = std::env::var("JIT_DEBUG_SCAN").is_ok();
+    // depth_at[pc] = entry depth for a pc reached ONLY by sequential
+    // fall-through (a non-block-target pc has exactly one predecessor).
+    // `None` = not yet reached this way.
+    let mut depth_at: Vec<Option<usize>> = vec![None; bytecode.len()];
+    // Block-target pcs (destinations of control-flow EDGES) -> the
+    // authoritative depth pass-2 gives the block. Strict-merged.
     let mut targets: std::collections::BTreeMap<usize, usize> =
         std::collections::BTreeMap::new();
-    // depth_at[pc] = stack depth observed at the *start* of the
-    // opcode at pc, used to validate that backward jumps land at
-    // a position whose recorded depth matches the depth at the
-    // jump source.
-    let mut depth_at: Vec<Option<usize>> = vec![None; bytecode.len()];
+
     let (start_pc, prologue_arg_count) = function_prologue(bytecode);
     let arg_count = compute_arg_count(bytecode, start_pc, prologue_arg_count);
-    let mut depth: usize = arg_count;
-    let mut pc = start_pc;
-    let mut reachable = true;
-    while pc < bytecode.len() {
-        // If we just exited a terminator (returned/jumped) and now
-        // re-enter at a recorded branch target, adopt that target's
-        // depth as our new reachable depth. If we're at an
-        // unreachable PC with no recorded target, skip ahead one
-        // opcode worth of bytes.
-        if !reachable {
-            if let Some(&recorded) = targets.get(&pc) {
-                depth = recorded;
-                reachable = true;
-            } else {
-                pc += opcode_total_len(bytecode, pc)?;
-                continue;
-            }
-        } else if let Some(&recorded) = targets.get(&pc) {
-            // Falling through into a recorded branch target. Pass 2
-            // emits an implicit jump here passing the current stack
-            // as block args — the block was created with `recorded`
-            // params. For a SOUND merge, the depth must match exactly.
-            //
-            // When they diverge, the cheapest correctness-preserving
-            // option is to TRUNCATE the stack to match `recorded`
-            // when fall-through has MORE values (the extras are
-            // dead at the merge point — well-formed SML compiler
-            // output ensures this), and bail when fall-through has
-            // FEWER values (we can't materialise extras).
-            #[allow(clippy::comparison_chain)]
-            if depth > recorded {
-                // Truncate to recorded; pass 2 will see the same
-                // depth and emit a clean jump.
-                depth = recorded;
-            } else if depth < recorded {
-                return Err(TranslateError::Unsupported { op: 0xFD, at: pc });
-            }
+
+    // The authoritative entry depth at which a pc is scanned: a block
+    // target is scanned at `targets[pc]`; any other reachable pc at
+    // `depth_at[pc]`.
+    let scan_depth = |pc: usize,
+                      targets: &std::collections::BTreeMap<usize, usize>,
+                      depth_at: &[Option<usize>]|
+     -> Option<usize> { targets.get(&pc).copied().or(depth_at[pc]) };
+
+    let mut worklist: Vec<usize> = Vec::new();
+    depth_at[start_pc] = Some(arg_count);
+    worklist.push(start_pc);
+
+    while let Some(pc) = worklist.pop() {
+        if pc >= bytecode.len() {
+            // A fall-through that runs off the end of the bytecode is a
+            // malformed body; pass-2 would FellOffEnd. Surface here.
+            return Err(TranslateError::FellOffEnd);
         }
-        depth_at[pc] = Some(depth);
-        if std::env::var("JIT_DEBUG_SCAN").is_ok() {
+        let Some(depth) = scan_depth(pc, &targets, &depth_at) else {
+            // pc lost its depth (shouldn't happen); skip defensively.
+            continue;
+        };
+        if debug {
             eprintln!("  scan: pc={pc} depth={depth} op=0x{:02x}", bytecode[pc]);
         }
-        let op = bytecode[pc];
-        pc += 1;
-        // NOTE on CASE16 (0x0a) translation limit: when bytecode after a
-        // CASE16 has case-targets that are NOT also jump-target sentinels
-        // (= the SML compiler emits jumps that fall-through code to case
-        // targets), our linear scan tracks depth as if executing the
-        // intervening code, but the case-target enters at CASE16's
-        // post-pop depth (depth-1). Truncating fall-through depth to
-        // recorded depth (above) hides this — subsequent LOCAL_K reads
-        // then fail with Underflow. Functions with such patterns won't
-        // translate. Fix would require per-case branch walking, not
-        // linear scan.
+        let scan = scan_one_opcode(bytecode, full_body, pc, depth)?;
+        for edge in scan.edges {
+            if edge.pc >= bytecode.len() {
+                return Err(TranslateError::FellOffEnd);
+            }
+            if edge.is_block_target {
+                // Branch edge: strict-equal merge into `targets`.
+                match targets.get(&edge.pc).copied() {
+                    Some(existing) if existing == edge.depth => {
+                        // already recorded at this depth; nothing to do.
+                    }
+                    Some(_) => {
+                        // Genuine depth conflict at a branch target.
+                        return Err(TranslateError::Unsupported {
+                            op: 0xFE,
+                            at: edge.pc,
+                        });
+                    }
+                    None => {
+                        // Newly a block target. If it was previously
+                        // reached only by fall-through, reconcile that
+                        // fall-through depth against this (now
+                        // authoritative) branch depth: a shallower
+                        // fall-through can't supply the block's values.
+                        if let Some(ft) = depth_at[edge.pc]
+                            && ft < edge.depth
+                        {
+                            return Err(TranslateError::Unsupported {
+                                op: 0xFD,
+                                at: edge.pc,
+                            });
+                        }
+                        targets.insert(edge.pc, edge.depth);
+                        worklist.push(edge.pc);
+                    }
+                }
+            } else {
+                // Sequential fall-through edge.
+                if let Some(&t) = targets.get(&edge.pc) {
+                    // Falls through onto an existing block target. Pass-2
+                    // truncates a DEEPER stack to `t` (dead temporaries)
+                    // and underflows on a SHALLOWER one.
+                    #[allow(clippy::comparison_chain)]
+                    if edge.depth < t {
+                        return Err(TranslateError::Unsupported {
+                            op: 0xFD,
+                            at: edge.pc,
+                        });
+                    }
+                    // edge.depth >= t: fine, no re-scan needed (the
+                    // target is scanned at `t`).
+                } else {
+                    match depth_at[edge.pc] {
+                        Some(existing) if existing == edge.depth => {}
+                        Some(_) => {
+                            // Two fall-throughs disagree at a non-target
+                            // join — surface as the old scan would.
+                            return Err(TranslateError::Unsupported {
+                                op: 0xFE,
+                                at: edge.pc,
+                            });
+                        }
+                        None => {
+                            depth_at[edge.pc] = Some(edge.depth);
+                            worklist.push(edge.pc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(targets)
+}
+
+/// Scan ONE opcode at `pc` (start depth `depth`), validating its stack
+/// effect (returning the SAME `TranslateError`s the linear scan did)
+/// and producing its successor control-flow edges. This is the SHARED
+/// per-opcode stack-effect logic the worklist in `scan_branch_targets`
+/// consumes — keeping it the single source of truth that pass-2 must
+/// agree with.
+fn scan_one_opcode(
+    bytecode: &[u8],
+    full_body: &[u8],
+    op_pc: usize,
+    depth_in: usize,
+) -> Result<OpScan, TranslateError> {
+    // Local mutable cursor / depth mirror the old inline logic: `pc`
+    // advances over the opcode byte + immediates; `depth` tracks the
+    // running operand-stack height. At the end, unless a terminator or
+    // explicit branch already produced edges, the opcode falls through
+    // to `pc` at the resulting `depth`.
+    let mut depth: usize = depth_in;
+    let mut pc = op_pc;
+    let op = bytecode[pc];
+    pc += 1;
+    {
         match op {
             INSTR_CONST_0..=INSTR_CONST_4 => depth += 1,
             INSTR_CONST_10 => depth += 1,
@@ -3107,8 +3440,12 @@ fn scan_branch_targets(
                     return Err(TranslateError::Underflow(pc - 3));
                 }
                 let taken = pc + off;
-                record_target(&mut targets, taken, depth)?;
-                record_target(&mut targets, pc, depth)?;
+                return Ok(OpScan {
+                    edges: vec![
+                        ControlEdge { pc: taken, depth, is_block_target: true },
+                        ControlEdge { pc, depth, is_block_target: true },
+                    ],
+                });
             }
             INSTR_IS_TAGGED_LOCAL_B => {
                 if pc >= bytecode.len() {
@@ -3134,8 +3471,12 @@ fn scan_branch_targets(
                     return Err(TranslateError::Underflow(pc - 4));
                 }
                 let taken = pc + off;
-                record_target(&mut targets, taken, depth)?;
-                record_target(&mut targets, pc, depth)?;
+                return Ok(OpScan {
+                    edges: vec![
+                        ControlEdge { pc: taken, depth, is_block_target: true },
+                        ControlEdge { pc, depth, is_block_target: true },
+                    ],
+                });
             }
             INSTR_INDIRECT_0
             | INSTR_INDIRECT_1
@@ -3422,7 +3763,7 @@ fn scan_branch_targets(
                 if depth < n_args + 1 {
                     return Err(TranslateError::Underflow(pc - 3));
                 }
-                reachable = false;
+                return Ok(OpScan::terminator());
             }
             INSTR_RAISE_EX => {
                 if depth == 0 {
@@ -3430,7 +3771,7 @@ fn scan_branch_targets(
                 }
                 // Treated as a function-exit terminator (no internal
                 // handler dispatch in this approximation).
-                reachable = false;
+                return Ok(OpScan::terminator());
             }
             INSTR_SET_HANDLER8 | INSTR_SET_HANDLER16 => {
                 // Consume immediate (1 or 2 bytes); push a placeholder.
@@ -3507,26 +3848,28 @@ fn scan_branch_targets(
                 if depth == 0 {
                     return Err(TranslateError::Underflow(pc - 1));
                 }
-                reachable = false;
+                return Ok(OpScan::terminator());
             }
             INSTR_RETURN_B => {
                 if pc >= bytecode.len() { return Err(TranslateError::Truncated(pc)); }
                 pc += 1;
                 if depth == 0 { return Err(TranslateError::Underflow(pc - 2)); }
-                reachable = false;
+                return Ok(OpScan::terminator());
             }
             INSTR_RETURN_W => {
                 if pc + 1 >= bytecode.len() { return Err(TranslateError::Truncated(pc)); }
                 pc += 2;
                 if depth == 0 { return Err(TranslateError::Underflow(pc - 3)); }
-                reachable = false;
+                return Ok(OpScan::terminator());
             }
             INSTR_JUMP8 | INSTR_JUMP16 => {
                 let (off, imm_bytes) = read_jump_off(bytecode, &mut pc, op)?;
                 let _ = imm_bytes;
                 let target = pc + off;
-                record_target(&mut targets, target, depth)?;
-                reachable = false;
+                // Unconditional: ONLY the target edge (no fall-through).
+                return Ok(OpScan {
+                    edges: vec![ControlEdge { pc: target, depth, is_block_target: true }],
+                });
             }
             INSTR_JUMP_BACK8 | INSTR_JUMP_BACK16 => {
                 let (off, imm_bytes) = read_jump_off(bytecode, &mut pc, op)?;
@@ -3536,15 +3879,12 @@ fn scan_branch_targets(
                     return Err(TranslateError::Unsupported { op, at: pc - opcode_total_len });
                 }
                 let target = pc - off - opcode_total_len;
-                let expected = depth_at[target].ok_or(TranslateError::Unsupported {
-                    op,
-                    at: pc - opcode_total_len,
-                })?;
-                if expected != depth {
-                    return Err(TranslateError::Unsupported { op: 0xFE, at: target });
-                }
-                record_target(&mut targets, target, depth)?;
-                reachable = false;
+                // Back-edge into a loop header. With CFG propagation the
+                // header's depth is found by fixpoint; min-merge keeps it
+                // consistent. Emit only the target edge (terminator).
+                return Ok(OpScan {
+                    edges: vec![ControlEdge { pc: target, depth, is_block_target: true }],
+                });
             }
             INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE
             | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
@@ -3554,9 +3894,12 @@ fn scan_branch_targets(
                 }
                 let post_pop = depth - 1;
                 let taken = pc + off;
-                record_target(&mut targets, taken, post_pop)?;
-                record_target(&mut targets, pc, post_pop)?;
-                depth = post_pop;
+                return Ok(OpScan {
+                    edges: vec![
+                        ControlEdge { pc: taken, depth: post_pop, is_block_target: true },
+                        ControlEdge { pc, depth: post_pop, is_block_target: true },
+                    ],
+                });
             }
             INSTR_CASE16 => {
                 // CASE16 = jump-table opcode:
@@ -3579,11 +3922,23 @@ fn scan_branch_targets(
                     return Err(TranslateError::Underflow(pc));
                 }
                 let post_pop = depth - 1;
-                // Register the default target (= one byte past the
-                // table, which is table_start + arg1*2).
+                // CASE16 pops the selector, then transfers control via a
+                // CFG edge to one of N case-targets or the default —
+                // EACH entered at post-pop depth (depth-1). There is NO
+                // fall-through past the inline table; this is a
+                // terminator. (The old linear scan instead marched into
+                // the table bytes / fell through, recording the wrong
+                // depth at case-targets — the bug this rewrite fixes.)
+                let mut edges: Vec<ControlEdge> = Vec::with_capacity(arg1 + 1);
+                // Default target (= one byte past the table, which is
+                // table_start + arg1*2).
                 let default_target = table_start + arg1 * 2;
-                record_target(&mut targets, default_target, post_pop)?;
-                // Register each case entry's target.
+                edges.push(ControlEdge {
+                    pc: default_target,
+                    depth: post_pop,
+                    is_block_target: true,
+                });
+                // Each case entry's target.
                 for i in 0..arg1 {
                     let entry_pos = table_start + i * 2;
                     if entry_pos + 1 >= bytecode.len() {
@@ -3594,17 +3949,22 @@ fn scan_branch_targets(
                         bytecode[entry_pos + 1],
                     ]) as usize;
                     let target = table_start + off;
-                    record_target(&mut targets, target, post_pop)?;
+                    edges.push(ControlEdge {
+                        pc: target,
+                        depth: post_pop,
+                        is_block_target: true,
+                    });
                 }
-                pc = table_start + arg1 * 2;
-                reachable = false;
+                return Ok(OpScan { edges });
             }
             _ => {
                 return Err(TranslateError::Unsupported { op, at: pc - 1 });
             }
         }
     }
-    Ok(targets)
+    // Non-branch, non-terminator opcode: sequential fall-through to the
+    // next pc at the resulting depth.
+    Ok(OpScan::fallthrough(pc, depth))
 }
 
 /// Read a jump immediate: 1 byte for 8-bit variants, 2 bytes (LE)
@@ -3633,24 +3993,6 @@ fn read_jump_off(
         let o = bytecode[*pc] as usize;
         *pc += 1;
         Ok((o, 1))
-    }
-}
-
-fn record_target(
-    targets: &mut std::collections::BTreeMap<usize, usize>,
-    pc: usize,
-    depth: usize,
-) -> Result<(), TranslateError> {
-    match targets.get(&pc) {
-        None => {
-            targets.insert(pc, depth);
-            Ok(())
-        }
-        Some(&existing) if existing == depth => Ok(()),
-        // Mismatched stack depth at a branch target — surface as
-        // an unsupported pattern; future work could spill the
-        // stack to memory and unify depths.
-        Some(_) => Err(TranslateError::Unsupported { op: 0xFE, at: pc }),
     }
 }
 
