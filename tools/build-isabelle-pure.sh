@@ -37,12 +37,21 @@ DRIVER=/tmp/build_isabelle_pure_driver.sml
   echo 'fun pr s = (print s; TextIO.flushOut TextIO.stdOut);'
   echo "val PURE = \"$PURE\";"
   echo 'val nok = ref 0; val idx = ref 0;'
-  echo 'fun useP f = (idx := !idx+1; PolyML.use (PURE ^ "/" ^ f); nok := !nok+1) handle _ => ();'
-  echo 'fun useM f = (idx := !idx+1; ML_file (PURE ^ "/" ^ f); nok := !nok+1) handle _ => ();'
-  # per-statement load (see isabelle-pure-probe.sh for why not List.app)
-  awk 'NR<=27{printf "val () = useP \"%s\";\n", $0}' "$FILES"
-  awk 'NR>27{printf "val () = useM \"%s\";\n", $0}' "$FILES"
+  echo 'fun okf () = (idx := !idx+1; nok := !nok+1);'
+  # per-statement, INLINE PolyML.use / ML_file (NOT wrapped in a function — a
+  # function captures the ML environment at definition time and yields 204 not
+  # 261; see isabelle-pure-probe.sh).
+  awk 'NR<=27{printf "val () = (PolyML.use (PURE ^ \"/%s\"); okf ()) handle _ => ();\n", $0}' "$FILES"
+  awk 'NR>27{printf "val () = (ML_file (PURE ^ \"/%s\"); okf ()) handle _ => ();\n", $0}' "$FILES"
   echo 'val () = pr ("ISABELLE_PURE_LOADED " ^ Int.toString (!nok) ^ "/" ^ Int.toString (!idx) ^ "\n");'
+  # The generic context (proto-Pure theory + proof data) is thread-local and is
+  # LOST when the image is reloaded into a fresh process ("Unknown context").
+  # Capture it as an explicit heap binding `Pure_context` that survives export,
+  # and a `restore_pure_context` thunk; reloaders call restore_pure_context ()
+  # before any proving so Context.the_global_context()/Proof_Context.init_global
+  # work again.
+  echo 'val Pure_context = Context.the_generic_context ();'
+  echo 'fun restore_pure_context () = Context.put_generic_context (SOME Pure_context);'
   # require the logical core (>= 255 of 285) before exporting a usable checkpoint
   cat <<SML
 val () =

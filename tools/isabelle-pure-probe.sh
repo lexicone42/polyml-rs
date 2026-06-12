@@ -45,18 +45,21 @@ DRIVER=/tmp/pure_probe_driver.sml
   echo 'fun pr s = (print s; TextIO.flushOut TextIO.stdOut);'
   echo "val PURE = \"$PURE\";"
   echo 'val nok = ref 0; val idx = ref 0; val firstfail = ref "";'
-  echo 'fun useP f = (idx := !idx+1; PolyML.use (PURE ^ "/" ^ f); nok := !nok+1)'
-  echo '   handle e => (if !firstfail="" then firstfail := (Int.toString(!idx)^":"^f) else (); pr ("ISA_FAIL #"^Int.toString(!idx)^" "^f^" :: "^exnMessage e^"\n"));'
-  echo 'fun useM f = (idx := !idx+1; ML_file (PURE ^ "/" ^ f); nok := !nok+1)'
-  echo '   handle e => (if !firstfail="" then firstfail := (Int.toString(!idx)^":"^f) else (); pr ("ISA_FAIL #"^Int.toString(!idx)^" "^f^" :: "^exnMessage e^"\n"));'
-  # Load each file as its OWN top-level statement (not List.app over the whole
-  # list). Antiquotation-handler registrations (add_antiquotation in
-  # ml_antiquotations.ML etc.) only commit to the generic context at a top-level
-  # statement boundary, so batching the load into one List.app starves later
-  # files' @{...} expansions and under-reports the frontier (204 vs 261).
-  echo 'val () = pr "ISA_LOAD_BEGIN\n";'
-  awk 'NR<=27{printf "val () = useP \"%s\";\n", $0}' "$FILES"
-  awk 'NR>27{printf "val () = useM \"%s\";\n", $0}' "$FILES"
+  echo 'fun okf () = (idx := !idx+1; nok := !nok+1);'
+  echo 'fun failf f = (idx := !idx+1; (if !firstfail="" then firstfail := (Int.toString(!idx)^":"^f) else ()); pr ("ISA_FAIL #"^Int.toString(!idx)^" "^f^"\n"));'
+  # Load each file as its OWN top-level statement, with the PolyML.use / ML_file
+  # call INLINE (not wrapped in a function). Two reasons:
+  #  (1) per-statement: antiquotation-handler registrations (add_antiquotation in
+  #      ml_antiquotations.ML etc.) only commit to the generic context at a
+  #      top-level statement boundary, so a single List.app over the whole list
+  #      starves later files' @{...} expansions.
+  #  (2) INLINE: an `fun useM f = ML_file ...` captures the ML compilation
+  #      environment at its DEFINITION time, so every later file would compile
+  #      against a stale namespace (gives 204, not 261). Inlining each ML_file at
+  #      top level uses the current accumulated environment.
+  # Phase 0 (first 27) via PolyML.use bring up ml_compiler0, which DEFINES ML_file.
+  awk 'NR<=27{printf "val () = (PolyML.use (PURE ^ \"/%s\"); okf ()) handle _ => failf \"%s\";\n", $0, $0}' "$FILES"
+  awk 'NR>27{printf "val () = (ML_file (PURE ^ \"/%s\"); okf ()) handle _ => failf \"%s\";\n", $0, $0}' "$FILES"
   echo 'val () = pr ("PURE_LOADED " ^ Int.toString (!nok) ^ "/" ^ Int.toString (!idx) ^ " first_fail=" ^ !firstfail ^ "\n");'
   echo 'pr "PURE_PROBE_DONE\n";'
 } > "$DRIVER"
