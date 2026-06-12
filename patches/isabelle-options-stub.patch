@@ -1,9 +1,18 @@
 diff --git a/src/Pure/System/options.ML b/src/Pure/System/options.ML
-index 1f41e48..76445b8 100644
+index 1f41e48..1098035 100644
 --- a/src/Pure/System/options.ML
 +++ b/src/Pure/System/options.ML
-@@ -75,10 +75,22 @@ fun check_name (Options tab) name =
-     else error ("Unknown system option " ^ quote name)
+@@ -72,13 +72,32 @@ fun dest (Options tab) =
+ fun check_name (Options tab) name =
+   let val opt = Symtab.lookup tab name in
+     if is_some opt andalso #typ (the opt) <> unknownT then the opt
+-    else error ("Unknown system option " ^ quote name)
++    (* polyml-rs: no Isabelle system options file is loaded, so synthesise a
++       default for undeclared options (e.g. the many \<^system_option> compile-time
++       antiquotations in the Isar layer) rather than failing a source-only Pure
++       load. Parallels the check_type patch below; check_type fixes the actual
++       type when the option value is read. *)
++    else {pos = Position.none, typ = unknownT, value = ""}
    end;
  
 -fun check_type options name typ =
@@ -23,13 +32,15 @@ index 1f41e48..76445b8 100644
 +    case Symtab.lookup tab name of
 +      SOME opt =>
 +        if #typ opt = typ then opt
-+        else if #typ opt = unknownT then deflt ()
-+        else error ("Ill-typed system option " ^ quote name ^ " : " ^ #typ opt ^ " vs. " ^ typ)
++        (* polyml-rs: the antiquotation options are all registered as bool (see the
++           bootstrap table); when one is actually read at a different type, return a
++           type-appropriate default rather than failing the source-only load. *)
++        else deflt ()
 +    | NONE => deflt ()
    end;
  
  
-@@ -235,6 +247,28 @@ fun with_default_update upd f x =
+@@ -235,6 +254,49 @@ fun with_default_update upd f x =
  (* Pure bootstrap *)
  
  val _ = load_process_default ();
@@ -48,11 +59,32 @@ index 1f41e48..76445b8 100644
 +         "names_long", "names_short", "names_unique", "quick_and_dirty", "show_consts",
 +         "show_main_goal", "show_question_marks", "show_sorts", "show_types"];
 +      val ints = [("goals_limit", "10"), ("ML_print_depth", "10")];
++      (* polyml-rs: the Isar/Thy/System layer also reads ~30 system options at
++         COMPILE time via `\<^system_option>‹name›` antiquotations, which validate
++         the name against Options.dest (the declared table) — so an undeclared one
++         fails the source-only Pure load with "Bad system_option". Declare them all
++         with the `unknown` type; the patched check_name/check_type then synthesise a
++         type-appropriate default whenever the value is actually read at runtime. *)
++      val antiq =
++        ["show_results", "show_states", "parallel_print", "record_proofs",
++         "record_theories", "export_standard_proofs", "context_data_timing",
++         "context_proof_tracing", "context_theory_tracing", "editor_output_state",
++         "editor_tracing_messages", "editor_execution_delay", "threads", "threads_trace",
++         "threads_stack_limit", "find_theorems_limit", "find_theorems_tactic_limit",
++         "document_tags", "bash_process_address", "bash_process_password",
++         "system_channel_address", "system_channel_password", "thy_output_break",
++         "thy_output_cartouche", "thy_output_display", "thy_output_indent",
++         "thy_output_margin", "thy_output_modes", "thy_output_quotes",
++         "thy_output_source", "thy_output_source_cartouche"];
 +      fun decl (nm, ty, v) = declare {pos = Position.none, name = nm, typ = ty, value = v};
++      (* `declare` only accepts bool/int/real/string, so register the antiquotation
++         options as bool; the patched check_type returns a type-appropriate default
++         for the int/string ones when their value is actually read. *)
 +      val opts =
 +        empty
 +        |> fold (fn nm => decl (nm, boolT, "false")) bools
-+        |> fold (fn (nm, v) => decl (nm, intT, v)) ints;
++        |> fold (fn (nm, v) => decl (nm, intT, v)) ints
++        |> fold (fn nm => decl (nm, boolT, "false")) antiq;
 +    in set_process_default (SOME opts) end;
 +val _ =
 +  (ML_Print_Depth.set_print_depth (default_int "ML_print_depth"))

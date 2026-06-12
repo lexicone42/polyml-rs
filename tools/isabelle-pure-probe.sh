@@ -47,17 +47,21 @@ DRIVER=/tmp/pure_probe_driver.sml
   echo 'val nok = ref 0; val idx = ref 0; val firstfail = ref "";'
   echo 'fun useP f = (idx := !idx+1; PolyML.use (PURE ^ "/" ^ f); nok := !nok+1)'
   echo '   handle e => (if !firstfail="" then firstfail := (Int.toString(!idx)^":"^f) else (); pr ("ISA_FAIL #"^Int.toString(!idx)^" "^f^" :: "^exnMessage e^"\n"));'
-  echo 'val ph0 = ['; awk 'NR<=27{if(NR>1)printf ","; printf "\"%s\"", $0}' "$FILES"; echo '];'
-  echo 'val () = List.app useP ph0;'
   echo 'fun useM f = (idx := !idx+1; ML_file (PURE ^ "/" ^ f); nok := !nok+1)'
   echo '   handle e => (if !firstfail="" then firstfail := (Int.toString(!idx)^":"^f) else (); pr ("ISA_FAIL #"^Int.toString(!idx)^" "^f^" :: "^exnMessage e^"\n"));'
-  echo 'val rest = ['; awk 'NR>27{if(NR>28)printf ","; printf "\"%s\"", $0}' "$FILES"; echo '];'
-  echo 'val () = List.app useM rest;'
+  # Load each file as its OWN top-level statement (not List.app over the whole
+  # list). Antiquotation-handler registrations (add_antiquotation in
+  # ml_antiquotations.ML etc.) only commit to the generic context at a top-level
+  # statement boundary, so batching the load into one List.app starves later
+  # files' @{...} expansions and under-reports the frontier (204 vs 261).
+  echo 'val () = pr "ISA_LOAD_BEGIN\n";'
+  awk 'NR<=27{printf "val () = useP \"%s\";\n", $0}' "$FILES"
+  awk 'NR>27{printf "val () = useM \"%s\";\n", $0}' "$FILES"
   echo 'val () = pr ("PURE_LOADED " ^ Int.toString (!nok) ^ "/" ^ Int.toString (!idx) ^ " first_fail=" ^ !firstfail ^ "\n");'
   echo 'pr "PURE_PROBE_DONE\n";'
 } > "$DRIVER"
 
 cd "$ROOT/vendor/polyml" || exit 1
 ML_SYSTEM=polyml ML_PLATFORM=x86_64-linux ISABELLE_HOME=/tmp/isa POLYML_GC_QUIET=1 \
-    "$POLY" run --max-steps 120000000000 "$IMG" < "$DRIVER" 2>&1 \
+    "$POLY" run --max-steps 250000000000 "$IMG" < "$DRIVER" 2>&1 \
     | grep -E "ISA_FAIL|PURE_LOADED|PURE_PROBE_DONE"
