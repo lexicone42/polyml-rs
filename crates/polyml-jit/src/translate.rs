@@ -1533,7 +1533,14 @@ fn compile_with_consts_impl(
                     if pc >= bytecode.len() {
                         return Err(TranslateError::Truncated(pc));
                     }
-                    let imm = bytecode[pc] as i8 as i64;
+                    // ZERO-extend the immediate byte. Upstream
+                    // (bytecode.cpp:621) is `TAGGED(*pc)` where `pc` is
+                    // `byte*` and `byte` = `unsigned char` (globals.h:120),
+                    // so the operand is unsigned 0..255 — and our interpreter
+                    // matches (`isize::from(u8)`, mod.rs:1280). The old
+                    // `as i8 as i64` SIGN-extended (0xFB → -5 vs the correct
+                    // 251), diverging from both for any byte ≥ 0x80.
+                    let imm = i64::from(bytecode[pc]);
                     pc += 1;
                     stack.push(builder.ins().iconst(int, tag(imm)));
                 }
@@ -4065,12 +4072,14 @@ mod tests {
     }
 
     #[test]
-    fn translate_const_int_b_negative() {
-        // -7 as a signed byte is 0xF9.
+    fn translate_const_int_b_high_bit_zero_extends() {
+        // CONST_INT_B's immediate is UNSIGNED (upstream byte = unsigned
+        // char, bytecode.cpp:621; interp isize::from(u8), mod.rs:1280).
+        // 0xF9 must zero-extend to 249 — NOT sign-extend to -7.
         let bc = vec![INSTR_CONST_INT_B, 0xF9, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(call0(f)), -7);
+        assert_eq!(untag(call0(f)), 249);
     }
 
     #[test]
@@ -4157,17 +4166,21 @@ mod tests {
     }
 
     #[test]
-    fn translate_negative_arithmetic() {
-        // -5 + 3 = -2, encoded with INSTR_CONST_INT_B
+    fn translate_high_bit_const_int_b_arithmetic() {
+        // CONST_INT_B's immediate is UNSIGNED (upstream byte = unsigned
+        // char; interp isize::from(u8)), so 0xFB = 251, NOT -5. Thus
+        // 0xFB + 3 = 254. (This previously asserted -2 under a wrong
+        // sign-extend assumption; the codegen never emits negative
+        // constants via CONST_INT_B.)
         let bc = vec![
-            INSTR_CONST_INT_B, (-5i8) as u8,
+            INSTR_CONST_INT_B, 0xFB,
             INSTR_CONST_3,
             INSTR_FIXED_ADD,
             INSTR_RETURN_1,
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
-        assert_eq!(untag(call0(f)), -2);
+        assert_eq!(untag(call0(f)), 254);
     }
 
     #[test]

@@ -122,6 +122,23 @@ fn jit_and_interp_agree_on_arg_times_3_plus_7() {
 }
 
 #[test]
+fn jit_and_interp_agree_on_high_bit_const_int_b() {
+    // Regression for the CONST_INT_B sign-extension bug (2026-06-12):
+    // the immediate byte is UNSIGNED (upstream byte = unsigned char,
+    // bytecode.cpp:621; interp isize::from(u8)). 0xFB must yield 251 in
+    // BOTH engines — the old JIT `as i8` sign-extended it to -5.
+    let bc = vec![INSTR_CONST_INT_B, 0xFB, INSTR_RETURN_1];
+    let arg = tag(0); // unused; just establishes the arity-1 frame shape
+    let interp_result = run_interp_arity1(&bc, arg);
+    let jit_result = run_jit_arity1(&bc, arg);
+    assert_eq!(
+        jit_result, interp_result,
+        "JIT/interp diverged on CONST_INT_B 0xFB: jit={jit_result:#x} interp={interp_result:#x}"
+    );
+    assert_eq!(untag(jit_result), 251, "0xFB must zero-extend to 251");
+}
+
+#[test]
 fn jit_zero_arg_function_returns_constant() {
     // No-arg function: CONST_1; RETURN_1. Inferred arity 0.
     // But RETURN_1 makes the JIT load sml_arity+2 = 3 slots per
