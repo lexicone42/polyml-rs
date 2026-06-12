@@ -30,10 +30,15 @@ for p in "$ROOT"/patches/isabelle-*.patch; do
     fi
 done
 
-# Build the ordered ML_file list (ROOT0 then ROOT).
+# Build the ordered ML_file list (ROOT0 then ROOT). NB: match ALL ML_file*
+# variants in order — ROOT.ML loads 3 files via `ML_file_no_debug`
+# (ML/exn_debugger.ML, Isar/runtime.ML, Tools/debugger.ML). Matching only the
+# plain `ML_file "..."` silently DROPPED those, so Isar/runtime.ML never loaded
+# and PIDE/execution.ML (which needs `Runtime`) failed — making the load look
+# walled at #160 when it actually reaches #191 (ml_antiquotations.ML).
 FILES=/tmp/pure_files.txt
-{ grep -oE 'ML_file "[^"]+"' "$PURE/ROOT0.ML"; grep -oE 'ML_file "[^"]+"' "$PURE/ROOT.ML"; } \
-    | sed -E 's/ML_file "([^"]+)"/\1/' > "$FILES"
+{ grep -hoE 'ML_file[a-z_]* "[^"]+"' "$PURE/ROOT0.ML"; grep -hoE 'ML_file[a-z_]* "[^"]+"' "$PURE/ROOT.ML"; } \
+    | sed -E 's/ML_file[a-z_]* "([^"]+)"/\1/' > "$FILES"
 
 DRIVER=/tmp/pure_probe_driver.sml
 {

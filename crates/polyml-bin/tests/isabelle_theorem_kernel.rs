@@ -45,14 +45,19 @@ fn arbint_image() -> Option<PathBuf> {
 }
 
 fn pure_ml_files(pure: &std::path::Path) -> Vec<String> {
+    // Match ALL `ML_file*` directive variants in order — ROOT.ML loads 3 files
+    // via `ML_file_no_debug` (incl. Isar/runtime.ML); matching only the plain
+    // `ML_file ` prefix silently dropped them (which made PIDE/execution.ML's
+    // `Runtime` dependency fail and the load look walled at #160).
     let mut out = Vec::new();
     for root in ["ROOT0.ML", "ROOT.ML"] {
         let Ok(text) = std::fs::read_to_string(pure.join(root)) else { continue };
         for line in text.lines() {
-            if let Some(rest) = line.trim().strip_prefix("ML_file ") {
-                if let Some(s) = rest.find('"') {
-                    if let Some(e) = rest[s + 1..].find('"') {
-                        out.push(rest[s + 1..s + 1 + e].to_string());
+            let t = line.trim();
+            if t.starts_with("ML_file") {
+                if let Some(s) = t.find('"') {
+                    if let Some(e) = t[s + 1..].find('"') {
+                        out.push(t[s + 1..s + 1 + e].to_string());
                     }
                 }
             }
