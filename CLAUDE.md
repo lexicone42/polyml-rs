@@ -268,10 +268,20 @@ Now SAFE (re-enabled, no regressions):
 - RAISE_EX (0x10), SET_HANDLER8/16 (0x81/0xf9), CLOSURE_B (0xd0),
   ALLOC_REF/BYTE_MEM/WORD_MEM (0x06/0xbd/0xda)
 - CONST_ADDR (load) variants 0x55/0x56/0x15/0x14
-- CASE16 (0x0a) — translation added (jump table → Cranelift
-  br_table), 4 new functions translate; some still fail with
-  `Underflow` (downstream depth tracking through CASE16 branches
-  needs more work).
+- CASE16 (0x0a) — NOW TRANSLATES (2026-06-12, commit 65bf0ed): 21/25
+  CASE16 code objects in the bootstrap translate, +97 functions overall
+  (3313→3410). The old `Underflow` was NOT the linear-depth-scan in
+  `scan_branch_targets` (that hypothesis measured to gain 0) — it was two
+  other bugs: (1) `infer_arg_count` was CFG-blind (stopped at CASE16's
+  `_ =>` arm, under-counting args → case bodies entered too shallow →
+  Underflow) — now a worklist/CFG pass enqueuing CASE16's N targets +
+  default at post-pop depth; (2) Cranelift `br_table` needs an i32 UNSIGNED
+  index but the untagged selector is i64 — now range-guarded (0≤u<arg1,
+  matching mod.rs:2125) + ireduce to i32. Verified JIT==interp
+  (tests/case16_differential.rs) on every selector incl. out-of-range. The
+  4 remaining CASE16 fns fail on the harder 0xfd/0xfe (ESCAPE) class.
+  Profiling found this: the hottest bootstrap/Isabelle-compile code object
+  (21% of all steps) was a CASE16 fn — the biggest single perf lever.
 - Functions where `jit_arity_init > sml_arity + 2` — args_buf
   layout fix in do_call handles older-slot positions correctly.
 
