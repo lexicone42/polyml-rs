@@ -1014,6 +1014,18 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   extends the theory — route ALL downstream cterms through ONE final context. Built
   by a foundation→fan-out→merge ultracode workflow (wf_74f3a1e0-a99); the `le_total`
   stretch seat added disjunction itself.
+- **DIVISIBILITY: a preorder on ℕ compatible with + and ·** (`isabelle_divisibility.rs`,
+  2026-06-12, the number-theory rung above the order; gateway toward GCD/primes):
+  defines `a ∣ b ≝ ∃k. b = a·k` (ML abbreviation over the existential) and proves, each
+  0-hyp by kernel inference: `dvd_refl`/`one_dvd`/`dvd_zero`, `dvd_trans` (⇒ preorder),
+  `dvd_add` (via `left_distrib`), `dvd_mult_right`/`dvd_mult_cong` (· compatibility, via
+  `mult_assoc`/`mult_comm`), and the CAPSTONE `dvd_le` (`d∣n ∧ n≠0 ⟹ d ≤ n`, tying
+  divisibility to the linear order — uses a num-cases lemma + `mult_Suc_right` + the
+  discrimination axiom, with n≠0 supplied as a meta-implication `oeq n 0 ⟹ oFalse`).
+  Built by a foundation→fan-out→merge ultracode workflow (wf_2eb4085c-828). NOTE: SML's
+  comment lexer NESTS — a literal `(* ... *)` fragment inside a comment (e.g. writing
+  "(· compatibility)" with an ASCII open-paren-star) reads as an unterminated nested
+  comment ("end of file found in comment"); avoid stray `(*`/`*)` in driver comments.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
