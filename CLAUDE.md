@@ -988,6 +988,15 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   `Unsynchronized.ref`, so a merged driver wanting a counter must avoid `ref` (use a
   functional fold/andalso). Built by a foundation→fan-out→merge ultracode workflow
   (wf_c761c4e8-236).
+- **GAUSS SUMMATION + SUM OF ODDS** (`isabelle_summation.rs`, 2026-06-12, on top of
+  the semiring): defines `sum`/`osum` by recursion and proves the two classics by
+  induction — **Gauss** `⊢ sum n + sum n = n·(Suc n)` (2·(0+···+n)=n(n+1), doubling
+  form) and **sum-of-odds** `⊢ osum n = n·n` (1+3+···+(2n−1)=n²) — each a 0-hyp
+  theorem, with a soundness probe (kernel rejects the false "drop +1" Gauss). The
+  Isabelle mirror of HOL4 `hol4_summation.rs`. Same extended-theory rule: `sum`/`osum`
+  declared on the mult-carrying theory, all cterms routed through one final
+  `ctxtS`/`ctermS`. Built by a 3-seat ultracode workflow (wf_4ca14273-6ab) — all
+  three seats proved both identities independently.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
