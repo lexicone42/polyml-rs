@@ -1126,6 +1126,14 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   (wf_15cdc379-e01): list/product helpers → FTA (2 seats both proved it). With Euclid +
   √2-irrational, a genuine elementary number theory from first principles on the Rust
   interpreter.
+- **FTA-UNIQUENESS arc (in progress)** — the famous hard half (prime factorisation is
+  unique), staged: division theorem → gcd + ℕ-Bézout → Euclid's lemma → uniqueness.
+  - **Stage 1 — THE DIVISION THEOREM** (`isabelle_division.rs`, 2026-06-13): `⊢ 0<b ⟹ ∃q
+    r. a = b·q+r ∧ r<b` (`div_mod_exists`) AND uniqueness (`div_mod_unique`), both 0-hyp.
+    Existence by strong induction on a, NO subtraction (a<b→(0,a); else a=b+a2 via the
+    le-witness, a2<a, recurse, recompose q:=Suc q2 via mult_Suc_right). 3-seat fleet
+    (wf_17792bed-545). Stages 2-4 (gcd/Bézout — the crux — then Euclid's lemma, then the
+    uniqueness permutation argument) are the remaining work; see task #75.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
