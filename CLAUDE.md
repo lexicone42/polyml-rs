@@ -1115,6 +1115,17 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   `list_laws_verified.sml` — shows the hand-built object logic handles a second inductive
   datatype with its own induction principle. Soundness probe rejects a garbled rev_rev.
   3-seat ultracode fleet (wf_666cb3a1-e29).
+- **FUNDAMENTAL THEOREM OF ARITHMETIC (existence)** (`isabelle_fta.rs`, 2026-06-13 — the
+  finale that FUSES the list theory with the primes machinery): `⊢ ∀n. 2≤n ⟹ ∃ps. all_prime
+  ps ∧ product ps = n` — every n≥2 is a product of primes. A 0-hyp theorem by strong
+  induction; only classical assumption = excluded middle. Adds `natlist` + `product` +
+  `all_prime` + `product_append` + `all_prime_append` + the `cofactor` lemma (1<d<n ∧ d∣n ⟹
+  ∃e. 1<e ∧ e<n ∧ n=d·e) on the classical-primes base, then: `prime_cases` splits n into
+  prime (singleton list) or composite (proper divisor d → cofactor e → strong IH on both d,e
+  → append their prime-lists, product = d·e = n). Built by a 2-phase ultracode pipeline
+  (wf_15cdc379-e01): list/product helpers → FTA (2 seats both proved it). With Euclid +
+  √2-irrational, a genuine elementary number theory from first principles on the Rust
+  interpreter.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
