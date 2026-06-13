@@ -1026,6 +1026,23 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   comment lexer NESTS — a literal `(* ... *)` fragment inside a comment (e.g. writing
   "(· compatibility)" with an ASCII open-paren-star) reads as an unterminated nested
   comment ("end of file found in comment"); avoid stray `(*`/`*)` in driver comments.
+- **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
+  2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
+  beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
+  induction DERIVED from `nat_induct` + the strict order (`(⋀n.(⋀m. m<n ⟹ P m)⟹P n)⟹⋀n.P n`),
+  the headline; `lt_trans`/`lt_trichotomy` (the strict linear order, `m<n ≝ Suc m ≤ n`);
+  `prime_two` (`⊢ prime 2`, STRUCTURAL `prime p ≝ 1<p ∧ ∀d. d∣p ⟹ d=1∨d=p`); `prime_gt_1`.
+  CAPSTONE WITH A DISCLOSED ASSUMPTION: `prime_divisor_exists` (`2≤n ⟹ ∃p. prime p ∧ p∣n`,
+  "every n≥2 has a prime divisor") is proved BY strong induction + `dvd_trans` chaining —
+  genuine structure — but RESTS ON a classical axiom `prime_cases` (`1<n ⟹ prime n ∨ ∃d.
+  1<d<n ∧ d∣n`) over an ABSTRACT `prime` const (not the structural one). Pure here is
+  intuitionistic (no excluded middle), so the case-split cannot be derived; in real
+  Isabelle/HOL it is a lemma from EM + the definition + `dvd_le`. So the capstone is "every
+  n≥2 has a prime divisor MODULO the classical primality case-split", a demonstration that
+  the strong-induction machinery reaches it — NOT a from-first-principles proof. Principled
+  follow-up: add ONE excluded-middle axiom and DERIVE `prime_cases` from the structural
+  `prime` + `dvd_le`, unifying the two `prime`s. Built by a foundation→fan-out→merge
+  ultracode workflow (wf_968ad1d0-b77).
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
