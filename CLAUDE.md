@@ -902,6 +902,15 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
     induction (`!l a.`) so the IH is `!a. ...`; `map_fusion`'s Cons case needs
     `BETA_CONV` to reduce the `(\x. f (g x)) h` application; `len_append` stays
     pure-rewrite via `arithmeticTheory.ADD_CLAUSES`. 3-seat fleet (wf_7e7cea22-9fd).
+  - **Verified quicksort** (`quicksort_verified.sml`, 2026-06-13) — the third classic sort
+    (completes the trio with insertion + merge). Non-structural recursion (recurses on
+    `le_filter`/`gt_filter` sublists) via `tDefine` + `measure llen` (termination = the
+    filters don't increase length). Proves `qsort_count` (permutation) and `qsort_sorted`
+    (sortedness), both 0-hyp, by the tDefine-emitted `qsort_ind` + `sorted_append` + the
+    `leall_qsort`/`geall_qsort` bound-preservation lemmas; then computeLib EVAL runs it.
+    Idiom: selective `ASM_ARITH_TAC` (lift only assumptions mentioning none of the
+    list/predicate constants, so the count/sorted IHs don't poison the arithmetic goal).
+    3-seat fleet (wf_c0a81a3c-d0b).
   These proofs were each engineered by a 3-seat ultracode fleet (diverse
   automation: explicit-witness / metis-assisted / simp-assisted); all seats
   verifying independently is the correctness signal, and the most robust (least

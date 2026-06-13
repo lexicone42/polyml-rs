@@ -318,3 +318,27 @@ fn verified_list_function_laws() {
     assert!(out.contains("LIST_LAWS_DONE"), "list-laws verification incomplete:\n{out}");
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
+
+#[test]
+#[ignore = "needs /tmp/hol4_datatype (tools/build-hol4-checkpoints.sh datatype)"]
+fn verified_quicksort() {
+    // VERIFIED QUICKSORT over a USER num-list datatype, completing the sort trio
+    // with insertion sort + merge sort. qsort is non-structural recursion (recurses
+    // on filtered sublists) via tDefine + measure (llen). Proves BOTH
+    //   qsort_count  : |- !x l. count x (qsort l) = count x l   (PERMUTATION)
+    //   qsort_sorted : |- !l. sorted (qsort l)                  (SORTEDNESS)
+    // 0-hyp, by the tDefine-emitted qsort recursion-induction + sorted_append and
+    // the leall/geall-qsort bound-preservation lemmas. Then computeLib EVAL actually
+    // RUNS it. Engineered by a 3-seat ultracode fleet (wf_c0a81a3c-d0b); all three
+    // verified independently, banked the simp variant.
+    let Some(image) = ckpt() else { return };
+    let driver = std::fs::read_to_string(common::support_file("quicksort_verified.sml"))
+        .expect("read quicksort_verified.sml");
+    let (out, _) = run_image_env(&image, &driver, 200_000_000_000, &[]).expect("run");
+    assert!(out.contains("OK qsort_count"), "permutation (multiset) failed:\n{out}");
+    assert!(out.contains("OK qsort_sorted"), "sortedness failed:\n{out}");
+    // and it actually computes (computeLib EVAL, kernel-checked)
+    assert!(out.contains("EVAL_QSORT_OK"), "EVAL of qsort did not produce the sorted list:\n{out}");
+    assert!(out.contains("QSORT_DONE"), "quicksort verification incomplete:\n{out}");
+    assert!(!out.contains("Exception-"), "exception:\n{out}");
+}
