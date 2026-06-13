@@ -1105,6 +1105,16 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   theorems in elementary number theory, both from first principles on the Rust runtime.
   (Maintenance note: the primes/Euclid/sqrt2 drivers each re-derive the ~3200-line classical
   foundation; a shared `isabelle_nt_helpers.sml` preamble could dedupe it — not yet done.)
+- **A LIST THEORY by structural induction** (`isabelle_list_theory.rs`, 2026-06-13 — a
+  SECOND inductive datatype beyond nat): on the semiring base, build `natlist = Nil | Cons
+  nat natlist` with its own list-equality `leq` (refl+subst) + a `list_induct` axiom +
+  append/reverse/length by primitive recursion, and prove by structural induction (each
+  0-hyp): `append_nil`, `append_assoc`, `rev_append` (`reverse (append a b) = append
+  (reverse b) (reverse a)`), **`rev_rev`** (`reverse (reverse l) = l`), `length_append`
+  (`length` additive, via add_Suc/add_0). The Isabelle analogue of the HOL4
+  `list_laws_verified.sml` — shows the hand-built object logic handles a second inductive
+  datatype with its own induction principle. Soundness probe rejects a garbled rev_rev.
+  3-seat ultracode fleet (wf_666cb3a1-e29).
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
