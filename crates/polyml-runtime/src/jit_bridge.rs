@@ -38,13 +38,31 @@ thread_local! {
 /// Soft cap on JIT-to-JIT recursion depth (used by
 /// `jit_dispatch_closure_call`). Set to 0 to disable nested JIT-to-JIT
 /// entirely — nested calls from JIT'd code go back through the
-/// interpreter. This avoids:
-///   1. OS thread stack overflow on deeply recursive callees (each
-///      JIT call adds a real Rust frame; the interp uses our
-///      managed PolyWord stack instead).
-///   2. A separate bug in the JIT-to-JIT path that SEGVs on certain
-///      install counts (e.g. install=53). Diagnosing that bug is
-///      future work.
+/// interpreter.
+///
+/// STATUS (2026-06-12): nested JIT→JIT is now CORRECTNESS-CLEAN when
+/// enabled — probing `MAX_JIT_DEPTH = 256` with the full 727-install
+/// set runs the simple bootstrap AND the basis load (1.675B steps, deep
+/// mutual recursion) to Tagged(0) with NO SEGV and NO OS-stack
+/// overflow. The old "separate bug that SEGVs at install=53" was the
+/// same wrong-args/wrong-pop-order family fixed by the args_buf
+/// (598f312) and TAIL_B_B (88134d3) work — it no longer reproduces.
+///
+/// It stays 0 anyway for two reasons:
+///   1. PERF-NEUTRAL on the current workload — only ~1.6% of dynamic
+///      CALL dispatches hit the JIT cache (the HOT functions aren't
+///      installed: they contain still-blocked opcodes — CALL_LOCAL_B,
+///      CALL_CONST_ADDR, the untranslatable CASE16 tail, ESCAPE).
+///      Enabling nesting measured 25.3s vs 25.2s on the basis load
+///      (noise); the binding constraint is hot-function COVERAGE, not
+///      dispatch depth. Turn this on only once coverage of the hot path
+///      improves enough for the fast path to matter.
+///   2. Each nested fast-path call adds a real Rust frame (plus a small
+///      args_buf alloc); a high cap on pathologically deep recursion
+///      could still approach the ~8 MB OS thread stack. A non-zero cap
+///      bounds that, but the interp's managed PolyWord stack has no such
+///      limit, so 0 (= always fall back to interp for nesting) is the
+///      safe default until there's a perf reason to change it.
 /// The outermost JIT dispatch — from `Interpreter::do_call` when the
 /// interpreter's CALL opcode hits a JIT-cached function — is gated
 /// separately on `JIT_INTERP` being null, so this cap doesn't disable

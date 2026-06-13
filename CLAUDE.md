@@ -284,20 +284,38 @@ basis load under --jit Tagged(0) (the gate that was failing), and a
 JIT==interp differential with a negative control
 (`tests/tail_b_b_differential.rs`).
 
-**PERF REALITY CHECK (measured 2026-06-12 — read before chasing more
-install coverage).** Installing TAIL_B_B/CASE16 is a *correctness*
-unblock, NOT yet a wall-clock win. On the basis load (`Bootstrap.use
-"basis/build.sml"`, 1.6B steps) `--jit` with 727 installs is ~5% SLOWER
-than the plain interpreter (25.2s vs 24.1s, 3 runs each). Reason: only
-the OUTERMOST JIT dispatch takes the fast path — nested calls fall back
-to the interpreter (the MAX_JIT_DEPTH=0 gate), so for deeply-nested
-bootstrap code the trampoline/args-buffer overhead at the JIT boundary
-dominates the native-code saving. So "+N installed opcodes" does not
-imply "+speed" until nested JIT→JIT dispatch works. **The real perf
-lever is fixing the nested-dispatch SEGV (the separate bug at
-MAX_JIT_DEPTH>0, install=53), not more install coverage.** Until then
-the JIT's value is the translation/execution-correctness testbed (the
-differential harness, opcode semantics), not throughput.
+**PERF REALITY CHECK (measured 2026-06-12 — read before doing ANY more
+JIT perf work).** `--jit` with 727 installs is ~5% SLOWER than the plain
+interpreter on the basis load (25.2s vs 24.1s, 3 runs each). Two levers
+were investigated and BOTH ruled out as the bottleneck:
+
+1. *Nested JIT→JIT dispatch* — NOT the problem. Probing `MAX_JIT_DEPTH =
+   256` (see jit_bridge.rs) runs the simple bootstrap AND the basis load
+   (deep recursion) to Tagged(0) with no SEGV/overflow — the old
+   "install=53 SEGV" is already fixed (same wrong-args family as
+   TAIL_B_B). But enabling nesting is PERF-NEUTRAL: 25.3s vs 25.2s.
+
+2. The actual binding constraint is **hot-function COVERAGE**. `poly run
+   --jit --profile` shows total CALL JIT-cache hit rate ≈ **1.6%**, and
+   the **top-10 most-called functions are ALL 0.0% JIT** — the 727 we
+   install are the COLD periphery; the genuinely hot functions can't be
+   installed (or even translated) because they contain still-blocked
+   opcodes. The profiler's per-function blocker analysis names the mix:
+   CALL_LOCAL_B, CALL_CONST_ADDR8_0, the untranslatable CASE16 tail
+   (the 4/25 that hit ESCAPE), STACK_CONTAINER_B variants, TAIL_B_B
+   *coexisting* with another blocker. There is NO single silver-bullet
+   opcode — the hot functions typically have MULTIPLE blockers, so
+   clearing one doesn't install them.
+
+So a real JIT speedup is a MULTI-FRONT effort (clear CALL_LOCAL_B +
+CALL_CONST_ADDR + the CASE16/ESCAPE tail + CALL_CLOSURE, all of them, on
+the same hot functions) with UNCERTAIN payoff — the trampoline-boundary
+cost + Cranelift-vs-a-tuned-92M-steps/sec-interpreter means even full
+coverage might not win. The honest current value of the JIT is as a
+translation/execution **correctness testbed** (the differential harness,
+opcode semantics), not throughput. Don't chase "+N installed opcodes"
+expecting "+speed" without first re-profiling the cache-hit rate on the
+HOT path.
 
 Top remaining translation blockers (= functions that don't even
 translate, much less install):
