@@ -1083,6 +1083,19 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   self-derived Isabelle number theory now runs: object logic → Peano → semiring → summation
   → order → divisibility → strong induction → classical FOL → genuine prime-divisor →
   **Euclid's theorem**, all on the Rust PolyML interpreter.
+- **√2 IS IRRATIONAL** (`isabelle_sqrt2.rs`, 2026-06-13 — the companion capstone):
+  `⊢ ¬(∃a. 0<a ∧ ∃b. a·a = 2·(b·b))` — no positive naturals a,b with a²=2b². A 0-hyp
+  theorem by INFINITE DESCENT via strong induction; only classical assumption = excluded
+  middle. Proof: a solution forces a even (`sq_even_even`, via the odd²-is-odd parity
+  argument — no Euclid's lemma needed), a=2c; cancelling 2 (`mult_left_cancel`) gives a
+  SMALLER solution b<a (`sq_lt_cancel`), contradicting strong-induction minimality.
+  Parity helpers: `parity` (every x is 2c or 2c+1), `odd_not_even`, `mult_left_cancel`,
+  `mult_zero_cancel`, `sq_lt_cancel`, `mult_le_mono`. Soundness probe: kernel rejects the
+  false positivity-dropped variant (a=b=0 solves it). Built on `isabelle_classical_primes.sml`
+  by a 2-phase ultracode pipeline (wf_d7246a73-e08). With Euclid, two of the most famous
+  theorems in elementary number theory, both from first principles on the Rust runtime.
+  (Maintenance note: the primes/Euclid/sqrt2 drivers each re-derive the ~3200-line classical
+  foundation; a shared `isabelle_nt_helpers.sml` preamble could dedupe it — not yet done.)
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
