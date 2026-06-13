@@ -973,6 +973,21 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   axioms, `A∨B⟹B∨A`, `∀`-distribution, `=`-symmetry.
 - **PEANO ARITHMETIC by induction** (`isabelle_arithmetic.rs`): `n+0=n`, `add_comm`,
   `add_assoc`, `n*0=0` — the Isabelle analogue of the HOL4 INDUCT_TAC trophies.
+- **ℕ IS A COMMUTATIVE SEMIRING** (`isabelle_number_theory.rs`, 2026-06-12, one rung
+  up from the above): defines multiplication (recursion on the 1st arg, matching
+  `add`) and proves the FULL semiring law set by induction — `add_0_right`/`add_comm`/
+  `add_assoc`, `mult_0_right`/`mult_1_right`, `mult_comm`/`mult_assoc`, and BOTH
+  distributive laws (`left_distrib`/`right_distrib`) — each a 0-hyp theorem, all in
+  ONE driver build (~122M steps, ~3s on the warm checkpoint), gated by `SEMIRING_OK`.
+  Real algebra, kernel-checked. The load-bearing subtlety: `mult` lives on an
+  EXTENDED theory (one final `ctxtM`/`ctermM`) — every congruence/instantiator on a
+  mult-containing goal MUST be built on that same context or you get cross-theory
+  cterm mismatches / silent no-op instantiation. `mult_Suc_right` (the RIGHT
+  recursion `n*(Suc m)=n+n*m`) is NOT an axiom (mult recurses on its 1st arg) — it is
+  proved by induction. Also: the Isabelle ML REPL shadows SML `ref` with
+  `Unsynchronized.ref`, so a merged driver wanting a counter must avoid `ref` (use a
+  functional fold/andalso). Built by a foundation→fan-out→merge ultracode workflow
+  (wf_c761c4e8-236).
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
