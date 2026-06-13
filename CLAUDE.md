@@ -1070,6 +1070,19 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   number-theory theorem proved from a single classical axiom on our Rust runtime. Built by
   a 4-phase ultracode pipeline (wf_26188260-4af): classical FOL → NT connectors + strong
   induction → prime_cases (3 seats all derived it) → capstone (2 seats both proved it).
+- **EUCLID'S THEOREM — the infinitude of primes** (`isabelle_euclid.rs`, 2026-06-13 — the
+  GRAND CAPSTONE, top of the ladder): `⊢ ∀n. ∃p. prime p ∧ n < p` — for every n there is a
+  prime greater than n. A 0-hyp theorem over the STRUCTURAL prime, genuine kernel inference,
+  only classical assumption = excluded middle. Proof: given n, N = n!+1 ≥ 2 (`fact_pos`) has
+  a prime divisor p (the genuine `prime_divisor_exists`); if p ≤ n then p∣n! (`dvd_fact`) and
+  p∣(n!+1), contradicting consecutive-coprimality (`consec_coprime`: a prime can't divide
+  two consecutive numbers); so p > n. Helpers: a real recursive `fact` const + `fact_pos`,
+  `dvd_fact`, `mult_le_mono`, `mult_eq_one`, `le_cases`, `dvd_self_mult`. Built on
+  `isabelle_classical_primes.sml` by a 3-phase ultracode pipeline (wf_a72a4b68-c26): helpers
+  → consec_coprime (3 seats all derived it) → Euclid (2 seats both proved it). The full
+  self-derived Isabelle number theory now runs: object logic → Peano → semiring → summation
+  → order → divisibility → strong induction → classical FOL → genuine prime-divisor →
+  **Euclid's theorem**, all on the Rust PolyML interpreter.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
