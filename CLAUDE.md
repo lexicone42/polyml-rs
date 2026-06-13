@@ -1042,7 +1042,23 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   the strong-induction machinery reaches it — NOT a from-first-principles proof. Principled
   follow-up: add ONE excluded-middle axiom and DERIVE `prime_cases` from the structural
   `prime` + `dvd_le`, unifying the two `prime`s. Built by a foundation→fan-out→merge
-  ultracode workflow (wf_968ad1d0-b77).
+  ultracode workflow (wf_968ad1d0-b77). **NOTE: the caveated capstone here is now
+  SUPERSEDED by `isabelle_classical_primes.rs` (below), which derives `prime_cases`
+  genuinely.**
+- **CLASSICAL FOL + the GENUINE prime-divisor theorem** (`isabelle_classical_primes.rs`,
+  2026-06-13 — the honest completion). Makes the object logic CLASSICAL: adds object
+  `Imp`/`Conj`/`Forall` + ONE classical axiom, EXCLUDED MIDDLE (`⊢ A ∨ ¬A`), and DERIVES
+  the standard classical lemmas (each 0-extra-hyp, aconv-checked): `dbl_neg` (¬¬A⟹A),
+  `deMorgan_or`, `not_imp` (¬(A⟶B)⟹A∧¬B), `not_forall` (¬∀⟹∃¬). Then — the key — DERIVES
+  the primality case-split `prime_cases` (`1<n ⟹ prime n ∨ ∃d. 1<d<n ∧ d∣n`) from EM +
+  the STRUCTURAL `prime` + `dvd_le` + the classical lemmas (NOT an axiom this time), and
+  proves the GENUINE capstone `prime_divisor_exists` (`2≤n ⟹ ∃p. prime p ∧ p∣n`, structural
+  prime) BY strong induction. The only classical assumption is excluded middle (which real
+  Isabelle/HOL object logics have) — soundness probes confirm the kernel rejects false
+  variants. This closes the honesty gap from `isabelle_primes.rs`: a real, named
+  number-theory theorem proved from a single classical axiom on our Rust runtime. Built by
+  a 4-phase ultracode pipeline (wf_26188260-4af): classical FOL → NT connectors + strong
+  induction → prime_cases (3 seats all derived it) → capstone (2 seats both proved it).
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
