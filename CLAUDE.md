@@ -997,6 +997,23 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   declared on the mult-carrying theory, all cterms routed through one final
   `ctxtS`/`ctermS`. Built by a 3-seat ultracode workflow (wf_4ca14273-6ab) — all
   three seats proved both identities independently.
+- **(ℕ, ≤) IS A LINEAR ORDER COMPATIBLE WITH +** (`isabelle_ordering.rs`, 2026-06-12,
+  the order rung; mirror of HOL4 `hol4_order.rs`): extends the object logic with TWO
+  new logical primitives — the EXISTENTIAL QUANTIFIER (`Ex`/`exI`/`exE`) and PEANO
+  DISCRIMINATION (`oFalse`/`oFalse_elim`/`Suc_neq_Zero`/`Suc_inj`) — plus a DISJUNCTION
+  connective (`Disj`/`disjI`/`disjE`), defines `m ≤ n ≝ ∃p. n = m+p` (an ML
+  abbreviation, not a const — avoids formula-level equality), and proves the full
+  order structure by kernel inference, each 0-hyp: `le_refl`/`zero_le`/`le_add`,
+  `le_trans` (transitivity), `le_antisym` (⇒ partial order), `le_suc_mono`/
+  `le_add_mono` (+ compatibility), `le_total` (linearity ⇒ LINEAR order). Antisymmetry
+  rests on `add_left_cancel` + `add_eq_zero_left`, proved by induction via a
+  meta-implication→object-predicate REFLECTION (nat_induct's predicate is
+  object-level `nat⇒o` and cannot hold a meta `⟹`, so fold the meta-impl into a fresh
+  object predicate, induct, unfold; discharge a whole-implication premise with
+  `Thm.implies_elim`, NOT `OF`, which resolves on conclusions only). Each new const
+  extends the theory — route ALL downstream cterms through ONE final context. Built
+  by a foundation→fan-out→merge ultracode workflow (wf_74f3a1e0-a99); the `le_total`
+  stretch seat added disjunction itself.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
