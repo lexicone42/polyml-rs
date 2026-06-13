@@ -293,3 +293,28 @@ fn verified_bst() {
     assert!(out.contains("BST_DONE"), "verification incomplete:\n{out}");
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
+
+#[test]
+#[ignore = "needs /tmp/hol4_datatype (tools/build-hol4-checkpoints.sh datatype)"]
+fn verified_list_function_laws() {
+    // Classic LIST-FUNCTION correctness laws over a USER list datatype
+    // (lst = Nil | Cons 'a lst — this checkpoint has NO listTheory), each a
+    // 0-hypothesis theorem by structural induction on HOL4's real LCF kernel:
+    //   revacc_correct : |- !l a. revacc l a = append (reverse l) a
+    //   revacc_reverse : |- !l. revacc l Nil = reverse l   (tail-recursive reverse
+    //                    equals naive reverse — the classic accumulator proof)
+    //   map_fusion     : |- !f g l. lmap f (lmap g l) = lmap (\x. f (g x)) l  (functor law)
+    //   len_append     : |- !a b. llen (append a b) = llen a + llen b
+    // plus the helpers append_nil / append_assoc. Engineered by a 3-seat ultracode
+    // fleet (wf_7e7cea22-9fd, rewrite/simp/metis); all three verified independently,
+    // banked the minimal-automation (rewrite) variant.
+    let Some(image) = ckpt() else { return };
+    let driver = std::fs::read_to_string(common::support_file("list_laws_verified.sml"))
+        .expect("read list_laws_verified.sml");
+    let (out, _) = run_image_env(&image, &driver, 100_000_000_000, &[]).expect("run");
+    for law in ["append_nil", "append_assoc", "revacc_correct", "revacc_reverse", "map_fusion", "len_append"] {
+        assert!(out.contains(&format!("OK {law}")), "list law `{law}` did not check:\n{out}");
+    }
+    assert!(out.contains("LIST_LAWS_DONE"), "list-laws verification incomplete:\n{out}");
+    assert!(!out.contains("Exception-"), "exception:\n{out}");
+}

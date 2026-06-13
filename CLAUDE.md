@@ -891,6 +891,17 @@ Roadmap toward full automation (mapped 2026-06-04, first wall on each step):
     with the defs + the `all_lt_insert`/`all_gt_insert` push-through lemmas, then
     close the residual from the IH by `METIS_TAC[]` (EMPTY set — feeding the
     iff-shaped lemmas to METIS explodes its search).
+  - **Verified list-function laws** (`list_laws_verified.sml`, 2026-06-13) — classic
+    functional-correctness laws over a USER list datatype (`lst = Nil | Cons 'a lst`),
+    each 0-hyp by structural induction: `revacc_correct`/`revacc_reverse`
+    (tail-recursive reverse = naive reverse — the accumulator proof), `map_fusion`
+    (`lmap f (lmap g l) = lmap (\x. f (g x)) l`, the functor law), `len_append`
+    (length is additive), + helpers `append_nil`/`append_assoc`. Idioms: induct via
+    `HO_MATCH_MP_TAC (TypeBasePure.induction_of tyi)` then `REPEAT STRIP_TAC THEN
+    ASM_REWRITE_TAC[defs]`; keep the accumulator universally quantified going INTO
+    induction (`!l a.`) so the IH is `!a. ...`; `map_fusion`'s Cons case needs
+    `BETA_CONV` to reduce the `(\x. f (g x)) h` application; `len_append` stays
+    pure-rewrite via `arithmeticTheory.ADD_CLAUSES`. 3-seat fleet (wf_7e7cea22-9fd).
   These proofs were each engineered by a 3-seat ultracode fleet (diverse
   automation: explicit-witness / metis-assisted / simp-assisted); all seats
   verifying independently is the correctness signal, and the most robust (least
