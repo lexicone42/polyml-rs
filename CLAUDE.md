@@ -1197,7 +1197,20 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
     machinery, `pow_b_sub_Suc`). Induction on n: `(a+b)^(Suc n) = a·S + b·S` [IH +
     right_distrib], distribute into the sum, shift exponents, peel the Suc-n RHS, Pascal-split
     each term into two sums, recombine. 2-phase pipeline (wf_a511fcbc-470), all 3 seats proved
-    it. Next: Stage C3 (freshman's dream `(a+b)^p ≡ a^p+b^p mod p`) → D (FLT `a^p ≡ a`).
+    it.
+  - **Stage C1 — SUMMATION + SUBTRACTION** (`isabelle_sum.rs`): `sumf` (higher-order) + `sub`
+    + `sum_cong` (see entry above).
+  - **Stages C3+D — FRESHMAN'S DREAM + FERMAT'S LITTLE THEOREM** (`isabelle_flt.rs`,
+    2026-06-13 — THE SUMMIT): `flt : ⊢ prime p ⟹ a^p ≡ a (mod p)`, 0-hyp (only classical
+    assumption = excluded middle; soundness probe keeps the prime premise). Via the
+    `freshman_dream` (`prime p ⟹ (a+b)^p ≡ a^p+b^p mod p`): binomial theorem at exp p, peel
+    the k=0/k=p endpoints, interior terms divisible by p (`p_dvd_binom` + `sum_all_dvd` +
+    `dvd_imp_cong_zero`). FLT by induction on a (`0^p=0`; step `(a+1)^p ≡ a^p+1 ≡ a+1` via the
+    freshman's dream + IH + cong_add/cong_trans + `pow_one_base`). Helpers: `sum_all_dvd`,
+    `dvd_imp_cong_zero`, `pow_one_base`, `pow_zero_pos`. 2-phase pipeline (wf_263aa14e-2ad),
+    all 3 seats proved it. **FERMAT'S LITTLE THEOREM is now proved from first principles on
+    the Rust interpreter — completing, with Euclid + √2-irrational + FTA, a tour of the
+    landmark theorems of elementary number theory.**
   - **NOTE on the unified base** (`isabelle_ntbase.sml`): the Fermat-arc drivers build on it
     (classical+division+Euclid+modular+powers in one), so they no longer re-derive separate
     foundations — the consolidation paid off for Stages A/B.
