@@ -1183,8 +1183,14 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
     (n+1)·C(n,k)` (induction on n with k universal via object `Forall`, IH at two points +
     both Pascal directions) + the famous **`p_dvd_binom`** (`prime p ∧ 0<k<p ⟹ p∣C(p,k)`,
     via absorption ⟹ `p∣k·C(p,k)`, `p∤k` + Euclid's lemma). 2-phase pipeline (wf_2f2eeca9-c88).
-    Remaining: Stage C (binomial theorem mod p / freshman's dream `(a+b)^p ≡ a^p+b^p`,
-    needs a summation operator — the hard wall) → Stage D (FLT `a^p ≡ a mod p`).
+    Remaining: Stage C (binomial theorem mod p) → Stage D (FLT).
+  - **Stage C1 — SUMMATION + TRUNCATED SUBTRACTION** (`isabelle_sum.rs`, 2026-06-13): Pure
+    is HIGHER-ORDER, so `sumf : (nat⇒nat)⇒nat⇒nat` is a legit const (pass summands as object
+    lambdas, beta_norm after applying f to an index). `sumf f 0 = f 0`, `sumf f (Suc n) =
+    sumf f n + f (Suc n)`; `sub` (truncated −) + `sub_self`/`sub_Suc_le`; and the workhorse
+    `sum_cong` (`(⋀k. k≤n ⟹ f k = g k) ⟹ sumf f n = sumf g n`, a higher-order induction).
+    2-seat fleet (wf_0d8f0cb2-45c). Next: Stage C2 (the binomial theorem `(a+b)^n = Σ
+    C(n,k)·a^k·b^(n−k)`, the hard induction) → C3 (freshman's dream `(a+b)^p ≡ a^p+b^p`) → D.
   - **NOTE on the unified base** (`isabelle_ntbase.sml`): the Fermat-arc drivers build on it
     (classical+division+Euclid+modular+powers in one), so they no longer re-derive separate
     foundations — the consolidation paid off for Stages A/B.
