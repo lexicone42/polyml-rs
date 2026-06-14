@@ -1163,6 +1163,14 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
     future work: define a "function with a conditional on object equality" (count, remove1)
     as a const + two conditional axioms (eq-case, neq-case), then `ex_middle` + `disjE` to
     use it; remove1 yields a list-equality (`leq`), so transfer properties via `leq_subst`.
+- **MODULAR ARITHMETIC** (`isabelle_modular.rs`, 2026-06-13): congruence mod m is a
+  CONGRUENCE RELATION — `cong m a b ≝ (∃k. b=a+m·k) ∨ (∃k. a=b+m·k)` (two-sided, ℕ has no
+  subtraction) — proving `cong_refl`/`cong_sym`/`cong_trans` (equivalence) + `cong_add`/
+  `cong_mult` (compatible with + and · ⇒ ℤ/mℤ is a commutative ring), each 0-hyp on the
+  classical-primes base. Subtlety: `cong_add`'s MIXED cases genuinely need `le_total` — the
+  linear order enters even though the statement is purely additive (ℕ can't decide which
+  side the m-multiple lands on). The gateway to Fermat's little theorem. 2-phase pipeline
+  (wf_0bbaeabe-bc6) + merge.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
