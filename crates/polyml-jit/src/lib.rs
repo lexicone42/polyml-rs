@@ -51,17 +51,33 @@ pub fn install_all_jit_entries(
     //   JIT_INSTALL_LIMIT=N — install only first N functions
     //   JIT_INSTALL_SKIP=N,M,K — skip these install indices (comma list)
     //   JIT_INSTALL_VERBOSE=1 — print each install with its index
-    let install_limit: Option<usize> = std::env::var("JIT_INSTALL_LIMIT")
-        .ok()
-        .and_then(|s| s.parse().ok());
-    let skip_indices: std::collections::HashSet<usize> = std::env::var("JIT_INSTALL_SKIP")
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .filter_map(|x| x.trim().parse().ok())
-                .collect()
-        })
-        .unwrap_or_default();
+    // Bisection harness controls: warn loudly on a SET-but-malformed
+    // value rather than silently defaulting (a typo'd value would
+    // otherwise derail SEGV localization — see CLAUDE.md's harness docs).
+    let install_limit: Option<usize> = match std::env::var("JIT_INSTALL_LIMIT") {
+        Ok(s) => match s.parse() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                eprintln!("warning: JIT_INSTALL_LIMIT={s:?} is not a number; ignoring");
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let skip_indices: std::collections::HashSet<usize> = match std::env::var("JIT_INSTALL_SKIP") {
+        Ok(s) => s
+            .split(',')
+            .filter(|x| !x.trim().is_empty())
+            .filter_map(|x| match x.trim().parse() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("warning: JIT_INSTALL_SKIP token {x:?} is not a number; ignoring it");
+                    None
+                }
+            })
+            .collect(),
+        Err(_) => std::collections::HashSet::new(),
+    };
     let verbose = std::env::var("JIT_INSTALL_VERBOSE").is_ok();
     let mut install_idx = 0usize;
 
@@ -524,6 +540,14 @@ pub unsafe extern "C" fn block_move_word_trampoline(
     let src = PolyWord::from_bits(src_word as usize).as_ptr::<PolyWord>();
     let dest_pw = PolyWord::from_bits(dest_word as usize).as_ptr::<PolyWord>();
     let dest = dest_pw.cast_mut();
+    // A negative offset/length here means a JIT codegen bug (wrong arg
+    // order / sign-extension). The .max(0) clamp keeps release builds
+    // robust; the debug_assert turns the silent-truncation into a precise
+    // failure under tests / JIT bisection.
+    debug_assert!(
+        src_off >= 0 && dest_off >= 0 && length >= 0,
+        "block_move_word_trampoline negative arg: src_off={src_off} dest_off={dest_off} len={length}"
+    );
     #[allow(clippy::cast_sign_loss)]
     let src_o = src_off.max(0) as usize;
     #[allow(clippy::cast_sign_loss)]
@@ -548,6 +572,10 @@ pub unsafe extern "C" fn block_compare_byte_trampoline(
     use polyml_runtime::PolyWord;
     let p1 = PolyWord::from_bits(p1_word as usize).as_ptr::<u8>();
     let p2 = PolyWord::from_bits(p2_word as usize).as_ptr::<u8>();
+    debug_assert!(
+        off1 >= 0 && off2 >= 0 && length >= 0,
+        "block_compare_byte_trampoline negative arg: off1={off1} off2={off2} len={length}"
+    );
     #[allow(clippy::cast_sign_loss)]
     let o1 = off1.max(0) as usize;
     #[allow(clippy::cast_sign_loss)]
@@ -580,6 +608,10 @@ pub unsafe extern "C" fn block_equal_byte_trampoline(
     use polyml_runtime::PolyWord;
     let p1 = PolyWord::from_bits(p1_word as usize).as_ptr::<u8>();
     let p2 = PolyWord::from_bits(p2_word as usize).as_ptr::<u8>();
+    debug_assert!(
+        off1 >= 0 && off2 >= 0 && length >= 0,
+        "block_equal_byte_trampoline negative arg: off1={off1} off2={off2} len={length}"
+    );
     #[allow(clippy::cast_sign_loss)]
     let o1 = off1.max(0) as usize;
     #[allow(clippy::cast_sign_loss)]
@@ -609,6 +641,10 @@ pub unsafe extern "C" fn block_move_byte_trampoline(
     let src = PolyWord::from_bits(src_word as usize).as_ptr::<u8>();
     let dest_pw = PolyWord::from_bits(dest_word as usize).as_ptr::<u8>();
     let dest = dest_pw.cast_mut();
+    debug_assert!(
+        src_off >= 0 && dest_off >= 0 && length >= 0,
+        "block_move_byte_trampoline negative arg: src_off={src_off} dest_off={dest_off} len={length}"
+    );
     #[allow(clippy::cast_sign_loss)]
     let src_o = src_off.max(0) as usize;
     #[allow(clippy::cast_sign_loss)]

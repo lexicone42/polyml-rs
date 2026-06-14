@@ -22,147 +22,13 @@ use cranelift::prelude::*;
 use cranelift::codegen::ir::BlockArg;
 use cranelift_module::{Linkage, Module};
 
-// Opcode constants — kept in sync with
-// `polyml_runtime::interpreter::opcodes`. We re-declare here so
-// this module doesn't pull in the runtime crate's private modules.
-const INSTR_CONST_0: u8 = 0x3b;
-const INSTR_CONST_1: u8 = 0x3c;
-const INSTR_CONST_2: u8 = 0x3d;
-const INSTR_CONST_3: u8 = 0x3e;
-const INSTR_CONST_4: u8 = 0x3f;
-const INSTR_CONST_10: u8 = 0x40;
-const INSTR_CONST_INT_B: u8 = 0x28;
-const INSTR_RETURN_1: u8 = 0x42;
-const INSTR_FIXED_ADD: u8 = 0xaa;
-const INSTR_WORD_ADD: u8 = 0xb1;
-const INSTR_WORD_SUB: u8 = 0xb2;
-const INSTR_WORD_AND: u8 = 0xb7;
-const INSTR_WORD_OR: u8 = 0xb8;
-const INSTR_WORD_XOR: u8 = 0xb9;
-const INSTR_WORD_MULT: u8 = 0xb3;
-const INSTR_WORD_SHIFT_LEFT: u8 = 0xba;
-const INSTR_WORD_SHIFT_R_LOG: u8 = 0xbb;
-const INSTR_SET_STACK_VAL_B: u8 = 0x25;
-const INSTR_FIXED_SUB: u8 = 0xab;
-const INSTR_FIXED_MULT: u8 = 0xac;
-const INSTR_FIXED_QUOT: u8 = 0xad;
-const INSTR_FIXED_REM: u8 = 0xae;
-const INSTR_GET_THREAD_ID: u8 = 0xd9;
-const INSTR_ALLOC_MUT_CLOSURE_B: u8 = 0x76;
-const INSTR_MOVE_TO_MUT_CLOSURE_B: u8 = 0x75;
-const INSTR_EQUAL_WORD: u8 = 0xa0;
-const INSTR_LESS_SIGNED: u8 = 0xa2;
-const INSTR_LESS_UNSIGNED: u8 = 0xa3;
-const INSTR_LESS_EQ_SIGNED: u8 = 0xa4;
-const INSTR_LESS_EQ_UNSIGNED: u8 = 0xa5;
-const INSTR_GREATER_SIGNED: u8 = 0xa6;
-const INSTR_GREATER_UNSIGNED: u8 = 0xa7;
-const INSTR_GREATER_EQ_SIGNED: u8 = 0xa8;
-const INSTR_GREATER_EQ_UNSIGNED: u8 = 0xa9;
-const INSTR_JUMP8: u8 = 0x02;
-const INSTR_CASE16: u8 = 0x0a;
-const INSTR_JUMP8_FALSE: u8 = 0x03;
-const INSTR_JUMP8_TRUE: u8 = 0x46;
-const INSTR_JUMP_BACK8: u8 = 0x1e;
-const INSTR_JUMP_BACK16: u8 = 0x20;
-const INSTR_JUMP16: u8 = 0xf7;
-const INSTR_JUMP16_FALSE: u8 = 0xf8;
-const INSTR_JUMP16_TRUE: u8 = 0x47;
-const INSTR_LOCAL_B: u8 = 0x22;
-const INSTR_LOCAL_0: u8 = 0x29;
-const INSTR_LOCAL_7: u8 = 0x30;
-const INSTR_LOCAL_8: u8 = 0x31;
-const INSTR_LOCAL_11: u8 = 0x34;
-const INSTR_LOCAL_12: u8 = 0x45;
-const INSTR_LOCAL_13: u8 = 0x49;
-const INSTR_LOCAL_14: u8 = 0x4a;
-const INSTR_LOCAL_15: u8 = 0x4b;
-const INSTR_WORD_DIV: u8 = 0xb4;
-const INSTR_WORD_MOD: u8 = 0xb5;
-const INSTR_RETURN_2: u8 = 0x43;
-const INSTR_RETURN_3: u8 = 0x44;
-const INSTR_RETURN_B: u8 = 0x1f;
-const INSTR_RETURN_W: u8 = 0x0d;
-const INSTR_INDIRECT_LOCAL_B0: u8 = 0xc7;
-const INSTR_INDIRECT_LOCAL_B1: u8 = 0xc1;
-const INSTR_INDIRECT_CLOSURE_B0: u8 = 0x77;
-const INSTR_INDIRECT_CLOSURE_B1: u8 = 0x7a;
-const INSTR_INDIRECT_CLOSURE_B2: u8 = 0x7c;
-const INSTR_ENTER_INT_X86: u8 = 0xff;
-const INSTR_ENTER_INT_ARM64: u8 = 0xe9;
-const INSTR_INDIRECT_LOCAL_BB: u8 = 0x21;
-const INSTR_INDIRECT_CLOSURE_BB: u8 = 0x54;
-const INSTR_INDIRECT_0: u8 = 0x35;
-const INSTR_INDIRECT_1: u8 = 0x36;
-const INSTR_INDIRECT_2: u8 = 0x37;
-const INSTR_INDIRECT_3: u8 = 0x38;
-const INSTR_INDIRECT_4: u8 = 0x39;
-const INSTR_INDIRECT_5: u8 = 0x3a;
-const INSTR_INDIRECT_B: u8 = 0x23;
-const INSTR_INDIRECT_0_LOCAL_0: u8 = 0xc6;
-const INSTR_NO_OP: u8 = 0x52;
-const INSTR_JUMP_TAGGED_LOCAL: u8 = 0xc4;
-const INSTR_IS_TAGGED_LOCAL_B: u8 = 0xc2;
-const INSTR_CONST_ADDR8_0: u8 = 0x55;
-const INSTR_CONST_ADDR8_1: u8 = 0x56;
-const INSTR_CALL_FAST_RTS0: u8 = 0x83;
-const INSTR_CALL_FAST_RTS1: u8 = 0x84;
-const INSTR_CALL_FAST_RTS2: u8 = 0x85;
-const INSTR_CALL_FAST_RTS3: u8 = 0x86;
-const INSTR_CALL_FAST_RTS4: u8 = 0x87;
-const INSTR_CALL_FAST_RTS5: u8 = 0x88;
-const INSTR_JUMP_NEQ_LOCAL: u8 = 0xc5;
-const INSTR_JUMP_NEQ_LOCAL_IND: u8 = 0xc3;
-const INSTR_RESET_1: u8 = 0x50;
-const INSTR_RESET_2: u8 = 0x51;
-const INSTR_RESET_B: u8 = 0x26;
-const INSTR_RESET_R_1: u8 = 0x64;
-const INSTR_RESET_R_2: u8 = 0x65;
-const INSTR_RESET_R_3: u8 = 0x66;
-const INSTR_RESET_R_B: u8 = 0x27;
-const INSTR_CALL_LOCAL_B: u8 = 0x16;
-const INSTR_CALL_CLOSURE: u8 = 0x0c;
-const INSTR_LDEXC: u8 = 0x6d;
-const INSTR_TAIL_B_B: u8 = 0x7b;
-const INSTR_CLOSURE_B: u8 = 0xd0;
-const INSTR_ALLOC_BYTE_MEM: u8 = 0xbd;
-const INSTR_ALLOC_WORD_MEMORY: u8 = 0xda;
-const INSTR_STORE_UNTAGGED: u8 = 0x09;
-const INSTR_LOAD_UNTAGGED: u8 = 0x08;
-const INSTR_STORE_ML_WORD: u8 = 0x05;
-const INSTR_RAISE_EX: u8 = 0x10;
-const INSTR_ALLOC_REF: u8 = 0x06;
-const INSTR_CELL_LENGTH: u8 = 0x93;
-const INSTR_LOAD_ML_BYTE: u8 = 0xdc;
-const INSTR_LOAD_ML_WORD: u8 = 0x04;
-const INSTR_STORE_ML_BYTE: u8 = 0xe4;
-const INSTR_BLOCK_MOVE_WORD: u8 = 0x07;
-const INSTR_BLOCK_MOVE_BYTE: u8 = 0xec;
-const INSTR_BLOCK_EQUAL_BYTE: u8 = 0xed;
-const INSTR_BLOCK_COMPARE_BYTE: u8 = 0xee;
-const INSTR_STACK_CONTAINER_B: u8 = 0x0e;
-const INSTR_MOVE_TO_CONTAINER_B: u8 = 0x24;
-const INSTR_INDIRECT_CONTAINER_B: u8 = 0x74;
-const INSTR_LOCK: u8 = 0x6c;
-const INSTR_CLEAR_MUTABLE: u8 = 0x95;
-const INSTR_CELL_FLAGS: u8 = 0x94;
-const INSTR_CONST_INT_W: u8 = 0x1b;
-const INSTR_PUSH_HANDLER: u8 = 0x78;
-const INSTR_NOT_BOOLEAN: u8 = 0x91;
-const INSTR_IS_TAGGED: u8 = 0x92;
-const INSTR_SET_HANDLER8: u8 = 0x81;
-const INSTR_SET_HANDLER16: u8 = 0xf9;
-const INSTR_DELETE_HANDLER: u8 = 0xf1;
-const INSTR_CALL_CONST_ADDR8_0: u8 = 0x57;
-const INSTR_CALL_CONST_ADDR8_1: u8 = 0x58;
-const INSTR_CONST_ADDR8_8: u8 = 0x15;
-const INSTR_CONST_ADDR16_8: u8 = 0x14;
-const INSTR_CALL_CONST_ADDR8_8: u8 = 0x17;
-const INSTR_CALL_CONST_ADDR16_8: u8 = 0x18;
-const INSTR_TUPLE_2: u8 = 0x69;
-const INSTR_TUPLE_3: u8 = 0x6a;
-const INSTR_TUPLE_4: u8 = 0x6b;
-const INSTR_TUPLE_B: u8 = 0x68;
+// Opcode constants are the SINGLE SOURCE OF TRUTH in
+// `polyml_runtime::interpreter::opcodes` (a faithful port of
+// `int_opcodes.h`). We glob-import the `INSTR_*` set here instead of
+// re-declaring it, so the JIT can never drift from the interpreter's
+// opcode numbering. (Verified 2026-06-14: every `INSTR_*` the JIT
+// references was byte-identical to the previous local copies.)
+use polyml_runtime::interpreter::opcodes::*;
 
 /// Errors specific to bytecode translation.
 #[derive(Debug, thiserror::Error)]
@@ -2742,10 +2608,6 @@ fn arity_from_terminator_scan(bytecode: &[u8], include_tail: bool) -> Option<usi
         pc += step;
     }
     None
-}
-
-fn function_entry_pc(bytecode: &[u8]) -> usize {
-    function_prologue(bytecode).0
 }
 
 /// Lightweight first-walk that determines the minimum incoming

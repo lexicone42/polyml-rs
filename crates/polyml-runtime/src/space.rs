@@ -134,14 +134,22 @@ impl MemorySpace {
     /// mmap-and-protect path.
     #[must_use]
     pub fn storage_bytes(&self) -> &[u8] {
+        // Length = words * size_of::<PolyWord>(). Spelled out explicitly
+        // rather than via `size_of_val::<[PolyWord]>(&self.storage)`,
+        // whose correctness depended on a turbofish-driven auto-deref;
+        // dropping that turbofish (or changing the container) would
+        // silently yield a fat-pointer's 16 bytes over a multi-MB heap.
+        let n_bytes = self.storage.len() * std::mem::size_of::<PolyWord>();
         // SAFETY: PolyWord is repr(transparent) over usize; bit-cast
         // for a read-only byte view is well-defined.
-        unsafe {
-            std::slice::from_raw_parts(
-                self.storage.as_ptr().cast::<u8>(),
-                std::mem::size_of_val::<[PolyWord]>(&self.storage),
-            )
-        }
+        let out =
+            unsafe { std::slice::from_raw_parts(self.storage.as_ptr().cast::<u8>(), n_bytes) };
+        debug_assert_eq!(
+            out.len(),
+            self.capacity_words() * std::mem::size_of::<PolyWord>(),
+            "storage_bytes() length out of sync with capacity_words()"
+        );
+        out
     }
 }
 

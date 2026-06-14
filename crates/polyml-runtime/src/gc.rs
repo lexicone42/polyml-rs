@@ -157,7 +157,12 @@ impl<'a> Collector<'a> {
             return None;
         }
         let (start, n) = self.from_objects[idx - 1];
-        let end = start + n * std::mem::size_of::<usize>();
+        // Saturating arithmetic: a corrupt length word (flag bits leaking
+        // into the length field) could make `n` huge and wrap `start +
+        // n*8`, which would silently mis-forward or drop a live pointer —
+        // the worst class of GC bug. For all valid (non-overflowing) `n`
+        // the result is identical to the plain computation.
+        let end = start.saturating_add(n.saturating_mul(std::mem::size_of::<usize>()));
         if addr < end || (n == 0 && addr == start) {
             Some((start, n))
         } else {
@@ -202,6 +207,11 @@ impl<'a> Collector<'a> {
         let len_idx = self.to_used;
         let body_idx = len_idx + 1;
         let new_used = body_idx + n_words;
+        // INVARIANT: to_storage is allocated with the same capacity as
+        // from-space (see collect()); a Cheney copy never produces more
+        // live words than from-space held, so this assert can only fire
+        // on collector corruption — it is a real release-time guard, not
+        // a debug-only check.
         assert!(
             new_used <= self.to_storage.len(),
             "GC to-space overflow: requested {n_words}, used {}/{}",
@@ -209,6 +219,7 @@ impl<'a> Collector<'a> {
             self.to_storage.len()
         );
         self.to_used = new_used;
+        // SAFETY: body_idx < new_used <= to_storage.len() per the assert above.
         unsafe { self.to_storage.as_mut_ptr().add(body_idx) }
     }
 

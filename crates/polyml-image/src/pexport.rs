@@ -1,4 +1,4 @@
-//! Reader (and eventually writer) for PolyML's portable export text format.
+//! Reader and writer for PolyML's portable export text format.
 //!
 //! The format is defined by `vendor/polyml/libpolyml/pexport.cpp`.
 //!

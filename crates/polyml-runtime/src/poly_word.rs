@@ -33,6 +33,7 @@ impl PolyWord {
     /// value fits in `WORD_BITS - 1` bits (otherwise it should be
     /// boxed as arbitrary precision).
     #[must_use]
+    #[inline(always)]
     pub const fn tagged(n: isize) -> Self {
         // ((n << 1) | 1) — relies on signed left-shift behavior
         // matching the C++ writer at globals.h:145.
@@ -47,6 +48,7 @@ impl PolyWord {
     /// Not `const fn` because `ptr as usize` is forbidden in const
     /// context (pointers don't have an integer value until runtime).
     #[must_use]
+    #[inline(always)]
     pub fn from_ptr<T>(p: *const T) -> Self {
         Self(p as usize)
     }
@@ -54,6 +56,7 @@ impl PolyWord {
     /// Raw constructor from a bit pattern. Avoid; prefer `tagged` or
     /// `from_ptr`.
     #[must_use]
+    #[inline(always)]
     pub const fn from_bits(bits: usize) -> Self {
         Self(bits)
     }
@@ -61,6 +64,7 @@ impl PolyWord {
     /// True iff the bottom bit is set (i.e. this slot holds a tagged
     /// integer rather than an object pointer).
     #[must_use]
+    #[inline(always)]
     pub const fn is_tagged(self) -> bool {
         (self.0 & 1) != 0
     }
@@ -70,6 +74,7 @@ impl PolyWord {
     /// signals (the containing object's type bits) to know whether to
     /// follow this; this is a quick filter only.
     #[must_use]
+    #[inline(always)]
     pub const fn is_data_ptr(self) -> bool {
         self.0 != 0 && (self.0 & 1) == 0
     }
@@ -77,7 +82,15 @@ impl PolyWord {
     /// Read the integer payload of a tagged word. Undefined behavior
     /// (in the C-spec sense) if `!is_tagged()`.
     #[must_use]
+    #[inline(always)]
     pub const fn untag(self) -> isize {
+        // Debug-only guard: `untag` on a pointer-shaped word is a
+        // semantic bug (treating an object pointer as a tagged int).
+        // Release builds keep the raw shift (the hot dispatch path).
+        debug_assert!(
+            self.is_tagged(),
+            "untag() on a non-tagged PolyWord (likely a pointer)"
+        );
         #[allow(clippy::cast_possible_wrap)]
         let s = self.0 as isize;
         s >> 1
@@ -87,7 +100,12 @@ impl PolyWord {
     /// `is_data_ptr()` is true at the call site.
     ///
     /// Not `const fn` for the same reason as `from_ptr`.
+    ///
+    /// NOTE: deliberately NOT guarded with a `debug_assert` — PC values
+    /// and `from_bits` raw addresses legitimately have the low bit set,
+    /// and the GC treats any bit pattern as a candidate pointer.
     #[must_use]
+    #[inline(always)]
     pub fn as_ptr<T>(self) -> *const T {
         self.0 as *const T
     }

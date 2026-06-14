@@ -49,25 +49,14 @@
 //!
 //! ## Scope
 //!
-//! Implemented:
-//! - ALU: const_{0..4,10,int_b,int_w}, fixed_*, word_*, comparisons
-//! - Stack: local_*, indirect_*, reset_*, reset_r_*
-//! - Control: jump{8,16}{,_back,_true,_false}, no_op
-//! - Calls: `call_closure`, `call_const_addr8_8`, `call_const_addr16_8`,
-//!   `call_const_addr8_{0,1}`, `call_local_b`
-//! - Constants from pool: `const_addr8_8`, `const_addr16_8`,
-//!   `const_addr8_{0,1}`
-//! - Returns: `return_{1,2,3,b,w}`
-//!
-//! Not yet implemented (will trap with `Unimplemented`):
-//! - Allocation (`tuple_*`, `alloc_*`)
-//! - Exceptions (`push_handler`, `raise_ex`, `set_handler*`, `delete_handler`)
-//! - Tail calls (`tail_b_b`)
-//! - Heap mutation (`store_ml_word`, `store_ml_byte`)
-//! - RTS calls (`call_fast_rts*`)
-//! - Floats / extended opcodes
-//! - Closure construction (`closure_b`, `alloc_mut_closure_b`)
-//! - `ldexc`, `lock`, etc.
+//! The full bytecode opcode set used by the PolyML bootstrap and the
+//! HOL4 / Isabelle workloads is implemented: see [`Interpreter::step`]
+//! for the primary dispatch and `dispatch_extended` for the ESCAPE
+//! (`0xfe`) extended set. This covers ALU (const/fixed/word/compare),
+//! stack ops (local/indirect/reset), control flow (jump family),
+//! calls/returns/tail calls, allocation, exceptions and handlers, heap
+//! mutation, RTS calls, closure construction, and the float/container
+//! opcodes. Genuinely unmodelled cases return `InterpError::Unimplemented`.
 
 // Interpreter-wide allows: the signed/unsigned reinterpretation of
 // PolyWord bits is intentional (matches PolyML's `UNTAGGED` casting
@@ -112,6 +101,63 @@ fn arbint_trace_on() -> bool {
         2 => false,
         _ => {
             let on = std::env::var("ARBINT_DEBUG").is_ok();
+            F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Memoized read of `JIT_TRACE_RETURNS` (see [`arbint_trace_on`] for the
+/// cache discipline). `do_return` is one of the hottest paths, so reading
+/// the env var per-return (allocating a `String` + scanning the environ)
+/// is exactly the regression class the GC-threshold cache fixed (6.2x);
+/// this caches it the same way. The diagnostic is virtually never enabled
+/// and the env is read once at process start in practice, so the observable
+/// behavior is identical.
+fn jit_trace_returns_on() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static F: AtomicU8 = AtomicU8::new(0);
+    match F.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::env::var("JIT_TRACE_RETURNS").is_ok();
+            F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Memoized read of `JIT_TRACE_STORES` (see [`arbint_trace_on`]).
+/// `INSTR_STORE_ML_WORD` is a hot heap-mutation opcode; a per-store
+/// `String` alloc + environ scan is the same footgun the env-var cache
+/// discipline exists to avoid.
+fn jit_trace_stores_on() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static F: AtomicU8 = AtomicU8::new(0);
+    match F.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::env::var("JIT_TRACE_STORES").is_ok();
+            F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Memoized read of `JIT_TRACE_CALLS` (see [`arbint_trace_on`]). Read once
+/// per JIT-dispatched call instead of twice via raw `env::var`; only
+/// matters when `--jit` is enabled but keeps the JIT trace path consistent
+/// with the cached-flag discipline.
+fn jit_trace_calls_on() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static F: AtomicU8 = AtomicU8::new(0);
+    match F.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::env::var("JIT_TRACE_CALLS").is_ok();
             F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
             on
         }
@@ -1585,7 +1631,7 @@ impl Interpreter {
                 // mapped memory) and dump context. Gated on env var.
                 // Also fires when the popped INDEX is itself a pointer
                 // (not a tagged int) — that means a stack/PC desync upstream.
-                if std::env::var("JIT_TRACE_STORES").is_ok() {
+                if jit_trace_stores_on() {
                     let b = base.0;
                     let suspicious = b < 0x1000 || (b & 0x1) != 0 || index > 0x10_0000
                         || !index_word.is_tagged();
@@ -2557,7 +2603,7 @@ impl Interpreter {
                     #[allow(clippy::cast_possible_wrap)]
                     let v = raw as isize;
                     self.stack[self.sp] = PolyWord::tagged(v);
-                } else if std::env::var("ARBINT_DEBUG").is_ok() {
+                } else if arbint_trace_on() {
                     let pc_off = unsafe { self.pc.offset_from(self.code_start) };
                     eprintln!("  LONG_W_TO_TAGGED on NON-PTR top: 0x{:016x} (tagged={}) pc_off={pc_off}",
                         p.0, p.is_tagged());
@@ -3213,11 +3259,11 @@ impl Interpreter {
         self.push_continue(p)
     }
     fn call_fast_g_to_r(&mut self) -> Result<StepResult, InterpError> {
-        let stub = self.pop()?;
-        let arg = self.pop()?;
-        let result = self.dispatch_typed_fast_call(stub, &[arg]);
-        let p = self.alloc_real(result)?;
-        self.push_continue(p)
+        // The general-arg ABI is identical to the real-arg ABI here:
+        // `dispatch_typed_fast_call` ignores the arg-kind distinction.
+        // Delegate so there's a single audited body (preserve the name
+        // for a future faithful-port fix that needs the ABIs to diverge).
+        self.call_fast_r_to_r()
     }
     fn call_fast_rr_to_r(&mut self) -> Result<StepResult, InterpError> {
         let stub = self.pop()?;
@@ -3228,12 +3274,8 @@ impl Interpreter {
         self.push_continue(p)
     }
     fn call_fast_rg_to_r(&mut self) -> Result<StepResult, InterpError> {
-        let stub = self.pop()?;
-        let arg2 = self.pop()?;
-        let arg1 = self.pop()?;
-        let result = self.dispatch_typed_fast_call(stub, &[arg1, arg2]);
-        let p = self.alloc_real(result)?;
-        self.push_continue(p)
+        // General-arg == real-arg ABI here (see call_fast_g_to_r).
+        self.call_fast_rr_to_r()
     }
     fn call_fast_f_to_f(&mut self) -> Result<StepResult, InterpError> {
         let stub = self.pop()?;
@@ -3244,12 +3286,8 @@ impl Interpreter {
         self.push_continue(Self::box_float(f))
     }
     fn call_fast_g_to_f(&mut self) -> Result<StepResult, InterpError> {
-        let stub = self.pop()?;
-        let arg = self.pop()?;
-        let result = self.dispatch_typed_fast_call(stub, &[arg]);
-        #[allow(clippy::cast_possible_truncation)]
-        let f = result as f32;
-        self.push_continue(Self::box_float(f))
+        // General-arg == real-arg ABI here (see call_fast_g_to_r).
+        self.call_fast_f_to_f()
     }
     fn call_fast_ff_to_f(&mut self) -> Result<StepResult, InterpError> {
         let stub = self.pop()?;
@@ -3261,13 +3299,8 @@ impl Interpreter {
         self.push_continue(Self::box_float(f))
     }
     fn call_fast_fg_to_f(&mut self) -> Result<StepResult, InterpError> {
-        let stub = self.pop()?;
-        let arg2 = self.pop()?;
-        let arg1 = self.pop()?;
-        let result = self.dispatch_typed_fast_call(stub, &[arg1, arg2]);
-        #[allow(clippy::cast_possible_truncation)]
-        let f = result as f32;
-        self.push_continue(Self::box_float(f))
+        // General-arg == real-arg ABI here (see call_fast_g_to_r).
+        self.call_fast_ff_to_f()
     }
 
     /// Dispatch a typed-FP-style fast call. The stub's word 0 is
@@ -3451,7 +3484,7 @@ impl Interpreter {
     /// `w` must be a valid boxed-LargeWord pointer (1+ word byte object).
     unsafe fn read_lg_word(w: PolyWord) -> usize {
         if !w.is_data_ptr() {
-            if std::env::var("ARBINT_DEBUG").is_ok() {
+            if arbint_trace_on() {
                 eprintln!("  read_lg_word on NON-PTR operand: 0x{:016x} (tagged={})", w.0, w.is_tagged());
                 std::process::abort();
             }
@@ -3897,15 +3930,21 @@ impl Interpreter {
         // ping-pong. The interpreter's managed PolyWord stack handles
         // recursion fine — but a Rust frame per nested call would
         // exhaust the OS thread stack on bootstrap-scale workloads.
-        let inside_jit = !crate::jit_bridge::JIT_INTERP.with(|c| c.get()).is_null();
-        if !inside_jit
+        //
+        // Short-circuit on the cheap state-local check first: in the
+        // default (non-`--jit`) configuration `jit_cache` is empty, so
+        // this skips both the JIT_INTERP thread-local access AND the
+        // HashMap probe on every CALL. When the JIT IS installed the
+        // guard is false and the original logic runs unchanged.
+        if !self.jit_cache.is_empty()
+            && crate::jit_bridge::JIT_INTERP.with(|c| c.get()).is_null()
             && let Some(entry) = self.jit_cache.get(&code_obj_ptr_for_jit).copied() {
             if let Some(d) = self.diag.as_mut() {
                 *d.jit_call_hits.entry(code_obj_ptr_for_jit).or_insert(0) += 1;
                 // Also count toward total call_targets (for compare).
                 *d.call_targets.entry(code_obj_ptr_for_jit).or_insert(0) += 1;
             }
-            if std::env::var("JIT_TRACE_CALLS").is_ok() {
+            if jit_trace_calls_on() {
                 let mut arg_dump = String::new();
                 for i in (0..entry.sml_arity).rev() {
                     let v = self.stack[self.sp + i].0;
@@ -4038,7 +4077,7 @@ impl Interpreter {
                 )
             };
             crate::jit_bridge::JIT_INTERP.with(|c| c.set(prev));
-            if std::env::var("JIT_TRACE_CALLS").is_ok() {
+            if jit_trace_calls_on() {
                 eprintln!("  → returned 0x{:016x}", result_bits as u64);
             }
             let result = PolyWord::from_bits(result_bits as usize);
@@ -4127,7 +4166,7 @@ impl Interpreter {
     fn do_return(&mut self, return_count: usize) -> Result<StepResult, InterpError> {
         // Diagnostic: peek the entire frame before popping, so we can
         // see if the stack is misaligned (retPC not a code pointer).
-        let pre_dump = std::env::var("JIT_TRACE_RETURNS").is_ok() && {
+        let pre_dump = jit_trace_returns_on() && {
             let sp = self.sp;
             let depth = self.stack.len().saturating_sub(sp);
             let need = 3 + return_count;

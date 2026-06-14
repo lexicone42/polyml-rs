@@ -258,28 +258,3 @@ fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(
     }
 }
 
-/// Mini RETURN_N scanner — copy of polyml_jit::translate's private one.
-fn arity_from_return_scan(bytecode: &[u8]) -> Option<usize> {
-    const INSTR_RETURN_1: u8 = 0x42;
-    const INSTR_RETURN_2: u8 = 0x43;
-    const INSTR_RETURN_3: u8 = 0x44;
-    const INSTR_RETURN_B: u8 = 0x1f;
-    const INSTR_RETURN_W: u8 = 0x0d;
-    let mut pc = 0;
-    while pc < bytecode.len() {
-        match bytecode[pc] {
-            INSTR_RETURN_1 => return Some(1),
-            INSTR_RETURN_2 => return Some(2),
-            INSTR_RETURN_3 => return Some(3),
-            INSTR_RETURN_B => return Some(*bytecode.get(pc + 1)? as usize),
-            INSTR_RETURN_W => {
-                let lo = *bytecode.get(pc + 1)?;
-                let hi = *bytecode.get(pc + 2)?;
-                return Some(u16::from_le_bytes([lo, hi]) as usize);
-            }
-            _ => {}
-        }
-        pc += 1;
-    }
-    None
-}

@@ -134,6 +134,16 @@ pub unsafe fn const_segment_for_code(obj_ptr: *const PolyWord) -> (*const PolyWo
     unsafe {
         let lw = crate::space::MemorySpace::length_word_of(obj_ptr);
         let n_words = length_of(lw);
+        // Debug-only guards: a malformed/zero-length object (e.g. after a
+        // GC corruption or a stale pointer) would make `n_words - 1` wrap
+        // to usize::MAX below and produce a wild pointer. Fail fast and
+        // precisely here in debug/test builds; zero release overhead.
+        debug_assert!(
+            is_code_object(lw),
+            "const_segment_for_code on non-code object: flags=0x{:02x}",
+            flags_of(lw)
+        );
+        debug_assert!(n_words >= 2, "code object too small: n_words={n_words}");
         let last_word_ptr = obj_ptr.add(n_words - 1);
         // The trailing offset is a signed byte distance written by the
         // loader; the high bit acts as the sign. Casting from usize is

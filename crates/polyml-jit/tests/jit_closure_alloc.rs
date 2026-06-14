@@ -10,7 +10,6 @@ use polyml_jit::{translate, Jit};
 use polyml_runtime::{Interpreter, MemorySpace, PolyWord, SpaceKind};
 
 const INSTR_LOCAL_2: u8 = 0x2b;
-const INSTR_LOCAL_3: u8 = 0x2c;
 const INSTR_CLOSURE_B: u8 = 0xd0;
 const INSTR_RETURN_1: u8 = 0x42;
 

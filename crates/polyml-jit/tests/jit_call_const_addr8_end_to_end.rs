@@ -11,7 +11,7 @@
 //! exercised together.
 
 use polyml_jit::{translate, Jit};
-use polyml_runtime::{Interpreter, JitEntry, PolyWord};
+use polyml_runtime::{Interpreter, JitEntry};
 
 const INSTR_CONST_INT_B: u8 = 0x28;
 const INSTR_CALL_CONST_ADDR8_0: u8 = 0x57;

@@ -16,7 +16,6 @@
 use polyml_jit::{translate, Jit};
 use polyml_runtime::PolyWord;
 
-const INSTR_LOCAL_0: u8 = 0x29;
 const INSTR_LOCAL_2: u8 = 0x2b;
 const INSTR_CONST_1: u8 = 0x3c;
 const INSTR_CONST_INT_B: u8 = 0x28;

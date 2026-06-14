@@ -1548,6 +1548,29 @@ fn i64_from_bigint_in_tag_range(n: &BigInt) -> Option<i64> {
     }
 }
 
+/// Shared body for the bignum-aware ARB_* fallbacks. Untags `y` then `x`
+/// to BigInts (mirroring upstream `bytecode.cpp`'s peek-then-pop operand
+/// order — `y` is the peek, `x` the pop), applies `op`, and re-tags the
+/// result. The closure is monomorphized per call site (no dynamic
+/// dispatch), and this is the slow boxed-overflow path, not the tagged
+/// fast path.
+fn arb_via_bigint(
+    alloc: Option<&mut crate::space::MemorySpace>,
+    x: PolyWord,
+    y: PolyWord,
+    op: impl FnOnce(BigInt, BigInt) -> BigInt,
+) -> PolyWord {
+    let (Some(a), Some(b)) = (poly_word_to_bigint(y), poly_word_to_bigint(x)) else {
+        return PolyWord::tagged(0);
+    };
+    let mut ctx = RtsContext {
+        alloc_space: alloc,
+        raised_exception: None,
+        rts: None,
+    };
+    bigint_to_poly_word(&mut ctx, &op(a, b))
+}
+
 /// Bignum-aware ARB_ADD.
 ///
 /// Called from the interpreter when the fast path overflows or
@@ -1559,15 +1582,7 @@ pub fn arb_add_via_bigint(
     x: PolyWord,
     y: PolyWord,
 ) -> PolyWord {
-    let (Some(a), Some(b)) = (poly_word_to_bigint(y), poly_word_to_bigint(x)) else {
-        return PolyWord::tagged(0);
-    };
-    let mut ctx = RtsContext {
-        alloc_space: alloc,
-        raised_exception: None,
-        rts: None,
-    };
-    bigint_to_poly_word(&mut ctx, &(a + b))
+    arb_via_bigint(alloc, x, y, |a, b| a + b)
 }
 
 pub fn arb_sub_via_bigint(
@@ -1575,15 +1590,7 @@ pub fn arb_sub_via_bigint(
     x: PolyWord,
     y: PolyWord,
 ) -> PolyWord {
-    let (Some(a), Some(b)) = (poly_word_to_bigint(y), poly_word_to_bigint(x)) else {
-        return PolyWord::tagged(0);
-    };
-    let mut ctx = RtsContext {
-        alloc_space: alloc,
-        raised_exception: None,
-        rts: None,
-    };
-    bigint_to_poly_word(&mut ctx, &(a - b))
+    arb_via_bigint(alloc, x, y, |a, b| a - b)
 }
 
 pub fn arb_mult_via_bigint(
@@ -1591,15 +1598,7 @@ pub fn arb_mult_via_bigint(
     x: PolyWord,
     y: PolyWord,
 ) -> PolyWord {
-    let (Some(a), Some(b)) = (poly_word_to_bigint(y), poly_word_to_bigint(x)) else {
-        return PolyWord::tagged(0);
-    };
-    let mut ctx = RtsContext {
-        alloc_space: alloc,
-        raised_exception: None,
-        rts: None,
-    };
-    bigint_to_poly_word(&mut ctx, &(a * b))
+    arb_via_bigint(alloc, x, y, |a, b| a * b)
 }
 
 // ---- arbitrary precision fast paths (tagged-int) -----------------
@@ -3007,20 +3006,16 @@ fn make_syserr_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
     PolyWord::from_ptr(p.cast_const())
 }
 
-/// Build the pervasive `Overflow` exception packet so that a handler
-/// `handle Overflow => ...` matches it. The matching identity is
-/// `ex_id == TAGGED(5)` (`EXC_overflow`, INITIALISE_.ML:512 / sys.h:32;
-/// the nullary constructor is `Global(mkConst(toMachineWord 5))`).
-/// `ex_name = "Overflow"` is for printing only (run_time.cpp:165).
-/// Mirrors upstream `makeExceptionPacket(taskData, EXC_overflow)`
-/// (run_time.cpp:206-209 -> make_exn, run_time.cpp:158-200): a 4-word
-/// ordinary object `[ex_id, ex_name, arg, ex_location]` with
-/// `arg = TAGGED(0)` (unit) and `ex_location = TAGGED(0)` (NoLocation).
-///
-/// NOTE: `make_simple_exception` would NOT be caught as `Overflow`
-/// because it uses a self-pointer ex_id, not TAGGED(5).
-pub fn make_overflow_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
-    let name = alloc_poly_string(ctx, b"Overflow");
+/// Build a nullary pervasive-exception packet: a 4-word ordinary object
+/// `[ex_id, ex_name, arg=(), ex_location=NoLocation]` where `ex_id =
+/// TAGGED(ex_id)` is the handler match key (sys.h) and `name` is for
+/// printing only (run_time.cpp:165). Mirrors upstream
+/// `makeExceptionPacket(taskData, EXC_*)` (run_time.cpp:206-209 ->
+/// make_exn, run_time.cpp:158-200). The single audited site for the
+/// Overflow/Div packet shape (the layout `handle Overflow`/`handle Div`
+/// matches on).
+fn make_pervasive_exn(ctx: &mut RtsContext<'_>, ex_id: isize, name: &[u8]) -> PolyWord {
+    let name_s = alloc_poly_string(ctx, name);
     let Some(space) = ctx.alloc_space.as_mut() else {
         return PolyWord::ZERO;
     };
@@ -3028,12 +3023,23 @@ pub fn make_overflow_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
     // SAFETY: just allocated 4 words.
     unsafe {
         crate::space::set_length_word(p, 4, 0);
-        p.write(PolyWord::tagged(5)); // ex_id = EXC_overflow (the match key)
-        p.add(1).write(name); // ex_name = "Overflow"
+        p.write(PolyWord::tagged(ex_id)); // ex_id = the match key
+        p.add(1).write(name_s); // ex_name (for printing)
         p.add(2).write(PolyWord::tagged(0)); // arg = () (nullary exception)
         p.add(3).write(PolyWord::tagged(0)); // ex_location = NoLocation
     }
     PolyWord::from_ptr(p.cast_const())
+}
+
+/// Build the pervasive `Overflow` exception packet so that a handler
+/// `handle Overflow => ...` matches it. The matching identity is
+/// `ex_id == TAGGED(5)` (`EXC_overflow`, INITIALISE_.ML:512 / sys.h:32;
+/// the nullary constructor is `Global(mkConst(toMachineWord 5))`).
+///
+/// NOTE: `make_simple_exception` would NOT be caught as `Overflow`
+/// because it uses a self-pointer ex_id, not TAGGED(5).
+pub fn make_overflow_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
+    make_pervasive_exn(ctx, 5, b"Overflow")
 }
 
 /// Build the pervasive `Div` exception packet so `handle Div => ...` matches.
@@ -3043,20 +3049,8 @@ pub fn make_overflow_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
 /// TAGGED(0), which the SML side then mis-read as a (q,r) tuple pointer and
 /// HALTED the interpreter (found by differential test vs upstream PolyML).
 pub fn make_div_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
-    let name = alloc_poly_string(ctx, b"Div");
-    let Some(space) = ctx.alloc_space.as_mut() else {
-        return PolyWord::ZERO;
-    };
-    let p = space.alloc(4);
-    // SAFETY: just allocated 4 words.
-    unsafe {
-        crate::space::set_length_word(p, 4, 0);
-        p.write(PolyWord::tagged(7)); // ex_id = EXC_divide (the match key)
-        p.add(1).write(name); // ex_name = "Div"
-        p.add(2).write(PolyWord::tagged(0)); // arg = () (nullary exception)
-        p.add(3).write(PolyWord::tagged(0)); // ex_location = NoLocation
-    }
-    PolyWord::from_ptr(p.cast_const())
+    // ex_id = TAGGED(7) = EXC_divide.
+    make_pervasive_exn(ctx, 7, b"Div")
 }
 
 /// `PolyGetEnv(threadId, name)` — return the real environment value, or
