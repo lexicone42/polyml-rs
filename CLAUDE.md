@@ -1140,8 +1140,16 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
     Key insight that made it tractable: the gcd/Bézout apparatus (which needs integers over
     ℕ) is entirely avoidable — the descent needs only the division theorem + `dvd_diff`
     (p∣x ∧ p∣(x+y) ⟹ p∣y) + `prime_not_dvd_pos_lt`. 2-phase pipeline (wf_904dd5f8-976).
-    Remaining: Stage 3 (Euclid's lemma for lists: p∣∏ps ⟹ p divides some element) → Stage 4
-    (the uniqueness permutation argument). See task #75.
+    Remaining: Stage 3 (done below) → Stage 4 (the uniqueness count argument).
+  - **Stage 3 — EUCLID'S LEMMA FOR LISTS** (`isabelle_euclid_list.rs`, 2026-06-13): `⊢
+    prime p ⟹ all_prime ps ⟹ p∣∏ps ⟹ in_list p ps` — a prime dividing the product of a
+    list of primes IS one of them. Re-derives the list machinery (natlist + product +
+    all_prime + a membership predicate `in_list`) on the Euclid-lemma base, proves
+    `prime_div_eq` (two primes, p∣q ⟹ p=q, from the structural prime), then the headline by
+    list induction on `euclid_lemma`. The key lemma for Stage 4. 2-phase pipeline
+    (wf_1b8fb713-66f). [Also: the harness `run_image_env` had a stdin/stdout pipe-buffer
+    DEADLOCK on big drivers (>64KB stdin + >64KB output) — fixed commit cad1719 by writing
+    stdin on a separate thread; it had hung the Euclid-lemma test.]
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
