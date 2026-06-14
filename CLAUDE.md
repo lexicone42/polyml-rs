@@ -1150,6 +1150,19 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
     (wf_1b8fb713-66f). [Also: the harness `run_image_env` had a stdin/stdout pipe-buffer
     DEADLOCK on big drivers (>64KB stdin + >64KB output) — fixed commit cad1719 by writing
     stdin on a separate thread; it had hung the Euclid-lemma test.]
+  - **Stage 4 (FINALE) — FTA UNIQUENESS** (`isabelle_fta_unique.rs`, 2026-06-13): `⊢
+    all_prime ps ⟹ all_prime qs ⟹ ∏ps = ∏qs ⟹ ∀r. count r ps = count r qs` — two prime
+    factorisations of the same number are the SAME multiset. Adds `count`/`remove1` via
+    CONDITIONAL defining axioms (no native if-then-else over object equality — `ex_middle`
+    case-splits pick the branch) + bridging lemmas (`product_remove1`, `count_remove1_self/
+    other`, `all_prime_remove1`, `mult_left_cancel`, `product_one_nil`), then `fta_unique`
+    by list induction on `prime_in_prime_list`: a prime of ps is in qs, remove one copy,
+    cancel it from the product, recurse. 2-phase pipeline (wf_20445576-234). **With FTA
+    existence (`isabelle_fta.rs`), the FULL Fundamental Theorem of Arithmetic is now proved
+    from first principles on the Rust interpreter — task #75 DONE.** Technique note for
+    future work: define a "function with a conditional on object equality" (count, remove1)
+    as a const + two conditional axioms (eq-case, neq-case), then `ex_middle` + `disjE` to
+    use it; remove1 yields a list-equality (`leq`), so transfer properties via `leq_subst`.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
