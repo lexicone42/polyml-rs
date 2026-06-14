@@ -201,9 +201,22 @@ pub fn run_image_env(
         cmd.env(k, v);
     }
     let mut child = cmd.spawn().ok()?;
-    child.stdin.as_mut().unwrap().write_all(sml.as_bytes()).ok()?;
-    drop(child.stdin.take());
+    // Write the driver to stdin on a SEPARATE THREAD so the parent can drain
+    // stdout/stderr concurrently. Writing all of stdin on this thread *before*
+    // reading stdout deadlocks for large drivers: once poly's stdout pipe fills
+    // (~64KB) it blocks on write -> stops reading stdin -> our write_all blocks
+    // (stdin pipe also full). This bit the big Euclid/FTA-arc drivers (4000+
+    // lines of stdin + lots of OK-marker output). wait_with_output() below reads
+    // stdout/stderr to EOF while this thread feeds stdin.
+    let mut stdin = child.stdin.take().unwrap();
+    let sml_bytes = sml.as_bytes().to_vec();
+    let writer = std::thread::spawn(move || {
+        use std::io::Write;
+        let _ = stdin.write_all(&sml_bytes);
+        // stdin dropped here -> EOF for the child
+    });
     let out = child.wait_with_output().ok()?;
+    let _ = writer.join();
     let combined = format!(
         "{}\n---STDERR---\n{}",
         String::from_utf8_lossy(&out.stdout),
