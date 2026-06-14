@@ -1171,6 +1171,13 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   linear order enters even though the statement is purely additive (ℕ can't decide which
   side the m-multiple lands on). The gateway to Fermat's little theorem. 2-phase pipeline
   (wf_0bbaeabe-bc6) + merge.
+- **FERMAT'S-LITTLE-THEOREM arc (in progress)** — `a^p ≡ a (mod p)`, staged: powers →
+  binomial coeffs (p∣C(p,k)) → binomial theorem mod p (the wall) → FLT.
+  - **Stage A — POWERS + MODULAR POWERS** (`isabelle_power.rs`, 2026-06-13): `pow` +
+    `pow_one`/`pow_add` (`a^(m+n)=a^m·a^n`)/`pow_mult_base` (`(ab)^n=a^n·b^n`) + `cong_pow`
+    (`a≡b ⟹ a^n≡b^n mod m`, induction on n via `cong_mult`/`cong_refl` + a `cong_cong`
+    helper). 3-seat fleet (wf_f0e818c6-9ed). Stages B-D remain; B (binomial `p∣C(p,k)`) is
+    clean, C (binomial theorem mod p, needs a summation operator) is the known hard wall.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
