@@ -1189,8 +1189,15 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
     lambdas, beta_norm after applying f to an index). `sumf f 0 = f 0`, `sumf f (Suc n) =
     sumf f n + f (Suc n)`; `sub` (truncated −) + `sub_self`/`sub_Suc_le`; and the workhorse
     `sum_cong` (`(⋀k. k≤n ⟹ f k = g k) ⟹ sumf f n = sumf g n`, a higher-order induction).
-    2-seat fleet (wf_0d8f0cb2-45c). Next: Stage C2 (the binomial theorem `(a+b)^n = Σ
-    C(n,k)·a^k·b^(n−k)`, the hard induction) → C3 (freshman's dream `(a+b)^p ≡ a^p+b^p`) → D.
+    2-seat fleet (wf_0d8f0cb2-45c).
+  - **Stage C2 — THE BINOMIAL THEOREM** (`isabelle_binom_thm.rs`, 2026-06-13 — the hardest
+    proof in the tower, the wall): `⊢ (a+b)^n = Σ_{k=0}^n C(n,k)·a^k·b^(n−k)`, 0-hyp. Plus
+    the sum-algebra (`sum_mult_l`, `sum_add`, `sum_peel_first` reindex, `binom_n_n` via
+    `binom_diag_zero` = `C(n,n+1+j)=0` by single induction with IH at j AND j+1 — no lt
+    machinery, `pow_b_sub_Suc`). Induction on n: `(a+b)^(Suc n) = a·S + b·S` [IH +
+    right_distrib], distribute into the sum, shift exponents, peel the Suc-n RHS, Pascal-split
+    each term into two sums, recombine. 2-phase pipeline (wf_a511fcbc-470), all 3 seats proved
+    it. Next: Stage C3 (freshman's dream `(a+b)^p ≡ a^p+b^p mod p`) → D (FLT `a^p ≡ a`).
   - **NOTE on the unified base** (`isabelle_ntbase.sml`): the Fermat-arc drivers build on it
     (classical+division+Euclid+modular+powers in one), so they no longer re-derive separate
     foundations — the consolidation paid off for Stages A/B.
