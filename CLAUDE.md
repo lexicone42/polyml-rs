@@ -1178,6 +1178,16 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
     (`a≡b ⟹ a^n≡b^n mod m`, induction on n via `cong_mult`/`cong_refl` + a `cong_cong`
     helper). 3-seat fleet (wf_f0e818c6-9ed). Stages B-D remain; B (binomial `p∣C(p,k)`) is
     clean, C (binomial theorem mod p, needs a summation operator) is the known hard wall.
+  - **Stage B — BINOMIAL COEFFICIENTS + p∣C(p,k)** (`isabelle_binom.rs`, 2026-06-13, on the
+    unified base): `binom` via Pascal + the **absorption identity** `(k+1)·C(n+1,k+1) =
+    (n+1)·C(n,k)` (induction on n with k universal via object `Forall`, IH at two points +
+    both Pascal directions) + the famous **`p_dvd_binom`** (`prime p ∧ 0<k<p ⟹ p∣C(p,k)`,
+    via absorption ⟹ `p∣k·C(p,k)`, `p∤k` + Euclid's lemma). 2-phase pipeline (wf_2f2eeca9-c88).
+    Remaining: Stage C (binomial theorem mod p / freshman's dream `(a+b)^p ≡ a^p+b^p`,
+    needs a summation operator — the hard wall) → Stage D (FLT `a^p ≡ a mod p`).
+  - **NOTE on the unified base** (`isabelle_ntbase.sml`): the Fermat-arc drivers build on it
+    (classical+division+Euclid+modular+powers in one), so they no longer re-derive separate
+    foundations — the consolidation paid off for Stages A/B.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
