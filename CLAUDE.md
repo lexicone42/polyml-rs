@@ -1132,8 +1132,16 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
     r. a = b·q+r ∧ r<b` (`div_mod_exists`) AND uniqueness (`div_mod_unique`), both 0-hyp.
     Existence by strong induction on a, NO subtraction (a<b→(0,a); else a=b+a2 via the
     le-witness, a2<a, recurse, recompose q:=Suc q2 via mult_Suc_right). 3-seat fleet
-    (wf_17792bed-545). Stages 2-4 (gcd/Bézout — the crux — then Euclid's lemma, then the
-    uniqueness permutation argument) are the remaining work; see task #75.
+    (wf_17792bed-545).
+  - **Stage 2 — EUCLID'S LEMMA** (`isabelle_euclid_lemma.rs`, 2026-06-13): `⊢ prime p ⟹
+    p∣a·b ⟹ p∣a ∨ p∣b`, 0-hyp, over the structural prime. Proved by the GAUSS DESCENT —
+    **no gcd, no Bézout, no integers**: `bounded_euclid` (a<p) by strong induction (divide
+    p by a → 0<r<a, `dvd_diff` gives p∣r·b, recurse at r), then general by reducing a mod p.
+    Key insight that made it tractable: the gcd/Bézout apparatus (which needs integers over
+    ℕ) is entirely avoidable — the descent needs only the division theorem + `dvd_diff`
+    (p∣x ∧ p∣(x+y) ⟹ p∣y) + `prime_not_dvd_pos_lt`. 2-phase pipeline (wf_904dd5f8-976).
+    Remaining: Stage 3 (Euclid's lemma for lists: p∣∏ps ⟹ p divides some element) → Stage 4
+    (the uniqueness permutation argument). See task #75.
 KEY GOTCHA across all of it: `Thm.add_axiom_global` returns axioms UNVARIFIED (Free vars,
 not schematic) — varify (`Drule.generalize`/`export_without_context` + `zero_var_indexes`)
 before `infer_instantiate`/resolution, or instantiation silently no-ops; `forall_elim`
