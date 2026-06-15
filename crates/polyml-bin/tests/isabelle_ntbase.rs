@@ -42,7 +42,7 @@ fn unified_number_theory_base() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &driver,
+        &common::with_nt_helpers(&driver),
         280_000_000_000,
         &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
     ) else {

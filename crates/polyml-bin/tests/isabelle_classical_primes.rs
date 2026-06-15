@@ -49,9 +49,12 @@ fn classical_fol_and_genuine_prime_divisor_theorem() {
         eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
         return;
     };
+    // The classical foundation now lives in the shared isabelle_nt_helpers.sml
+    // (every higher NT driver splices it in via common::with_nt_helpers). This
+    // test validates that shared foundation standalone — it IS the driver here.
     let driver_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/isabelle_support/isabelle_classical_primes.sml");
-    let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_classical_primes.sml");
+        .join("tests/isabelle_support/isabelle_nt_helpers.sml");
+    let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_nt_helpers.sml");
 
     let Some((out, _)) = run_image_env(
         &image,

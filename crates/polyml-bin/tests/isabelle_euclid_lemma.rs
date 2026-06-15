@@ -42,7 +42,7 @@ fn euclids_lemma_prime_divides_product() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &driver,
+        &common::with_nt_helpers(&driver),
         250_000_000_000,
         &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
     ) else {

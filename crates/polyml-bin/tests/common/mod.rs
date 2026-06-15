@@ -49,6 +49,32 @@ pub fn isabelle_pure_dir() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// The shared classical number-theory foundation driver
+/// (`isabelle_support/isabelle_nt_helpers.sml`): object logic + Peano
+/// arithmetic + the commutative semiring + the existential quantifier +
+/// linear order + divisibility + classical FOL (excluded middle) + the
+/// genuine "every n >= 2 has a prime divisor" theorem. Every number-theory
+/// driver above the classical layer used to embed this ~3229-line block
+/// verbatim; now they carry only their proof-specific delta and the harness
+/// splices the foundation in front at run time (see [`with_nt_helpers`]).
+pub fn nt_helpers_path() -> PathBuf {
+    workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_nt_helpers.sml")
+}
+
+/// Prepend the shared classical NT foundation to a driver `delta`, yielding
+/// the full source to pipe into `poly run /tmp/isabelle_pure`.
+///
+/// The foundation begins with `restore_pure_context ()`, so it must run
+/// first — exactly what prepending guarantees. The delta files retain their
+/// (comment-only) header above the proof; moving it after the foundation is
+/// a pure comment reordering, so the executed SML is identical to the old
+/// self-contained driver.
+pub fn with_nt_helpers(delta: &str) -> String {
+    let helpers = std::fs::read_to_string(nt_helpers_path())
+        .expect("read isabelle_nt_helpers.sml");
+    format!("{helpers}\n{delta}")
+}
+
 /// Basis-only warm checkpoint (`tools/build-hol4-checkpoints.sh basis`).
 pub fn basis_checkpoint_path() -> Option<PathBuf> {
     let p = PathBuf::from("/tmp/basis_loaded");
