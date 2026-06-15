@@ -159,13 +159,28 @@ pub fn jit_dispatch_dynamic_call(
         // No enter-int prologue — fall back to scanning forward in
         // the code object for the first RETURN_N. Standard pattern
         // for closures whose compiler didn't emit an enter-int marker.
-        // Scan a generous window (the SML compiler keeps function
-        // bodies small enough that this terminates quickly).
+        //
+        // The scan MUST stay inside the code object's allocated bytes:
+        // the old fixed `scan_pc < 512` window read past the end of any
+        // code object smaller than 512 bytes (and the RETURN_B/W arms
+        // below stepped one or two bytes further still), an OOB read /
+        // potential SEGV on a small object near a page boundary. Bound
+        // the window to the object's true byte length (length-word in
+        // words × word size) capped at 512 (real bodies are <200 bytes,
+        // and this path is only the missing-enter-int fallback).
+        // SAFETY: code_word is a verified data pointer to a code object,
+        // so its length-word sits one word below `code_ptr`.
+        let code_byte_len = unsafe {
+            let lw = crate::space::MemorySpace::length_word_of(code_word.as_ptr::<PolyWord>());
+            crate::length_word::length_of(lw) * std::mem::size_of::<usize>()
+        };
+        let window = code_byte_len.min(512);
         let mut scan_pc = 0usize;
         let mut inferred = None;
-        while scan_pc < 512 {
-            // SAFETY: code object byte access bounded by 512 byte
-            // window; real bodies are typically <200 bytes.
+        while scan_pc < window {
+            // SAFETY: scan_pc < window <= code_byte_len, so this byte is
+            // within the object. The multi-byte RETURN_B/W arms guard
+            // their trailing operand bytes against `code_byte_len`.
             let b = unsafe { *code_ptr.add(scan_pc) };
             match b {
                 0x42 => { inferred = Some(1); break; } // RETURN_1
@@ -173,12 +188,18 @@ pub fn jit_dispatch_dynamic_call(
                 0x44 => { inferred = Some(3); break; } // RETURN_3
                 0x1f => {
                     // RETURN_B: next byte is arity
+                    if scan_pc + 1 >= code_byte_len {
+                        break;
+                    }
                     let n_imm = unsafe { *code_ptr.add(scan_pc + 1) };
                     inferred = Some(n_imm as usize);
                     break;
                 }
                 0x0d => {
                     // RETURN_W: next two bytes are u16 LE arity
+                    if scan_pc + 2 >= code_byte_len {
+                        break;
+                    }
                     let lo = unsafe { *code_ptr.add(scan_pc + 1) } as usize;
                     let hi = unsafe { *code_ptr.add(scan_pc + 2) } as usize;
                     inferred = Some(lo | (hi << 8));
