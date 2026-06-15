@@ -1103,8 +1103,20 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   false positivity-dropped variant (a=b=0 solves it). Built on `isabelle_classical_primes.sml`
   by a 2-phase ultracode pipeline (wf_d7246a73-e08). With Euclid, two of the most famous
   theorems in elementary number theory, both from first principles on the Rust runtime.
-  (Maintenance note: the primes/Euclid/sqrt2 drivers each re-derive the ~3200-line classical
-  foundation; a shared `isabelle_nt_helpers.sml` preamble could dedupe it — not yet done.)
+  (Maintenance: the ~3229-line classical foundation is now consolidated into the shared
+  `isabelle_support/isabelle_nt_helpers.sml` (object logic + Peano + semiring + order +
+  divisibility + classical FOL + the genuine prime-divisor theorem). 11 drivers that used to
+  embed it verbatim — division, euclid_lemma, euclid_list, euclid, fta, sqrt2, ntbase, flt,
+  binom_thm, binom, sum — now carry only their proof delta and the harness splices the
+  foundation in front via `common::with_nt_helpers` (commit 10a7a51, −35.5K dup lines). The
+  splice is provably behavior-preserving: the removed block was byte-identical to the helper
+  in every file and each driver's pre-foundation prefix is comment-only, so prepending only
+  reorders comments. `isabelle_classical_primes.rs` now validates the helper standalone. STILL
+  embedding a VARIANT foundation (a "PHASE 2"-structured merge artifact, ~80 lines off
+  canonical) and NOT yet consolidated: `isabelle_modular` / `isabelle_power` /
+  `isabelle_fta_unique` — their proofs need re-verifying against the canonical helper first.
+  Nested second-tier dedup (euclid_lemma additions in euclid_list; ntbase additions in the
+  Fermat-arc drivers) also remains.)
 - **A LIST THEORY by structural induction** (`isabelle_list_theory.rs`, 2026-06-13 — a
   SECOND inductive datatype beyond nat): on the semiring base, build `natlist = Nil | Cons
   nat natlist` with its own list-equality `leq` (refl+subst) + a `list_induct` axiom +
