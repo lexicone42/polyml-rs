@@ -1066,6 +1066,22 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   Bézout "needs integers over ℕ" / "is entirely avoidable" stands as written for THAT proof
   (the Gauss descent genuinely avoids them) — but gcd + Bézout are now available over ℕ
   directly should later work (Wilson, CRT, Euler) want them.
+- **THE CHINESE REMAINDER THEOREM** (`isabelle_crt.rs`, `isabelle_crt.sml`, 2026-06-15 — the
+  first payoff of the gcd/Bézout/inverse machinery). For coprime moduli m,n and any residues
+  a,b there is an x ≡ a (mod m) and ≡ b (mod n), unique mod m·n — both halves, by genuine
+  kernel inference over ℕ (two-sided cong, no subtraction). `gen_inverse` (general modular
+  inverse for coprimes, `coprime a m ⟹ 0<m ⟹ ∃b. cong m (a·b) 1`, from `coprime_bezout`, both
+  Bézout disjuncts handled — the −1 case uses the square trick a·(x·a·x) ≡ (−1)² = 1);
+  `crt_exists` (EXISTENCE, by the construction `x = a·(n·s) + b·(m·t)` with n·s≡1 mod m and
+  m·t≡1 mod n, via `cong_add`/`cong_mult`/`cong_refl`); `gauss` (`coprime n m ⟹ n∣m·c ⟹ n∣c`,
+  from `coprime_bezout` + `dvd_diff`); `coprime_mult_dvd` (`coprime m n ⟹ m∣k ⟹ n∣k ⟹ m·n∣k`,
+  via gauss); and `crt_unique` (UNIQUENESS: two solutions agree mod m·n). Built on the full
+  gcd development via the new `common::with_gcd` (third consolidation tier: helpers + ntbase +
+  isabelle_gcd, no re-embedding). Each lemma has a soundness probe. Proved by a 3-phase
+  multi-seat ultracode fleet (wf_f77ae210-0f5: gen-inverse → crt-existence → crt-uniqueness),
+  re-verified end-to-end by hand. Next reachable with this machinery: Wilson's theorem and
+  Euler's theorem (both need a finite-product/pairing argument over a residue range, the one
+  piece the tower still lacks).
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values

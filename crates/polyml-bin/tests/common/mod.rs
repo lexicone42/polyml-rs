@@ -88,6 +88,18 @@ pub fn with_ntbase(delta: &str) -> String {
     with_nt_helpers(&format!("{ntbase}\n{delta}"))
 }
 
+/// Prepend the full gcd / Bézout development (`isabelle_gcd.sml`: gcd universal
+/// property, Bézout's identity, coprime-Bézout, modular inverse) on top of the
+/// unified base, for drivers that need modular inverses or Bézout coefficients
+/// (e.g. the Chinese Remainder Theorem).
+pub fn with_gcd(delta: &str) -> String {
+    let gcd = std::fs::read_to_string(
+        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_gcd.sml"),
+    )
+    .expect("read isabelle_gcd.sml");
+    with_ntbase(&format!("{gcd}\n{delta}"))
+}
+
 /// Basis-only warm checkpoint (`tools/build-hol4-checkpoints.sh basis`).
 pub fn basis_checkpoint_path() -> Option<PathBuf> {
     let p = PathBuf::from("/tmp/basis_loaded");
