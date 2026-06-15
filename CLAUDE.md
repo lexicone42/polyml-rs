@@ -1082,6 +1082,21 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   re-verified end-to-end by hand. Next reachable with this machinery: Wilson's theorem and
   Euler's theorem (both need a finite-product/pairing argument over a residue range, the one
   piece the tower still lacks).
+- **CLASSIC COMBINATORIAL IDENTITIES** (`isabelle_combinatorics.rs`, `isabelle_combinatorics.sml`,
+  2026-06-15 — a combinatorics flavour on the binomial-theorem machinery). Three famous
+  binomial-coefficient identities, each 0-hyp by kernel inference on top of the binom_thm
+  development (binom + Pascal `binom_Suc_Suc`, the higher-order finite sum `sumf`, the
+  sum-algebra `sum_cong`/`sum_add`/`sum_mult_l`/`sum_peel_first`, `pow`): `pascal_row_sum`
+  (`∑_{k=0}^n C(n,k) = 2^n`, the Pascal-triangle row sum — proved the slick way, as a COROLLARY
+  of `binom_theorem` at a=b=1, with `pow_one_base` collapsing 1^k and `sum_cong` tidying the
+  summand); `hockey_stick` (`∑_{i=0}^n C(i,r) = C(n+1,r+1)`, induction on n + Pascal); and the
+  capstone `vandermonde` (`∑_{j=0}^k C(m,j)·C(n,k−j) = C(m+n,k)`, the classic Pascal-split +
+  reindex + recombine induction, with truncated `sub`). Each has a soundness probe. Built via
+  the new `common::with_binom_thm` (a sibling consolidation tier: classical foundation +
+  isabelle_binom_thm). Proved by a multi-seat ultracode fleet racing all three concurrently
+  (wf_bd77c82b-594, all three landed including Vandermonde); re-verified end-to-end by hand.
+  Gotcha logged: `varify` ETA-CONTRACTS a summand lambda (`%k. binom n k` → `binom n`), so the
+  intended-statement aconv probe must compare against the eta-contracted form.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values

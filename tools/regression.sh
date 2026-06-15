@@ -45,7 +45,7 @@ if [ "$MODE" = "full" ]; then
   echo; echo "--- headline #[ignore] integration suite ---"
   ipass=0; ifail=0
   for t in real_math parsetree_introspect isabelle_pure isabelle_pure_arbint \
-           isabelle_kernel isabelle_theorem_kernel isabelle_proving isabelle_object_logic isabelle_arithmetic isabelle_number_theory isabelle_summation isabelle_ordering isabelle_divisibility isabelle_primes isabelle_classical_primes isabelle_euclid isabelle_sqrt2 isabelle_list_theory isabelle_fta isabelle_division isabelle_euclid_lemma isabelle_euclid_list isabelle_fta_unique isabelle_modular isabelle_power isabelle_ntbase isabelle_binom isabelle_sum isabelle_binom_thm isabelle_flt isabelle_gcd isabelle_crt intflip_basis \
+           isabelle_kernel isabelle_theorem_kernel isabelle_proving isabelle_object_logic isabelle_arithmetic isabelle_number_theory isabelle_summation isabelle_ordering isabelle_divisibility isabelle_primes isabelle_classical_primes isabelle_euclid isabelle_sqrt2 isabelle_list_theory isabelle_fta isabelle_division isabelle_euclid_lemma isabelle_euclid_list isabelle_fta_unique isabelle_modular isabelle_power isabelle_ntbase isabelle_binom isabelle_sum isabelle_binom_thm isabelle_flt isabelle_gcd isabelle_crt isabelle_combinatorics intflip_basis \
            hol4_taut hol4_meson hol4_metis hol4_pelletier hol4_num_prover \
            hol4_arith hol4_order hol4_induction hol4_list hol4_simp hol4_fancy \
            hol4_prim_rec hol4_summation \

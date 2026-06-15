@@ -100,6 +100,21 @@ pub fn with_gcd(delta: &str) -> String {
     with_ntbase(&format!("{gcd}\n{delta}"))
 }
 
+/// Prepend the binomial-theorem development (`isabelle_binom_thm.sml`: `binom`
+/// + Pascal, the higher-order finite sum `sumf` + sum-algebra, `pow`, and the
+/// binomial theorem itself) on top of the classical foundation, for drivers
+/// that need finite sums / binomial coefficients (e.g. the combinatorial
+/// identities). NB this development is self-contained above `with_nt_helpers`
+/// (it embeds the `pow`/`sub` pieces it needs), so it builds on the classical
+/// foundation directly, not on `with_ntbase`.
+pub fn with_binom_thm(delta: &str) -> String {
+    let binom_thm = std::fs::read_to_string(
+        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_binom_thm.sml"),
+    )
+    .expect("read isabelle_binom_thm.sml");
+    with_nt_helpers(&format!("{binom_thm}\n{delta}"))
+}
+
 /// Basis-only warm checkpoint (`tools/build-hol4-checkpoints.sh basis`).
 pub fn basis_checkpoint_path() -> Option<PathBuf> {
     let p = PathBuf::from("/tmp/basis_loaded");
