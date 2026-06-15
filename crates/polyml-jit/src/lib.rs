@@ -558,6 +558,39 @@ pub unsafe extern "C" fn block_move_word_trampoline(
     1 // TAGGED(0)
 }
 
+/// Decode the `(p1_word, off1, p2_word, off2, length)` ABI shared by the
+/// three byte-block trampolines into two raw `u8` pointers plus clamped
+/// `usize` offsets/length. A negative offset/length means a JIT codegen
+/// bug (wrong arg order / sign-extension); the `.max(0)` clamp keeps
+/// release builds robust while the `debug_assert!` turns the silent
+/// truncation into a precise failure under tests / JIT bisection.
+/// (`block_move_word_trampoline` is NOT a caller — it decodes
+/// `PolyWord`-typed pointers for word-sized elements.)
+#[inline]
+fn decode_byte_block(
+    p1_word: i64,
+    off1: i64,
+    p2_word: i64,
+    off2: i64,
+    length: i64,
+) -> (*const u8, *const u8, usize, usize, usize) {
+    use polyml_runtime::PolyWord;
+    let p1 = PolyWord::from_bits(p1_word as usize).as_ptr::<u8>();
+    let p2 = PolyWord::from_bits(p2_word as usize).as_ptr::<u8>();
+    debug_assert!(
+        off1 >= 0 && off2 >= 0 && length >= 0,
+        "byte-block trampoline negative arg: off1={off1} off2={off2} len={length}"
+    );
+    #[allow(clippy::cast_sign_loss)]
+    (
+        p1,
+        p2,
+        off1.max(0) as usize,
+        off2.max(0) as usize,
+        length.max(0) as usize,
+    )
+}
+
 /// Byte-block compare trampoline. `(p1, off1, p2, off2, length) -> tag(-1|0|1)`.
 /// Returns tagged -1 if `p1[off1..] < p2[off2..]`, 0 if equal, 1 if greater.
 /// Used by JIT'd `BLOCK_COMPARE_BYTE`.
@@ -569,19 +602,7 @@ pub unsafe extern "C" fn block_compare_byte_trampoline(
     off2: i64,
     length: i64,
 ) -> i64 {
-    use polyml_runtime::PolyWord;
-    let p1 = PolyWord::from_bits(p1_word as usize).as_ptr::<u8>();
-    let p2 = PolyWord::from_bits(p2_word as usize).as_ptr::<u8>();
-    debug_assert!(
-        off1 >= 0 && off2 >= 0 && length >= 0,
-        "block_compare_byte_trampoline negative arg: off1={off1} off2={off2} len={length}"
-    );
-    #[allow(clippy::cast_sign_loss)]
-    let o1 = off1.max(0) as usize;
-    #[allow(clippy::cast_sign_loss)]
-    let o2 = off2.max(0) as usize;
-    #[allow(clippy::cast_sign_loss)]
-    let len = length.max(0) as usize;
+    let (p1, p2, o1, o2, len) = decode_byte_block(p1_word, off1, p2_word, off2, length);
     let ordering = unsafe {
         let s1 = std::slice::from_raw_parts(p1.add(o1), len);
         let s2 = std::slice::from_raw_parts(p2.add(o2), len);
@@ -605,19 +626,7 @@ pub unsafe extern "C" fn block_equal_byte_trampoline(
     off2: i64,
     length: i64,
 ) -> i64 {
-    use polyml_runtime::PolyWord;
-    let p1 = PolyWord::from_bits(p1_word as usize).as_ptr::<u8>();
-    let p2 = PolyWord::from_bits(p2_word as usize).as_ptr::<u8>();
-    debug_assert!(
-        off1 >= 0 && off2 >= 0 && length >= 0,
-        "block_equal_byte_trampoline negative arg: off1={off1} off2={off2} len={length}"
-    );
-    #[allow(clippy::cast_sign_loss)]
-    let o1 = off1.max(0) as usize;
-    #[allow(clippy::cast_sign_loss)]
-    let o2 = off2.max(0) as usize;
-    #[allow(clippy::cast_sign_loss)]
-    let len = length.max(0) as usize;
+    let (p1, p2, o1, o2, len) = decode_byte_block(p1_word, off1, p2_word, off2, length);
     let equal = unsafe {
         let s1 = std::slice::from_raw_parts(p1.add(o1), len);
         let s2 = std::slice::from_raw_parts(p2.add(o2), len);
@@ -637,20 +646,9 @@ pub unsafe extern "C" fn block_move_byte_trampoline(
     dest_off: i64,
     length: i64,
 ) -> i64 {
-    use polyml_runtime::PolyWord;
-    let src = PolyWord::from_bits(src_word as usize).as_ptr::<u8>();
-    let dest_pw = PolyWord::from_bits(dest_word as usize).as_ptr::<u8>();
-    let dest = dest_pw.cast_mut();
-    debug_assert!(
-        src_off >= 0 && dest_off >= 0 && length >= 0,
-        "block_move_byte_trampoline negative arg: src_off={src_off} dest_off={dest_off} len={length}"
-    );
-    #[allow(clippy::cast_sign_loss)]
-    let src_o = src_off.max(0) as usize;
-    #[allow(clippy::cast_sign_loss)]
-    let dest_o = dest_off.max(0) as usize;
-    #[allow(clippy::cast_sign_loss)]
-    let len = length.max(0) as usize;
+    let (src, dest_const, src_o, dest_o, len) =
+        decode_byte_block(src_word, src_off, dest_word, dest_off, length);
+    let dest = dest_const.cast_mut();
     unsafe { std::ptr::copy(src.add(src_o), dest.add(dest_o), len) };
     1 // TAGGED(0)
 }

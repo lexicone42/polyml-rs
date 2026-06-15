@@ -74,6 +74,21 @@ pub type JitFn = unsafe extern "C" fn(
     stack_base: i64,
 ) -> i64;
 
+/// Pop the two top operands of a binary opcode off the compile-time
+/// value stack, in interpreter order: `x` is the top-of-stack (popped
+/// first), `y` is the value below it. Both binop operands map to a
+/// single `Underflow(err_pc)` on an empty stack. Factors the two-line
+/// preamble shared by every `INSTR_FIXED_*` / `INSTR_WORD_*` arithmetic
+/// arm (the result-building IR legitimately differs per opcode and stays
+/// inline). `err_pc` is the opcode's own pc (callers pass `pc - 1`,
+/// since `pc` has already advanced past the opcode byte).
+#[inline]
+fn pop2(stack: &mut Vec<Value>, err_pc: usize) -> Result<(Value, Value), TranslateError> {
+    let x = stack.pop().ok_or(TranslateError::Underflow(err_pc))?;
+    let y = stack.pop().ok_or(TranslateError::Underflow(err_pc))?;
+    Ok((x, y))
+}
+
 /// Compile bytecode where the bytecode portion is the entire slice
 /// (no constant pool accessible). CONST_ADDR* opcodes will fail
 /// with `Unsupported` because they read past the bytecode end.
@@ -452,8 +467,7 @@ fn compile_with_consts_impl(
                 INSTR_WORD_DIV => {
                     // Untag, divide (signed? interp uses checked_div on
                     // unsigned). Use unsigned to match interp.
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let xn = builder.ins().ushr_imm(x, 1);
                     let yn = builder.ins().ushr_imm(y, 1);
                     // Need to guard against /0. The interp returns 0 on
@@ -469,8 +483,7 @@ fn compile_with_consts_impl(
                     stack.push(builder.ins().bor(shifted, one_const));
                 }
                 INSTR_WORD_MOD => {
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let xn = builder.ins().ushr_imm(x, 1);
                     let yn = builder.ins().ushr_imm(y, 1);
                     let zero = builder.ins().iconst(int, 0);
@@ -1425,8 +1438,7 @@ fn compile_with_consts_impl(
                     // coverage (74.7%→65.5%) and broke 10 JIT arithmetic tests, so
                     // the wrap is kept as a documented gap; the JIT is off the
                     // default (interpreter) path that runs HOL4/Isabelle.
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let sum = builder.ins().iadd(x, y);
                     let one = builder.ins().iconst(int, 1);
                     let result = builder.ins().isub(sum, one);
@@ -1434,43 +1446,37 @@ fn compile_with_consts_impl(
                 }
                 INSTR_WORD_ADD => {
                     // y + x - tag(0) = (y + x) - 1; same shape as FIXED_ADD.
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let sum = builder.ins().iadd(y, x);
                     let one = builder.ins().iconst(int, 1);
                     stack.push(builder.ins().isub(sum, one));
                 }
                 INSTR_WORD_SUB => {
                     // y - x + 1
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let diff = builder.ins().isub(y, x);
                     let one = builder.ins().iconst(int, 1);
                     stack.push(builder.ins().iadd(diff, one));
                 }
                 INSTR_WORD_AND => {
                     // (y & x); both tagged, low bit preserved.
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     stack.push(builder.ins().band(y, x));
                 }
                 INSTR_WORD_OR => {
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     stack.push(builder.ins().bor(y, x));
                 }
                 INSTR_WORD_XOR => {
                     // y ^ x has the tag bit cleared (1^1=0); reinstate.
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let xor = builder.ins().bxor(y, x);
                     let one = builder.ins().iconst(int, 1);
                     stack.push(builder.ins().bor(xor, one));
                 }
                 INSTR_WORD_MULT => {
                     // Interp: ((x>>1) * (y>>1)) << 1 | 1
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let xs = builder.ins().sshr_imm(x, 1);
                     let ys = builder.ins().sshr_imm(y, 1);
                     let prod = builder.ins().imul(xs, ys);
@@ -1482,8 +1488,7 @@ fn compile_with_consts_impl(
                     // Top is shift amount, below is value. Both tagged.
                     // Untag shift via >>1, mask to 63. Untag value via >>1.
                     // Shift, then retag.
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let one = builder.ins().iconst(int, 1);
                     let mask63 = builder.ins().iconst(int, 63);
                     let s_unt = builder.ins().sshr_imm(x, 1);
@@ -1519,8 +1524,7 @@ fn compile_with_consts_impl(
                 INSTR_FIXED_SUB => {
                     // Interp: result_n = y_n - x_n
                     // tagged: (y_t - x_t) + 1
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let diff = builder.ins().isub(y, x);
                     let one = builder.ins().iconst(int, 1);
                     let result = builder.ins().iadd(diff, one);
@@ -1530,8 +1534,7 @@ fn compile_with_consts_impl(
                     // pop x, y; push tagged(1) if x == y else tagged(0).
                     // Since tagged ints have the same bit pattern when
                     // equal, a raw word compare is correct.
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let cmp = builder.ins().icmp(IntCC::Equal, x, y);
                     let cmp64 = builder.ins().uextend(int, cmp);
                     let doubled = builder.ins().ishl_imm(cmp64, 1);
@@ -1557,8 +1560,7 @@ fn compile_with_consts_impl(
                         INSTR_GREATER_EQ_SIGNED => IntCC::SignedGreaterThanOrEqual,
                         _ => IntCC::UnsignedGreaterThanOrEqual,
                     };
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     // Compute y CC x (since interp does `y OP x`).
                     let cmp = builder.ins().icmp(cc, y, x);
                     let cmp64 = builder.ins().uextend(int, cmp);
@@ -1570,8 +1572,7 @@ fn compile_with_consts_impl(
                     // Interp: result_n = x_n * y_n
                     // Untag both via arithmetic shift right by 1
                     // (after subtracting the tag bit). Multiply, re-tag.
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let one = builder.ins().iconst(int, 1);
                     let x_minus_1 = builder.ins().isub(x, one);
                     let xn = builder.ins().sshr_imm(x_minus_1, 1);
@@ -1587,8 +1588,7 @@ fn compile_with_consts_impl(
                     // Interp: pops x (top, divisor), pops y (dividend),
                     // pushes y/x or y%x. Division by zero traps (we
                     // let Cranelift's sdiv/srem trap on 0 like SIGFPE).
-                    let x = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let y = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
+                    let (x, y) = pop2(&mut stack, pc - 1)?;
                     let xn = builder.ins().sshr_imm(x, 1);
                     let yn = builder.ins().sshr_imm(y, 1);
                     let result_n = if op == INSTR_FIXED_QUOT {
