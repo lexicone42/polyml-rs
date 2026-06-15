@@ -1122,6 +1122,22 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   `common::with_binom_thm`. Proved by a 3-seat ultracode fleet (wf_66aae28d-292); re-verified by
   hand. **Remaining for Wilson/Euler: a product-permutation/pairing-invariance lemma for `prodf`
   (product unchanged under reindexing by an involution/bijection) — the genuinely hard piece.**
+- **THE MULTIPLICATIVE GROUP MOD p — the Wilson keystones** (`isabelle_mult_group.rs`,
+  `isabelle_mult_group.sml`, 2026-06-15). The algebraic core of (ℤ/pℤ)*, each 0-hyp by kernel
+  inference over the two-sided `cong`: `inverse_unique` (`cong p (a·b) 1 ⟹ cong p (a·c) 1 ⟹
+  cong p b c`, modular inverse is unique — a pure congruence chain b ≡ b·1 ≡ b·(a·c) = (a·b)·c
+  ≡ 1·c ≡ c, no primality); `mod_cancel` (`prime p ⟹ ¬(p∣a) ⟹ cong p (a·b) (a·c) ⟹ cong p b c`,
+  cancellation by a unit, via Euclid's lemma + monotonicity); and `lagrange_roots` — **Lagrange's
+  theorem on square roots of unity**: `prime p ⟹ cong p (a·a) 1 ⟹ (cong p a 1 ∨ cong p (Suc a) 0)`
+  (the only square roots of 1 mod a prime are ±1; −1 written as `Suc a ≡ 0` to avoid truncated
+  subtraction; via the identity `(a−1)(a+1) = a²−1` + Euclid's lemma). Each has a soundness probe.
+  Built on the gcd/Bézout/Euclid-lemma development via `common::with_gcd`. Proved by a multi-seat
+  ultracode fleet (wf_3eef19b5-87f); re-verified by hand. CAPTURE GOTCHA logged: when building an
+  `oeq_subst` predicate `%z. cong p X z`, use `Term.lambda` over a FRESH Free, NOT `Abs(...,Bound 0)`
+  — the `cong` constructor inserts its own inner existential `Abs`, so a literal `Bound 0` gets
+  captured by that inner k-binder (\"OF: no unifiers\"). These three are the algebraic heart of
+  Wilson's theorem; full Wilson still needs `prodf` merged onto this modular base + the
+  product-pairing lemma.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
