@@ -1107,6 +1107,21 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   fleet racing all three (wf_62507100-db8); re-verified end-to-end by hand. (NB: distinct from the
   older `isabelle_summation.sml`, which proved Gauss + sum-of-odds via a first-order `sum`/`num_Axiom`
   rather than the higher-order `sumf`.)
+- **THE FINITE-PRODUCT COMBINATOR `prodf`** (`isabelle_prodf.rs`, `isabelle_prodf.sml`,
+  2026-06-15 — the multiplicative mirror of `sumf`, the structural piece toward Wilson/Euler).
+  A NEW higher-order constant `prodf : (nat⇒nat)⇒nat⇒nat` defined conservatively by two asserted
+  recursion axioms (exactly as `sumf`/`fact`/`pow`): `prodf f 0 = f 0`, `prodf f (Suc n) =
+  (prodf f n)·(f (Suc n))`. Core algebra proved 0-hyp by kernel induction: `prod_cong`
+  (`(∀k≤n. f k = g k) ⟹ prodf f n = prodf g n`, mirrors `sum_cong`), `prod_const_pow`
+  (`prodf (λk. c) n = pow c (Suc n)`, with an exponent soundness probe), `prod_mult_combine`
+  (`(prodf f n)·(prodf g n) = prodf (λk. f k·g k) n`, mirrors `sum_add`). Adding the const
+  EXTENDS the theory, so the development builds ONE final context (`ctxtPr`/`ctermPr` over a
+  `thyPr` extending the base `thySub`) and RE-VARIFIES every reused base lemma onto it before
+  instantiating — the standard new-const discipline; the proof is a clean template for mirroring
+  any `sumf` lemma to `prodf`. Built on `isabelle_binom_thm.sml` (the sumf template) via
+  `common::with_binom_thm`. Proved by a 3-seat ultracode fleet (wf_66aae28d-292); re-verified by
+  hand. **Remaining for Wilson/Euler: a product-permutation/pairing-invariance lemma for `prodf`
+  (product unchanged under reindexing by an involution/bijection) — the genuinely hard piece.**
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
