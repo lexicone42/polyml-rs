@@ -1097,6 +1097,16 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   (wf_bd77c82b-594, all three landed including Vandermonde); re-verified end-to-end by hand.
   Gotcha logged: `varify` ETA-CONTRACTS a summand lambda (`%k. binom n k` → `binom n`), so the
   intended-statement aconv probe must compare against the eta-contracted form.
+- **CLOSED-FORM SUMMATION THEOREMS** (`isabelle_summation_forms.rs`, `isabelle_summation_forms.sml`,
+  2026-06-15 — named polynomial closed forms over the higher-order `sumf`). Three classics, each
+  0-hyp by nat induction + the semiring algebra (pure identities, no new constant; sums cleared of
+  denominators to stay in ℕ): `nicomachus` (`∑_{k=0}^n k³ = (∑_{k=0}^n k)²`, Nicomachus's theorem,
+  via the Gauss-doubling helper `gauss2`: `2·∑k = n(n+1)`); `faulhaber_sq` (`6·∑k² = n(n+1)(2n+1)`,
+  Faulhaber's sum of squares); `pronic_sum` (`3·∑k(k+1) = n(n+1)(n+2)`). Each has a soundness probe.
+  Built on isabelle_binom_thm.sml via `common::with_binom_thm`. Proved by a multi-seat ultracode
+  fleet racing all three (wf_62507100-db8); re-verified end-to-end by hand. (NB: distinct from the
+  older `isabelle_summation.sml`, which proved Gauss + sum-of-odds via a first-order `sum`/`num_Axiom`
+  rather than the higher-order `sumf`.)
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
