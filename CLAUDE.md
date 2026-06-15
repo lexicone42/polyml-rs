@@ -1138,6 +1138,16 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   captured by that inner k-binder (\"OF: no unifiers\"). These three are the algebraic heart of
   Wilson's theorem; full Wilson still needs `prodf` merged onto this modular base + the
   product-pairing lemma.
+- **THE CENTRAL BINOMIAL COEFFICIENT IDENTITY** (`isabelle_central_binomial.rs`,
+  `isabelle_central_binomial.sml`, 2026-06-15 — a Vandermonde payoff). `binom_symmetry`
+  (`∀n k. k≤n ⟹ C(n,k) = C(n,n−k)`, by nat induction with k object-universally quantified so the
+  IH applies at both k and Suc k, + Pascal + a `sub` case-split; needs a `sub_Suc`-style lemma and
+  `le_Suc_Suc_rev`) and `central_binomial` (`∑_{k=0}^n C(n,k)² = C(2n,n)`, the central binomial
+  coefficient) — the latter a short COROLLARY of `vandermonde` instantiated at m=n,k=n
+  (`∑_j C(n,j)·C(n,n−j) = C(2n,n)`) with the summand rewritten by `binom_symmetry` under `sum_cong`.
+  Both 0-hyp with soundness probes. Built on `isabelle_combinatorics.sml` (carries Vandermonde) via
+  the new `common::with_combinatorics`. Proved by a 2-phase ultracode fleet (wf_f6d7e8db-f16);
+  re-verified by hand.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values

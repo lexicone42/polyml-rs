@@ -115,6 +115,18 @@ pub fn with_binom_thm(delta: &str) -> String {
     with_nt_helpers(&format!("{binom_thm}\n{delta}"))
 }
 
+/// Prepend the combinatorial-identities development (`isabelle_combinatorics.sml`:
+/// Pascal row sum, hockey stick, and Vandermonde) on top of the binomial-theorem
+/// base, for drivers that build on those identities (e.g. the central binomial
+/// coefficient identity, a Vandermonde corollary).
+pub fn with_combinatorics(delta: &str) -> String {
+    let comb = std::fs::read_to_string(
+        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_combinatorics.sml"),
+    )
+    .expect("read isabelle_combinatorics.sml");
+    with_binom_thm(&format!("{comb}\n{delta}"))
+}
+
 /// Basis-only warm checkpoint (`tools/build-hol4-checkpoints.sh basis`).
 pub fn basis_checkpoint_path() -> Option<PathBuf> {
     let p = PathBuf::from("/tmp/basis_loaded");
