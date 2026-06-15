@@ -75,6 +75,19 @@ pub fn with_nt_helpers(delta: &str) -> String {
     format!("{helpers}\n{delta}")
 }
 
+/// Prepend the UNIFIED number-theory base to a driver `delta`: the classical
+/// foundation (`isabelle_nt_helpers.sml`) PLUS the `isabelle_ntbase.sml`
+/// additions — the division theorem (`div_mod_exists`), Euclid, Euclid's lemma,
+/// modular congruence (`cong`), and powers. Drivers that need division or
+/// modular arithmetic build on this second tier instead of re-embedding it.
+pub fn with_ntbase(delta: &str) -> String {
+    let ntbase = std::fs::read_to_string(
+        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_ntbase.sml"),
+    )
+    .expect("read isabelle_ntbase.sml");
+    with_nt_helpers(&format!("{ntbase}\n{delta}"))
+}
+
 /// Basis-only warm checkpoint (`tools/build-hol4-checkpoints.sh basis`).
 pub fn basis_checkpoint_path() -> Option<PathBuf> {
     let p = PathBuf::from("/tmp/basis_loaded");

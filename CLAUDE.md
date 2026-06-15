@@ -1046,6 +1046,26 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   comment lexer NESTS — a literal `(* ... *)` fragment inside a comment (e.g. writing
   "(· compatibility)" with an ASCII open-paren-star) reads as an unterminated nested
   comment ("end of file found in comment"); avoid stray `(*`/`*)` in driver comments.
+- **THE EUCLIDEAN ALGORITHM — gcd universal property + BÉZOUT + MODULAR INVERSE**
+  (`isabelle_gcd.rs`, `isabelle_gcd.sml`, 2026-06-15). Closes the gap the rest of the tower
+  deliberately sidestepped ("gcd/Bézout needs integers over ℕ"): all four results are proved
+  as PURE EXISTENTIALS over the existing theory (NO new constant, NO new axiom), by genuine
+  kernel inference, driven by the already-proved division theorem (`div_mod_exists`) through
+  `strong_induct`. `gcd_props` (`⊢ ∀a b. ∃g. g∣a ∧ g∣b ∧ ∀d. d∣a ⟹ d∣b ⟹ d∣g` — the gcd
+  VALUE + its universal property, by strong induction on b: g=a at b=0, else a=b·q+r with r<b,
+  IH at (b,r), `dvd_diff` for the greatest claim); `bezout` (same + `∃x y. a·x=b·y+g ∨
+  b·y=a·x+g` — Bézout in the two-sided ℕ form, no subtraction, the coefficients tracked
+  through the same induction); `coprime_bezout` (coprimality forces g=1); and the stretch
+  `mod_inverse` (`⊢ prime p ⟹ ¬(p∣a) ⟹ ∃b. cong p (a·b) 1`). Each carries a soundness probe.
+  KEY de-risking insight: because `div_mod_exists` is itself existential, gcd/Bézout need no
+  `mod`/`div` FUNCTION and hence no theory extension — sidestepping the context-routing /
+  varify machinery that dominates the rest of the tower. Built on the unified base via the new
+  `common::with_ntbase` (second-tier consolidation: helpers + ntbase, no re-embedding); proved
+  by a 3-phase multi-seat ultracode fleet (wf_a420c57e-d18: gcd-props → bezout →
+  coprime/inverse), re-verified end-to-end by hand. The earlier Euclid's-lemma note that gcd/
+  Bézout "needs integers over ℕ" / "is entirely avoidable" stands as written for THAT proof
+  (the Gauss descent genuinely avoids them) — but gcd + Bézout are now available over ℕ
+  directly should later work (Wilson, CRT, Euler) want them.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
