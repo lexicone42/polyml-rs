@@ -139,6 +139,17 @@ pub fn with_wilson_pairing(delta: &str) -> String {
     with_mult_group(&format!("{wp}\n{delta}"))
 }
 
+/// Prepend the Wilson modular-inverse development (`isabelle_wilson_inverse.sml`:
+/// rmod/cong_iff_rmod, the residue range `upto`, and the inverse function `finv`)
+/// on top of the Wilson-pairing base — the full base for Wilson's theorem itself.
+pub fn with_wilson_inverse(delta: &str) -> String {
+    let wi = std::fs::read_to_string(
+        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_wilson_inverse.sml"),
+    )
+    .expect("read isabelle_wilson_inverse.sml");
+    with_wilson_pairing(&format!("{wi}\n{delta}"))
+}
+
 /// Prepend the combinatorial-identities development (`isabelle_combinatorics.sml`:
 /// Pascal row sum, hockey stick, and Vandermonde) on top of the binomial-theorem
 /// base, for drivers that build on those identities (e.g. the central binomial

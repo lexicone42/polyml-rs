@@ -1184,6 +1184,25 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   Built via `common::with_wilson_pairing`. Proved by a 2-phase ultracode fleet (wf_a22d8bd7-115,
   ~106 min); re-verified by hand. NEXT (the finale): apply `pairing_lemma` to [2..p-2] with `finv`
   ⟹ `lprod[2..p-2] ≡ 1`, then `(p-1)! = 1·lprod[2..p-2]·(p-1) ≡ -1` — Wilson's theorem.
+- **WILSON'S THEOREM** (`isabelle_wilson.rs`, `isabelle_wilson.sml`, 2026-06-15 — A SUMMIT REACHED):
+  `⊢ prime p ⟹ (p−1)! ≡ −1 (mod p)` (`cong p (lprod (upto (p−1))) (p−1)`), a 0-hyp theorem by
+  genuine LCF kernel inference on the Rust interpreter — the classical companion to Fermat's little
+  theorem. Proved by the inverse-pairing argument: each residue in [2..p−2] is paired with its
+  modular inverse `finv` (1 and p−1 are self-inverse, `finv_one`/`finv_pm1`), [2..p−2] is closed
+  under `finv` / fixed-point-free / an involution, so by the **involution-pairing lemma**
+  `lprod[2..p−2] ≡ 1`, whence `(p−1)! = (p−1)·1·∏[2..p−2] ≡ p−1 ≡ −1`. The whole campaign was FOUR
+  ultracode fleet runs (~6.5 hrs total): the Wilson keystones (`isabelle_mult_group`) → the
+  list-product library + **the involution-pairing lemma, the historic wall** (`isabelle_wilson_pairing`)
+  → the **mod function + decidable congruence + the modular-inverse FUNCTION** (`isabelle_wilson_inverse`)
+  → the **assembly** (`isabelle_wilson`, wf_39658abf-b42). Each layer re-verified by hand and committed.
+  **SOUNDNESS NOTE (audited):** the statement uses `prime2` = the GENUINE structural prime
+  (1<p ∧ ∀d. d∣p ⟹ d=1∨d=p), used consistently by the entire keystone chain (euclid_lemma /
+  mod_inverse / lagrange_roots all take prime2; 107 prime2 uses, 0 of the legacy `prime`/primePredAbs
+  downstream). The legacy `prime` (phase-2 `primePredAbs`) has a de-Bruijn capture bug — its raw
+  `Bound 0` is captured by `dvd`'s inner existential — so it is **dead/unused**; ALWAYS use `prime2`.
+  Three soundness probes on the result pass (needs the prime hyp; residue is p−1 not 0; not the false
+  `≡1`). **Euler's theorem is the next summit and reuses `pairing_lemma` + `finv` directly** (product
+  over the reduced residues, x↦a·x permutes them).
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
