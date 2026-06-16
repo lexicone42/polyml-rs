@@ -362,20 +362,34 @@ fn run_image(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let mut steps = 0u64;
-    let outcome = loop {
-        if steps >= max_steps {
-            break Ok::<_, polyml_runtime::InterpError>(StepResult::Continue);
+    let outcome = if checkpoint_every == 0 {
+        // Fast path: a single in-crate run_until loop. The per-step trace/diag
+        // branches are compiled out (production picks the non-instrumented
+        // monomorphisation), and there is no per-opcode cross-crate step() call.
+        match interp.run_until(max_steps) {
+            Ok((s, r)) => {
+                steps = s;
+                Ok(r)
+            }
+            Err(e) => Err(e),
         }
-        steps += 1;
-        if checkpoint_every != 0 && steps % checkpoint_every == 0 {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr(), "  [checkpoint] steps={steps}");
-            let _ = std::io::stderr().flush();
-        }
-        match interp.step() {
-            Ok(StepResult::Continue) => {}
-            Ok(other) => break Ok(other),
-            Err(e) => break Err(e),
+    } else {
+        // Slow path: per-step checkpoint logging (POLY_CHECKPOINT_EVERY).
+        loop {
+            if steps >= max_steps {
+                break Ok::<_, polyml_runtime::InterpError>(StepResult::Continue);
+            }
+            steps += 1;
+            if steps % checkpoint_every == 0 {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr(), "  [checkpoint] steps={steps}");
+                let _ = std::io::stderr().flush();
+            }
+            match interp.step() {
+                Ok(StepResult::Continue) => {}
+                Ok(other) => break Ok(other),
+                Err(e) => break Err(e),
+            }
         }
     };
 

@@ -1227,10 +1227,55 @@ impl Interpreter {
         }
     }
 
-    /// Execute a single instruction.
+    /// Execute a single instruction. Back-compat wrapper over the fully
+    /// instrumented code path; external loops (tests, the old `run`) keep
+    /// their exact behaviour.
+    #[inline]
+    pub fn step(&mut self) -> Result<StepResult, InterpError> {
+        self.step_impl::<true>()
+    }
+
+    /// Run up to `max_steps` instructions in a tight in-crate loop and return
+    /// `(steps_executed, terminating_result)`. Picks the instrumented vs fast
+    /// code path ONCE: in production (no `--profile`, no RTS trace) the fast
+    /// path is monomorphised with the per-step trace/diag branches compiled
+    /// out entirely. GC and finish cadence are byte-identical to `step()` —
+    /// only the always-off debug checks differ — so timing/GC behaviour is
+    /// unchanged. (Perf lever, task #88: hoists the per-step global checks the
+    /// CLI loop used to pay across the crate boundary on every opcode.)
+    pub fn run_until(&mut self, max_steps: u64) -> Result<(u64, StepResult), InterpError> {
+        let instrumented = self.diag.is_some() || arbint_trace_on() || crate::rts::is_traced();
+        if instrumented {
+            self.run_until_impl::<true>(max_steps)
+        } else {
+            self.run_until_impl::<false>(max_steps)
+        }
+    }
+
+    #[inline]
+    fn run_until_impl<const INSTR: bool>(
+        &mut self,
+        max_steps: u64,
+    ) -> Result<(u64, StepResult), InterpError> {
+        let mut steps = 0u64;
+        loop {
+            if steps >= max_steps {
+                return Ok((steps, StepResult::Continue));
+            }
+            steps += 1;
+            match self.step_impl::<INSTR>()? {
+                StepResult::Continue => {}
+                other => return Ok((steps, other)),
+            }
+        }
+    }
+
+    /// Execute a single instruction. `INSTR` selects the instrumented path
+    /// (per-step RTS-trace ring, diagnostics counters, RTS step trace); when
+    /// `false` those branches vanish at monomorphisation.
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::wildcard_imports)]
-    pub fn step(&mut self) -> Result<StepResult, InterpError> {
+    fn step_impl<const INSTR: bool>(&mut self) -> Result<StepResult, InterpError> {
         use opcodes::*;
 
         // If PolyFinish was just called, halt cleanly with the
@@ -1268,7 +1313,7 @@ impl Interpreter {
 
         let opcode_pc = self.pc;
         let op = self.fetch_u8()?;
-        if arbint_trace_on() {
+        if INSTR && arbint_trace_on() {
             #[allow(clippy::cast_possible_truncation)]
             let off = unsafe { opcode_pc.offset_from(self.code_start) as u32 };
             let code = self.code_start as usize;
@@ -1281,7 +1326,7 @@ impl Interpreter {
                 r.push_back((code, off, op, sp_depth));
             });
         }
-        if let Some(d) = self.diag.as_mut() {
+        if INSTR && let Some(d) = self.diag.as_mut() {
             #[allow(clippy::cast_possible_truncation)]
             let off = unsafe { opcode_pc.offset_from(self.code_start) as u32 };
             let code = self.code_start as usize;
@@ -1289,7 +1334,7 @@ impl Interpreter {
             *d.pc_visits.entry((code, off)).or_insert(0) += 1;
             d.opcode_counts[op as usize] += 1;
         }
-        if crate::rts::is_traced() {
+        if INSTR && crate::rts::is_traced() {
             eprintln!(
                 "  [{:5}] op=0x{op:02x} sp_depth={} top={:?}",
                 self.pc_offset() - 1,
