@@ -13,7 +13,7 @@ edition = "2024"
 rust-version = "1.96"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/lexicone42/polyml-rs"
-authors = ["Bryan Egan <bryan.egan@gmail.com>"]
+authors = ["Bryan Egan <3395267+bryanegan@users.noreply.github.com>"]
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
