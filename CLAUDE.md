@@ -1148,6 +1148,28 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   Both 0-hyp with soundness probes. Built on `isabelle_combinatorics.sml` (carries Vandermonde) via
   the new `common::with_combinatorics`. Proved by a 2-phase ultracode fleet (wf_f6d7e8db-f16);
   re-verified by hand.
+- **THE INVOLUTION-PAIRING LEMMA — the historic Wilson wall, BROKEN** (`isabelle_wilson_pairing.rs`,
+  `isabelle_wilson_pairing.sml`, 2026-06-15). The classical Wilson proof pairs each residue with
+  its inverse; formalizing that pairing — **a product invariant under a fixed-point-free
+  involution, with no finite-set library** — has been the obstruction. Now proved by genuine kernel
+  inference in two parts. (1) **A list-product library** on the modular base: a `natlist` datatype
+  (defined here, `lnil`/`lcons` + `list_induct`) with `lprod`/`lmem`/`lremove` (remove-first, via
+  conditional axioms)/`llen`/`lnodup`, and the lemmas the pairing needs — the KEY one being
+  `extract : lmem x L ⟹ lprod L = x · lprod (lremove x L)` — plus `mem_remove`, `llen_remove`
+  (removal strictly shortens), `nodup_remove`, each 0-hyp by list induction (`LIST_LIB_OK`).
+  (2) **`pairing_lemma`**: for a list `L` and function `inv`, `lnodup L ⟹ (∀x∈L. inv x ∈ L) ⟹
+  (∀x∈L. cong p (x·inv x) 1) ⟹ (∀x∈L. inv x ≠ x) ⟹ (∀x∈L. inv(inv x)=x) ⟹ cong p (lprod L) 1`,
+  by STRONG INDUCTION on `llen L` (extract head `a` and its partner `inv a` from the tail, remove
+  both, recurse — `inv` injective on `L` from the involution makes the residual list still closed)
+  (`PAIRING_OK`). Soundness probes confirm it genuinely uses the inverse hypothesis and is
+  conditional. Built on the modular/keystone base via the new `common::with_mult_group`. Proved by
+  a 2-phase ultracode fleet (wf_1ef6ffe6-859, ~97 min — Phase 1 list lib, Phase 2 the wall); each
+  re-verified end-to-end by hand. KEY gotchas logged: conditional-function axioms return the
+  premise STILL attached (implies_elim against the assumed condition before use); disjE case-arms
+  must be META-implications, not impI-wrapped object implications; object `neg A = Imp A oFalse` is
+  discharged with `mp`, not `implies_elim`. **NEXT toward full Wilson:** construct the list `[2..p-2]`
+  / `[1..p-1]` and prove it closed under the modular inverse (the residue-range construction), then
+  assemble `(p-1)! = 1·∏[2..p-2]·(p-1) ≡ -1`. **Euler's theorem reuses `pairing_lemma` directly.**
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values

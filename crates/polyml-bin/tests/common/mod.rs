@@ -115,6 +115,18 @@ pub fn with_binom_thm(delta: &str) -> String {
     with_nt_helpers(&format!("{binom_thm}\n{delta}"))
 }
 
+/// Prepend the multiplicative-group-mod-p development (`isabelle_mult_group.sml`:
+/// inverse_unique, mod_cancel, lagrange_roots) on top of the gcd / Euclid-lemma
+/// base, for drivers that need the Wilson keystones (e.g. the list-product +
+/// involution-pairing development toward Wilson's theorem).
+pub fn with_mult_group(delta: &str) -> String {
+    let mg = std::fs::read_to_string(
+        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_mult_group.sml"),
+    )
+    .expect("read isabelle_mult_group.sml");
+    with_gcd(&format!("{mg}\n{delta}"))
+}
+
 /// Prepend the combinatorial-identities development (`isabelle_combinatorics.sml`:
 /// Pascal row sum, hockey stick, and Vandermonde) on top of the binomial-theorem
 /// base, for drivers that build on those identities (e.g. the central binomial
