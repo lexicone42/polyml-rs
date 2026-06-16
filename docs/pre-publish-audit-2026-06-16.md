@@ -17,15 +17,15 @@ Apple Silicon cross-arch demo). **Verdict: clean — safe to publish.**
 | Git history (large/orphaned blobs) | clean; largest-ever blobs are current tracked proof drivers (≤0.52 MB), no committed-then-deleted bloat or secrets |
 | Commit-author identity | 420 commits, all `bryan <bryan.egan@gmail.com>` — consistent |
 
-## Notes / decisions before the push (not blockers)
+## Decisions (resolved 2026-06-16)
 
-1. **Author email becomes public.** `bryan.egan@gmail.com` appears in
-   `Cargo.toml` (`authors`) and on all 420 commits. This is the existing git
-   identity and is intended-public for an authored open-source repo — just a
-   heads-up, not a leak.
-2. **Repo owner.** `gh` is authed as `bryanegan`; `Cargo.toml` `repository`
-   points at `lexicone42/polyml-rs`. Confirm which owner before
-   `gh repo create` + push.
+1. **Owner = `lexicone42`** (Organization; `bryanegan` is a member and can
+   publish under it). `Cargo.toml` `repository` already matches.
+2. **Author identity = GitHub noreply going forward.** Repo git config +
+   `Cargo.toml` `authors` now use `3395267+bryanegan@users.noreply.github.com`
+   (commit fixing this onward). History was **deliberately NOT scrubbed** — the
+   421 pre-existing commits keep `bryan.egan@gmail.com`, by the author's choice
+   ("people can find my email if they want"). Not a blocker.
 3. **`vendor/` images don't travel via git** (git-ignored by design). Any
    consumer — including the macOS demo — needs `bootstrap64.txt` (1.8 MB) /
    `polyexport` (13 MB) transferred separately. The build itself fetches no
