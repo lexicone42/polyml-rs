@@ -207,16 +207,26 @@ work in May 2026. Current state (5.9 GHz Intel, single core):
 | Workload                              | Time   | Steps    | Steps/sec |
 |---------------------------------------|--------|----------|-----------|
 | Simple bootstrap (no stage1)          | 0.1s   | 1.1M     | 11M       |
-| Basis load (`Bootstrap.use "basis/build.sml"`) | 20s | 1.8B | 90M |
+| Basis load (`Bootstrap.use "basis/build.sml"`) | 19s | 1.8B | 95M |
 | Full 7-stage chain                    | 5min   | 27.7B    | 92M       |
 | HOL4 kernel + 14 inferences proof     | 15s    | ?        | ?         |
 
-Two structural fixes account for most of the gain:
+Three structural fixes account for most of the gain:
 1. `gc_threshold_percent()` cached in `AtomicUsize` — was reading
    env var on every step → 6.2x.
 2. Pre-computed `gc_trigger_words` from `cap * threshold / 100`,
    plus `#[inline(always)]` + `get_unchecked` on push/pop/peek/
    reset/drop_n → 1.35x more.
+3. **In-crate `run_until` loop** (2026-06-16, commit d2bc443, task #88
+   lever 1): the CLI used to call `step()` per opcode across the crate
+   boundary, and `step()` ran three always-off debug checks before every
+   dispatch (`arbint_trace_on()` atomic, `diag` Option, `is_traced()`
+   atomic). Split `step()` into `step_impl<const INSTR: bool>` (debug
+   paths gated on `INSTR`, compiled out in production) + an in-crate
+   `run_until(max_steps)` that picks the fast monomorphisation once.
+   GC/finish cadence byte-identical. **Measured ~12% on the basis load
+   (84.5 → 95.4M steps/sec, byte-identical 1.783B-step trace).** The
+   number below reflects this.
 
 Use `poly run --profile <image>` to dump hot opcodes / hot code
 objects. Top-20 hottest opcodes is invaluable for finding the next
