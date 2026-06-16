@@ -201,3 +201,47 @@ masks, WORD/FIXED_MULT untag) are **correct and faithful**.
   LDEXC stub. Each is commented locally; a single "Exception & overflow fidelity"
   section in the crate header listing all of them would make the boundary auditable.
   *The most valuable doc improvement for the JIT.*
+
+---
+
+## Resolution log — 2026-06-16
+
+The genuine-bug + cheap-robustness batch (poly-free, verified by background
+build + clippy + fmt + lib tests; the Euler proving fleet ran undisturbed).
+
+**Banked**
+- `7aafb4b` — **JUMP32 sign-extension** (genuine faithfulness bug): the three
+  32-bit jump arms zero-extended their offset, so backward long jumps (functions
+  >64 KB) jumped ~4 GB forward. Now cast through `i32`, matching upstream
+  bytecode.cpp:2236. The 1300-case differential oracle never exercised it — no
+  workload has a function that large. *Validated-against-an-oracle means
+  validated on what the oracle exercised, not "correct."*
+- `7aafb4b` — **GC untracked-pointer use-after-free**: an unforwarded from-space
+  slot was logged then left dangling when `replace_storage` drops from-space.
+  Now a hard panic (the set is always empty in correct operation; crash loudly
+  on a collector bug rather than corrupt the heap).
+- `9607e4c` — **pexport allocation amplification** (untrusted-image DoS): the
+  reader pre-allocated from header counts before consuming input, so a ~20-byte
+  malformed file could force a multi-GB OOM. `with_capacity` now bounded by
+  remaining input; object table validates `n_objects` ≤ remaining bytes;
+  `parse_entry_point` uses `checked_add`.
+- `7f0db02` — GC roots log gated behind `POLYML_GC_QUIET`; pexport
+  `read_u64`/`read_i64` `from_utf8().unwrap()` → propagated `BadNumber` (the
+  parser is now fully panic-free on arbitrary input).
+
+**Deferred (with rationale — not silent drops)**
+- *DELETE_HANDLER bounds guard* — indexing is already Rust bounds-checked (safe
+  panic on a malformed image, not UB); it's a hot opcode, so a redundant check
+  isn't worth the cost. The threat model is memory-safety, which holds.
+- *LargeWord over-shift (≥64)* — a faithfulness question vs upstream's
+  shift-≥-wordsize semantics; needs an oracle diff to settle. Changing it blind
+  risks introducing a divergence.
+- *allocate→try_alloc retry* — the foundation audit already deferred this as a
+  heap-corruption hazard (a pointer is cached across the allocation).
+- *JIT NICE-TO-HAVE items* (exception/overflow fidelity header, `.expect()` →
+  graceful degrade, install-filter precision) — JIT is a correctness testbed,
+  not on the release-critical path; a separate pass.
+
+**Verdict unchanged**: no preview-blockers under a stated "trusted images" threat
+model; the untrusted-image amplification class (the one concrete BLOCKER three of
+four reviewers converged on) is now closed on the parser side.
