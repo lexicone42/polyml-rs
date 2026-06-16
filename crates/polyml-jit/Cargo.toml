@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+description = "Cranelift-backed JIT for PolyML bytecode (bytecode → Cranelift IR)"
 
 [lints]
 workspace = true
