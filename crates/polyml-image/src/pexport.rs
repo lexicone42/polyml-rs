@@ -383,7 +383,9 @@ impl<'a> Cursor<'a> {
 
     /// Read `n` hex characters into a `Vec<u8>` (2 chars per byte).
     fn read_hex_bytes(&mut self, n: usize) -> Result<Vec<u8>, ParseError> {
-        let mut out = Vec::with_capacity(n);
+        // Bound pre-allocation by remaining input (2 hex chars per byte) so a
+        // malformed huge `n` can't force a giant allocation before hitting EOF.
+        let mut out = Vec::with_capacity(n.min(self.bytes.len().saturating_sub(self.pos) / 2));
         for _ in 0..n {
             let h = self.bump()?;
             let l = self.bump()?;
@@ -451,6 +453,12 @@ impl Image {
         // header order, count match) but skip the re-scan.
         let pass2_start = c.pos;
 
+        // A valid image needs >=1 byte per object line; reject a header claiming
+        // more objects than the remaining input could hold (else `vec![None; n]`
+        // can attempt a multi-GB allocation on a malformed/truncated file).
+        if (n_objects as usize) > c.bytes.len().saturating_sub(c.pos) {
+            return Err(ParseError::Eof { at: c.pos });
+        }
         let mut objects: Vec<Option<Object>> = vec![None; n_objects as usize];
         let mut observed: u32 = 0;
 
@@ -651,7 +659,9 @@ fn parse_value_list(
     n: usize,
     n_objects: u32,
 ) -> Result<Vec<Value>, ParseError> {
-    let mut out = Vec::with_capacity(n);
+    // Bound pre-allocation by remaining input (each value consumes >=1 byte) so a
+    // malformed huge `n` can't force a giant allocation before hitting EOF.
+    let mut out = Vec::with_capacity(n.min(c.bytes.len().saturating_sub(c.pos)));
     for i in 0..n {
         out.push(parse_value(c, n_objects)?);
         if i + 1 < n {
@@ -771,7 +781,7 @@ fn parse_entry_point(c: &mut Cursor<'_>) -> Result<ObjectBody, ParseError> {
     let start = c.pos;
     // The name is plain ASCII up to end of line. The writer writes
     // exactly `n` bytes (the strlen) before the newline.
-    let end = start + n;
+    let end = start.checked_add(n).ok_or(ParseError::Eof { at: start })?;
     if end > c.bytes.len() {
         return Err(ParseError::Eof { at: end });
     }
