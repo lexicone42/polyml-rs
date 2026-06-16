@@ -522,8 +522,11 @@ run`, diff the results. Any difference is a faithfulness bug in OUR port.
   the backend source).
 - `tools/diff-oracle.sh [--dir <d>] <file.sml ...>` runs each snippet through
   both and compares `@@<label>=<value>` lines (the filter strips REPL chatter).
-- `tools/diff-corpus/*.sml` — ~1600 deterministic comparisons across 44 files
-  (30 Basis categories + compiler-stress programs). Run:
+- `tools/diff-corpus/*.sml` — ~1600 deterministic comparisons across 45 files
+  (30 Basis categories + compiler-stress programs, incl. `cstress_heavy.sml`:
+  heavy-compute stress — Ackermann/naive-fib call storms, 100k-deep mutual TCO,
+  bignum factorials/powers/gcd/powmod + GC pressure, 100k-element folds, and
+  exception raise/handle loops — all byte-identical to upstream). Run:
   `tools/diff-oracle.sh --dir tools/diff-corpus` (wired into `regression.sh full`).
   The 2026-06-16 faithfulness sweep (ultracode wf_a7f8686d-310) added 317
   edge-case comparisons in `numeric_edge.sml` (divMod/quotRem sign conventions,
