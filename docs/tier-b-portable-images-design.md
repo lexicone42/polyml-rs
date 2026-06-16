@@ -135,12 +135,22 @@ patterns are endian-agnostic. No work needed for the target arches.
 
 ## Milestones
 
-- [ ] M1 — `LoadError::WordSizeMismatch`: plumb header word size into the loader,
-      validate, clear error on mismatch (+ unit test with a hand-written 32-bit
-      header). *Small, lands independently.*
-- [ ] M2 — aarch64 interpreter build green (cross or native).
-- [ ] M3 — x86_64-built `polyexport` runs `fact 10` → `3628800` on aarch64.
-      The headline demo. `#[ignore]` test + `tools/` script.
+- [x] M1 — `LoadError::WordSizeMismatch`: plumb header word size into the loader,
+      validate, clear error on mismatch (+ unit test). **DONE** (commit 76da2ec):
+      simple bootstrap still loads clean; `rejects_cross_word_size_image` passes.
+- [ ] M2 — aarch64 build green. *Prepped:* `cross` + docker + podman are
+      installed (no native aarch64 target / qemu needed — `cross` containerises
+      both). `poly` depends on `polyml-jit` unconditionally, so the build needs
+      Cranelift to cross-compile — expected fine (Cranelift is pure Rust with
+      runtime host-detection via `cranelift-native`). Fallback if it doesn't:
+      feature-gate the JIT out of `polyml-bin` for an interpreter-only build.
+      Run: `tools/cross-arch-demo.sh --build`. *Hold until Euler finishes to
+      avoid CPU contention with the proof fleet.*
+- [ ] M3 — x86_64-built image runs on aarch64 under qemu. **Harness written**
+      (`tools/cross-arch-demo.sh`): M3a runs the checked-in `bootstrap64.txt`
+      (proves load+exec on aarch64, always available); M3b runs `fact 10` →
+      `3628800` through the self-bootstrapped `polyexport` if present (the REPL
+      headline). Promote to an `#[ignore]` integration test once green.
 - [ ] M4 (stretch) — object sizing from image word size; 32-bit image loads on
       64-bit host (round-trip test).
 - [ ] M5 (stretch) — arbint tagged/long normalization across word sizes.
