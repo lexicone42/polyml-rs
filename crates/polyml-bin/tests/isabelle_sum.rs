@@ -35,23 +35,42 @@ fn summation_operator_and_truncated_subtraction() {
         eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
         return;
     };
-    let driver_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/isabelle_support/isabelle_sum.sml");
+    let driver_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/isabelle_support/isabelle_sum.sml");
     let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_sum.sml");
 
     let Some((out, _)) = run_image_env(
         &image,
         &common::with_nt_helpers(&driver),
         280_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("OK sub_self"), "sub_self did not check:\n{out}");
-    assert!(out.contains("OK sub_Suc_le"), "sub_Suc_le did not check:\n{out}");
-    assert!(out.contains("OK sum_cong"), "sum_cong did not check:\n{out}");
-    assert!(out.contains("SUMSUB_DONE"), "Stage-C1 development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        out.contains("OK sub_self"),
+        "sub_self did not check:\n{out}"
+    );
+    assert!(
+        out.contains("OK sub_Suc_le"),
+        "sub_Suc_le did not check:\n{out}"
+    );
+    assert!(
+        out.contains("OK sum_cong"),
+        "sum_cong did not check:\n{out}"
+    );
+    assert!(
+        out.contains("SUMSUB_DONE"),
+        "Stage-C1 development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
 }

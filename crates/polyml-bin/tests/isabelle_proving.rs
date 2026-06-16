@@ -46,18 +46,34 @@ fn isabelle_pure_proving_rungs() {
         &image,
         &driver,
         30_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("ISA_PROVING_START"), "driver did not start:\n{out}");
-    for rung in ["tactic", "simplifier", "theory_axiom", "resolution", "parser"] {
+    assert!(
+        out.contains("ISA_PROVING_START"),
+        "driver did not start:\n{out}"
+    );
+    for rung in [
+        "tactic",
+        "simplifier",
+        "theory_axiom",
+        "resolution",
+        "parser",
+    ] {
         assert!(
             out.contains(&format!("RUNG {rung} OK")),
             "Isabelle proving rung `{rung}` did not produce a checked theorem:\n{out}"
         );
     }
-    assert!(out.contains("ISA_PROVING_DONE"), "proving demo did not finish:\n{out}");
+    assert!(
+        out.contains("ISA_PROVING_DONE"),
+        "proving demo did not finish:\n{out}"
+    );
 }

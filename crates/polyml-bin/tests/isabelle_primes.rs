@@ -65,7 +65,11 @@ fn strong_induction_strict_order_and_primality() {
         &image,
         &driver,
         220_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
@@ -74,7 +78,13 @@ fn strong_induction_strict_order_and_primality() {
     // The fully-genuine results (no axioms beyond the ladder's Peano/discrimination
     // set). strong_induct is the headline: course-of-values induction derived from
     // nat_induct + the strict order.
-    for thm in ["strong_induct", "lt_trans", "lt_trichotomy", "prime_two", "prime_gt_1"] {
+    for thm in [
+        "strong_induct",
+        "lt_trans",
+        "lt_trichotomy",
+        "prime_two",
+        "prime_gt_1",
+    ] {
         assert!(
             out.contains(&format!("OK {thm}")),
             "genuine theorem `{thm}` did not check:\n{out}"
@@ -87,6 +97,12 @@ fn strong_induction_strict_order_and_primality() {
         out.contains("OK prime_divisor_exists"),
         "capstone `prime_divisor_exists` (modulo prime_cases) did not check:\n{out}"
     );
-    assert!(out.contains("PRIME_DONE"), "prime development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        out.contains("PRIME_DONE"),
+        "prime development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
 }

@@ -49,16 +49,38 @@ fn list_laws_by_structural_induction() {
         &image,
         &driver,
         120_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    for law in ["append_nil", "append_assoc", "rev_append", "rev_rev", "length_append"] {
-        assert!(out.contains(&format!("OK {law}")), "list law `{law}` did not check:\n{out}");
+    for law in [
+        "append_nil",
+        "append_assoc",
+        "rev_append",
+        "rev_rev",
+        "length_append",
+    ] {
+        assert!(
+            out.contains(&format!("OK {law}")),
+            "list law `{law}` did not check:\n{out}"
+        );
     }
-    assert!(out.contains("LIST_THEORY_DONE"), "list theory did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("LIST_THEORY_DONE"),
+        "list theory did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
 }

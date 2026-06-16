@@ -46,7 +46,11 @@ pr "MESON_TEST_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("MESON_TEST_DONE"), "meson driver did not finish.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("MESON_TEST_DONE"),
+        "meson driver did not finish.\n{}",
+        tail(&out, 40)
+    );
     for (tag, stmt) in [
         ("SYLL", "⊢ (∀x. P x ⇒ Q x) ∧ P a ⇒ Q a"),
         ("DRINK", "⊢ ∃x. D x ⇒ ∀y. D y"),
@@ -66,5 +70,9 @@ pr "MESON_TEST_DONE\n";
             tail(&out, 40)
         );
     }
-    assert!(!out.contains("ERR "), "a MESON goal failed to prove.\n{}", tail(&out, 40));
+    assert!(
+        !out.contains("ERR "),
+        "a MESON goal failed to prove.\n{}",
+        tail(&out, 40)
+    );
 }

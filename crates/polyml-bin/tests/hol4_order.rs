@@ -40,15 +40,30 @@ pr "ORDER_TEST_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("ORDER_TEST_DONE"), "order driver did not finish.\n{}", tail(&out, 40));
-    assert!(out.contains("ALL_CLEAN=true"), "an ordering law has hypotheses.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("ORDER_TEST_DONE"),
+        "order driver did not finish.\n{}",
+        tail(&out, 40)
+    );
+    assert!(
+        out.contains("ALL_CLEAN=true"),
+        "an ordering law has hypotheses.\n{}",
+        tail(&out, 40)
+    );
     for (tag, stmt) in [
         ("LE_TRANS", "∀m n p. LE m n ∧ LE n p ⇒ LE m p"),
         ("LE_ANTISYM", "∀m n. LE m n ∧ LE n m ⇒ m = n"),
         ("SUC_LE", "∀m n. LE (SUC m) (SUC n) ⇔ LE m n"),
     ] {
-        assert!(out.contains(stmt), "{tag} not the expected statement `{stmt}`.\n{}", tail(&out, 40));
+        assert!(
+            out.contains(stmt),
+            "{tag} not the expected statement `{stmt}`.\n{}",
+            tail(&out, 40)
+        );
     }
-    assert!(!out.contains("_FAIL") && !out.contains("not been declared"),
-        "an ordering theorem was unreachable.\n{}", tail(&out, 40));
+    assert!(
+        !out.contains("_FAIL") && !out.contains("not been declared"),
+        "an ordering theorem was unreachable.\n{}",
+        tail(&out, 40)
+    );
 }

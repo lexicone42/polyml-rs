@@ -92,20 +92,31 @@ pr "SUMMATION_TEST_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("SUMMATION_TEST_DONE"), "summation driver did not finish.\n{}", tail(&out, 50));
-    assert!(out.contains("ALL_CLEAN=true"), "a summation theorem has hypotheses.\n{}", tail(&out, 50));
+    assert!(
+        out.contains("SUMMATION_TEST_DONE"),
+        "summation driver did not finish.\n{}",
+        tail(&out, 50)
+    );
+    assert!(
+        out.contains("ALL_CLEAN=true"),
+        "a summation theorem has hypotheses.\n{}",
+        tail(&out, 50)
+    );
     // exact theorem statements (the closed forms), proved by induction.
     assert!(
         out.contains("∀n. sum n + sum n = mult n (SUC n)"),
-        "GAUSS not the expected closed form.\n{}", tail(&out, 50)
+        "GAUSS not the expected closed form.\n{}",
+        tail(&out, 50)
     );
     assert!(
         out.contains("∀n. osum n = mult n n"),
-        "SUM_OF_ODDS not the expected closed form.\n{}", tail(&out, 50)
+        "SUM_OF_ODDS not the expected closed form.\n{}",
+        tail(&out, 50)
     );
     // concrete: sum 3 = 6 (six nested SUCs over 0).
     assert!(
         out.contains("sum (SUC (SUC (SUC 0))) = SUC (SUC (SUC (SUC (SUC (SUC 0)))))"),
-        "sum 3 = 6 sanity failed.\n{}", tail(&out, 50)
+        "sum 3 = 6 sanity failed.\n{}",
+        tail(&out, 50)
     );
 }

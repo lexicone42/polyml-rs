@@ -46,7 +46,11 @@ pr "NUMPROVER_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("NUMPROVER_DONE"), "driver did not finish.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("NUMPROVER_DONE"),
+        "driver did not finish.\n{}",
+        tail(&out, 30)
+    );
     // real numScript INDUCTION
     assert!(
         out.contains("IND: ⊢ ∀P. P 0 ∧ (∀n. P n ⇒ P (SUC n)) ⇒ ∀n. P n"),
@@ -59,7 +63,11 @@ pr "NUMPROVER_DONE\n";
         "bool_ss did not simplify the EXISTS_UNIQUE goal (real bool_ss absent?).\n{}",
         tail(&out, 30)
     );
-    assert!(!out.contains("BOOLSS_FAIL"), "bool_ss raised.\n{}", tail(&out, 30));
+    assert!(
+        !out.contains("BOOLSS_FAIL"),
+        "bool_ss raised.\n{}",
+        tail(&out, 30)
+    );
     // MESON live alongside num
     assert!(
         out.contains("MESON: ⊢ (∀x. P x ⇒ Q x) ∧ P a ⇒ Q a"),

@@ -45,17 +45,36 @@ fn peano_arithmetic_by_induction() {
         &image,
         &driver,
         60_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
     // n + 0 = n by induction (the keystone), then the laws + multiplication
-    assert!(out.contains("OK add_0_right"), "n+0=n (by induction) failed:\n{out}");
-    assert!(out.contains("OK add_comm"), "add commutativity failed:\n{out}");
-    assert!(out.contains("OK add_assoc"), "add associativity failed:\n{out}");
-    assert!(out.contains("OK mult"), "mult_0_right (multiplication by induction) failed:\n{out}");
-    assert!(out.contains("ISA_ARITH_DONE"), "arithmetic demo did not finish:\n{out}");
+    assert!(
+        out.contains("OK add_0_right"),
+        "n+0=n (by induction) failed:\n{out}"
+    );
+    assert!(
+        out.contains("OK add_comm"),
+        "add commutativity failed:\n{out}"
+    );
+    assert!(
+        out.contains("OK add_assoc"),
+        "add associativity failed:\n{out}"
+    );
+    assert!(
+        out.contains("OK mult"),
+        "mult_0_right (multiplication by induction) failed:\n{out}"
+    );
+    assert!(
+        out.contains("ISA_ARITH_DONE"),
+        "arithmetic demo did not finish:\n{out}"
+    );
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }

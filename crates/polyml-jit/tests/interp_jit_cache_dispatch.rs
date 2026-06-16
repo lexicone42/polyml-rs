@@ -5,7 +5,7 @@
 //! handles all of bytecode execution, but recognises pre-JIT'd
 //! code objects and calls the native function instead of stepping.
 
-use polyml_jit::{translate, Jit};
+use polyml_jit::{Jit, translate};
 use polyml_runtime::{Interpreter, JitEntry, PolyWord};
 
 const INSTR_LOCAL_2: u8 = 0x2b;

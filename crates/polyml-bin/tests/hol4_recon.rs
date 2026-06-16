@@ -52,10 +52,7 @@ fn hol4_dir() -> Option<PathBuf> {
 /// Run our `poly run` on bootstrap64.txt, piping `sml_driver` on
 /// stdin from `vendor/polyml/` as cwd. Returns (combined output,
 /// exit code).
-fn run_with_driver(
-    sml_driver: &str,
-    max_steps: u64,
-) -> std::io::Result<(String, i32)> {
+fn run_with_driver(sml_driver: &str, max_steps: u64) -> std::io::Result<(String, i32)> {
     let image = bootstrap_image().expect("bootstrap image");
     let vendor = vendor_polyml_dir().expect("vendor polyml");
     let mut child = Command::new(poly_bin())
@@ -70,7 +67,11 @@ fn run_with_driver(
         .env("POLYML_GC_THRESHOLD", "99") // minimise GC overhead
         .env("POLYML_GC_QUIET", "1")
         .spawn()?;
-    child.stdin.as_mut().unwrap().write_all(sml_driver.as_bytes())?;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(sml_driver.as_bytes())?;
     drop(child.stdin.take());
     let out = child.wait_with_output()?;
     let combined = format!(
@@ -615,57 +616,93 @@ fn recon_via_checkpoint_proves_implication_self() {
     };
     assert_compile_clean(&out, "HOL_PROOF_OK");
     // REFL p produces |- p = p with no hypotheses.
-    assert!(out.contains("REFL: hyps=0 lhs=true rhs=true"),
-        "REFL inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("REFL: hyps=0 lhs=true rhs=true"),
+        "REFL inference incorrect. Output:\n{out}"
+    );
     // ASSUME p produces p |- p (one hypothesis = p, concl = p).
-    assert!(out.contains("ASSUME: hyps=1 concl=p:true"),
-        "ASSUME inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("ASSUME: hyps=1 concl=p:true"),
+        "ASSUME inference incorrect. Output:\n{out}"
+    );
     // DISCH p (ASSUME p) produces |- p ==> p (no hypotheses, concl is p ==> p).
-    assert!(out.contains("DISCH: hyps=0 lhs=true rhs=true"),
-        "DISCH inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("DISCH: hyps=0 lhs=true rhs=true"),
+        "DISCH inference incorrect. Output:\n{out}"
+    );
     // MP th_pq th_p produces (p, p==>q) |- q with two hypotheses.
-    assert!(out.contains("MP: hyps=2 concl=q:true"),
-        "MP inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("MP: hyps=2 concl=q:true"),
+        "MP inference incorrect. Output:\n{out}"
+    );
     // TRANS th_pq_eq th_qr_eq produces (p=q, q=r) |- p=r with two hypotheses.
-    assert!(out.contains("TRANS: hyps=2 lhs=p:true rhs=r:true"),
-        "TRANS inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("TRANS: hyps=2 lhs=p:true rhs=r:true"),
+        "TRANS inference incorrect. Output:\n{out}"
+    );
     // SYM of (p=q) produces (p=q) |- q=p.
-    assert!(out.contains("SYM: hyps=1 lhs=q:true rhs=p:true"),
-        "SYM inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("SYM: hyps=1 lhs=q:true rhs=p:true"),
+        "SYM inference incorrect. Output:\n{out}"
+    );
     // EQ_MP th_pq_eq th_p produces (p=q, p) |- q with two hypotheses.
-    assert!(out.contains("EQ_MP: hyps=2 concl=q:true"),
-        "EQ_MP inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("EQ_MP: hyps=2 concl=q:true"),
+        "EQ_MP inference incorrect. Output:\n{out}"
+    );
     // AP_TERM f th_pq_eq produces (p=q) |- f p = f q.
-    assert!(out.contains("AP_TERM: hyps=1 lhs=f(p):true"),
-        "AP_TERM inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("AP_TERM: hyps=1 lhs=f(p):true"),
+        "AP_TERM inference incorrect. Output:\n{out}"
+    );
     // BETA_CONV of `(\x. x) p` produces |- (\x.x) p = p with no hypotheses.
-    assert!(out.contains("BETA_CONV: hyps=0 lhs=(\\x.x)p:true rhs=p:true"),
-        "BETA_CONV inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("BETA_CONV: hyps=0 lhs=(\\x.x)p:true rhs=p:true"),
+        "BETA_CONV inference incorrect. Output:\n{out}"
+    );
     // ABS x_var on REFL(p) → |- (\x. p) = (\x. p), both sides are abstractions.
-    assert!(out.contains("ABS: hyps=0 lhs_is_abs:true rhs_is_abs:true"),
-        "ABS inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("ABS: hyps=0 lhs_is_abs:true rhs_is_abs:true"),
+        "ABS inference incorrect. Output:\n{out}"
+    );
     // MK_COMB(REFL(f), ASSUME(p=q)) → (p=q) |- f p = f q.
-    assert!(out.contains("MK_COMB: hyps=1 lhs=fp:true rhs=fq:true"),
-        "MK_COMB inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("MK_COMB: hyps=1 lhs=fp:true rhs=fq:true"),
+        "MK_COMB inference incorrect. Output:\n{out}"
+    );
     // INST_TYPE 'a := bool on REFL(x:'a) → |- (x:bool) = (x:bool).
-    assert!(out.contains("INST_TYPE: hyps=0 ty=bool:true lhs_eq_rhs:true"),
-        "INST_TYPE inference incorrect. Output:\n{out}");
+    assert!(
+        out.contains("INST_TYPE: hyps=0 ty=bool:true lhs_eq_rhs:true"),
+        "INST_TYPE inference incorrect. Output:\n{out}"
+    );
     // Composed: discharging both hyps gives a closed theorem.
-    assert!(out.contains("COMPOSED: hyps=0"),
-        "Composed proof incorrect. Output:\n{out}");
+    assert!(
+        out.contains("COMPOSED: hyps=0"),
+        "Composed proof incorrect. Output:\n{out}"
+    );
     // Transitivity of implication, derived from primitives:
     // |- (p==>q) ==> (q==>r) ==> (p==>r), no hypotheses.
-    assert!(out.contains("TRANS_IMP_HYPS: 0"),
-        "Transitivity-of-impl hyps wrong. Output:\n{out}");
-    assert!(out.contains("TRANS_IMP_LHS_OUTER: true"),
-        "Transitivity-of-impl outer LHS wrong. Output:\n{out}");
-    assert!(out.contains("TRANS_IMP_LHS_MID: true"),
-        "Transitivity-of-impl middle LHS wrong. Output:\n{out}");
-    assert!(out.contains("TRANS_IMP_INNER: true true"),
-        "Transitivity-of-impl inner LHS/RHS wrong. Output:\n{out}");
+    assert!(
+        out.contains("TRANS_IMP_HYPS: 0"),
+        "Transitivity-of-impl hyps wrong. Output:\n{out}"
+    );
+    assert!(
+        out.contains("TRANS_IMP_LHS_OUTER: true"),
+        "Transitivity-of-impl outer LHS wrong. Output:\n{out}"
+    );
+    assert!(
+        out.contains("TRANS_IMP_LHS_MID: true"),
+        "Transitivity-of-impl middle LHS wrong. Output:\n{out}"
+    );
+    assert!(
+        out.contains("TRANS_IMP_INNER: true true"),
+        "Transitivity-of-impl inner LHS/RHS wrong. Output:\n{out}"
+    );
     // Leibniz substitution: (p=q, P p) |- P q. Two hypotheses.
-    assert!(out.contains("LEIBNIZ: hyps=2 concl=fq:true"),
-        "Leibniz substitution wrong. Output:\n{out}");
+    assert!(
+        out.contains("LEIBNIZ: hyps=2 concl=fq:true"),
+        "Leibniz substitution wrong. Output:\n{out}"
+    );
 }
 
 /// Beyond compilation: actually USE the HOL4 kernel by constructing
@@ -759,9 +796,18 @@ fn recon_via_checkpoint_executes_kernel() {
         panic!("subprocess failure");
     };
     assert_compile_clean(&out, "HOL_EXEC_OK");
-    assert!(out.contains("bool_ty.is_type = true"), "kernel didn't run. Output:\n{out}");
-    assert!(out.contains("p_var.is_var = true"), "kernel didn't run. Output:\n{out}");
-    assert!(out.contains("p_var name = p"), "kernel didn't run. Output:\n{out}");
+    assert!(
+        out.contains("bool_ty.is_type = true"),
+        "kernel didn't run. Output:\n{out}"
+    );
+    assert!(
+        out.contains("p_var.is_var = true"),
+        "kernel didn't run. Output:\n{out}"
+    );
+    assert!(
+        out.contains("p_var name = p"),
+        "kernel didn't run. Output:\n{out}"
+    );
 }
 
 /// SML prelude that loads enough of HOL4 to expose the kernel
@@ -954,8 +1000,7 @@ fn recon_compiles_simple_buffer() {
          print \"HOL_OK\\n\";\n",
         path = hol.display(),
     );
-    let (out, code) = run_with_driver(&driver, 10_000_000_000)
-        .expect("run");
+    let (out, code) = run_with_driver(&driver, 10_000_000_000).expect("run");
     assert_eq!(code, 0, "exit non-zero. Output:\n{out}");
     assert!(
         out.contains("HOL_OK"),
@@ -1016,15 +1061,16 @@ fn recon_compiles_portable() {
          U \"Portable.sig\"; U \"Portable.sml\";\n\
          print \"HOL_OK\\n\";\n",
     );
-    let (out, code) = run_with_driver(&driver, 30_000_000_000)
-        .expect("run");
+    let (out, code) = run_with_driver(&driver, 30_000_000_000).expect("run");
     if code != 0 || !out.contains("HOL_OK") {
         panic!(
             "Portable.sml didn't compile (code={code}).\n\
              First few errors:\n{}",
             out.lines()
-                .filter(|l| l.contains("Error-") || l.contains("not been declared")
-                    || l.contains("Halted") || l.contains("Result:"))
+                .filter(|l| l.contains("Error-")
+                    || l.contains("not been declared")
+                    || l.contains("Halted")
+                    || l.contains("Result:"))
                 .take(10)
                 .collect::<Vec<_>>()
                 .join("\n")

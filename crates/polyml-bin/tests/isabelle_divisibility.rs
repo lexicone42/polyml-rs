@@ -50,7 +50,11 @@ fn divisibility_is_a_preorder_compatible_with_plus_and_times() {
         &image,
         &driver,
         160_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
@@ -59,9 +63,13 @@ fn divisibility_is_a_preorder_compatible_with_plus_and_times() {
     // each divisibility law is a checked theorem (driver prints `OK <name>` only
     // when hyps = 0 AND prop aconv the intended goal)
     for law in [
-        "dvd_refl", "one_dvd", "dvd_zero",
-        "dvd_trans", "dvd_add",
-        "dvd_mult_right", "dvd_mult_cong",
+        "dvd_refl",
+        "one_dvd",
+        "dvd_zero",
+        "dvd_trans",
+        "dvd_add",
+        "dvd_mult_right",
+        "dvd_mult_cong",
         "dvd_le",
     ] {
         assert!(
@@ -70,6 +78,12 @@ fn divisibility_is_a_preorder_compatible_with_plus_and_times() {
         );
     }
     // printed only when all eight OK gates fired
-    assert!(out.contains("DVD_DONE"), "divisibility development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        out.contains("DVD_DONE"),
+        "divisibility development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
 }

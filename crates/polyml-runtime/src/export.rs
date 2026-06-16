@@ -31,8 +31,8 @@
 //!   are deliberately *not* followed (matching upstream behaviour).
 
 use crate::length_word::{
-    self, F_BYTE_OBJ, F_CLOSURE_OBJ, F_CODE_OBJ, F_NEGATIVE_BIT, F_MUTABLE_BIT,
-    F_NO_OVERWRITE, F_WEAK_BIT,
+    self, F_BYTE_OBJ, F_CLOSURE_OBJ, F_CODE_OBJ, F_MUTABLE_BIT, F_NEGATIVE_BIT, F_NO_OVERWRITE,
+    F_WEAK_BIT,
 };
 use crate::poly_word::PolyWord;
 use polyml_image::pexport::{
@@ -234,7 +234,7 @@ fn placeholder() -> Object {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::space::{set_length_word, MemorySpace, SpaceKind};
+    use crate::space::{MemorySpace, SpaceKind, set_length_word};
 
     #[test]
     fn snapshot_single_word_object() {
@@ -282,7 +282,13 @@ mod tests {
             ObjectBody::Ordinary(values) => {
                 let ids: Vec<_> = values
                     .iter()
-                    .filter_map(|v| if let Value::Ref(id) = v { Some(*id) } else { None })
+                    .filter_map(|v| {
+                        if let Value::Ref(id) = v {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
                 assert_eq!(ids.len(), 2);
                 assert_eq!(ids[0], ids[1]);
@@ -312,9 +318,6 @@ mod tests {
         assert_eq!(img2.objects.len(), img.objects.len());
         assert_eq!(img2.root, img.root);
         // Parent is the root and is mutable.
-        assert_eq!(
-            img2.objects[img2.root as usize].flags,
-            ObjFlags::MUTABLE
-        );
+        assert_eq!(img2.objects[img2.root as usize].flags, ObjFlags::MUTABLE);
     }
 }

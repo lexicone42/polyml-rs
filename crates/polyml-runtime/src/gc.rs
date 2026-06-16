@@ -106,7 +106,9 @@ impl<'a> Collector<'a> {
         // word-objects, closures, and code-object constants are
         // always tagged-or-pointer here, so we filter by LSB to
         // skip immediates.
-        unsafe { self.forward_impl(slot, /*tagged_filter=*/ true) };
+        unsafe {
+            self.forward_impl(slot, /*tagged_filter=*/ true)
+        };
     }
 
     /// Variant for stack slots: PC values (retPC, handler PCs)
@@ -117,7 +119,9 @@ impl<'a> Collector<'a> {
     /// # Safety
     /// Same as [`forward`].
     pub unsafe fn forward_stack_slot(&mut self, slot: *mut PolyWord) {
-        unsafe { self.forward_impl(slot, /*tagged_filter=*/ false) };
+        unsafe {
+            self.forward_impl(slot, /*tagged_filter=*/ false)
+        };
     }
 
     unsafe fn forward_impl(&mut self, slot: *mut PolyWord, tagged_filter: bool) {
@@ -406,7 +410,7 @@ impl MemorySpace {
 mod tests {
     use super::*;
     use crate::length_word::{F_BYTE_OBJ, F_MUTABLE_BIT};
-    use crate::space::{set_length_word, SpaceKind};
+    use crate::space::{SpaceKind, set_length_word};
 
     #[test]
     fn collect_empty_heap_is_empty() {

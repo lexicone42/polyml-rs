@@ -8,8 +8,8 @@
 
 #![cfg(test)]
 
-use crate::translate::compile;
 use crate::Jit;
+use crate::translate::compile;
 
 // Opcode constants — kept in sync with `translate.rs`.
 const INSTR_CONST_1: u8 = 0x3c;
@@ -129,11 +129,20 @@ fn jit_matches_interp_for_addition_chain() {
 fn jit_matches_interp_for_mult_chain() {
     // 2 * 2 * 2 * 2 * 2 = 32
     let bc = vec![
-        INSTR_CONST_INT_B, 2,
-        INSTR_CONST_INT_B, 2, INSTR_FIXED_MULT,
-        INSTR_CONST_INT_B, 2, INSTR_FIXED_MULT,
-        INSTR_CONST_INT_B, 2, INSTR_FIXED_MULT,
-        INSTR_CONST_INT_B, 2, INSTR_FIXED_MULT,
+        INSTR_CONST_INT_B,
+        2,
+        INSTR_CONST_INT_B,
+        2,
+        INSTR_FIXED_MULT,
+        INSTR_CONST_INT_B,
+        2,
+        INSTR_FIXED_MULT,
+        INSTR_CONST_INT_B,
+        2,
+        INSTR_FIXED_MULT,
+        INSTR_CONST_INT_B,
+        2,
+        INSTR_FIXED_MULT,
         INSTR_RETURN_1,
     ];
     let mut jit = Jit::new().unwrap();

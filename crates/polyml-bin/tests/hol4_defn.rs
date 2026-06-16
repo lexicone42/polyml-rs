@@ -30,7 +30,10 @@ val () = pr ("DEF " ^ Parse.thm_to_string th ^ "\n");
 val () = pr "DEFINE_OK\n";
 "#;
     let (out, _) = run_image_env(&image, driver, 100_000_000_000, &[]).expect("run");
-    assert!(out.contains("DEFINE_OK"), "non-recursive Define failed:\n{out}");
+    assert!(
+        out.contains("DEFINE_OK"),
+        "non-recursive Define failed:\n{out}"
+    );
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
 

@@ -38,7 +38,10 @@ val () = pr "PROBE_DONE\n";
 "#;
     let (out, _) = run_image_env(&image, driver, 30_000_000_000, &[]).expect("run");
     assert!(out.contains("PROBE_DONE"), "probe didn't finish:\n{out}");
-    assert!(!out.contains("MISS "), "a TFL prerequisite is missing:\n{out}");
+    assert!(
+        !out.contains("MISS "),
+        "a TFL prerequisite is missing:\n{out}"
+    );
 }
 
 #[test]
@@ -55,5 +58,8 @@ val th = Tactical.prove (
 val () = if List.null (Thm.hyp th) then pr "FST_SND_OK\n" else pr "HYPS\n";
 "#;
     let (out, _) = run_image_env(&image, driver, 30_000_000_000, &[]).expect("run");
-    assert!(out.contains("FST_SND_OK"), "FST/SND projection failed:\n{out}");
+    assert!(
+        out.contains("FST_SND_OK"),
+        "FST/SND projection failed:\n{out}"
+    );
 }

@@ -28,10 +28,13 @@ use common::*;
 #[test]
 #[ignore = "slow: needs /tmp/hol4_kernel (tools/build-hol4-checkpoints.sh)"]
 fn theory_subsystem_loads() {
-    let Some((out, _code)) =
-        run_theory_subsystem("val () = print \"THEORY_TEST_SENTINEL\\n\";", 200_000_000_000)
-    else {
-        eprintln!("SKIP: /tmp/hol4_kernel or vendor/hol4 missing — run tools/build-hol4-checkpoints.sh");
+    let Some((out, _code)) = run_theory_subsystem(
+        "val () = print \"THEORY_TEST_SENTINEL\\n\";",
+        200_000_000_000,
+    ) else {
+        eprintln!(
+            "SKIP: /tmp/hol4_kernel or vendor/hol4 missing — run tools/build-hol4-checkpoints.sh"
+        );
         return;
     };
 
@@ -73,7 +76,9 @@ val () =
   handle e => print ("NEW_THEORY_RAISED " ^ General.exnMessage e ^ "\n");
 "#;
     let Some((out, _code)) = run_theory_subsystem(smoke, 200_000_000_000) else {
-        eprintln!("SKIP: /tmp/hol4_kernel or vendor/hol4 missing — run tools/build-hol4-checkpoints.sh");
+        eprintln!(
+            "SKIP: /tmp/hol4_kernel or vendor/hol4 missing — run tools/build-hol4-checkpoints.sh"
+        );
         return;
     };
 
@@ -82,7 +87,10 @@ val () =
     if ok {
         eprintln!("new_theory succeeded: {}", grep_line(&out, "NEW_THEORY_OK"));
     } else if raised {
-        eprintln!("new_theory ran and raised: {}", grep_line(&out, "NEW_THEORY_RAISED"));
+        eprintln!(
+            "new_theory ran and raised: {}",
+            grep_line(&out, "NEW_THEORY_RAISED")
+        );
     }
     assert!(
         ok || raised,
@@ -130,7 +138,9 @@ end)
 handle e => print ("DEMO_PROOF_FAIL " ^ General.exnMessage e ^ "\n");
 "#;
     let Some((out, _)) = run_theory_subsystem(proof, 200_000_000_000) else {
-        eprintln!("SKIP: /tmp/hol4_kernel or vendor/hol4 missing — run tools/build-hol4-checkpoints.sh");
+        eprintln!(
+            "SKIP: /tmp/hol4_kernel or vendor/hol4 missing — run tools/build-hol4-checkpoints.sh"
+        );
         return;
     };
     assert!(

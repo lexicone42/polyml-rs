@@ -55,7 +55,11 @@ fn naturals_with_le_form_a_linear_order() {
         &image,
         &driver,
         130_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
@@ -64,9 +68,13 @@ fn naturals_with_le_form_a_linear_order() {
     // each order law is a checked theorem (driver prints `OK <name>` only when
     // hyps = 0 AND prop aconv the intended goal)
     for law in [
-        "le_refl", "zero_le", "le_add",
-        "le_trans", "le_antisym",
-        "le_suc_mono", "le_add_mono",
+        "le_refl",
+        "zero_le",
+        "le_add",
+        "le_trans",
+        "le_antisym",
+        "le_suc_mono",
+        "le_add_mono",
         "le_total",
     ] {
         assert!(
@@ -75,6 +83,12 @@ fn naturals_with_le_form_a_linear_order() {
         );
     }
     // the driver prints this only when all eight OK gates + the soundness probes fired
-    assert!(out.contains("ORDER_DONE"), "order development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        out.contains("ORDER_DONE"),
+        "order development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
 }

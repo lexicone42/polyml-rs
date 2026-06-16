@@ -44,13 +44,20 @@ fn first_order_object_logic_proofs() {
         &image,
         &driver,
         30_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("ISA_OBJLOGIC_START"), "driver did not start:\n{out}");
+    assert!(
+        out.contains("ISA_OBJLOGIC_START"),
+        "driver did not start:\n{out}"
+    );
     // each connective's natural-deduction theorem must be checked
     for rung in ["conj", "oimp", "disj", "forall", "oeq"] {
         assert!(
@@ -58,5 +65,8 @@ fn first_order_object_logic_proofs() {
             "object-logic rung `{rung}` did not produce a checked theorem:\n{out}"
         );
     }
-    assert!(out.contains("ISA_OBJLOGIC_DONE"), "object-logic demo did not finish:\n{out}");
+    assert!(
+        out.contains("ISA_OBJLOGIC_DONE"),
+        "object-logic demo did not finish:\n{out}"
+    );
 }

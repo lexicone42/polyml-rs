@@ -26,10 +26,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # Non-blocking for now: the tree predates CI and isn't fully rustfmt-clean.
-      # Flip to a hard gate after a one-shot `cargo fmt --all` cleanup pass.
-      - name: Formatting (informational)
+      - name: Formatting
         run: cargo fmt --all -- --check
-        continue-on-error: true
 
       - name: Build workspace (compiles all crates + test targets)
         run: cargo build --release --workspace --all-targets

@@ -44,25 +44,44 @@ fn fermats_little_theorem() {
         eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
         return;
     };
-    let driver_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/isabelle_support/isabelle_flt.sml");
+    let driver_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/isabelle_support/isabelle_flt.sml");
     let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_flt.sml");
 
     let Some((out, _)) = run_image_env(
         &image,
         &common::with_nt_helpers(&driver),
         320_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
     // the freshman's dream (a+b)^p == a^p + b^p mod p
-    assert!(out.contains("OK freshman_dream"), "freshman's dream did not check:\n{out}");
+    assert!(
+        out.contains("OK freshman_dream"),
+        "freshman's dream did not check:\n{out}"
+    );
     // FERMAT'S LITTLE THEOREM: a^p == a mod p
-    assert!(out.contains("OK flt"), "Fermat's little theorem did not check:\n{out}");
-    assert!(out.contains("FLT_DONE"), "FLT development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("OK flt"),
+        "Fermat's little theorem did not check:\n{out}"
+    );
+    assert!(
+        out.contains("FLT_DONE"),
+        "FLT development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
 }

@@ -7,8 +7,9 @@ use std::path::PathBuf;
 
 use polyml_image::pexport::Image;
 use polyml_runtime::{
+    MemorySpace, PolyWord,
     length_word::{self, length_of},
-    load_image, MemorySpace, PolyWord,
+    load_image,
 };
 
 fn workspace_root() -> PathBuf {

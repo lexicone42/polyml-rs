@@ -45,22 +45,38 @@ fn closed_form_summations() {
         &image,
         &common::with_binom_thm(&driver),
         800_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("BINOM_THM_DONE"), "finite-sum base did not load:\n{out}");
+    assert!(
+        out.contains("BINOM_THM_DONE"),
+        "finite-sum base did not load:\n{out}"
+    );
     for (lemma, marker) in [
         ("nicomachus", "NICOMACHUS_OK"),
         ("faulhaber_sq", "FAULHABER_SQ_OK"),
         ("pronic_sum", "PRONIC_OK"),
     ] {
-        assert!(out.contains(&format!("OK {lemma}")), "identity `{lemma}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {lemma}")),
+            "identity `{lemma}` did not check:\n{out}"
+        );
         assert!(out.contains(marker), "marker `{marker}` missing:\n{out}");
     }
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("PROBE_UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("PROBE_UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
 }

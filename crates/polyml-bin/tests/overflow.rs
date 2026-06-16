@@ -43,7 +43,11 @@ pr "OVF_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("OVF_DONE"), "driver did not finish.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("OVF_DONE"),
+        "driver did not finish.\n{}",
+        tail(&out, 30)
+    );
     for op in ["ADD", "SUB", "MULT", "FLOOR"] {
         assert!(
             out.contains(&format!("{op}=CAUGHT")),
@@ -51,6 +55,14 @@ pr "OVF_DONE\n";
             tail(&out, 30)
         );
     }
-    assert!(out.contains("NORM_ADD=42"), "in-range add changed.\n{}", tail(&out, 30));
-    assert!(out.contains("NORM_FLOOR=3"), "in-range floor changed.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("NORM_ADD=42"),
+        "in-range add changed.\n{}",
+        tail(&out, 30)
+    );
+    assert!(
+        out.contains("NORM_FLOOR=3"),
+        "in-range floor changed.\n{}",
+        tail(&out, 30)
+    );
 }

@@ -1,26 +1,20 @@
 //! Cranelift-backed JIT for PolyML bytecode.
 //!
-//! Status: proof-of-concept stub. We compile one toy function
-//! (`compile_identity`) to native code and call it from Rust to
-//! prove the Cranelift build + JIT plumbing works in this
-//! workspace. Real bytecode-to-IR translation comes next.
-//!
-//! ## Long-term plan
-//!
-//! - Each PolyML `Closure { code_addr }` will get a JIT'd entry
-//!   point computed from the underlying code object's bytecode.
-//! - The interpreter dispatches CALL into a JIT'd function by
-//!   looking the closure's code pointer up in a JIT cache.
-//! - Inside JIT'd code, opcodes we haven't yet translated trampoline
-//!   back to the interpreter (one entry per uncompiled opcode).
-//! - JIT'd code shares the same `Interpreter::stack` array as the
-//!   interpreter for now; later we can spill registers more
-//!   aggressively.
+//! Translates a code object's bytecode to Cranelift IR and installs the
+//! compiled entry in the interpreter's JIT cache; `do_call` dispatches into a
+//! JIT'd function by looking its code pointer up in that cache, and opcodes the
+//! translator doesn't model trampoline back to the interpreter. It runs the
+//! full pipeline correctly (the simple bootstrap, the 7-stage self-compilation
+//! chain, and the HOL4 workloads), but is currently a correctness *testbed* —
+//! roughly perf-neutral with the tuned interpreter rather than a speedup,
+//! because the genuinely hot functions still contain un-translated opcodes (see
+//! `CLAUDE.md`, "JIT status", for the coverage-bound performance analysis).
+//! Enable with `poly run --jit <image>`.
 
 #![allow(clippy::missing_safety_doc)]
 
-pub mod translate;
 pub mod differential;
+pub mod translate;
 
 #[cfg(test)]
 mod bench;
@@ -42,7 +36,7 @@ pub fn install_all_jit_entries(
     loaded: &polyml_runtime::LoadedImage,
     interp: &mut polyml_runtime::Interpreter,
 ) -> (usize, usize, usize) {
-    use polyml_runtime::{length_word, JitEntry, MemorySpace, PolyWord};
+    use polyml_runtime::{JitEntry, MemorySpace, PolyWord, length_word};
     let mut total = 0usize;
     let mut jit_ok = 0usize;
     let mut installed = 0usize;
@@ -81,10 +75,7 @@ pub fn install_all_jit_entries(
     let verbose = std::env::var("JIT_INSTALL_VERBOSE").is_ok();
     let mut install_idx = 0usize;
 
-    fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(
-        space: &MemorySpace,
-        mut f: F,
-    ) {
+    fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(space: &MemorySpace, mut f: F) {
         let mut i = 0usize;
         let used = space.used_words();
         let Some(base) = space.iter().next().map(|w| w as *const PolyWord) else {
@@ -118,23 +109,30 @@ pub fn install_all_jit_entries(
             let bytecode_len = bytecode_len.min(max_bytes);
             let full_body: &[u8] =
                 unsafe { std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes) };
-            let (jf, jit_arity_init) =
-                match translate::compile_with_consts_meta(jit, full_body, bytecode_len) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        if std::env::var("JIT_LOG_TRANSLATE_ERRORS").is_ok() {
-                            let dump_len: usize = std::env::var("JIT_LOG_BC_LEN")
-                                .ok().and_then(|s| s.parse().ok()).unwrap_or(32);
-                            let hex: Vec<String> = full_body[..bytecode_len.min(dump_len)]
-                                .iter().map(|b| format!("{b:02x}")).collect();
-                            eprintln!(
-                                "  jit_translate err: code_obj=0x{body_start:016x} bytecode_len={bytecode_len} bc={} err={e}",
-                                hex.join(" ")
-                            );
-                        }
-                        return;
+            let (jf, jit_arity_init) = match translate::compile_with_consts_meta(
+                jit,
+                full_body,
+                bytecode_len,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    if std::env::var("JIT_LOG_TRANSLATE_ERRORS").is_ok() {
+                        let dump_len: usize = std::env::var("JIT_LOG_BC_LEN")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(32);
+                        let hex: Vec<String> = full_body[..bytecode_len.min(dump_len)]
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect();
+                        eprintln!(
+                            "  jit_translate err: code_obj=0x{body_start:016x} bytecode_len={bytecode_len} bc={} err={e}",
+                            hex.join(" ")
+                        );
                     }
-                };
+                    return;
+                }
+            };
             jit_ok += 1;
             let Some(sml_arity) = translate::arity_from_return_scan_pub(&full_body[..bytecode_len])
             else {
@@ -258,10 +256,7 @@ pub fn install_all_jit_entries(
             // / a CONST_ADDR-RTS wrapper) — those remain blocked by their
             // own filters below, independent of the tail-call fix.
             let _ = has_tail_b_b;
-            if has_call_local_b
-                || has_call_const_addr
-                || const_addr_rts_wrapper
-            {
+            if has_call_local_b || has_call_const_addr || const_addr_rts_wrapper {
                 return;
             }
             // Bisection: check limit + skip set BEFORE incrementing
@@ -329,14 +324,10 @@ pub fn install_all_jit_entries(
 /// `rts_args[0]` matches the interpreter's `args[0]` (= threadId
 /// for `rtsCallFullN`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rts_trampoline(
-    stub_word: i64,
-    n_args: i64,
-    args: *const i64,
-) -> i64 {
+pub unsafe extern "C" fn rts_trampoline(stub_word: i64, n_args: i64, args: *const i64) -> i64 {
     use polyml_runtime::{
+        JIT_INTERP, PolyWord,
         rts::{RtsContext, RtsFn},
-        PolyWord, JIT_INTERP,
     };
 
     let interp_ptr = JIT_INTERP.with(|c| c.get());
@@ -440,8 +431,7 @@ unsafe fn check_closure_arity(addr: u64) -> Option<usize> {
     }
     // Fallback: scan bytecode for first RETURN_N. Use the same
     // arity_from_return_scan logic that the translator uses.
-    let body =
-        unsafe { std::slice::from_raw_parts(code_addr as *const u8, body_len_bytes) };
+    let body = unsafe { std::slice::from_raw_parts(code_addr as *const u8, body_len_bytes) };
     // The const pool starts at body[body_len_bytes - 8] + body_len_bytes
     // (trailing-offset is signed, negative). Restrict scan to bytecode.
     let trailing_offset_word = body_len_bytes.checked_sub(8)?;
@@ -469,9 +459,7 @@ pub unsafe extern "C" fn closure_call_trampoline(
     // differ, the JIT'd code will push too many or too few args
     // → stack drift → eventually SEGV in unrelated code.
     if std::env::var("JIT_TRAMP_VERIFY_ARITY").is_ok() {
-        let runtime_arity = unsafe {
-            check_closure_arity(closure_word as u64)
-        };
+        let runtime_arity = unsafe { check_closure_arity(closure_word as u64) };
         if let Some(rt_arity) = runtime_arity
             && rt_arity != n
         {
@@ -483,14 +471,13 @@ pub unsafe extern "C" fn closure_call_trampoline(
     }
     if std::env::var("JIT_TRAMP_DUMP_ARGS").is_ok() {
         use std::io::Write;
-        let _ = writeln!(std::io::stderr(),
+        let _ = writeln!(
+            std::io::stderr(),
             "  closure_call_trampoline: closure=0x{closure_word:016x} n_args={n}",
         );
         for i in 0..n {
             let v = unsafe { args_ptr.add(i).read() };
-            let _ = writeln!(std::io::stderr(),
-                "    raw_slot[{i}] = 0x{v:016x}",
-            );
+            let _ = writeln!(std::io::stderr(), "    raw_slot[{i}] = 0x{v:016x}",);
         }
         let _ = std::io::stderr().flush();
     }
@@ -609,9 +596,9 @@ pub unsafe extern "C" fn block_compare_byte_trampoline(
         s1.cmp(s2)
     };
     match ordering {
-        std::cmp::Ordering::Less => -1,        // tag(-1)
-        std::cmp::Ordering::Equal => 1,         // tag(0)
-        std::cmp::Ordering::Greater => 3,       // tag(1)
+        std::cmp::Ordering::Less => -1,   // tag(-1)
+        std::cmp::Ordering::Equal => 1,   // tag(0)
+        std::cmp::Ordering::Greater => 3, // tag(1)
     }
 }
 
@@ -670,11 +657,11 @@ pub unsafe extern "C" fn dynamic_call_trampoline(
     args_ptr: *const i64,
     args_depth: i64,
 ) -> i64 {
-    match polyml_runtime::jit_dispatch_dynamic_call(
-        closure_word as u64,
-        args_ptr,
-        args_depth,
-    ) {
+    // SAFETY: args_ptr is the JIT-spilled arg buffer of length args_depth, valid
+    // for the duration of this trampoline call (the caller is JIT-generated code).
+    match unsafe {
+        polyml_runtime::jit_dispatch_dynamic_call(closure_word as u64, args_ptr, args_depth)
+    } {
         Ok(v) => v.0 as i64,
         Err(e) => {
             if std::env::var("JIT_TRAMP_PANIC_ON_ERR").is_ok() {
@@ -719,10 +706,7 @@ pub unsafe extern "C" fn get_thread_id_trampoline() -> i64 {
 /// Byte-mem allocation trampoline. `(n_words, flags) -> i64`.
 /// Used by JIT'd `ALLOC_BYTE_MEM`. Body is uninitialized.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn alloc_byte_mem_trampoline(
-    n_words: i64,
-    flags: i64,
-) -> i64 {
+pub unsafe extern "C" fn alloc_byte_mem_trampoline(n_words: i64, flags: i64) -> i64 {
     #[allow(clippy::cast_sign_loss)]
     let n = n_words.max(0) as usize;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -747,7 +731,11 @@ pub unsafe extern "C" fn closure_alloc_trampoline(
 ) -> i64 {
     #[allow(clippy::cast_sign_loss)]
     let n = n_captures.max(0) as usize;
-    match polyml_runtime::jit_dispatch_closure_alloc(n, captures_ptr, src_closure_word as u64) {
+    // SAFETY: captures_ptr points at n valid capture words spilled by the
+    // JIT-generated caller; valid for the duration of this trampoline call.
+    match unsafe {
+        polyml_runtime::jit_dispatch_closure_alloc(n, captures_ptr, src_closure_word as u64)
+    } {
         Some(ptr) => ptr as i64,
         None => 1,
     }
@@ -763,13 +751,12 @@ pub unsafe extern "C" fn closure_alloc_trampoline(
 /// fallback — the JIT'd code can still run, just produces a
 /// useless tuple value.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn alloc_tuple_trampoline(
-    n_words: i64,
-    values_ptr: *const i64,
-) -> i64 {
+pub unsafe extern "C" fn alloc_tuple_trampoline(n_words: i64, values_ptr: *const i64) -> i64 {
     #[allow(clippy::cast_sign_loss)]
     let n = n_words.max(0) as usize;
-    match polyml_runtime::jit_dispatch_alloc(n, 0, values_ptr) {
+    // SAFETY: values_ptr points at n valid tuple-element words spilled by the
+    // JIT-generated caller; valid for the duration of this trampoline call.
+    match unsafe { polyml_runtime::jit_dispatch_alloc(n, 0, values_ptr) } {
         Some(ptr) => ptr as i64,
         None => 1, // TAGGED(0)
     }
@@ -806,8 +793,7 @@ impl Jit {
         flags
             .set("opt_level", "speed")
             .map_err(|e| JitError::Settings(e.to_string()))?;
-        let isa_builder = cranelift_native::builder()
-            .map_err(|e| JitError::Isa(e.to_string()))?;
+        let isa_builder = cranelift_native::builder().map_err(|e| JitError::Isa(e.to_string()))?;
         let isa = isa_builder
             .finish(settings::Flags::new(flags))
             .map_err(|e| JitError::Isa(e.to_string()))?;
@@ -945,7 +931,11 @@ mod tests {
         //   tag(6)  = 13
         let tagged_3: i64 = 2 * 3 + 1;
         let tagged_6: i64 = 2 * 6 + 1;
-        assert_eq!(f(tagged_3), tagged_6, "double of tagged 3 should be tagged 6");
+        assert_eq!(
+            f(tagged_3),
+            tagged_6,
+            "double of tagged 3 should be tagged 6"
+        );
 
         let tagged_neg1: i64 = 2 * (-1) + 1; // = -1
         let tagged_neg2: i64 = 2 * (-2) + 1; // = -3

@@ -132,7 +132,11 @@ fn run_golden_corpus() {
     }
 
     if !failures.is_empty() {
-        let msg = format!("{} golden test failure(s):\n\n{}", failures.len(), failures.join("\n\n"));
+        let msg = format!(
+            "{} golden test failure(s):\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
         panic!("{msg}");
     }
 }

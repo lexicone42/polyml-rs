@@ -40,26 +40,47 @@ fn finite_product_combinator() {
         eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
         return;
     };
-    let driver_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/isabelle_support/isabelle_prodf.sml");
+    let driver_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/isabelle_support/isabelle_prodf.sml");
     let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_prodf.sml");
 
     let Some((out, _)) = run_image_env(
         &image,
         &common::with_binom_thm(&driver),
         800_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("BINOM_THM_DONE"), "finite-sum base did not load:\n{out}");
-    for lemma in ["prodf_def", "prod_cong", "prod_const_pow", "prod_mult_combine"] {
-        assert!(out.contains(&format!("OK {lemma}")), "`{lemma}` did not check:\n{out}");
+    assert!(
+        out.contains("BINOM_THM_DONE"),
+        "finite-sum base did not load:\n{out}"
+    );
+    for lemma in [
+        "prodf_def",
+        "prod_cong",
+        "prod_const_pow",
+        "prod_mult_combine",
+    ] {
+        assert!(
+            out.contains(&format!("OK {lemma}")),
+            "`{lemma}` did not check:\n{out}"
+        );
     }
     assert!(out.contains("PRODF_OK"), "PRODF_OK marker missing:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("PROBE_UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("PROBE_UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
 }

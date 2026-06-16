@@ -7,7 +7,7 @@
 //! prove the translation is semantically faithful, not just that it
 //! compiles.
 
-use polyml_jit::{differential, translate, Jit};
+use polyml_jit::{Jit, differential, translate};
 use polyml_runtime::{Interpreter, PolyWord, StepResult};
 
 const INSTR_LOCAL_2: u8 = 0x2b;
@@ -30,15 +30,24 @@ fn case16_bytecode() -> Vec<u8> {
     vec![
         INSTR_LOCAL_2,
         INSTR_CASE16,
-        0x02, 0x00, // arg1 = 2
-        0x07, 0x00, // off0 = 7  -> case0 @ 11
-        0x0a, 0x00, // off1 = 10 -> case1 @ 14
+        0x02,
+        0x00, // arg1 = 2
+        0x07,
+        0x00, // off0 = 7  -> case0 @ 11
+        0x0a,
+        0x00, // off1 = 10 -> case1 @ 14
         // default body @ 8
-        INSTR_CONST_INT_B, 99, INSTR_RETURN_1,
+        INSTR_CONST_INT_B,
+        99,
+        INSTR_RETURN_1,
         // case0 body @ 11
-        INSTR_CONST_INT_B, 11, INSTR_RETURN_1,
+        INSTR_CONST_INT_B,
+        11,
+        INSTR_RETURN_1,
         // case1 body @ 14
-        INSTR_CONST_INT_B, 22, INSTR_RETURN_1,
+        INSTR_CONST_INT_B,
+        22,
+        INSTR_RETURN_1,
     ]
 }
 
@@ -70,9 +79,9 @@ fn case16_jit_matches_interp_all_selectors() {
     let cases: &[(i64, i64)] = &[
         (0, 11),
         (1, 22),
-        (2, 99),   // out of range high
+        (2, 99), // out of range high
         (5, 99),
-        (-1, 99),  // out of range negative
+        (-1, 99), // out of range negative
         (100, 99),
     ];
 

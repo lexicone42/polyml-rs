@@ -37,10 +37,22 @@ fn append_laws_by_list_induction() {
         eprintln!("SKIP: vendor/hol4 or driver missing");
         return;
     };
-    assert!(out.contains("LISTAX_DONE"), "list driver did not finish.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("LISTAX_DONE"),
+        "list driver did not finish.\n{}",
+        tail(&out, 40)
+    );
     // the two APPEND theorems, proved by genuine structural induction, 0 hyps
-    assert!(out.contains("APPEND_NIL_HYPS=0"), "APPEND l NIL = l had hypotheses.\n{}", tail(&out, 40));
-    assert!(out.contains("APPEND_ASSOC_HYPS=0"), "APPEND_ASSOC had hypotheses.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("APPEND_NIL_HYPS=0"),
+        "APPEND l NIL = l had hypotheses.\n{}",
+        tail(&out, 40)
+    );
+    assert!(
+        out.contains("APPEND_ASSOC_HYPS=0"),
+        "APPEND_ASSOC had hypotheses.\n{}",
+        tail(&out, 40)
+    );
     assert!(
         out.contains("∀l1 l2 l3. APPEND (APPEND l1 l2) l3 = APPEND l1 (APPEND l2 l3)"),
         "APPEND_ASSOC not the expected statement.\n{}",
@@ -52,5 +64,9 @@ fn append_laws_by_list_induction() {
         "list_INDUCT should be present and labelled as an axiom.\n{}",
         tail(&out, 40)
     );
-    assert!(!out.contains("_FAIL"), "a list step failed.\n{}", tail(&out, 40));
+    assert!(
+        !out.contains("_FAIL"),
+        "a list step failed.\n{}",
+        tail(&out, 40)
+    );
 }

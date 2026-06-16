@@ -13,7 +13,7 @@
 //! This is the "transparent JIT" pattern: the interpreter remains
 //! in charge; JIT'd code is a fast path.
 
-use polyml_jit::{translate, Jit};
+use polyml_jit::{Jit, translate};
 use polyml_runtime::PolyWord;
 
 const INSTR_LOCAL_2: u8 = 0x2b;

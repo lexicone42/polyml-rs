@@ -185,11 +185,7 @@ pub enum ParseError {
 
 // ----- Writer -----------------------------------------------------------
 
-fn write_object<W: std::io::Write>(
-    w: &mut W,
-    id: u32,
-    obj: &Object,
-) -> std::io::Result<()> {
+fn write_object<W: std::io::Write>(w: &mut W, id: u32, obj: &Object) -> std::io::Result<()> {
     write!(w, "{id}:")?;
     // Modifier letters in the order MNVW (matches upstream).
     if obj.flags.contains(ObjFlags::MUTABLE) {
@@ -236,12 +232,7 @@ fn write_object<W: std::io::Write>(
             constants,
             relocs,
         } => {
-            write!(
-                w,
-                "F{},{}|",
-                constants.len(),
-                code_bytes.len(),
-            )?;
+            write!(w, "F{},{}|", constants.len(), code_bytes.len(),)?;
             write_hex(w, code_bytes)?;
             w.write_all(b"|")?;
             write_value_list(w, constants)?;
@@ -263,10 +254,7 @@ fn write_object<W: std::io::Write>(
     Ok(())
 }
 
-fn write_value_list<W: std::io::Write>(
-    w: &mut W,
-    values: &[Value],
-) -> std::io::Result<()> {
+fn write_value_list<W: std::io::Write>(w: &mut W, values: &[Value]) -> std::io::Result<()> {
     for (i, v) in values.iter().enumerate() {
         if i > 0 {
             w.write_all(b",")?;
@@ -347,12 +335,17 @@ impl<'a> Cursor<'a> {
         let start = self.pos;
         self.skip_while(|b| b.is_ascii_digit());
         if self.pos == start {
-            return Err(ParseError::BadNumber { reason: "expected digit", at: start });
+            return Err(ParseError::BadNumber {
+                reason: "expected digit",
+                at: start,
+            });
         }
         // SAFETY: digits are ASCII.
         let s = std::str::from_utf8(&self.bytes[start..self.pos]).unwrap();
-        s.parse::<u64>()
-            .map_err(|_| ParseError::BadNumber { reason: "overflow", at: start })
+        s.parse::<u64>().map_err(|_| ParseError::BadNumber {
+            reason: "overflow",
+            at: start,
+        })
     }
 
     /// Read an unsigned decimal integer that fits in `usize`. On 64-bit
@@ -376,11 +369,16 @@ impl<'a> Cursor<'a> {
         }
         self.skip_while(|b| b.is_ascii_digit());
         if self.pos == start || (self.pos == start + 1 && self.bytes[start] == b'-') {
-            return Err(ParseError::BadNumber { reason: "expected digit", at: start });
+            return Err(ParseError::BadNumber {
+                reason: "expected digit",
+                at: start,
+            });
         }
         let s = std::str::from_utf8(&self.bytes[start..self.pos]).unwrap();
-        s.parse::<i64>()
-            .map_err(|_| ParseError::BadNumber { reason: "overflow", at: start })
+        s.parse::<i64>().map_err(|_| ParseError::BadNumber {
+            reason: "overflow",
+            at: start,
+        })
     }
 
     /// Read `n` hex characters into a `Vec<u8>` (2 chars per byte).
@@ -426,9 +424,7 @@ impl Image {
         writeln!(
             w,
             "Root\t{} {} {}",
-            self.root,
-            arch_char as char,
-            word_size_n,
+            self.root, arch_char as char, word_size_n,
         )?;
         for (id, obj) in self.objects.iter().enumerate() {
             write_object(w, id as u32, obj)?;
@@ -506,17 +502,15 @@ impl Image {
     }
 }
 
-fn parse_header(
-    c: &mut Cursor<'_>,
-) -> Result<(u32, ObjectId, SourceArch, WordSize), ParseError> {
+fn parse_header(c: &mut Cursor<'_>) -> Result<(u32, ObjectId, SourceArch, WordSize), ParseError> {
     // "Objects\t<count>\n"
     for &expected in b"Objects" {
         c.expect(expected, "header magic 'Objects'")?;
     }
     c.skip_while(|b| b == b'\t' || b == b' ');
     let count = c.read_u64()?;
-    let count: u32 = u32::try_from(count)
-        .map_err(|_| ParseError::BadHeader("object count exceeds u32"))?;
+    let count: u32 =
+        u32::try_from(count).map_err(|_| ParseError::BadHeader("object count exceeds u32"))?;
     c.skip_while(|b| matches!(b, b'\r' | b'\n'));
 
     // "Root\t<id> <arch> <word_size>\n"
@@ -525,8 +519,8 @@ fn parse_header(
     }
     c.skip_while(|b| b == b'\t' || b == b' ');
     let root_u = c.read_u64()?;
-    let root: ObjectId = u32::try_from(root_u)
-        .map_err(|_| ParseError::BadHeader("root index exceeds u32"))?;
+    let root: ObjectId =
+        u32::try_from(root_u).map_err(|_| ParseError::BadHeader("root index exceeds u32"))?;
 
     // Older versions omit arch+word_size. Be lenient.
     c.skip_while(|b| b == b' ' || b == b'\t');
@@ -755,9 +749,8 @@ fn parse_code(c: &mut Cursor<'_>, n_objects: u32) -> Result<ObjectBody, ParseErr
                     });
                 }
                 relocs.push(CodeReloc {
-                    offset: u32::try_from(offset_u).map_err(|_| ParseError::BadHeader(
-                        "reloc offset exceeds u32",
-                    ))?,
+                    offset: u32::try_from(offset_u)
+                        .map_err(|_| ParseError::BadHeader("reloc offset exceeds u32"))?,
                     kind: u8::try_from(kind_u)
                         .map_err(|_| ParseError::BadHeader("reloc kind exceeds u8"))?,
                     target,

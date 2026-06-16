@@ -6,7 +6,7 @@
 //! whose first word matches the source's code-addr and whose
 //! second word matches arg_0.
 
-use polyml_jit::{translate, Jit};
+use polyml_jit::{Jit, translate};
 use polyml_runtime::{Interpreter, MemorySpace, PolyWord, SpaceKind};
 
 const INSTR_LOCAL_2: u8 = 0x2b;
@@ -84,15 +84,9 @@ fn jit_closure_b_builds_real_closure() {
     //   args_ptr[1] = arg_1
     //   args_ptr[2] = retPC placeholder
     //   args_ptr[3] = closure placeholder
-    let args = [
-        tag(42),
-        src_closure_ptr as i64,
-        0,
-        0,
-    ];
-    let result = polyml_runtime::with_jit_interp(&mut interp, || unsafe {
-        jit_fn(args.as_ptr(), 0, 0)
-    });
+    let args = [tag(42), src_closure_ptr as i64, 0, 0];
+    let result =
+        polyml_runtime::with_jit_interp(&mut interp, || unsafe { jit_fn(args.as_ptr(), 0, 0) });
 
     let result_word = PolyWord::from_bits(result as usize);
     assert!(

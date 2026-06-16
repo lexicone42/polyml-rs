@@ -36,23 +36,36 @@ fn powers_and_modular_powers() {
         eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
         return;
     };
-    let driver_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/isabelle_support/isabelle_power.sml");
+    let driver_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/isabelle_support/isabelle_power.sml");
     let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_power.sml");
 
     let Some((out, _)) = run_image_env(
         &image,
         &driver,
         250_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
     for law in ["pow_one", "pow_add", "pow_mult_base", "cong_pow"] {
-        assert!(out.contains(&format!("OK {law}")), "power law `{law}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {law}")),
+            "power law `{law}` did not check:\n{out}"
+        );
     }
-    assert!(out.contains("POW_DONE"), "powers development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        out.contains("POW_DONE"),
+        "powers development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
 }

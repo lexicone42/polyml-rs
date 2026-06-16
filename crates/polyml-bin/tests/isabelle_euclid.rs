@@ -51,7 +51,11 @@ fn euclid_infinitude_of_primes() {
         &image,
         &common::with_nt_helpers(&driver),
         300_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
@@ -59,11 +63,26 @@ fn euclid_infinitude_of_primes() {
 
     // the supporting lemmas (factorial positivity, p|n!, consecutive-coprimality)
     for lemma in ["fact_pos", "dvd_fact", "consec_coprime"] {
-        assert!(out.contains(&format!("OK {lemma}")), "supporting lemma `{lemma}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {lemma}")),
+            "supporting lemma `{lemma}` did not check:\n{out}"
+        );
     }
     // EUCLID: forall n, exists a prime p with n < p (structural prime, 0-hyp)
-    assert!(out.contains("OK euclid"), "Euclid's theorem (infinitude of primes) did not check:\n{out}");
-    assert!(out.contains("EUCLID_DONE"), "Euclid development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("OK euclid"),
+        "Euclid's theorem (infinitude of primes) did not check:\n{out}"
+    );
+    assert!(
+        out.contains("EUCLID_DONE"),
+        "Euclid development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
 }

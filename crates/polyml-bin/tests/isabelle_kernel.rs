@@ -35,7 +35,9 @@ fn arbint_image() -> Option<PathBuf> {
 fn pure_ml_files(pure: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     for root in ["ROOT0.ML", "ROOT.ML"] {
-        let Ok(text) = std::fs::read_to_string(pure.join(root)) else { continue };
+        let Ok(text) = std::fs::read_to_string(pure.join(root)) else {
+            continue;
+        };
         for line in text.lines() {
             if let Some(rest) = line.trim().strip_prefix("ML_file ") {
                 if let Some(start) = rest.find('"') {
@@ -58,11 +60,22 @@ fn term_kernel_constructs_and_reduces() {
     };
     let files = pure_ml_files(&pure);
     // term.ML is #83 in the load order; load up to and including it.
-    let upto = files.iter().position(|f| f == "term.ML").map_or(files.len(), |i| i + 1);
+    let upto = files
+        .iter()
+        .position(|f| f == "term.ML")
+        .map_or(files.len(), |i| i + 1);
     let p = pure.to_str().unwrap();
     let quote = |f: &str| format!("\"{p}/{f}\"");
-    let ph0_list = files[..27.min(files.len())].iter().map(|f| quote(f)).collect::<Vec<_>>().join(",");
-    let mid_list = files[27..upto].iter().map(|f| quote(f)).collect::<Vec<_>>().join(",");
+    let ph0_list = files[..27.min(files.len())]
+        .iter()
+        .map(|f| quote(f))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mid_list = files[27..upto]
+        .iter()
+        .map(|f| quote(f))
+        .collect::<Vec<_>>()
+        .join(",");
 
     let driver = format!(
         r#"
@@ -92,15 +105,27 @@ pr "=KDEMO= DONE\n";
         &image,
         &driver,
         60_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("=KDEMO= DONE"), "kernel demo did not finish.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("=KDEMO= DONE"),
+        "kernel demo did not finish.\n{}",
+        tail(&out, 40)
+    );
     for check in [
-        "fastype_lam true", "beta true", "alpha true", "K true",
-        "type_of_K true", "type_of_sum true",
+        "fastype_lam true",
+        "beta true",
+        "alpha true",
+        "K true",
+        "type_of_K true",
+        "type_of_sum true",
     ] {
         assert!(
             out.contains(&format!("=KDEMO= {check}")),

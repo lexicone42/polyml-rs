@@ -25,8 +25,7 @@ fn run_rewrite(sml: &str) -> Option<(String, i32)> {
     run_image_env(&image, sml, 30_000_000_000, &[])
 }
 
-const SKIP: &str =
-    "SKIP: /tmp/hol4_rewrite missing — run tools/build-hol4-checkpoints.sh rewrite";
+const SKIP: &str = "SKIP: /tmp/hol4_rewrite missing — run tools/build-hol4-checkpoints.sh rewrite";
 
 /// `REWRITE_TAC []` proves boolean goals via the default rewrite set, explicit
 /// `REWRITE_TAC [thm]` and `ASM_REWRITE_TAC`/`ONCE_REWRITE_TAC` also work, and
@@ -63,7 +62,9 @@ val () = pr "REWRITE_TEST_DONE\n";
         "default rewrite set not populated (expected 11 boolTheory clauses).\n{}",
         tail(&out, 40)
     );
-    for tag in ["rw-and-T", "rw-or-T", "rw-dneg", "rw-thm", "asm-rw", "once-rw"] {
+    for tag in [
+        "rw-and-T", "rw-or-T", "rw-dneg", "rw-thm", "asm-rw", "once-rw",
+    ] {
         assert!(
             out.contains(&format!("PROVED {tag}")),
             "REWRITE_TAC proof '{tag}' did not succeed.\n{}",
@@ -71,9 +72,7 @@ val () = pr "REWRITE_TEST_DONE\n";
         );
     }
     assert!(
-        out.contains("REWRITE_TEST_DONE")
-            && !out.contains("FAIL ")
-            && !out.contains("BAD "),
+        out.contains("REWRITE_TEST_DONE") && !out.contains("FAIL ") && !out.contains("BAD "),
         "a REWRITE_TAC proof failed or produced the wrong theorem.\n{}",
         tail(&out, 40)
     );

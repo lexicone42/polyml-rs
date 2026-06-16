@@ -45,14 +45,30 @@ fn division_theorem_existence_and_uniqueness() {
         &image,
         &common::with_nt_helpers(&driver),
         200_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("OK div_mod_exists"), "division-theorem existence did not check:\n{out}");
-    assert!(out.contains("OK div_mod_unique"), "division-theorem uniqueness did not check:\n{out}");
-    assert!(out.contains("DIVISION_DONE"), "division development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        out.contains("OK div_mod_exists"),
+        "division-theorem existence did not check:\n{out}"
+    );
+    assert!(
+        out.contains("OK div_mod_unique"),
+        "division-theorem uniqueness did not check:\n{out}"
+    );
+    assert!(
+        out.contains("DIVISION_DONE"),
+        "division development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
 }

@@ -5,8 +5,8 @@
 //!
 //! Run with: `cargo test --release -p polyml-jit --test jit_speedup_bench -- --nocapture`
 
-use polyml_jit::{translate, Jit};
-use polyml_runtime::{Interpreter, StepResult, PolyWord};
+use polyml_jit::{Jit, translate};
+use polyml_runtime::{Interpreter, PolyWord, StepResult};
 use std::time::Instant;
 
 const INSTR_LOCAL_2: u8 = 0x2b;

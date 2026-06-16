@@ -56,7 +56,9 @@ fn parse_bootstrap64() {
         eprintln!("SKIP: vendor/polyml/bootstrap/bootstrap64.txt not present");
         return;
     };
-    let Some(bytes) = load_or_skip(&path) else { return };
+    let Some(bytes) = load_or_skip(&path) else {
+        return;
+    };
 
     let img = match Image::parse(&bytes) {
         Ok(i) => i,
@@ -111,7 +113,9 @@ fn bootstrap64_roundtrips_through_writer() {
         eprintln!("SKIP: vendor/polyml/bootstrap/bootstrap64.txt not present");
         return;
     };
-    let Some(bytes) = load_or_skip(&path) else { return };
+    let Some(bytes) = load_or_skip(&path) else {
+        return;
+    };
 
     let img = Image::parse(&bytes).expect("parse");
     let mut emitted = Vec::with_capacity(bytes.len());
@@ -133,7 +137,9 @@ fn parse_bootstrap32() {
         eprintln!("SKIP: vendor/polyml/bootstrap/bootstrap32.txt not present");
         return;
     };
-    let Some(bytes) = load_or_skip(&path) else { return };
+    let Some(bytes) = load_or_skip(&path) else {
+        return;
+    };
 
     let img = match Image::parse(&bytes) {
         Ok(i) => i,
@@ -142,5 +148,8 @@ fn parse_bootstrap32() {
 
     assert_eq!(img.arch, SourceArch::Interpreted);
     assert_eq!(img.word_size, WordSize::Bits32);
-    assert!(img.objects.len() > 1000, "bootstrap image should have many objects");
+    assert!(
+        img.objects.len() > 1000,
+        "bootstrap image should have many objects"
+    );
 }

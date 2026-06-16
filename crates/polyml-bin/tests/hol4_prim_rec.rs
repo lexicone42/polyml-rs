@@ -49,21 +49,36 @@ pr "PRIM_REC_TEST_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("PRIM_REC_TEST_DONE"), "driver did not finish.\n{}", tail(&out, 40));
-    assert!(out.contains("CURRENT=prim_rec"), "wrong current theory.\n{}", tail(&out, 40));
-    assert!(out.contains("ALL_CLEAN=true"), "a prim_rec theorem has hypotheses.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("PRIM_REC_TEST_DONE"),
+        "driver did not finish.\n{}",
+        tail(&out, 40)
+    );
+    assert!(
+        out.contains("CURRENT=prim_rec"),
+        "wrong current theory.\n{}",
+        tail(&out, 40)
+    );
+    assert!(
+        out.contains("ALL_CLEAN=true"),
+        "a prim_rec theorem has hypotheses.\n{}",
+        tail(&out, 40)
+    );
     // exact statements of the keystones
     assert!(
         out.contains("∀e f. ∃fn. fn 0 = e ∧ ∀n. fn (SUC n) = f n (fn n)"),
-        "num_Axiom not the primitive recursion theorem.\n{}", tail(&out, 40)
+        "num_Axiom not the primitive recursion theorem.\n{}",
+        tail(&out, 40)
     );
     assert!(
         out.contains("∀m n. m < SUC n ⇔ m = n ∨ m < n"),
-        "LESS_THM wrong.\n{}", tail(&out, 40)
+        "LESS_THM wrong.\n{}",
+        tail(&out, 40)
     );
     // and the recursion principle WORKS:
     assert!(
         out.contains("dbl 0 = 0 ∧ ∀n. dbl (SUC n) = SUC (SUC (dbl n))"),
-        "num_Axiom failed to define a recursive function.\n{}", tail(&out, 40)
+        "num_Axiom failed to define a recursive function.\n{}",
+        tail(&out, 40)
     );
 }

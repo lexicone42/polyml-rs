@@ -19,12 +19,11 @@ pub mod space;
 
 pub use interpreter::{InterpError, Interpreter, JitEntry, StepResult};
 pub use jit_bridge::{
-    jit_dispatch_alloc, jit_dispatch_alloc_bytes, jit_dispatch_alloc_mut_closure,
-    jit_dispatch_closure_alloc, jit_dispatch_closure_call,
-    jit_dispatch_dynamic_call, jit_dispatch_get_thread_id,
-    with_jit_interp, JIT_INTERP,
+    JIT_INTERP, jit_dispatch_alloc, jit_dispatch_alloc_bytes, jit_dispatch_alloc_mut_closure,
+    jit_dispatch_closure_alloc, jit_dispatch_closure_call, jit_dispatch_dynamic_call,
+    jit_dispatch_get_thread_id, with_jit_interp,
 };
-pub use loader::{load_image, LoadError, LoadedImage};
+pub use loader::{LoadError, LoadedImage, load_image};
 pub use poly_word::PolyWord;
-pub use rts::{patch_entry_points, RtsFn, RtsTable};
+pub use rts::{RtsFn, RtsTable, patch_entry_points};
 pub use space::{MemorySpace, SpaceKind};

@@ -46,23 +46,39 @@ fn multiplicative_group_mod_p() {
         &image,
         &common::with_gcd(&driver),
         700_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
     // the gcd / Euclid-lemma base must load first
-    assert!(out.contains("MOD_INVERSE_OK"), "gcd/Euclid base did not load:\n{out}");
+    assert!(
+        out.contains("MOD_INVERSE_OK"),
+        "gcd/Euclid base did not load:\n{out}"
+    );
     for (lemma, marker) in [
         ("inverse_unique", "INVERSE_UNIQUE_OK"),
         ("mod_cancel", "MOD_CANCEL_OK"),
         ("lagrange_roots", "LAGRANGE_ROOTS_OK"),
     ] {
-        assert!(out.contains(&format!("OK {lemma}")), "lemma `{lemma}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {lemma}")),
+            "lemma `{lemma}` did not check:\n{out}"
+        );
         assert!(out.contains(marker), "marker `{marker}` missing:\n{out}");
     }
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("PROBE_UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("PROBE_UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
 }

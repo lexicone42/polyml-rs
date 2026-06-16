@@ -27,8 +27,7 @@ fn run_tactic(sml: &str) -> Option<(String, i32)> {
     run_image_env(&image, sml, 30_000_000_000, &[])
 }
 
-const SKIP: &str =
-    "SKIP: /tmp/hol4_tactic missing — run tools/build-hol4-checkpoints.sh tactic";
+const SKIP: &str = "SKIP: /tmp/hol4_tactic missing — run tools/build-hol4-checkpoints.sh tactic";
 
 /// HOL4's tactic engine proves goals on our interpreter: implication
 /// reflexivity (`p ==> p`), conjunction commutativity (`p /\ q ==> q /\ p`),
@@ -68,9 +67,7 @@ val () = pr "TACTIC_TEST_DONE\n";
         );
     }
     assert!(
-        out.contains("TACTIC_TEST_DONE")
-            && !out.contains("FAIL ")
-            && !out.contains("BAD "),
+        out.contains("TACTIC_TEST_DONE") && !out.contains("FAIL ") && !out.contains("BAD "),
         "a tactic proof failed or produced the wrong theorem.\n{}",
         tail(&out, 40)
     );

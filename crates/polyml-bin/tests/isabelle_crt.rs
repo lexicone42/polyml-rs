@@ -39,30 +39,52 @@ fn chinese_remainder_theorem() {
         eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
         return;
     };
-    let driver_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/isabelle_support/isabelle_crt.sml");
+    let driver_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/isabelle_support/isabelle_crt.sml");
     let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_crt.sml");
 
     let Some((out, _)) = run_image_env(
         &image,
         &common::with_gcd(&driver),
         700_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
     // the gcd/Bézout base must load first
-    assert!(out.contains("MOD_INVERSE_OK"), "gcd/Bézout base did not load:\n{out}");
+    assert!(
+        out.contains("MOD_INVERSE_OK"),
+        "gcd/Bézout base did not load:\n{out}"
+    );
     // each rung of the CRT ladder, by named lemma + phase marker
-    for lemma in ["gen_inverse", "crt_exists", "gauss", "coprime_mult_dvd", "crt_unique"] {
-        assert!(out.contains(&format!("OK {lemma}")), "lemma `{lemma}` did not check:\n{out}");
+    for lemma in [
+        "gen_inverse",
+        "crt_exists",
+        "gauss",
+        "coprime_mult_dvd",
+        "crt_unique",
+    ] {
+        assert!(
+            out.contains(&format!("OK {lemma}")),
+            "lemma `{lemma}` did not check:\n{out}"
+        );
     }
     for marker in ["GEN_INVERSE_OK", "CRT_EXISTS_OK", "CRT_UNIQUE_OK"] {
         assert!(out.contains(marker), "marker `{marker}` missing:\n{out}");
     }
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("PROBE_UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("PROBE_UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
 }

@@ -10,7 +10,7 @@
 //! "JIT translator emits a CALL" and "JIT'd target runs" is
 //! exercised together.
 
-use polyml_jit::{translate, Jit};
+use polyml_jit::{Jit, translate};
 use polyml_runtime::{Interpreter, JitEntry};
 
 const INSTR_CONST_INT_B: u8 = 0x28;
@@ -101,8 +101,7 @@ fn jit_emitted_call_const_addr8_chains_through_trampoline() {
     caller_full_body[2] = INSTR_CALL_CONST_ADDR8_0;
     caller_full_body[3] = 4; // imm: pc(4) + 4 + 24 = 32
     caller_full_body[4] = INSTR_RETURN_1;
-    caller_full_body[32..40]
-        .copy_from_slice(&(callee_closure_ptr as u64).to_le_bytes());
+    caller_full_body[32..40].copy_from_slice(&(callee_closure_ptr as u64).to_le_bytes());
 
     let caller_bytecode_end = 5;
     let caller_jit =

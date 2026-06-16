@@ -72,23 +72,51 @@ pr "ISA_PROBE_DONE\n";
         &basis,
         &driver,
         60_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("ISA_PROBE_DONE"), "probe did not finish.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("ISA_PROBE_DONE"),
+        "probe did not finish.\n{}",
+        tail(&out, 30)
+    );
     // The keystone: Isabelle's ML_Name_Space loads and PolyML.NameSpace round-trips.
-    assert!(out.contains("ISA_OK ML/ml_name_space.ML"), "ml_name_space.ML did not load.\n{}", tail(&out, 40));
-    assert!(out.contains("NS_ROUNDTRIP_OK"), "PolyML.NameSpace lookup did not round-trip.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("ISA_OK ML/ml_name_space.ML"),
+        "ml_name_space.ML did not load.\n{}",
+        tail(&out, 40)
+    );
+    assert!(
+        out.contains("NS_ROUNDTRIP_OK"),
+        "PolyML.NameSpace lookup did not round-trip.\n{}",
+        tail(&out, 40)
+    );
     // The load-bearing system + pretty + concurrency + namespace-recursion coupling.
     for f in [
-        "ML/ml_system.ML", "ML/ml_pretty.ML", "ML/ml_recursive.ML",
-        "Concurrent/multithreading.ML", "Concurrent/synchronized.ML",
-        "Concurrent/thread_attributes.ML", "ML/ml_heap.ML",
+        "ML/ml_system.ML",
+        "ML/ml_pretty.ML",
+        "ML/ml_recursive.ML",
+        "Concurrent/multithreading.ML",
+        "Concurrent/synchronized.ML",
+        "Concurrent/thread_attributes.ML",
+        "ML/ml_heap.ML",
     ] {
-        assert!(out.contains(&format!("ISA_OK {f}")), "{f} did not load.\n{}", tail(&out, 40));
+        assert!(
+            out.contains(&format!("ISA_OK {f}")),
+            "{f} did not load.\n{}",
+            tail(&out, 40)
+        );
     }
     // 23 of 27 load (the go-signal); the 4 known walls are documented in the header.
-    assert!(out.contains("ISA_LOADED 23/27"), "Phase-0 load count changed from 23/27.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("ISA_LOADED 23/27"),
+        "Phase-0 load count changed from 23/27.\n{}",
+        tail(&out, 40)
+    );
 }

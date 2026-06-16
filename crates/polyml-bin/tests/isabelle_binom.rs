@@ -40,23 +40,42 @@ fn prime_divides_inner_binomial_coefficients() {
         eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
         return;
     };
-    let driver_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/isabelle_support/isabelle_binom.sml");
+    let driver_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/isabelle_support/isabelle_binom.sml");
     let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_binom.sml");
 
     let Some((out, _)) = run_image_env(
         &image,
         &common::with_nt_helpers(&driver),
         280_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("OK absorption"), "absorption identity did not check:\n{out}");
-    assert!(out.contains("OK p_dvd_binom"), "p | C(p,k) did not check:\n{out}");
-    assert!(out.contains("P_DVD_BINOM_DONE"), "Stage-B development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("OK absorption"),
+        "absorption identity did not check:\n{out}"
+    );
+    assert!(
+        out.contains("OK p_dvd_binom"),
+        "p | C(p,k) did not check:\n{out}"
+    );
+    assert!(
+        out.contains("P_DVD_BINOM_DONE"),
+        "Stage-B development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
 }

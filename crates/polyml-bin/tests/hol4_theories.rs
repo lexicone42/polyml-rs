@@ -42,7 +42,12 @@ pr "MARKER_TEST_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    for s in ["THY marker", "STMARKER_CONST_OK", "ABBREV_CONG_OK", "MARKER_TEST_DONE"] {
+    for s in [
+        "THY marker",
+        "STMARKER_CONST_OK",
+        "ABBREV_CONG_OK",
+        "MARKER_TEST_DONE",
+    ] {
         assert!(out.contains(s), "missing {s}.\n{}", tail(&out, 30));
     }
 }
@@ -72,8 +77,18 @@ pr "COMBIN_TEST_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    for s in ["THY combin", "I_CONST_OK", "COMBIN_THMS_OK", "ANCESTORS_OK", "COMBIN_TEST_DONE"] {
+    for s in [
+        "THY combin",
+        "I_CONST_OK",
+        "COMBIN_THMS_OK",
+        "ANCESTORS_OK",
+        "COMBIN_TEST_DONE",
+    ] {
         assert!(out.contains(s), "missing {s}.\n{}", tail(&out, 30));
     }
-    assert!(!out.contains("FAIL "), "a combin check failed.\n{}", tail(&out, 30));
+    assert!(
+        !out.contains("FAIL "),
+        "a combin check failed.\n{}",
+        tail(&out, 30)
+    );
 }

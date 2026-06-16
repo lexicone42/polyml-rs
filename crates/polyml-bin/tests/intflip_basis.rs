@@ -80,7 +80,11 @@ fn basis_loads_under_arbitrary_precision_int() {
         tail(&combined, 40)
     );
     // Clean VM return, no SEGV / compile error / exn-unwind halt.
-    assert_eq!(out.status.code(), Some(0), "non-zero exit under --intIsIntInf");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "non-zero exit under --intIsIntInf"
+    );
     assert!(
         combined.contains("Result: Tagged(0)"),
         "no clean Tagged(0) return.\n{}",

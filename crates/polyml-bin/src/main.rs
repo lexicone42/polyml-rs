@@ -5,20 +5,24 @@
 //! control" part yet — Phase 2.1 (bytecode interpreter port) unlocks
 //! that. For now this binary loads + reports.
 
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use polyml_image::pexport::{Image, ObjectBody};
 use polyml_runtime::{
-    interpreter::diag::DiagState, length_word, load_image, patch_entry_points, Interpreter,
-    MemorySpace, PolyWord, RtsTable, StepResult,
+    Interpreter, MemorySpace, PolyWord, RtsTable, StepResult, interpreter::diag::DiagState,
+    length_word, load_image, patch_entry_points,
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "poly", version, about = "polyml-rs runtime CLI (work in progress)")]
+#[command(
+    name = "poly",
+    version,
+    about = "polyml-rs runtime CLI (work in progress)"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -199,8 +203,20 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             r#use.clone(),
             *jit,
         ),
-        Cmd::Disasm { image, idx, code_obj, bc_grep, max, scan_all } => disasm_command(
-            image, *idx, code_obj.as_deref(), bc_grep.as_deref(), *max, *scan_all,
+        Cmd::Disasm {
+            image,
+            idx,
+            code_obj,
+            bc_grep,
+            max,
+            scan_all,
+        } => disasm_command(
+            image,
+            *idx,
+            code_obj.as_deref(),
+            bc_grep.as_deref(),
+            *max,
+            *scan_all,
         ),
         Cmd::Diff {
             image,
@@ -260,11 +276,13 @@ fn run_image(
     // --use FILE expands to feeding `Bootstrap.use "<basename>";` via
     // stdin and adding `-I <parent>` to CommandLine.arguments.
     let synthetic_stdin: Option<String> = use_file.as_ref().map(|p| {
-        let parent = p.parent().filter(|d| !d.as_os_str().is_empty()).map_or_else(
-            || ".".to_string(),
-            |d| d.to_string_lossy().into_owned(),
-        );
-        let base = p.file_name().map(|n| n.to_string_lossy().into_owned())
+        let parent = p
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .map_or_else(|| ".".to_string(), |d| d.to_string_lossy().into_owned());
+        let base = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| p.to_string_lossy().into_owned());
         if !all_args.iter().any(|a| a == "-I") {
             all_args.push("-I".to_string());
@@ -285,7 +303,10 @@ fn run_image(
     let rts = Arc::new(RtsTable::new());
     let (patched, missing) = patch_entry_points(&mut loaded, &rts);
     println!("Loaded {}", path.display());
-    println!("  RTS patch: {patched} resolved, {} unresolved", missing.len());
+    println!(
+        "  RTS patch: {patched} resolved, {} unresolved",
+        missing.len()
+    );
     if !missing.is_empty() {
         println!("  unresolved entry points (first 10):");
         for name in missing.iter().take(10) {
@@ -320,8 +341,7 @@ fn run_image(
         interp = interp.enable_diagnostics();
     }
     if install_jit {
-        let mut jit = polyml_jit::Jit::new()
-            .map_err(|e| format!("jit init: {e}"))?;
+        let mut jit = polyml_jit::Jit::new().map_err(|e| format!("jit init: {e}"))?;
         let (total, jit_ok, installed) =
             polyml_jit::install_all_jit_entries(&mut jit, &loaded, &mut interp);
         println!(
@@ -365,9 +385,7 @@ fn run_image(
         Ok(StepResult::Returned(v)) => {
             if v.is_tagged() {
                 let n = v.untag();
-                println!(
-                    "Result: Tagged({n}) — clean return (exit code in PolyFinish convention)"
-                );
+                println!("Result: Tagged({n}) — clean return (exit code in PolyFinish convention)");
                 // SML's `OS.Process.exit` passes a small int that
                 // PolyML maps to the process exit code. Clamp into
                 // a u8 so unusual values don't wrap weirdly.
@@ -443,9 +461,7 @@ fn dump_hottest_bytecode(d: &DiagState) {
     let win_end = (hi + 6).min(hi.saturating_add(20));
 
     println!();
-    println!(
-        "--- Hottest code object disassembly (steps={total}, offsets {lo}..={hi}) ---"
-    );
+    println!("--- Hottest code object disassembly (steps={total}, offsets {lo}..={hi}) ---");
     // Read a slice covering [lo, win_end+8) — extra padding so the
     // last opcode's immediates don't get truncated. SAFETY: the code
     // object is live for the program's lifetime.
@@ -465,7 +481,11 @@ fn dump_hottest_bytecode(d: &DiagState) {
             .get(&(hot_code, abs_pc as u32))
             .copied()
             .unwrap_or(0);
-        let marker = if visits > 0 { format!("  [×{visits}]") } else { String::new() };
+        let marker = if visits > 0 {
+            format!("  [×{visits}]")
+        } else {
+            String::new()
+        };
         let imm = d_op.imm_text.as_deref().unwrap_or("");
         println!(
             "  +{abs_pc:4}: 0x{:02x} {:<22} {imm}{marker}",
@@ -502,11 +522,19 @@ fn print_profile(d: &DiagState) {
     let total_jit_hits = d.total_jit_hits();
     println!(
         "Top 10 CALL targets (most-entered functions) — total calls={total_calls}, JIT hits={total_jit_hits} ({:.1}%):",
-        if total_calls > 0 { 100.0 * total_jit_hits as f64 / total_calls as f64 } else { 0.0 }
+        if total_calls > 0 {
+            100.0 * total_jit_hits as f64 / total_calls as f64
+        } else {
+            0.0
+        }
     );
     for (code, cnt) in d.hot_call_targets(10) {
         let jit_hits = d.jit_call_hits.get(&code).copied().unwrap_or(0);
-        let jit_pct = if cnt > 0 { 100.0 * jit_hits as f64 / cnt as f64 } else { 0.0 };
+        let jit_pct = if cnt > 0 {
+            100.0 * jit_hits as f64 / cnt as f64
+        } else {
+            0.0
+        };
         let marker = if jit_hits > 0 { "[JIT]" } else { "     " };
         println!(
             "  {marker} code=0x{code:016x}  calls={cnt:10}  jit_hits={jit_hits:10}  ({jit_pct:5.1}%)"
@@ -639,18 +667,22 @@ fn load(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let root_lw = unsafe { MemorySpace::length_word_of(loaded.root) };
-    println!("  root: length-word len={} flags=0x{:02x}",
-             length_word::length_of(root_lw),
-             length_word::flags_of(root_lw));
+    println!(
+        "  root: length-word len={} flags=0x{:02x}",
+        length_word::length_of(root_lw),
+        length_word::flags_of(root_lw)
+    );
     if length_word::is_closure_object(root_lw) {
         let code_ptr_word = unsafe { *loaded.root };
         if code_ptr_word.is_data_ptr() {
             let code_ptr: *const PolyWord = code_ptr_word.as_ptr();
             let code_lw = unsafe { MemorySpace::length_word_of(code_ptr) };
-            println!("        root closure -> code object, len={} bytes={}, is_code={}",
-                     length_word::length_of(code_lw),
-                     length_word::length_of(code_lw) * 8,
-                     length_word::is_code_object(code_lw));
+            println!(
+                "        root closure -> code object, len={} bytes={}, is_code={}",
+                length_word::length_of(code_lw),
+                length_word::length_of(code_lw) * 8,
+                length_word::is_code_object(code_lw)
+            );
         }
     }
 
@@ -673,9 +705,11 @@ fn body_word_count_estimate(body: &ObjectBody) -> usize {
         ObjectBody::Closure { values, .. } => 1 + values.len(),
         ObjectBody::String(b) => 1 + b.len().div_ceil(8),
         ObjectBody::Bytes(b) => b.len().div_ceil(8),
-        ObjectBody::Code { code_bytes, constants, .. } => {
-            code_bytes.len().div_ceil(8) + constants.len() + 2
-        }
+        ObjectBody::Code {
+            code_bytes,
+            constants,
+            ..
+        } => code_bytes.len().div_ceil(8) + constants.len() + 2,
         ObjectBody::EntryPoint(n) => (n.len() + 16) / 8,
         ObjectBody::WeakRef => 1,
     }
@@ -693,8 +727,8 @@ fn diff_command(
     raw_args: bool,
     closure_hex: Option<&str>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    use polyml_jit::{differential, Jit};
-    use polyml_runtime::{patch_entry_points, RtsTable};
+    use polyml_jit::{Jit, differential};
+    use polyml_runtime::{RtsTable, patch_entry_points};
 
     let bytes = std::fs::read(image_path)?;
     let image = Image::parse(&bytes)?;
@@ -721,9 +755,7 @@ fn diff_command(
     let mut jit = Jit::new()?;
     let (total, jit_ok, installed) =
         polyml_jit::install_all_jit_entries(&mut jit, &loaded, &mut interp);
-    eprintln!(
-        "Loaded: {total} code objects, translated {jit_ok}, installed {installed}",
-    );
+    eprintln!("Loaded: {total} code objects, translated {jit_ok}, installed {installed}",);
     Box::leak(Box::new(jit));
 
     let mut entries = interp.jit_cache_entries();
@@ -760,12 +792,9 @@ fn diff_command(
     // Single-function diff: must specify --idx or --code-obj.
     let (code_obj_ptr, entry) = match (idx, code_obj_hex) {
         (Some(i), None) => {
-            let pair = entries.get(i).ok_or_else(|| {
-                format!(
-                    "idx {i} out of range (have {} entries)",
-                    entries.len()
-                )
-            })?;
+            let pair = entries
+                .get(i)
+                .ok_or_else(|| format!("idx {i} out of range (have {} entries)", entries.len()))?;
             (pair.0, pair.1)
         }
         (None, Some(s)) => {
@@ -780,9 +809,7 @@ fn diff_command(
             return Err("specify only one of --idx or --code-obj".into());
         }
         (None, None) => {
-            return Err(
-                "specify --idx N, --code-obj HEX, --list, or --scan".into(),
-            );
+            return Err("specify --idx N, --code-obj HEX, --list, or --scan".into());
         }
     };
 
@@ -806,13 +833,8 @@ fn diff_command(
         "Diffing code_obj=0x{:016x} sml_arity={} arity_init={}",
         code_obj_ptr, entry.sml_arity, entry.arity_init,
     );
-    let report = differential::diff_function(
-        &mut interp,
-        &entry,
-        code_obj_ptr,
-        &final_args,
-        closure_word,
-    );
+    let report =
+        differential::diff_function(&mut interp, &entry, code_obj_ptr, &final_args, closure_word);
     println!("{}", report.pretty());
     if report.matches {
         Ok(ExitCode::SUCCESS)
@@ -823,8 +845,7 @@ fn diff_command(
 
 fn parse_hex_addr(s: &str) -> Result<usize, Box<dyn std::error::Error>> {
     let trimmed = s.trim().trim_start_matches("0x").trim_start_matches("0X");
-    usize::from_str_radix(trimmed, 16)
-        .map_err(|e| format!("bad hex address '{s}': {e}").into())
+    usize::from_str_radix(trimmed, 16).map_err(|e| format!("bad hex address '{s}': {e}").into())
 }
 
 /// Disassemble a code object's bytecode into pretty-printed
@@ -875,10 +896,11 @@ fn disasm_command(
                     let bytecode_len = (cp as usize)
                         .saturating_sub(body as usize)
                         .saturating_sub(std::mem::size_of::<usize>());
-                    let bc: &[u8] = unsafe {
-                        std::slice::from_raw_parts(body as *const u8, bytecode_len)
-                    };
-                    let head: String = bc.iter().take(64)
+                    let bc: &[u8] =
+                        unsafe { std::slice::from_raw_parts(body as *const u8, bytecode_len) };
+                    let head: String = bc
+                        .iter()
+                        .take(64)
                         .map(|b| format!("{b:02x}"))
                         .collect::<Vec<_>>()
                         .join(" ");
@@ -923,14 +945,16 @@ fn disasm_command(
 
     let (ptr, entry) = match (idx, code_obj_hex, bc_grep) {
         (Some(i), None, None) => {
-            let pair = entries.get(i).ok_or_else(|| {
-                format!("idx {i} out of range (have {} entries)", entries.len())
-            })?;
+            let pair = entries
+                .get(i)
+                .ok_or_else(|| format!("idx {i} out of range (have {} entries)", entries.len()))?;
             (pair.0, pair.1)
         }
         (None, Some(s), None) => {
             let addr = parse_hex_addr(s)?;
-            entries.iter().find(|(p, _)| *p == addr)
+            entries
+                .iter()
+                .find(|(p, _)| *p == addr)
                 .copied()
                 .ok_or_else(|| format!("no JIT entry at 0x{addr:016x}"))?
         }
@@ -938,25 +962,23 @@ fn disasm_command(
             let found = entries.iter().find(|(p, _)| {
                 let bc_head: String = unsafe {
                     let bp = *p as *const u8;
-                    (0..32).map(|k| format!("{:02x}", *bp.add(k)))
-                        .collect::<Vec<_>>().join(" ")
+                    (0..32)
+                        .map(|k| format!("{:02x}", *bp.add(k)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 };
                 bc_head.contains(pat)
             });
             *found.ok_or_else(|| format!("no entry matching bc-grep '{pat}'"))?
         }
-        _ => return Err(
-            "specify exactly one of --idx, --code-obj, or --bc-grep".into()
-        ),
+        _ => return Err("specify exactly one of --idx, --code-obj, or --bc-grep".into()),
     };
 
     // Determine bytecode length from the code object's const-pool boundary.
     // SAFETY: ptr is a JIT-installed code-obj pointer, so length-word is at
     // ptr-8 per PolyML's heap layout.
     let bytecode: &[u8] = unsafe {
-        let cp = polyml_runtime::length_word::const_segment_for_code(
-            ptr as *const PolyWord
-        ).0;
+        let cp = polyml_runtime::length_word::const_segment_for_code(ptr as *const PolyWord).0;
         let body_start = ptr;
         let cp_start = cp as usize;
         let bytecode_len = cp_start
@@ -967,7 +989,9 @@ fn disasm_command(
 
     println!(
         "Disassembly: code_obj=0x{ptr:016x}, sml_arity={}, arity_init={}, bytecode_len={}",
-        entry.sml_arity, entry.arity_init, bytecode.len(),
+        entry.sml_arity,
+        entry.arity_init,
+        bytecode.len(),
     );
     println!("{:>5}  {:>4} {:<22} {}", "pc", "op", "mnemonic", "operands");
     let decoded = disasm::disassemble(bytecode);
@@ -996,9 +1020,7 @@ fn disasm_command(
 /// Caps per `DIFF_SCAN_LIMIT` (default 50 to bound interactive
 /// runtime). Each function is tested with 6 different tagged-int
 /// args. Divergences are reported with full output.
-fn scan_isolated_command(
-    image_path: &PathBuf,
-) -> Result<ExitCode, Box<dyn std::error::Error>> {
+fn scan_isolated_command(image_path: &PathBuf) -> Result<ExitCode, Box<dyn std::error::Error>> {
     use std::process::{Command, Stdio};
 
     // First: load the image in this process just to enumerate idx
@@ -1128,14 +1150,10 @@ fn function_likely_derefs(code_obj_ptr: usize) -> bool {
     // LOAD_ML_BYTE (0xdc), LOAD_ML_WORD (0x04),
     // JUMP_NEQ_LOCAL_IND (0xc3) — derefs the local.
     let deref_ops: &[u8] = &[
-        0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x23,
-        0xc7, 0xc1, 0x21, 0xc6,
-        0x77, 0x7a, 0x7c, 0x54,
-        0xdc, 0x04,
-        0xc3,
-        0x08, 0x09, // LOAD_UNTAGGED, STORE_UNTAGGED
+        0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x23, 0xc7, 0xc1, 0x21, 0xc6, 0x77, 0x7a, 0x7c, 0x54,
+        0xdc, 0x04, 0xc3, 0x08, 0x09, // LOAD_UNTAGGED, STORE_UNTAGGED
         0x05, 0x07, // STORE_ML_WORD, BLOCK_MOVE_WORD
-        0x93,       // CELL_LENGTH (derefs cell)
+        0x93, // CELL_LENGTH (derefs cell)
     ];
     // Only check the first 8 bytes — functions that deref args
     // immediately (within the first few opcodes) almost always do
@@ -1154,10 +1172,7 @@ fn function_likely_derefs(code_obj_ptr: usize) -> bool {
     false
 }
 
-fn print_jit_entries(
-    entries: &[(usize, polyml_runtime::JitEntry)],
-    bc_grep: Option<&str>,
-) {
+fn print_jit_entries(entries: &[(usize, polyml_runtime::JitEntry)], bc_grep: Option<&str>) {
     println!(
         "{:>4} {:>18} {:>9} {:>11}  {}",
         "idx", "code_obj_ptr", "sml_arity", "arity_init", "bc[0..32]",
@@ -1255,9 +1270,7 @@ fn run_scan(
         for base in &base_values {
             let combo: Vec<i64> = std::iter::repeat(*base).take(entry.sml_arity).collect();
             tested += 1;
-            let report = differential::diff_function(
-                interp, entry, *ptr, &combo, closure_word,
-            );
+            let report = differential::diff_function(interp, entry, *ptr, &combo, closure_word);
             if report.matches {
                 matched += 1;
             } else if report.interp_err.is_some() {

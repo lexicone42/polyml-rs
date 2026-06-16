@@ -13,8 +13,12 @@
 use std::path::PathBuf;
 
 use polyml_image::pexport::Image;
-use polyml_jit::{translate, Jit};
-use polyml_runtime::{length_word::{self, length_of}, load_image, MemorySpace, PolyWord};
+use polyml_jit::{Jit, translate};
+use polyml_runtime::{
+    MemorySpace, PolyWord,
+    length_word::{self, length_of},
+    load_image,
+};
 
 fn workspace_root() -> PathBuf {
     let mut p: PathBuf = env!("CARGO_MANIFEST_DIR").into();
@@ -78,9 +82,8 @@ fn jit_coverage_on_bootstrap_code_objects() {
             // constant pool + trailer. compile_with_consts walks
             // only [0..bytecode_len) for opcodes; CONST_ADDR8_*
             // reads land in the constants area at higher offsets.
-            let full_body: &[u8] = unsafe {
-                std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes)
-            };
+            let full_body: &[u8] =
+                unsafe { std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes) };
             match translate::compile_with_consts(&mut jit, full_body, bytecode_len) {
                 Ok(_) => {
                     ok += 1;
@@ -90,7 +93,10 @@ fn jit_coverage_on_bootstrap_code_objects() {
                     }
                 }
                 Err(translate::TranslateError::Unsupported { op, .. }) if op == 0xfd => {
-                    if shortest_jump_fail.as_ref().is_none_or(|(sz, ..)| bytecode_len < *sz) {
+                    if shortest_jump_fail
+                        .as_ref()
+                        .is_none_or(|(sz, ..)| bytecode_len < *sz)
+                    {
                         shortest_jump_fail = Some((
                             bytecode_len,
                             full_body[..bytecode_len].to_vec(),
@@ -131,7 +137,10 @@ fn jit_coverage_on_bootstrap_code_objects() {
                     // Capture the shortest function that fails with a
                     // jump-arg-count mismatch, for offline trace.
                     if msg.is_some_and(|m| m.contains("mismatched argument count")) {
-                        if shortest_jump_fail.as_ref().is_none_or(|(sz, ..)| bytecode_len < *sz) {
+                        if shortest_jump_fail
+                            .as_ref()
+                            .is_none_or(|(sz, ..)| bytecode_len < *sz)
+                        {
                             shortest_jump_fail = Some((
                                 bytecode_len,
                                 full_body[..bytecode_len].to_vec(),
@@ -148,16 +157,23 @@ fn jit_coverage_on_bootstrap_code_objects() {
 
     eprintln!("JIT coverage over bootstrap64.txt:");
     eprintln!("  total code objects:  {total}");
-    eprintln!("  JIT-compiled OK:     {ok} ({:.2}%)", 100.0 * ok as f64 / total as f64);
+    eprintln!(
+        "  JIT-compiled OK:     {ok} ({:.2}%)",
+        100.0 * ok as f64 / total as f64
+    );
     if let Some(s) = shortest_ok {
-        eprintln!("  shortest JIT'd bytecode: {s} bytes = {:?}", shortest_ok_bytes);
+        eprintln!(
+            "  shortest JIT'd bytecode: {s} bytes = {:?}",
+            shortest_ok_bytes
+        );
     }
     if let Some((sz, bytes, total_sz, msg)) = &shortest_jump_fail {
-        eprintln!(
-            "  shortest jump-mismatch fail: {sz} bytecode bytes (total {total_sz}):",
-        );
+        eprintln!("  shortest jump-mismatch fail: {sz} bytecode bytes (total {total_sz}):",);
         eprintln!("    bytes = {bytes:02x?}");
-        eprintln!("    msg head: {}", msg.chars().take(160).collect::<String>());
+        eprintln!(
+            "    msg head: {}",
+            msg.chars().take(160).collect::<String>()
+        );
     }
     eprintln!("  top 10 blockers (first-failure reason per failing function):");
     let mut blockers_vec: Vec<(String, usize)> = blockers.into_iter().collect();
@@ -206,9 +222,8 @@ fn case16_coverage() {
                 .saturating_sub(std::mem::size_of::<usize>());
             let max_bytes = n_words * std::mem::size_of::<usize>();
             let bytecode_len = bytecode_len.min(max_bytes);
-            let full_body: &[u8] = unsafe {
-                std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes)
-            };
+            let full_body: &[u8] =
+                unsafe { std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes) };
             let bc = &full_body[..bytecode_len];
             if !translate::has_real_case16(bc) {
                 return;
@@ -227,21 +242,23 @@ fn case16_coverage() {
                 Ok(_) => case16_ok += 1,
                 Err(e) => {
                     let key = match &e {
-                        translate::TranslateError::Unsupported { op, .. } => format!("op 0x{op:02x}"),
+                        translate::TranslateError::Unsupported { op, .. } => {
+                            format!("op 0x{op:02x}")
+                        }
                         translate::TranslateError::Truncated(_) => "truncated".into(),
                         translate::TranslateError::Underflow(_) => "underflow".into(),
                         translate::TranslateError::FellOffEnd => "fell-off-end".into(),
                         translate::TranslateError::Jit(_) => "jit".into(),
                     };
-                    if matches!(e, translate::TranslateError::Jit(_))
-                        && first_jit_fail.is_none()
-                    {
+                    if matches!(e, translate::TranslateError::Jit(_)) && first_jit_fail.is_none() {
                         first_jit_fail = Some((full_body.to_vec(), bytecode_len));
                     }
                     // Capture the SMALLEST failing function for offline
                     // tracing (now that non-CASE16 blockers are excluded,
                     // any failure here is CASE16-related).
-                    if first_fail_bytes.as_ref().is_none_or(|(s, _)| bytecode_len < *s)
+                    if first_fail_bytes
+                        .as_ref()
+                        .is_none_or(|(s, _)| bytecode_len < *s)
                     {
                         first_fail_bytes = Some((bytecode_len, bc.to_vec()));
                     }
@@ -268,20 +285,21 @@ fn case16_coverage() {
     if let Some((full_body, bclen)) = &first_jit_fail {
         eprintln!("\n=== Re-translating first jit-error CASE16 fn with IR dump ===");
         // Safety: JIT_DUMP_IR is read inside compile; set it for this one.
-        unsafe { std::env::set_var("JIT_DUMP_IR", "1"); }
+        unsafe {
+            std::env::set_var("JIT_DUMP_IR", "1");
+        }
         let mut j2 = Jit::new().unwrap();
         let r = translate::compile_with_consts(&mut j2, full_body, *bclen);
-        unsafe { std::env::remove_var("JIT_DUMP_IR"); }
+        unsafe {
+            std::env::remove_var("JIT_DUMP_IR");
+        }
         eprintln!("=== jit-fail re-translate result: {:?}", r.map(|_| ()));
     }
 }
 
 /// Walk every F_CODE_OBJ in a space, calling `f(body_ptr, length_word)`
 /// for each. Length-word and trailing-offset must be well-formed.
-fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(
-    space: &MemorySpace,
-    mut f: F,
-) {
+fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(space: &MemorySpace, mut f: F) {
     // We don't have a public iterator over (body, length_word) pairs;
     // walk the storage manually by re-using the bump-allocated layout
     // (1 length word + body of N words, repeated).
@@ -308,12 +326,13 @@ fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(
 #[test]
 fn trace_one_case16() {
     let bc: Vec<u8> = vec![
-        0x2c,0x57,0x5d,0x29,0x16,0x04,0x2f,0x16,0x01,0x64,0xc7,0x01,0x0a,0x07,0x00,0x19,
-        0x00,0x1c,0x00,0x1f,0x00,0x31,0x00,0x3d,0x00,0x40,0x00,0x0e,0x00,0xc1,0x01,0xc6,
-        0x2b,0x2a,0x31,0x30,0x32,0x7b,0x05,0x09,0x29,0x02,0x31,0x29,0x02,0x2e,0xc1,0x01,
-        0x21,0x02,0x02,0x2b,0x2a,0x31,0x16,0x07,0x29,0x2c,0x32,0x31,0x33,0x7b,0x05,0x0a,
-        0xc1,0x01,0x29,0x2d,0x30,0x2d,0x56,0x18,0x32,0x7b,0x06,0x08,0x29,0x02,0x0d,0xc1,
-        0x01,0x29,0x2d,0x30,0x2d,0x15,0x08,0x02,0x32,0x7b,0x06,0x08,0x65,0x44,0x3b,0x3b,
+        0x2c, 0x57, 0x5d, 0x29, 0x16, 0x04, 0x2f, 0x16, 0x01, 0x64, 0xc7, 0x01, 0x0a, 0x07, 0x00,
+        0x19, 0x00, 0x1c, 0x00, 0x1f, 0x00, 0x31, 0x00, 0x3d, 0x00, 0x40, 0x00, 0x0e, 0x00, 0xc1,
+        0x01, 0xc6, 0x2b, 0x2a, 0x31, 0x30, 0x32, 0x7b, 0x05, 0x09, 0x29, 0x02, 0x31, 0x29, 0x02,
+        0x2e, 0xc1, 0x01, 0x21, 0x02, 0x02, 0x2b, 0x2a, 0x31, 0x16, 0x07, 0x29, 0x2c, 0x32, 0x31,
+        0x33, 0x7b, 0x05, 0x0a, 0xc1, 0x01, 0x29, 0x2d, 0x30, 0x2d, 0x56, 0x18, 0x32, 0x7b, 0x06,
+        0x08, 0x29, 0x02, 0x0d, 0xc1, 0x01, 0x29, 0x2d, 0x30, 0x2d, 0x15, 0x08, 0x02, 0x32, 0x7b,
+        0x06, 0x08, 0x65, 0x44, 0x3b, 0x3b,
     ];
     let mut jit = Jit::new().unwrap();
     // This function reads CONST_ADDR (0x57/0x56...) which need a const

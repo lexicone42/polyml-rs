@@ -44,15 +44,34 @@ fn euclids_lemma_prime_divides_product() {
         &image,
         &common::with_nt_helpers(&driver),
         250_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("OK bounded_euclid"), "bounded Euclid (a<p) did not check:\n{out}");
-    assert!(out.contains("OK euclid_lemma"), "Euclid's lemma did not check:\n{out}");
-    assert!(out.contains("EUCLID_LEMMA_DONE"), "Euclid-lemma development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("OK bounded_euclid"),
+        "bounded Euclid (a<p) did not check:\n{out}"
+    );
+    assert!(
+        out.contains("OK euclid_lemma"),
+        "Euclid's lemma did not check:\n{out}"
+    );
+    assert!(
+        out.contains("EUCLID_LEMMA_DONE"),
+        "Euclid-lemma development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
 }

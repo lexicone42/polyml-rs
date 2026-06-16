@@ -47,15 +47,34 @@ fn the_binomial_theorem() {
         &image,
         &common::with_nt_helpers(&driver),
         300_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("OK sum_peel_first"), "sum_peel_first (reindex) did not check:\n{out}");
-    assert!(out.contains("OK binom_n_n"), "binom_n_n (C(n,n)=1) did not check:\n{out}");
-    assert!(out.contains("OK binom_theorem"), "the binomial theorem did not check:\n{out}");
-    assert!(out.contains("BINOM_THM_DONE"), "Stage-C2 development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        out.contains("OK sum_peel_first"),
+        "sum_peel_first (reindex) did not check:\n{out}"
+    );
+    assert!(
+        out.contains("OK binom_n_n"),
+        "binom_n_n (C(n,n)=1) did not check:\n{out}"
+    );
+    assert!(
+        out.contains("OK binom_theorem"),
+        "the binomial theorem did not check:\n{out}"
+    );
+    assert!(
+        out.contains("BINOM_THM_DONE"),
+        "Stage-C2 development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
 }

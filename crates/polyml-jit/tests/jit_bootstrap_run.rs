@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use polyml_image::pexport::Image;
-use polyml_jit::{translate, Jit};
+use polyml_jit::{Jit, translate};
 use polyml_runtime::{
-    length_word, load_image, patch_entry_points,
-    Interpreter, JitEntry, MemorySpace, PolyWord, RtsTable, StepResult,
+    Interpreter, JitEntry, MemorySpace, PolyWord, RtsTable, StepResult, length_word, load_image,
+    patch_entry_points,
 };
 
 fn workspace_root() -> PathBuf {
@@ -58,8 +58,7 @@ fn jit_install_real_bootstrap_functions() {
         walk_code_objects(space, |code_obj_ptr, lw| {
             total += 1;
             let n_words = length_word::length_of(lw);
-            let (cp, _count) =
-                unsafe { length_word::const_segment_for_code(code_obj_ptr) };
+            let (cp, _count) = unsafe { length_word::const_segment_for_code(code_obj_ptr) };
             let body_start = code_obj_ptr as usize;
             let cp_start = cp as usize;
             let bytecode_len = cp_start
@@ -67,9 +66,8 @@ fn jit_install_real_bootstrap_functions() {
                 .saturating_sub(std::mem::size_of::<usize>());
             let max_bytes = n_words * std::mem::size_of::<usize>();
             let bytecode_len = bytecode_len.min(max_bytes);
-            let full_body: &[u8] = unsafe {
-                std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes)
-            };
+            let full_body: &[u8] =
+                unsafe { std::slice::from_raw_parts(code_obj_ptr.cast::<u8>(), max_bytes) };
             if let Ok((jf, jit_arity_init)) =
                 translate::compile_with_consts_meta(&mut jit, full_body, bytecode_len)
             {
@@ -96,7 +94,8 @@ fn jit_install_real_bootstrap_functions() {
                         // Skip if bytecode mentions any allocation /
                         // call opcode.
                         for b in bc {
-                            if matches!(*b,
+                            if matches!(
+                                *b,
                                 0x57 | 0x58 | 0x17 | 0x18 | 0x16 | 0x0c | 0x7b // CALL family
                                 | 0x69 | 0x6a | 0x6b | 0x68 // TUPLE
                                 | 0xd0 | 0xbd | 0xda | 0x06 // alloc family
@@ -168,7 +167,9 @@ fn jit_install_real_bootstrap_functions() {
         .and_then(|s| s.parse().ok());
     let mut installed = 0usize;
     for (idx, (k, e)) in entries.into_iter().take(install_count).enumerate() {
-        if Some(idx) == skip_idx { continue; }
+        if Some(idx) == skip_idx {
+            continue;
+        }
         if let Some(only) = only_idx
             && idx != only
         {
@@ -182,8 +183,10 @@ fn jit_install_real_bootstrap_functions() {
                 eprintln!("  bytecode[{idx}] ({} bytes): {:02x?}", bytes.len(), bytes);
             }
         }
-        eprintln!("  install[{idx}]: code_obj=0x{k:016x} arity_init={} sml_arity={}",
-            e.arity_init, e.sml_arity);
+        eprintln!(
+            "  install[{idx}]: code_obj=0x{k:016x} arity_init={} sml_arity={}",
+            e.arity_init, e.sml_arity
+        );
         interp.install_jit(k, e);
         installed += 1;
     }
@@ -236,10 +239,7 @@ fn jit_install_real_bootstrap_functions() {
 
 // ---- helpers (duplicated from coverage_bootstrap.rs for self-containment)
 
-fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(
-    space: &MemorySpace,
-    mut f: F,
-) {
+fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(space: &MemorySpace, mut f: F) {
     let mut i = 0usize;
     let used = space.used_words();
     let start = space.iter().next().map(|w| w as *const PolyWord);
@@ -257,4 +257,3 @@ fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(
         i += 1 + n;
     }
 }
-

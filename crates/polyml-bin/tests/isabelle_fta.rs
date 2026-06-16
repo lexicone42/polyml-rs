@@ -41,15 +41,19 @@ fn fundamental_theorem_of_arithmetic_existence() {
         eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
         return;
     };
-    let driver_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/isabelle_support/isabelle_fta.sml");
+    let driver_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/isabelle_support/isabelle_fta.sml");
     let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_fta.sml");
 
     let Some((out, _)) = run_image_env(
         &image,
         &common::with_nt_helpers(&driver),
         300_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
@@ -57,11 +61,26 @@ fn fundamental_theorem_of_arithmetic_existence() {
 
     // the list/product helpers (the engine of the composite case)
     for lemma in ["product_append", "all_prime_append", "cofactor"] {
-        assert!(out.contains(&format!("OK {lemma}")), "FTA helper `{lemma}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {lemma}")),
+            "FTA helper `{lemma}` did not check:\n{out}"
+        );
     }
     // FTA existence: every n >= 2 is a product of primes (0-hyp, by strong induction)
-    assert!(out.contains("OK fta_existence"), "FTA (existence) did not check:\n{out}");
-    assert!(out.contains("FTA_DONE"), "FTA development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("OK fta_existence"),
+        "FTA (existence) did not check:\n{out}"
+    );
+    assert!(
+        out.contains("FTA_DONE"),
+        "FTA development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
 }

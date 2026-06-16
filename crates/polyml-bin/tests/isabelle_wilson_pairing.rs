@@ -50,20 +50,45 @@ fn involution_pairing_lemma() {
         &image,
         &common::with_mult_group(&driver),
         900_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
     // the modular/keystone base must load first
-    assert!(out.contains("LAGRANGE_ROOTS_OK"), "modular/keystone base did not load:\n{out}");
+    assert!(
+        out.contains("LAGRANGE_ROOTS_OK"),
+        "modular/keystone base did not load:\n{out}"
+    );
     // the list-product library (incl. the key extract lemma) and the pairing lemma
-    assert!(out.contains("OK extract"), "the extract lemma did not check:\n{out}");
-    assert!(out.contains("LIST_LIB_OK"), "list-product library did not complete:\n{out}");
-    assert!(out.contains("OK pairing_lemma"), "the pairing lemma did not check:\n{out}");
-    assert!(out.contains("PAIRING_OK"), "PAIRING_OK marker missing:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("PROBE_UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("OK extract"),
+        "the extract lemma did not check:\n{out}"
+    );
+    assert!(
+        out.contains("LIST_LIB_OK"),
+        "list-product library did not complete:\n{out}"
+    );
+    assert!(
+        out.contains("OK pairing_lemma"),
+        "the pairing lemma did not check:\n{out}"
+    );
+    assert!(
+        out.contains("PAIRING_OK"),
+        "PAIRING_OK marker missing:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("PROBE_UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
 }

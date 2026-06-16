@@ -45,8 +45,16 @@ pr "ARITH_TEST_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("ARITH_TEST_DONE"), "arith driver did not finish.\n{}", tail(&out, 40));
-    assert!(out.contains("ALL_CLEAN=true"), "an arithmetic law has hypotheses.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("ARITH_TEST_DONE"),
+        "arith driver did not finish.\n{}",
+        tail(&out, 40)
+    );
+    assert!(
+        out.contains("ALL_CLEAN=true"),
+        "an arithmetic law has hypotheses.\n{}",
+        tail(&out, 40)
+    );
     // exact theorem statements (commutativity of + and *, and the parity law)
     for (tag, stmt) in [
         ("ADD_COMM", "∀m n. m + n = n + m"),
@@ -59,6 +67,9 @@ pr "ARITH_TEST_DONE\n";
             tail(&out, 40)
         );
     }
-    assert!(!out.contains("_FAIL") && !out.contains("not been declared"),
-        "an arithmetic theorem was unreachable.\n{}", tail(&out, 40));
+    assert!(
+        !out.contains("_FAIL") && !out.contains("not been declared"),
+        "an arithmetic theorem was unreachable.\n{}",
+        tail(&out, 40)
+    );
 }

@@ -35,8 +35,7 @@ fn run_parse(sml: &str) -> Option<(String, i32)> {
     run_image_env(&image, sml, 50_000_000_000, &[])
 }
 
-const SKIP: &str =
-    "SKIP: /tmp/hol4_parse missing — run tools/build-hol4-checkpoints.sh parse";
+const SKIP: &str = "SKIP: /tmp/hol4_parse missing — run tools/build-hol4-checkpoints.sh parse";
 
 /// `Parse.Type` turns a quotation into the right HOL4 type, and `Parse.Term`
 /// turns quotations into variables, applications, and lambda abstractions —

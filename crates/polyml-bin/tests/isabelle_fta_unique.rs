@@ -50,14 +50,30 @@ fn fta_uniqueness_prime_factorisations_have_same_multiset() {
         &image,
         &driver,
         300_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("OK fta_unique"), "FTA uniqueness did not check:\n{out}");
-    assert!(out.contains("FTA_UNIQUE_DONE"), "FTA-uniqueness development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("OK fta_unique"),
+        "FTA uniqueness did not check:\n{out}"
+    );
+    assert!(
+        out.contains("FTA_UNIQUE_DONE"),
+        "FTA-uniqueness development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
 }

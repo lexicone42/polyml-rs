@@ -48,7 +48,11 @@ fn gauss_summation_and_sum_of_odds_by_induction() {
         &image,
         &driver,
         90_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
@@ -56,9 +60,21 @@ fn gauss_summation_and_sum_of_odds_by_induction() {
 
     // Gauss (2*(0+..+n) = n(n+1), doubling form) and sum-of-odds (n^2), each a
     // checked theorem (driver prints `OK <name>` only when hyps=0 AND aconv goal)
-    assert!(out.contains("OK gauss"), "Gauss summation not proved:\n{out}");
-    assert!(out.contains("OK sum_of_odds"), "sum-of-odds (n^2) not proved:\n{out}");
+    assert!(
+        out.contains("OK gauss"),
+        "Gauss summation not proved:\n{out}"
+    );
+    assert!(
+        out.contains("OK sum_of_odds"),
+        "sum-of-odds (n^2) not proved:\n{out}"
+    );
     // the driver prints this only when both OK gates + the soundness probe fired
-    assert!(out.contains("GAUSS_DONE"), "summation development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        out.contains("GAUSS_DONE"),
+        "summation development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
 }

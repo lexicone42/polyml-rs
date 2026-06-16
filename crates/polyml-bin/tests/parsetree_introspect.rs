@@ -84,13 +84,37 @@ pr "PARSETREE_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("PARSETREE_DONE"), "probe did not finish.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("PARSETREE_DONE"),
+        "probe did not finish.\n{}",
+        tail(&out, 30)
+    );
     // a successful compile yields both a runnable code fn and a parse tree
-    assert!(out.contains("GOOD_CODE=true"), "compiler did not return code.\n{}", tail(&out, 30));
-    assert!(out.contains("GOOD_TREE=true"), "compiler did not return a parseTree.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("GOOD_CODE=true"),
+        "compiler did not return code.\n{}",
+        tail(&out, 30)
+    );
+    assert!(
+        out.contains("GOOD_TREE=true"),
+        "compiler did not return a parseTree.\n{}",
+        tail(&out, 30)
+    );
     // the PT* walk reaches a PTtype that renders to `int` (NameSpace.Values.printType)
-    assert!(out.contains("GOOD_HAS_INT_TYPE=true"), "parse-tree walk did not find an int PTtype.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("GOOD_HAS_INT_TYPE=true"),
+        "parse-tree walk did not find an int PTtype.\n{}",
+        tail(&out, 30)
+    );
     // error path: no code, but a tree (what Isabelle uses to report errors with markup)
-    assert!(out.contains("ERR_CODE=false"), "type-error decl should not yield code.\n{}", tail(&out, 30));
-    assert!(out.contains("ERR_TREE=true"), "type-error decl should still yield a parseTree.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("ERR_CODE=false"),
+        "type-error decl should not yield code.\n{}",
+        tail(&out, 30)
+    );
+    assert!(
+        out.contains("ERR_TREE=true"),
+        "type-error decl should still yield a parseTree.\n{}",
+        tail(&out, 30)
+    );
 }

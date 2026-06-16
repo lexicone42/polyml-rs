@@ -36,8 +36,7 @@ fn induction_proofs_over_num() {
         return;
     };
 
-    let Some((out, _code)) =
-        run_support_driver_on(&num, "prove_induction.sml", 150_000_000_000)
+    let Some((out, _code)) = run_support_driver_on(&num, "prove_induction.sml", 150_000_000_000)
     else {
         eprintln!("SKIP: vendor/hol4 or driver missing");
         return;
@@ -51,8 +50,7 @@ fn induction_proofs_over_num() {
 
     // numTheory.INDUCTION survived the checkpoint and is the real thing.
     assert!(
-        out.contains("∀P. P 0 ∧ (∀n. P n ⇒ P (SUC n)) ⇒ ∀n. P n")
-            || out.contains("!P. P 0"),
+        out.contains("∀P. P 0 ∧ (∀n. P n ⇒ P (SUC n)) ⇒ ∀n. P n") || out.contains("!P. P 0"),
         "numTheory.INDUCTION not present / wrong shape.\n{}",
         tail(&out, 40)
     );
@@ -101,17 +99,28 @@ fn arithmetic_induction_n_plus_0() {
         eprintln!("SKIP: /tmp/hol4_num missing — run tools/build-hol4-checkpoints.sh num");
         return;
     };
-    let Some((out, _code)) =
-        run_support_driver_on(&num, "num_arith_trophy.sml", 400_000_000_000)
+    let Some((out, _code)) = run_support_driver_on(&num, "num_arith_trophy.sml", 400_000_000_000)
     else {
         eprintln!("SKIP: vendor/hol4 or driver missing");
         return;
     };
-    assert!(out.contains("TROPHY_DONE"), "num_arith_trophy.sml did not finish.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("TROPHY_DONE"),
+        "num_arith_trophy.sml did not finish.\n{}",
+        tail(&out, 40)
+    );
     // primitive-recursion theorem (the blocker that was sidestepped)
-    assert!(out.contains("num_Axiom_OK:"), "num_Axiom not derived.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("num_Axiom_OK:"),
+        "num_Axiom not derived.\n{}",
+        tail(&out, 40)
+    );
     // the canonical arithmetic induction, zero hypotheses
-    assert!(out.contains("TROPHY_HYPS=0"), "trophy had hypotheses.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("TROPHY_HYPS=0"),
+        "trophy had hypotheses.\n{}",
+        tail(&out, 40)
+    );
     assert!(
         out.contains("FULL_TROPHY_PASS")
             && (out.contains("∀n. n + 0 = n") || out.contains("!n. n + 0 = n")),

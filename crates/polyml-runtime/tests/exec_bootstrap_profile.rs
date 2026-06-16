@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use polyml_image::pexport::Image;
 use polyml_runtime::{
-    interpreter::diag::DiagState, load_image, patch_entry_points, Interpreter, PolyWord, RtsTable,
-    StepResult,
+    Interpreter, PolyWord, RtsTable, StepResult, interpreter::diag::DiagState, load_image,
+    patch_entry_points,
 };
 
 fn workspace_root() -> PathBuf {
@@ -70,7 +70,10 @@ fn dump_stack_at_hot_loop_entry() {
     };
     eprintln!(
         "Phase 1: hottest PC is code=0x{hot_code1:016x}+{hot_off} ({} visits).",
-        diag.pc_visits.get(&(hot_code1, hot_off)).copied().unwrap_or(0)
+        diag.pc_visits
+            .get(&(hot_code1, hot_off))
+            .copied()
+            .unwrap_or(0)
     );
 
     // Phase 2: fresh load (note: addresses change), but the hot PC
@@ -111,9 +114,7 @@ fn dump_stack_at_hot_loop_entry() {
             if snap_idx < snapshots.len() && *c == snapshots[snap_idx] {
                 eprintln!(
                     "--- Iteration {} (step {steps}) at PC=0x{:016x}+{} ---",
-                    *c,
-                    here.0,
-                    here.1
+                    *c, here.0, here.1
                 );
                 eprintln!("Stack depth: {}.", interp2.stack_height());
                 for (i, w) in interp2.dump_stack_top(15).into_iter().enumerate() {
@@ -201,12 +202,8 @@ fn disassemble_hottest_loop(d: &DiagState) {
     let win_end = (hi + 6).min(hi.saturating_add(20));
 
     eprintln!();
-    eprintln!(
-        "--- Disassembly of hottest code object's hot region (offsets {lo}..={hi}) ---"
-    );
-    eprintln!(
-        "(reading raw bytes at 0x{hot_code:016x}+[{lo}..{win_end}])"
-    );
+    eprintln!("--- Disassembly of hottest code object's hot region (offsets {lo}..={hi}) ---");
+    eprintln!("(reading raw bytes at 0x{hot_code:016x}+[{lo}..{win_end}])");
     let code_ptr = hot_code as *const u8;
     let mut pc = lo as usize;
     while pc <= win_end as usize {
@@ -220,7 +217,11 @@ fn disassemble_hottest_loop(d: &DiagState) {
             .map(|b| format!("{b:02x}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let visits = d.pc_visits.get(&(hot_code, pc as u32)).copied().unwrap_or(0);
+        let visits = d
+            .pc_visits
+            .get(&(hot_code, pc as u32))
+            .copied()
+            .unwrap_or(0);
         let visit_marker = if visits > 0 {
             format!("  [×{visits}]")
         } else {
@@ -344,16 +345,9 @@ fn imm_bytes(op: u8) -> usize {
         | INSTR_STACK_CONTAINER_B
         | INSTR_INDIRECT_CONTAINER_B
         | INSTR_CONST_ADDR8 => 1,
-        INSTR_JUMP16
-        | INSTR_JUMP16_FALSE
-        | INSTR_JUMP16_TRUE
-        | INSTR_JUMP_BACK16
-        | INSTR_LOCAL_W
-        | INSTR_CONST_INT_W
-        | INSTR_RETURN_W
-        | INSTR_SET_HANDLER16
-        | INSTR_CONST_ADDR16
-        | INSTR_CASE16 => 2,
+        INSTR_JUMP16 | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE | INSTR_JUMP_BACK16
+        | INSTR_LOCAL_W | INSTR_CONST_INT_W | INSTR_RETURN_W | INSTR_SET_HANDLER16
+        | INSTR_CONST_ADDR16 | INSTR_CASE16 => 2,
         INSTR_INDIRECT_LOCAL_BB
         | INSTR_TAIL_B_B
         | INSTR_CONST_ADDR8_8
@@ -367,11 +361,11 @@ fn report(d: &DiagState) {
     eprintln!();
     eprintln!("================ Bootstrap execution profile ================");
     eprintln!("Total steps observed: {}", d.total_steps);
+    eprintln!("Unique (code, offset) pairs visited: {}", d.pc_visits.len());
     eprintln!(
-        "Unique (code, offset) pairs visited: {}",
-        d.pc_visits.len()
+        "Unique code objects visited: {}",
+        d.hot_code_objects(usize::MAX).len()
     );
-    eprintln!("Unique code objects visited: {}", d.hot_code_objects(usize::MAX).len());
     eprintln!("Unique CALL targets: {}", d.call_targets.len());
 
     eprintln!();
@@ -386,9 +380,7 @@ fn report(d: &DiagState) {
     eprintln!("--- Top 20 hottest (code, offset) PCs ---");
     for ((code, off), cnt) in d.hot_pcs(20) {
         let pct = 100.0 * cnt as f64 / total;
-        eprintln!(
-            "  code=0x{code:016x}+{off:5}  visits={cnt:10}  ({pct:5.1}%)"
-        );
+        eprintln!("  code=0x{code:016x}+{off:5}  visits={cnt:10}  ({pct:5.1}%)");
     }
 
     eprintln!();

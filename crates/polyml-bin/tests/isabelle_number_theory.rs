@@ -52,7 +52,11 @@ fn naturals_form_a_commutative_semiring() {
         &image,
         &driver,
         80_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
@@ -61,10 +65,15 @@ fn naturals_form_a_commutative_semiring() {
     // every semiring law must be a checked theorem (the driver prints `OK <name>`
     // only when hyps = 0 AND prop aconv the intended goal)
     for law in [
-        "add_0_right", "add_comm", "add_assoc",
-        "mult_0_right", "mult_1_right",
-        "mult_comm", "mult_assoc",
-        "left_distrib", "right_distrib",
+        "add_0_right",
+        "add_comm",
+        "add_assoc",
+        "mult_0_right",
+        "mult_1_right",
+        "mult_comm",
+        "mult_assoc",
+        "left_distrib",
+        "right_distrib",
     ] {
         assert!(
             out.contains(&format!("OK {law}")),
@@ -72,6 +81,12 @@ fn naturals_form_a_commutative_semiring() {
         );
     }
     // the driver only prints this when all nine OK gates fired
-    assert!(out.contains("SEMIRING_OK"), "semiring development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        out.contains("SEMIRING_OK"),
+        "semiring development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
 }

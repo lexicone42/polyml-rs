@@ -7,7 +7,7 @@
 //! Closure-call dispatch lives in a follow-up test once the real
 //! trampoline is wired up.
 
-use polyml_jit::{translate, Jit};
+use polyml_jit::{Jit, translate};
 use polyml_runtime::{Interpreter, PolyWord};
 
 const INSTR_LOCAL_2: u8 = 0x2b;
@@ -106,11 +106,13 @@ fn jit_and_interp_agree_on_arg_plus_one() {
 fn jit_and_interp_agree_on_arg_times_3_plus_7() {
     // 3 * arg_0 + 7
     let bc = vec![
-        INSTR_LOCAL_2,            // arg_0
-        INSTR_CONST_INT_B, 3,     // const 3
-        INSTR_FIXED_MULT,         // arg_0 * 3
-        INSTR_CONST_INT_B, 7,     // const 7
-        INSTR_FIXED_ADD,          // + 7
+        INSTR_LOCAL_2, // arg_0
+        INSTR_CONST_INT_B,
+        3,                // const 3
+        INSTR_FIXED_MULT, // arg_0 * 3
+        INSTR_CONST_INT_B,
+        7,               // const 7
+        INSTR_FIXED_ADD, // + 7
         INSTR_RETURN_1,
     ];
     let arg = tag(5);

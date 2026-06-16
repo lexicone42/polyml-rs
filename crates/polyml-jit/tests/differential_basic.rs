@@ -4,7 +4,7 @@
 //! the differential tester's core machinery works: JIT and interp
 //! agree on a simple arithmetic function.
 
-use polyml_jit::{differential, translate, Jit};
+use polyml_jit::{Jit, differential, translate};
 use polyml_runtime::{Interpreter, JitEntry, PolyWord};
 
 const INSTR_LOCAL_2: u8 = 0x2b;
@@ -61,23 +61,21 @@ fn differential_matches_for_simple_add() {
     let jit_result = unsafe { (entry.func)(args_buf.as_ptr(), 0, 0) };
 
     assert_eq!(interp_result, jit_result, "JIT/interp diverged");
-    assert_eq!(
-        differential::untag(jit_result),
-        8,
-        "expected tag(8) = 17"
-    );
+    assert_eq!(differential::untag(jit_result), 8, "expected tag(8) = 17");
 }
 
 /// Verify `compare_results` correctly handles pointer cases.
 #[test]
 fn compare_results_tagged_ints() {
     // Both tagged: exact equality required.
-    assert!(
-        cmp_via_diff_machinery(differential::tag(5), differential::tag(5))
-    );
-    assert!(
-        !cmp_via_diff_machinery(differential::tag(5), differential::tag(6))
-    );
+    assert!(cmp_via_diff_machinery(
+        differential::tag(5),
+        differential::tag(5)
+    ));
+    assert!(!cmp_via_diff_machinery(
+        differential::tag(5),
+        differential::tag(6)
+    ));
     // Tagged vs zero: differ.
     assert!(!cmp_via_diff_machinery(differential::tag(0), 0));
 }

@@ -44,7 +44,11 @@ fn unified_number_theory_base() {
         &image,
         &common::with_nt_helpers(&driver),
         280_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
@@ -52,12 +56,28 @@ fn unified_number_theory_base() {
 
     // the four layers all present on the one final context
     for thm in [
-        "cong_refl", "cong_sym", "cong_trans", "cong_add", "cong_mult", // modular
-        "pow_one", "pow_add", "pow_mult_base", "cong_pow",              // powers
-        "euclid_lemma",                                                  // division branch
+        "cong_refl",
+        "cong_sym",
+        "cong_trans",
+        "cong_add",
+        "cong_mult", // modular
+        "pow_one",
+        "pow_add",
+        "pow_mult_base",
+        "cong_pow",     // powers
+        "euclid_lemma", // division branch
     ] {
-        assert!(out.contains(&format!("OK {thm}")), "unified base lemma `{thm}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {thm}")),
+            "unified base lemma `{thm}` did not check:\n{out}"
+        );
     }
-    assert!(out.contains("NT_BASE_OK"), "unified base did not validate:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        out.contains("NT_BASE_OK"),
+        "unified base did not validate:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
 }

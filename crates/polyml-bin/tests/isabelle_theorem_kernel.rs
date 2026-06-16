@@ -51,7 +51,9 @@ fn pure_ml_files(pure: &std::path::Path) -> Vec<String> {
     // `Runtime` dependency fail and the load look walled at #160).
     let mut out = Vec::new();
     for root in ["ROOT0.ML", "ROOT.ML"] {
-        let Ok(text) = std::fs::read_to_string(pure.join(root)) else { continue };
+        let Ok(text) = std::fs::read_to_string(pure.join(root)) else {
+            continue;
+        };
         for line in text.lines() {
             let t = line.trim();
             if t.starts_with("ML_file") {
@@ -74,11 +76,22 @@ fn lcf_kernel_derives_theorems() {
         return;
     };
     let files = pure_ml_files(&pure);
-    let upto = files.iter().position(|f| f == "thm.ML").map_or(files.len(), |i| i + 1);
+    let upto = files
+        .iter()
+        .position(|f| f == "thm.ML")
+        .map_or(files.len(), |i| i + 1);
     let p = pure.to_str().unwrap();
     let q = |f: &str| format!("\"{p}/{f}\"");
-    let ph0 = files[..27.min(files.len())].iter().map(|f| q(f)).collect::<Vec<_>>().join(",");
-    let mid = files[27..upto].iter().map(|f| q(f)).collect::<Vec<_>>().join(",");
+    let ph0 = files[..27.min(files.len())]
+        .iter()
+        .map(|f| q(f))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mid = files[27..upto]
+        .iter()
+        .map(|f| q(f))
+        .collect::<Vec<_>>()
+        .join(",");
 
     let driver = format!(
         r#"
@@ -162,15 +175,33 @@ pr "=THM= DONE\n";
         &image,
         &driver,
         80_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("=THM= DONE"), "theorem kernel demo did not finish.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("=THM= DONE"),
+        "theorem kernel demo did not finish.\n{}",
+        tail(&out, 40)
+    );
     for op in [
-        "reflexive", "symmetric", "transitive", "beta", "imp_refl", "imp_weaken", "mp",
-        "forall_intr", "forall_elim", "combination", "abstract_rule", "forall_imp",
+        "reflexive",
+        "symmetric",
+        "transitive",
+        "beta",
+        "imp_refl",
+        "imp_weaken",
+        "mp",
+        "forall_intr",
+        "forall_elim",
+        "combination",
+        "abstract_rule",
+        "forall_imp",
     ] {
         assert!(
             out.contains(&format!("=THM= {op} true")),

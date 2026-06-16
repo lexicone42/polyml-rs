@@ -46,7 +46,10 @@ fn disassemble_bootstrap_entry() {
         other => panic!("closure code addr is not a Code object: {other:?}"),
     };
 
-    eprintln!("Bootstrap entry: closure @{} -> code @{}", image.root, code_id);
+    eprintln!(
+        "Bootstrap entry: closure @{} -> code @{}",
+        image.root, code_id
+    );
     eprintln!("Code bytes ({} total): ", code_bytes.len());
 
     // Decode + print each instruction.
@@ -70,4 +73,3 @@ fn disassemble_bootstrap_entry() {
         eprintln!("  0x{op:02x} {:<22} {count}", disasm::opcode_name(**op));
     }
 }
-

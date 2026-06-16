@@ -47,7 +47,11 @@ pr "TAUT_TEST_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("TAUT_TEST_DONE"), "taut driver did not finish.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("TAUT_TEST_DONE"),
+        "taut driver did not finish.\n{}",
+        tail(&out, 40)
+    );
     // Each must be a proved theorem (turnstile) with zero hypotheses.
     for (tag, stmt) in [
         ("EM", "⊢ p ∨ ¬p"),
@@ -66,5 +70,9 @@ pr "TAUT_TEST_DONE\n";
             tail(&out, 40)
         );
     }
-    assert!(!out.contains("ERR "), "a tautology failed to prove.\n{}", tail(&out, 40));
+    assert!(
+        !out.contains("ERR "),
+        "a tautology failed to prove.\n{}",
+        tail(&out, 40)
+    );
 }

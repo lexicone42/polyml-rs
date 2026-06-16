@@ -41,9 +41,18 @@ val () = pr ("(2+3)*5 = " ^ ev "(2 + 3) * 5" ^ "\n");
 val () = pr "MULT_EVAL_DONE\n";
 "#;
     let (out, _) = run_image_env(&image, driver, 50_000_000_000, &[]).expect("run");
-    assert!(out.contains("3*4 = 12"), "computeLib did not reduce 3*4 to 12:\n{out}");
-    assert!(out.contains("12*13 = 156"), "computeLib did not reduce 12*13 to 156:\n{out}");
-    assert!(out.contains("(2+3)*5 = 25"), "computeLib did not reduce (2+3)*5 to 25:\n{out}");
+    assert!(
+        out.contains("3*4 = 12"),
+        "computeLib did not reduce 3*4 to 12:\n{out}"
+    );
+    assert!(
+        out.contains("12*13 = 156"),
+        "computeLib did not reduce 12*13 to 156:\n{out}"
+    );
+    assert!(
+        out.contains("(2+3)*5 = 25"),
+        "computeLib did not reduce (2+3)*5 to 25:\n{out}"
+    );
     assert!(out.contains("MULT_EVAL_DONE"), "incomplete:\n{out}");
 }
 
@@ -61,7 +70,10 @@ val () = case TypeBase.fetch ty of
 val () = pr "OK\n";
 "#;
     let (out, _) = run_image_env(&image, driver, 100_000_000_000, &[]).expect("run");
-    assert!(out.contains("TREE_REGISTERED"), "tree not in TypeBase:\n{out}");
+    assert!(
+        out.contains("TREE_REGISTERED"),
+        "tree not in TypeBase:\n{out}"
+    );
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
 
@@ -141,10 +153,8 @@ fn verified_insertion_sort() {
     // proof chain (ins_leall / leall_trans / ins_sorted / ins_count) was
     // engineered by a 3-seat proof fleet.
     let Some(image) = ckpt() else { return };
-    let driver = std::fs::read_to_string(
-        common::support_file("insertion_sort_verified.sml"),
-    )
-    .expect("read insertion_sort_verified.sml");
+    let driver = std::fs::read_to_string(common::support_file("insertion_sort_verified.sml"))
+        .expect("read insertion_sort_verified.sml");
     let (out, _) = run_image_env(&image, &driver, 300_000_000_000, &[]).expect("run");
     assert!(out.contains("OK sorted_isort"), "sortedness failed:\n{out}");
     assert!(out.contains("OK count_isort"), "permutation failed:\n{out}");
@@ -174,10 +184,13 @@ fn verified_euclid_gcd() {
     // Both ZERO-hypothesis theorems, engineered by two 3-seat fleets
     // (wf_dac9e4a5-fe2 / wf_9aa3fd1e-5a7, all seats converged independently).
     let Some(image) = ckpt() else { return };
-    let driver =
-        std::fs::read_to_string(common::support_file("gcd_verified.sml")).expect("read gcd_verified.sml");
+    let driver = std::fs::read_to_string(common::support_file("gcd_verified.sml"))
+        .expect("read gcd_verified.sml");
     let (out, _) = run_image_env(&image, &driver, 200_000_000_000, &[]).expect("run");
-    assert!(out.contains("GCD_SETUP_OK"), "gcd tDefine setup failed:\n{out}");
+    assert!(
+        out.contains("GCD_SETUP_OK"),
+        "gcd tDefine setup failed:\n{out}"
+    );
     assert!(
         out.contains("OK gcd_divides"),
         "gcd common-divisor theorem failed:\n{out}"
@@ -186,7 +199,10 @@ fn verified_euclid_gcd() {
         out.contains("OK gcd_greatest"),
         "gcd greatest-common-divisor (universal property) failed:\n{out}"
     );
-    assert!(out.contains("SAVED gcd_greatest"), "gcd_greatest not saved:\n{out}");
+    assert!(
+        out.contains("SAVED gcd_greatest"),
+        "gcd_greatest not saved:\n{out}"
+    );
     // commutativity proved ALGEBRAICALLY from the characterisation (no induction)
     assert!(
         out.contains("OK gcd_comm"),
@@ -224,14 +240,23 @@ fn verified_compiler() {
     let driver = std::fs::read_to_string(common::support_file("verified_compiler.sml"))
         .expect("read verified_compiler.sml");
     let (out, _) = run_image_env(&image, &driver, 200_000_000_000, &[]).expect("run");
-    assert!(out.contains("OK exec_capp"), "exec_capp lemma failed:\n{out}");
+    assert!(
+        out.contains("OK exec_capp"),
+        "exec_capp lemma failed:\n{out}"
+    );
     assert!(
         out.contains("OK compile_correct"),
         "compiler correctness theorem failed:\n{out}"
     );
-    assert!(out.contains("ZERO_HYP_OK"), "compile_correct has hypotheses:\n{out}");
+    assert!(
+        out.contains("ZERO_HYP_OK"),
+        "compile_correct has hypotheses:\n{out}"
+    );
     // the compiled code actually RUNS and agrees with eval (kernel-checked)
-    assert!(out.contains("EVAL_OK"), "EVAL demo (machine run = source eval) failed:\n{out}");
+    assert!(
+        out.contains("EVAL_OK"),
+        "EVAL demo (machine run = source eval) failed:\n{out}"
+    );
     // OPTIMIZING-COMPILER EXTENSION: a constant-folding optimizer proved
     // semantics-preserving (simplify_correct) and COMPOSED with the compiler
     // (opt_compile_correct) — CompCert-style two-pass composition.
@@ -261,11 +286,26 @@ fn verified_merge_sort() {
     let driver = std::fs::read_to_string(common::support_file("merge_sort_verified.sml"))
         .expect("read merge_sort_verified.sml");
     let (out, _) = run_image_env(&image, &driver, 150_000_000_000, &[]).expect("run");
-    assert!(out.contains("OK msort_count"), "merge sort permutation property failed:\n{out}");
-    assert!(out.contains("OK msort_sorted"), "merge sort sortedness failed:\n{out}");
-    assert!(out.contains("msort_count hyps=0"), "msort_count has hypotheses:\n{out}");
-    assert!(out.contains("msort_sorted hyps=0"), "msort_sorted has hypotheses:\n{out}");
-    assert!(out.contains("EVAL_OK"), "EVAL of msort did not produce the sorted list:\n{out}");
+    assert!(
+        out.contains("OK msort_count"),
+        "merge sort permutation property failed:\n{out}"
+    );
+    assert!(
+        out.contains("OK msort_sorted"),
+        "merge sort sortedness failed:\n{out}"
+    );
+    assert!(
+        out.contains("msort_count hyps=0"),
+        "msort_count has hypotheses:\n{out}"
+    );
+    assert!(
+        out.contains("msort_sorted hyps=0"),
+        "msort_sorted has hypotheses:\n{out}"
+    );
+    assert!(
+        out.contains("EVAL_OK"),
+        "EVAL of msort did not produce the sorted list:\n{out}"
+    );
     assert!(out.contains("ALL_DONE"), "verification incomplete:\n{out}");
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
@@ -286,10 +326,19 @@ fn verified_bst() {
     let driver = std::fs::read_to_string(common::support_file("verified_bst.sml"))
         .expect("read verified_bst.sml");
     let (out, _) = run_image_env(&image, &driver, 200_000_000_000, &[]).expect("run");
-    assert!(out.contains("OK member_insert [0 hyps]"), "membership-correctness failed:\n{out}");
-    assert!(out.contains("OK insert_bst [0 hyps]"), "BST-invariant preservation failed:\n{out}");
+    assert!(
+        out.contains("OK member_insert [0 hyps]"),
+        "membership-correctness failed:\n{out}"
+    );
+    assert!(
+        out.contains("OK insert_bst [0 hyps]"),
+        "BST-invariant preservation failed:\n{out}"
+    );
     // membership actually computes on a concrete tree (kernel-checked)
-    assert!(out.contains("EVAL_OK"), "EVAL of member on a concrete tree failed:\n{out}");
+    assert!(
+        out.contains("EVAL_OK"),
+        "EVAL of member on a concrete tree failed:\n{out}"
+    );
     assert!(out.contains("BST_DONE"), "verification incomplete:\n{out}");
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
@@ -312,10 +361,23 @@ fn verified_list_function_laws() {
     let driver = std::fs::read_to_string(common::support_file("list_laws_verified.sml"))
         .expect("read list_laws_verified.sml");
     let (out, _) = run_image_env(&image, &driver, 100_000_000_000, &[]).expect("run");
-    for law in ["append_nil", "append_assoc", "revacc_correct", "revacc_reverse", "map_fusion", "len_append"] {
-        assert!(out.contains(&format!("OK {law}")), "list law `{law}` did not check:\n{out}");
+    for law in [
+        "append_nil",
+        "append_assoc",
+        "revacc_correct",
+        "revacc_reverse",
+        "map_fusion",
+        "len_append",
+    ] {
+        assert!(
+            out.contains(&format!("OK {law}")),
+            "list law `{law}` did not check:\n{out}"
+        );
     }
-    assert!(out.contains("LIST_LAWS_DONE"), "list-laws verification incomplete:\n{out}");
+    assert!(
+        out.contains("LIST_LAWS_DONE"),
+        "list-laws verification incomplete:\n{out}"
+    );
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }
 
@@ -335,10 +397,19 @@ fn verified_quicksort() {
     let driver = std::fs::read_to_string(common::support_file("quicksort_verified.sml"))
         .expect("read quicksort_verified.sml");
     let (out, _) = run_image_env(&image, &driver, 200_000_000_000, &[]).expect("run");
-    assert!(out.contains("OK qsort_count"), "permutation (multiset) failed:\n{out}");
+    assert!(
+        out.contains("OK qsort_count"),
+        "permutation (multiset) failed:\n{out}"
+    );
     assert!(out.contains("OK qsort_sorted"), "sortedness failed:\n{out}");
     // and it actually computes (computeLib EVAL, kernel-checked)
-    assert!(out.contains("EVAL_QSORT_OK"), "EVAL of qsort did not produce the sorted list:\n{out}");
-    assert!(out.contains("QSORT_DONE"), "quicksort verification incomplete:\n{out}");
+    assert!(
+        out.contains("EVAL_QSORT_OK"),
+        "EVAL of qsort did not produce the sorted list:\n{out}"
+    );
+    assert!(
+        out.contains("QSORT_DONE"),
+        "quicksort verification incomplete:\n{out}"
+    );
     assert!(!out.contains("Exception-"), "exception:\n{out}");
 }

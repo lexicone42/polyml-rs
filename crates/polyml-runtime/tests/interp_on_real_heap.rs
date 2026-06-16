@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use polyml_image::pexport::Image;
 use polyml_runtime::{
-    interpreter::opcodes::*, load_image, Interpreter, MemorySpace, PolyWord, StepResult,
+    Interpreter, MemorySpace, PolyWord, StepResult, interpreter::opcodes::*, load_image,
 };
 
 fn workspace_root() -> PathBuf {
@@ -55,7 +55,10 @@ fn interpreter_reads_real_heap_via_indirect() {
     let StepResult::Returned(code_word) = result else {
         panic!("expected Returned, got {result:?}");
     };
-    assert!(code_word.is_data_ptr(), "code_word should be a pointer, got {code_word:?}");
+    assert!(
+        code_word.is_data_ptr(),
+        "code_word should be a pointer, got {code_word:?}"
+    );
 
     // The fetched value should be the same as what reading the root
     // object directly would yield — namely the code pointer stored at

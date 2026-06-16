@@ -38,24 +38,50 @@ fn euler_foundations() {
     };
     let driver_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/isabelle_support/isabelle_euler_foundations.sml");
-    let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_euler_foundations.sml");
+    let driver =
+        std::fs::read_to_string(&driver_path).expect("read isabelle_euler_foundations.sml");
 
     let Some((out, _)) = run_image_env(
         &image,
         &common::with_wilson_inverse(&driver),
         990_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("INVERSE_FN_OK"), "Wilson-inverse base did not load:\n{out}");
-    assert!(out.contains("OK lprod_perm"), "lprod_perm did not check:\n{out}");
-    assert!(out.contains("PERM_INV_OK"), "PERM_INV_OK marker missing:\n{out}");
-    assert!(out.contains("OK lmem_rrl"), "lmem_rrl did not check:\n{out}");
-    assert!(out.contains("REDUCED_RES_OK"), "REDUCED_RES_OK marker missing:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("PROBE_UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("INVERSE_FN_OK"),
+        "Wilson-inverse base did not load:\n{out}"
+    );
+    assert!(
+        out.contains("OK lprod_perm"),
+        "lprod_perm did not check:\n{out}"
+    );
+    assert!(
+        out.contains("PERM_INV_OK"),
+        "PERM_INV_OK marker missing:\n{out}"
+    );
+    assert!(
+        out.contains("OK lmem_rrl"),
+        "lmem_rrl did not check:\n{out}"
+    );
+    assert!(
+        out.contains("REDUCED_RES_OK"),
+        "REDUCED_RES_OK marker missing:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("PROBE_UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
 }

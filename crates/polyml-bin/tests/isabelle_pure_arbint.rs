@@ -61,21 +61,43 @@ pr "ISA_ARB_DONE\n";
         &image,
         &driver,
         60_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("ISA_ARB_DONE"), "probe did not finish.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("ISA_ARB_DONE"),
+        "probe did not finish.\n{}",
+        tail(&out, 40)
+    );
     // Confirm we really are on an arbitrary-precision-int image.
-    assert!(out.contains("ARB_INT = yes"), "image is not arbitrary-precision int.\n{}", tail(&out, 10));
+    assert!(
+        out.contains("ARB_INT = yes"),
+        "image is not arbitrary-precision int.\n{}",
+        tail(&out, 10)
+    );
     // The 4 that fail under FixedInt must now load.
     for f in [
-        "ML/ml_statistics.ML", "General/time.ML",
-        "Concurrent/isabelle_thread.ML", "ML/ml_compiler0.ML",
+        "ML/ml_statistics.ML",
+        "General/time.ML",
+        "Concurrent/isabelle_thread.ML",
+        "ML/ml_compiler0.ML",
     ] {
-        assert!(out.contains(&format!("ISA_OK {f}")), "{f} did not load under arbitrary int.\n{}", tail(&out, 40));
+        assert!(
+            out.contains(&format!("ISA_OK {f}")),
+            "{f} did not load under arbitrary int.\n{}",
+            tail(&out, 40)
+        );
     }
     // Full Phase 0 (the int flip's payoff).
-    assert!(out.contains("ISA_LOADED 27/27"), "Phase-0 count is not 27/27.\n{}", tail(&out, 40));
+    assert!(
+        out.contains("ISA_LOADED 27/27"),
+        "Phase-0 count is not 27/27.\n{}",
+        tail(&out, 40)
+    );
 }

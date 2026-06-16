@@ -6,7 +6,7 @@
 //! return the tuple pointer. Verify the tuple lives in the interp's
 //! heap and its fields read back correctly.
 
-use polyml_jit::{translate, Jit};
+use polyml_jit::{Jit, translate};
 use polyml_runtime::{Interpreter, MemorySpace, PolyWord, SpaceKind};
 
 const INSTR_LOCAL_2: u8 = 0x2b;
@@ -52,9 +52,8 @@ fn jit_allocates_tuple_via_real_trampoline() {
     // Invoke the JIT'd function inside with_jit_interp so the
     // alloc_tuple_trampoline can reach the live interpreter.
     let args = [tag(42), 0i64, 0i64];
-    let result = polyml_runtime::with_jit_interp(&mut interp, || unsafe {
-        jit_fn(args.as_ptr(), 0, 0)
-    });
+    let result =
+        polyml_runtime::with_jit_interp(&mut interp, || unsafe { jit_fn(args.as_ptr(), 0, 0) });
 
     // The result should be a heap pointer (not tagged).
     let result_word = PolyWord::from_bits(result as usize);

@@ -29,20 +29,32 @@ fn meson_proves_pelletier_suite() {
         eprintln!("SKIP: /tmp/hol4_meson missing — run tools/build-hol4-checkpoints.sh meson");
         return;
     };
-    let Some((out, _)) =
-        run_support_driver_on(&image, "pelletier_problems.sml", 200_000_000_000)
+    let Some((out, _)) = run_support_driver_on(&image, "pelletier_problems.sml", 200_000_000_000)
     else {
         eprintln!("SKIP: vendor/hol4 or driver missing");
         return;
     };
-    assert!(out.contains("PELLETIER_DONE"), "driver did not finish.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("PELLETIER_DONE"),
+        "driver did not finish.\n{}",
+        tail(&out, 30)
+    );
 
     // All 46 of P1..P46 prove, each as a 0-hypothesis theorem.
     let proved = out.matches("PROVED HYPS=0").count();
-    assert_eq!(proved, 46, "expected 46 zero-hyp MESON proofs, got {proved}.\n{}", tail(&out, 60));
+    assert_eq!(
+        proved,
+        46,
+        "expected 46 zero-hyp MESON proofs, got {proved}.\n{}",
+        tail(&out, 60)
+    );
 
     // No problem in the proved set failed or smuggled a hypothesis.
-    assert!(!out.contains(" FAILED"), "a Pelletier problem failed.\n{}", tail(&out, 60));
+    assert!(
+        !out.contains(" FAILED"),
+        "a Pelletier problem failed.\n{}",
+        tail(&out, 60)
+    );
     for n in 1..=46 {
         assert!(
             out.contains(&format!("PELL P{n} PROVED HYPS=0")),
@@ -57,5 +69,9 @@ fn meson_proves_pelletier_suite() {
         "P47 should be the expected MESON failure (not a pass, not a crash).\n{}",
         tail(&out, 30)
     );
-    assert!(!out.contains("UNEXPECTED_PASS"), "P47 unexpectedly passed?\n{}", tail(&out, 30));
+    assert!(
+        !out.contains("UNEXPECTED_PASS"),
+        "P47 unexpectedly passed?\n{}",
+        tail(&out, 30)
+    );
 }

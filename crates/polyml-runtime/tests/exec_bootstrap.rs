@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use polyml_image::pexport::Image;
 use polyml_runtime::{
+    Interpreter, PolyWord, RtsTable,
     interpreter::{StepResult, opcodes},
-    load_image, patch_entry_points, Interpreter, PolyWord, RtsTable,
+    load_image, patch_entry_points,
 };
 
 /// Snapshot of one step for the failure-time trace dump.
@@ -62,7 +63,10 @@ fn step_bootstrap_entry_as_far_as_possible() {
     // polyml_runtime::rts::set_rts_trace(true);
     let rts = Arc::new(RtsTable::new());
     let (patched, missing) = patch_entry_points(&mut loaded, &rts);
-    eprintln!("RTS patch: {patched} resolved, {} unresolved.", missing.len());
+    eprintln!(
+        "RTS patch: {patched} resolved, {} unresolved.",
+        missing.len()
+    );
     if !missing.is_empty() {
         eprintln!("Unresolved entry-point names (first 10):");
         for name in missing.iter().take(10) {
@@ -172,7 +176,10 @@ fn step_bootstrap_entry_as_far_as_possible() {
             eprintln!("(shouldn't happen) Unexpected Continue result.");
         }
         Err(e) => {
-            eprintln!("Error after {steps} steps at pc_offset={}: {e}", interp.pc_offset());
+            eprintln!(
+                "Error after {steps} steps at pc_offset={}: {e}",
+                interp.pc_offset()
+            );
             dump_recent(&recent);
             // Hex-dump the bytes around the failing PC in the current
             // code object. The PC reported above is the byte just

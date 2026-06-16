@@ -64,7 +64,12 @@ pub fn decode(bytecode: &[u8], pc: usize) -> DecodedOp {
                 imm_text: Some(format!("{arg1} cases")),
             };
         }
-        return DecodedOp { op, mnemonic, total_len: 1, imm_text: Some("truncated".into()) };
+        return DecodedOp {
+            op,
+            mnemonic,
+            total_len: 1,
+            imm_text: Some("truncated".into()),
+        };
     }
 
     // ESCAPE: 1 prefix byte + 1 extended opcode byte. We don't decode
@@ -86,7 +91,12 @@ pub fn decode(bytecode: &[u8], pc: usize) -> DecodedOp {
     } else {
         Some(format_imm(op, &bytecode[pc + 1..pc + 1 + imm]))
     };
-    DecodedOp { op, mnemonic, total_len, imm_text }
+    DecodedOp {
+        op,
+        mnemonic,
+        total_len,
+        imm_text,
+    }
 }
 
 /// Format the immediate bytes of a known opcode into a readable
@@ -105,14 +115,16 @@ fn format_imm(op: u8, imm: &[u8]) -> String {
         INSTR_CLOSURE_B => format!("captures={}", imm[0]),
         INSTR_SET_HANDLER8 => format!("off=+{}", imm[0]),
         INSTR_PUSH_HANDLER => "".into(),
-        INSTR_CALL_FAST_RTS0 | INSTR_CALL_FAST_RTS1
-        | INSTR_CALL_FAST_RTS2 | INSTR_CALL_FAST_RTS3
-        | INSTR_CALL_FAST_RTS4 | INSTR_CALL_FAST_RTS5 => format!("stub_op={}", imm[0]),
+        INSTR_CALL_FAST_RTS0 | INSTR_CALL_FAST_RTS1 | INSTR_CALL_FAST_RTS2
+        | INSTR_CALL_FAST_RTS3 | INSTR_CALL_FAST_RTS4 | INSTR_CALL_FAST_RTS5 => {
+            format!("stub_op={}", imm[0])
+        }
         INSTR_MOVE_TO_CONTAINER_B | INSTR_SET_STACK_VAL_B => format!("slot={}", imm[0]),
         INSTR_STACK_CONTAINER_B => format!("n={}", imm[0]),
         INSTR_INDIRECT_CONTAINER_B => format!("slot={}", imm[0]),
-        INSTR_INDIRECT_CLOSURE_B0 | INSTR_INDIRECT_CLOSURE_B1
-        | INSTR_INDIRECT_CLOSURE_B2 => format!("depth={}", imm[0]),
+        INSTR_INDIRECT_CLOSURE_B0 | INSTR_INDIRECT_CLOSURE_B1 | INSTR_INDIRECT_CLOSURE_B2 => {
+            format!("depth={}", imm[0])
+        }
         INSTR_INDIRECT_LOCAL_B0 | INSTR_INDIRECT_LOCAL_B1 => format!("depth={}", imm[0]),
         INSTR_MOVE_TO_MUT_CLOSURE_B | INSTR_ALLOC_MUT_CLOSURE_B => format!("n={}", imm[0]),
         INSTR_CALL_LOCAL_B => format!("n_args={}", imm[0]),
@@ -154,7 +166,11 @@ fn format_imm(op: u8, imm: &[u8]) -> String {
         }
 
         // Three+ bytes: render as hex by default.
-        _ => imm.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
+        _ => imm
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" "),
     }
 }
 
@@ -328,25 +344,52 @@ pub fn opcode_name(op: u8) -> &'static str {
 #[must_use]
 pub fn imm_bytes(op: u8) -> usize {
     match op {
-        INSTR_JUMP8 | INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE | INSTR_JUMP_BACK8
-        | INSTR_LOCAL_B | INSTR_INDIRECT_B | INSTR_CONST_INT_B | INSTR_RESET_B
-        | INSTR_RESET_R_B | INSTR_RETURN_B | INSTR_TUPLE_B | INSTR_CLOSURE_B
-        | INSTR_SET_HANDLER8 | INSTR_PUSH_HANDLER | INSTR_MOVE_TO_CONTAINER_B
-        | INSTR_SET_STACK_VAL_B | INSTR_STACK_CONTAINER_B | INSTR_INDIRECT_CONTAINER_B
-        | INSTR_INDIRECT_CLOSURE_B0 | INSTR_INDIRECT_CLOSURE_B1 | INSTR_INDIRECT_CLOSURE_B2
-        | INSTR_INDIRECT_LOCAL_B0 | INSTR_INDIRECT_LOCAL_B1
+        INSTR_JUMP8
+        | INSTR_JUMP8_FALSE
+        | INSTR_JUMP8_TRUE
+        | INSTR_JUMP_BACK8
+        | INSTR_LOCAL_B
+        | INSTR_INDIRECT_B
+        | INSTR_CONST_INT_B
+        | INSTR_RESET_B
+        | INSTR_RESET_R_B
+        | INSTR_RETURN_B
+        | INSTR_TUPLE_B
+        | INSTR_CLOSURE_B
+        | INSTR_SET_HANDLER8
+        | INSTR_PUSH_HANDLER
+        | INSTR_MOVE_TO_CONTAINER_B
+        | INSTR_SET_STACK_VAL_B
+        | INSTR_STACK_CONTAINER_B
+        | INSTR_INDIRECT_CONTAINER_B
+        | INSTR_INDIRECT_CLOSURE_B0
+        | INSTR_INDIRECT_CLOSURE_B1
+        | INSTR_INDIRECT_CLOSURE_B2
+        | INSTR_INDIRECT_LOCAL_B0
+        | INSTR_INDIRECT_LOCAL_B1
         | INSTR_IS_TAGGED_LOCAL_B
-        | INSTR_MOVE_TO_MUT_CLOSURE_B | INSTR_ALLOC_MUT_CLOSURE_B
-        | INSTR_CALL_LOCAL_B | INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1
-        | INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1
-        | INSTR_CALL_FAST_RTS0 | INSTR_CALL_FAST_RTS1 | INSTR_CALL_FAST_RTS2
-        | INSTR_CALL_FAST_RTS3 | INSTR_CALL_FAST_RTS4 | INSTR_CALL_FAST_RTS5 => 1,
+        | INSTR_MOVE_TO_MUT_CLOSURE_B
+        | INSTR_ALLOC_MUT_CLOSURE_B
+        | INSTR_CALL_LOCAL_B
+        | INSTR_CONST_ADDR8_0
+        | INSTR_CONST_ADDR8_1
+        | INSTR_CALL_CONST_ADDR8_0
+        | INSTR_CALL_CONST_ADDR8_1
+        | INSTR_CALL_FAST_RTS0
+        | INSTR_CALL_FAST_RTS1
+        | INSTR_CALL_FAST_RTS2
+        | INSTR_CALL_FAST_RTS3
+        | INSTR_CALL_FAST_RTS4
+        | INSTR_CALL_FAST_RTS5 => 1,
         INSTR_JUMP16 | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE | INSTR_JUMP_BACK16
         | INSTR_LOCAL_W | INSTR_CONST_INT_W | INSTR_RETURN_W | INSTR_SET_HANDLER16
         | INSTR_STACK_SIZE16 => 2,
-        INSTR_INDIRECT_LOCAL_BB | INSTR_INDIRECT_CLOSURE_BB
-        | INSTR_CONST_ADDR8_8 | INSTR_CALL_CONST_ADDR8_8
-        | INSTR_JUMP_TAGGED_LOCAL | INSTR_TAIL_B_B => 2,
+        INSTR_INDIRECT_LOCAL_BB
+        | INSTR_INDIRECT_CLOSURE_BB
+        | INSTR_CONST_ADDR8_8
+        | INSTR_CALL_CONST_ADDR8_8
+        | INSTR_JUMP_TAGGED_LOCAL
+        | INSTR_TAIL_B_B => 2,
         INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => 3,
         INSTR_CONST_ADDR16_8 | INSTR_CALL_CONST_ADDR16_8 => 3,
         _ => 0,
@@ -426,7 +469,11 @@ mod tests {
         // A two-instruction stream must decode to exactly two ops, in step.
         let stream = vec![INSTR_IS_TAGGED_LOCAL_B, 0x01, INSTR_JUMP8_FALSE, 0x05];
         let ops = disassemble(&stream);
-        assert_eq!(ops.len(), 2, "operand must not be mis-decoded as a second opcode");
+        assert_eq!(
+            ops.len(),
+            2,
+            "operand must not be mis-decoded as a second opcode"
+        );
         assert_eq!(ops[1].1.mnemonic, "JUMP8_FALSE");
     }
 }

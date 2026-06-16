@@ -40,28 +40,44 @@ fn sqrt2_is_irrational_by_infinite_descent() {
         eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
         return;
     };
-    let driver_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/isabelle_support/isabelle_sqrt2.sml");
+    let driver_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/isabelle_support/isabelle_sqrt2.sml");
     let driver = std::fs::read_to_string(&driver_path).expect("read isabelle_sqrt2.sml");
 
     let Some((out, _)) = run_image_env(
         &image,
         &common::with_nt_helpers(&driver),
         300_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
     // the parity development (the descent engine)
-    assert!(out.contains("PARITY_OK"), "parity helpers did not check:\n{out}");
+    assert!(
+        out.contains("PARITY_OK"),
+        "parity helpers did not check:\n{out}"
+    );
     // √2 irrational: no positive a,b with a^2 = 2 b^2, by infinite descent (0-hyp)
     assert!(
         out.contains("OK sqrt2_irrational"),
         "sqrt 2 irrationality did not check:\n{out}"
     );
-    assert!(out.contains("SQRT2_DONE"), "sqrt2 development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("SQRT2_DONE"),
+        "sqrt2 development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
 }

@@ -31,7 +31,7 @@ use crate::length_word::{
     self, F_BYTE_OBJ, F_CLOSURE_OBJ, F_CODE_OBJ, F_MUTABLE_BIT, F_NEGATIVE_BIT, F_NO_OVERWRITE,
     F_WEAK_BIT,
 };
-use crate::poly_word::{PolyWord, MAX_TAGGED, MIN_TAGGED};
+use crate::poly_word::{MAX_TAGGED, MIN_TAGGED, PolyWord};
 use crate::space::{MemorySpace, SpaceKind};
 
 /// The output of [`load_image`]: three populated spaces plus a pointer
@@ -119,13 +119,19 @@ fn classify(obj: &Object) -> (SpaceKind, u8) {
     if obj.flags.contains(polyml_image::pexport::ObjFlags::MUTABLE) {
         flags |= F_MUTABLE_BIT;
     }
-    if obj.flags.contains(polyml_image::pexport::ObjFlags::NEGATIVE) {
+    if obj
+        .flags
+        .contains(polyml_image::pexport::ObjFlags::NEGATIVE)
+    {
         flags |= F_NEGATIVE_BIT;
     }
     if obj.flags.contains(polyml_image::pexport::ObjFlags::WEAK) {
         flags |= F_WEAK_BIT;
     }
-    if obj.flags.contains(polyml_image::pexport::ObjFlags::NO_OVERWRITE) {
+    if obj
+        .flags
+        .contains(polyml_image::pexport::ObjFlags::NO_OVERWRITE)
+    {
         flags |= F_NO_OVERWRITE;
     }
     // Type bits.
@@ -231,15 +237,17 @@ fn resolve_value(v: Value, pointers: &[*mut PolyWord]) -> Result<PolyWord, LoadE
     match v {
         Value::Tagged(n) => {
             // Range check against the *current target* word size.
-            let n_isize = isize::try_from(n)
-                .map_err(|_| LoadError::TaggedOutOfRange { value: n })?;
+            let n_isize =
+                isize::try_from(n).map_err(|_| LoadError::TaggedOutOfRange { value: n })?;
             if !(MIN_TAGGED..=MAX_TAGGED).contains(&n_isize) {
                 return Err(LoadError::TaggedOutOfRange { value: n });
             }
             Ok(PolyWord::tagged(n_isize))
         }
         Value::Ref(id) => {
-            let p = *pointers.get(id as usize).ok_or(LoadError::UnresolvedRef { id })?;
+            let p = *pointers
+                .get(id as usize)
+                .ok_or(LoadError::UnresolvedRef { id })?;
             if p.is_null() {
                 return Err(LoadError::UnresolvedRef { id });
             }
@@ -324,9 +332,7 @@ fn write_body(
             // const count at [code_words]
             // SAFETY: code_words < total_words
             unsafe {
-                obj_ptr
-                    .add(code_words)
-                    .write(PolyWord::from_bits(n_consts));
+                obj_ptr.add(code_words).write(PolyWord::from_bits(n_consts));
             }
 
             // constants at [code_words + 1 .. code_words + 1 + n_consts]

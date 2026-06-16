@@ -64,7 +64,11 @@ fn run_poly(
         .env("POLYML_GC_THRESHOLD", "99") // minimise GC overhead
         .env("POLYML_GC_QUIET", "1")
         .spawn()?;
-    child.stdin.as_mut().unwrap().write_all(stdin_data.as_bytes())?;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin_data.as_bytes())?;
     drop(child.stdin.take());
     let out = child.wait_with_output()?;
     let combined = format!(
@@ -88,8 +92,8 @@ fn live_export_roundtrip_through_basis() {
     };
 
     // Use a per-test output path under /tmp so concurrent runs don't collide.
-    let pexport_path = std::env::temp_dir()
-        .join(format!("polyml-rs-live-export-{}", std::process::id()));
+    let pexport_path =
+        std::env::temp_dir().join(format!("polyml-rs-live-export-{}", std::process::id()));
     // Don't carry over a stale file from a prior run.
     let _ = std::fs::remove_file(&pexport_path);
     let pexport_str = pexport_path.to_string_lossy().to_string();
@@ -101,26 +105,31 @@ fn live_export_roundtrip_through_basis() {
         pexport_str.replace('"', "\\\""),
     );
 
-    let (out, code) = run_poly(&image, &sml, &vendor, 5_000_000_000)
-        .expect("first run (basis+export)");
-    assert_eq!(
-        code, 0,
-        "first run did not exit clean. output:\n{out}"
-    );
+    let (out, code) =
+        run_poly(&image, &sml, &vendor, 5_000_000_000).expect("first run (basis+export)");
+    assert_eq!(code, 0, "first run did not exit clean. output:\n{out}");
     assert!(
         out.contains("Tagged(0)"),
         "first run did not finish with Tagged(0) result. output:\n{out}"
     );
 
-    let meta = std::fs::metadata(&pexport_path)
-        .unwrap_or_else(|e| panic!("PolyML.export did not produce {}: {e}", pexport_path.display()));
-    assert!(meta.len() > 1000, "exported file is suspiciously tiny ({} bytes)", meta.len());
+    let meta = std::fs::metadata(&pexport_path).unwrap_or_else(|e| {
+        panic!(
+            "PolyML.export did not produce {}: {e}",
+            pexport_path.display()
+        )
+    });
+    assert!(
+        meta.len() > 1000,
+        "exported file is suspiciously tiny ({} bytes)",
+        meta.len()
+    );
 
     // Re-run through `poly run` on the exported file. We expect at
     // least one bytecode step before halting (the trivial root
     // function returns immediately, so a few steps is fine).
-    let (out2, _code2) = run_poly(&pexport_path, "", &vendor, 1_000_000)
-        .expect("second run (re-loaded export)");
+    let (out2, _code2) =
+        run_poly(&pexport_path, "", &vendor, 1_000_000).expect("second run (re-loaded export)");
     assert!(
         out2.contains("Loaded ") && out2.contains(" bytecode step(s)"),
         "re-loaded image didn't enter the interpreter. output:\n{out2}"

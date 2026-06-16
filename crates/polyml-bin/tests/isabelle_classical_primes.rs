@@ -60,7 +60,11 @@ fn classical_fol_and_genuine_prime_divisor_theorem() {
         &image,
         &driver,
         240_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
@@ -68,18 +72,36 @@ fn classical_fol_and_genuine_prime_divisor_theorem() {
 
     // classical FOL derived from the single excluded-middle axiom
     for lemma in ["dbl_neg", "deMorgan_or", "not_imp", "not_forall"] {
-        assert!(out.contains(&format!("OK {lemma}")), "classical lemma `{lemma}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {lemma}")),
+            "classical lemma `{lemma}` did not check:\n{out}"
+        );
     }
     // strong (course-of-values) induction
-    assert!(out.contains("OK strong_induct"), "strong induction did not check:\n{out}");
+    assert!(
+        out.contains("OK strong_induct"),
+        "strong induction did not check:\n{out}"
+    );
     // the DERIVED primality case-split (the keystone that was an axiom before)
-    assert!(out.contains("OK prime_cases"), "prime_cases was not DERIVED:\n{out}");
+    assert!(
+        out.contains("OK prime_cases"),
+        "prime_cases was not DERIVED:\n{out}"
+    );
     // the GENUINE capstone, structural prime, no abstract-prime axiom
     assert!(
         out.contains("OK prime_divisor_exists"),
         "genuine prime-divisor theorem did not check:\n{out}"
     );
-    assert!(out.contains("CAPSTONE_DONE"), "capstone development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("CAPSTONE_DONE"),
+        "capstone development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
 }

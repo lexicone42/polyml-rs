@@ -49,10 +49,13 @@ val () = (let val th = Tactical.prove(g, metisLib.METIS_TAC [])
 pr "METIS_TEST_DONE\n";
 "#;
     let out = prove_on_metis(driver).expect("poly spawn");
-    assert!(out.contains("METIS_TEST_DONE"), "driver did not finish.\n{}", tail(&out, 30));
     assert!(
-        out.contains("METIS_AC: ⊢ (∀x y. mul x y = mul y x) ∧")
-            && out.contains("HYPS=0"),
+        out.contains("METIS_TEST_DONE"),
+        "driver did not finish.\n{}",
+        tail(&out, 30)
+    );
+    assert!(
+        out.contains("METIS_AC: ⊢ (∀x y. mul x y = mul y x) ∧") && out.contains("HYPS=0"),
         "AC_CHAIN not proved by METIS_TAC (0 hyps).\n{}",
         tail(&out, 30)
     );
@@ -80,12 +83,26 @@ fn metis_proves_equality_and_first_order() {
         prove_on_metis(&driver).expect("poly spawn")
     }
     let cong = one("CONG", r"(a = b) /\\ (b = c) /\\ (c = d) ==> (f a = f d)");
-    assert!(cong.contains("METIS_TEST_DONE"), "CONG driver did not finish.\n{}", tail(&cong, 30));
-    assert!(cong.contains("M CONG: ⊢ a = b ∧ b = c ∧ c = d ⇒ f a = f d HYPS=0"),
-        "equality-congruence not proved.\n{}", tail(&cong, 30));
+    assert!(
+        cong.contains("METIS_TEST_DONE"),
+        "CONG driver did not finish.\n{}",
+        tail(&cong, 30)
+    );
+    assert!(
+        cong.contains("M CONG: ⊢ a = b ∧ b = c ∧ c = d ⇒ f a = f d HYPS=0"),
+        "equality-congruence not proved.\n{}",
+        tail(&cong, 30)
+    );
 
     let syll = one("SYLL", r"(!x. P x ==> Q x) /\\ P a ==> Q a");
-    assert!(syll.contains("METIS_TEST_DONE"), "SYLL driver did not finish.\n{}", tail(&syll, 30));
-    assert!(syll.contains("M SYLL: ⊢ (∀x. P x ⇒ Q x) ∧ P a ⇒ Q a HYPS=0"),
-        "syllogism not proved.\n{}", tail(&syll, 30));
+    assert!(
+        syll.contains("METIS_TEST_DONE"),
+        "SYLL driver did not finish.\n{}",
+        tail(&syll, 30)
+    );
+    assert!(
+        syll.contains("M SYLL: ⊢ (∀x. P x ⇒ Q x) ∧ P a ⇒ Q a HYPS=0"),
+        "syllogism not proved.\n{}",
+        tail(&syll, 30)
+    );
 }

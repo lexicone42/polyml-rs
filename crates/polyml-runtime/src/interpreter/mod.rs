@@ -367,7 +367,8 @@ impl Interpreter {
     pub unsafe fn from_code_object(stack_capacity: usize, code_obj: *const PolyWord) -> Self {
         use crate::length_word;
         // SAFETY: caller upholds.
-        let (consts_start, _consts_count) = unsafe { length_word::const_segment_for_code(code_obj) };
+        let (consts_start, _consts_count) =
+            unsafe { length_word::const_segment_for_code(code_obj) };
         let start: *const u8 = code_obj.cast::<u8>();
         // Constant pool begins at consts_start; bytes end one word
         // before that (the const-count word). For our bounds, accept
@@ -438,7 +439,9 @@ impl Interpreter {
     /// installed JIT'd code (see `jit_bridge::jit_dispatch_closure_call`).
     #[doc(hidden)]
     #[must_use]
-    pub fn jit_current_sp(&self) -> usize { self.sp }
+    pub fn jit_current_sp(&self) -> usize {
+        self.sp
+    }
 
     /// JIT bridge: base address of the SML stack as a mutable raw
     /// pointer. Combined with `jit_current_sp()` it lets JIT'd code
@@ -681,9 +684,8 @@ impl Interpreter {
                             // No pointers.
                         }
                         crate::length_word::F_CODE_OBJ => {
-                            let (cp, count) = unsafe {
-                                crate::length_word::const_segment_for_code(body)
-                            };
+                            let (cp, count) =
+                                unsafe { crate::length_word::const_segment_for_code(body) };
                             let cp_mut = cp.cast_mut();
                             for k in 0..count {
                                 unsafe { c.forward(cp_mut.add(k)) };
@@ -740,8 +742,7 @@ impl Interpreter {
         for (i, hs) in handler_starts.into_iter().enumerate() {
             let new_start = hs.as_ptr::<PolyWord>().cast::<u8>();
             self.handler_frames_depth[i].1 = new_start;
-            self.handler_frames_depth[i].2 =
-                unsafe { new_start.offset(handler_offsets[i]) };
+            self.handler_frames_depth[i].2 = unsafe { new_start.offset(handler_offsets[i]) };
         }
         crate::rts::set_bootstrap_tail_call(bootstrap_tail);
 
@@ -841,11 +842,7 @@ impl Interpreter {
                     if in_old(v) {
                         residual += 1;
                         if samples.len() < 5 {
-                            samples.push((
-                                "to_space_body",
-                                i + 1 + k,
-                                v,
-                            ));
+                            samples.push(("to_space_body", i + 1 + k, v));
                         }
                     }
                 }
@@ -1074,8 +1071,7 @@ impl Interpreter {
     /// `code_obj_ptr` must point at a valid PolyML code object.
     pub unsafe fn set_code_segment_to_code_obj(&mut self, code_obj_ptr: usize) {
         let code_obj = code_obj_ptr as *const PolyWord;
-        let (consts_start, _) =
-            unsafe { crate::length_word::const_segment_for_code(code_obj) };
+        let (consts_start, _) = unsafe { crate::length_word::const_segment_for_code(code_obj) };
         self.code_start = code_obj.cast::<u8>();
         self.code_end = consts_start.cast::<u8>();
         self.pc = self.code_start;
@@ -1105,8 +1101,7 @@ impl Interpreter {
         }
         let code_obj = code_word.as_ptr::<PolyWord>();
         // SAFETY: closure points at a valid code object.
-        let (consts_start, _) =
-            unsafe { crate::length_word::const_segment_for_code(code_obj) };
+        let (consts_start, _) = unsafe { crate::length_word::const_segment_for_code(code_obj) };
         self.code_start = code_obj.cast::<u8>();
         self.code_end = consts_start.cast::<u8>();
         self.pc = self.code_start;
@@ -1260,7 +1255,11 @@ impl Interpreter {
             if std::env::var("POLYML_GC_QUIET").is_err() {
                 eprintln!(
                     "  GC: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
-                    if before > 0 { (new_used * 100) / before } else { 0 }
+                    if before > 0 {
+                        (new_used * 100) / before
+                    } else {
+                        0
+                    }
                 );
             }
         }
@@ -1293,7 +1292,11 @@ impl Interpreter {
                 "  [{:5}] op=0x{op:02x} sp_depth={} top={:?}",
                 self.pc_offset() - 1,
                 self.stack_height(),
-                if self.sp < self.stack.len() { Some(self.stack[self.sp]) } else { None }
+                if self.sp < self.stack.len() {
+                    Some(self.stack[self.sp])
+                } else {
+                    None
+                }
             );
         }
         match op {
@@ -1570,7 +1573,8 @@ impl Interpreter {
                 if !base.is_data_ptr() {
                     eprintln!(
                         "  LOAD_UNTAGGED: base={base:?}, index={index}, sp_depth={}, frames={}",
-                        self.stack_height(), self.frames.len()
+                        self.stack_height(),
+                        self.frames.len()
                     );
                     // Print the ring of recent call targets — gives us
                     // a "what was just executing" trail back from the
@@ -1601,7 +1605,10 @@ impl Interpreter {
                         )
                     }
                     .unwrap_or_else(|| "<anonymous>".to_string());
-                    eprintln!("  Current code: 0x{:016x} {cur_name}", self.code_start as usize);
+                    eprintln!(
+                        "  Current code: 0x{:016x} {cur_name}",
+                        self.code_start as usize
+                    );
                     let cur_off = self.pc_offset();
                     let lo = cur_off.saturating_sub(30);
                     let hi = cur_off + 4;
@@ -1609,7 +1616,11 @@ impl Interpreter {
                     for off in lo..hi {
                         // SAFETY: within current code segment.
                         let b = unsafe { *self.code_start.add(off) };
-                        let marker = if off + 1 == cur_off { " ← LOAD_UNTAGGED" } else { "" };
+                        let marker = if off + 1 == cur_off {
+                            " ← LOAD_UNTAGGED"
+                        } else {
+                            ""
+                        };
                         eprintln!("    +{off:5}: 0x{b:02x}{marker}");
                     }
                     return Err(InterpError::NotAClosure(base));
@@ -1633,13 +1644,16 @@ impl Interpreter {
                 // (not a tagged int) — that means a stack/PC desync upstream.
                 if jit_trace_stores_on() {
                     let b = base.0;
-                    let suspicious = b < 0x1000 || (b & 0x1) != 0 || index > 0x10_0000
+                    let suspicious = b < 0x1000
+                        || (b & 0x1) != 0
+                        || index > 0x10_0000
                         || !index_word.is_tagged();
                     if suspicious {
                         let pc_off = unsafe { self.pc.offset_from(self.code_start) };
                         eprintln!(
                             "  STORE_ML_WORD BAD: base=0x{b:016x} index_word=0x{:016x} (tagged={}) index={index} to_store=0x{:016x} cur_code=0x{:016x} pc_off={pc_off} frames_depth={}",
-                            index_word.0, index_word.is_tagged(),
+                            index_word.0,
+                            index_word.is_tagged(),
                             to_store.0,
                             self.code_start as usize,
                             self.frames.len(),
@@ -1814,11 +1828,8 @@ impl Interpreter {
                 let entry = unsafe { self.pc.add(off) };
                 self.push(PolyWord::from_bits(entry as usize))?;
                 self.handler_sp = self.sp;
-                self.handler_frames_depth.push((
-                    self.frames.len(),
-                    self.code_start,
-                    self.code_end,
-                ));
+                self.handler_frames_depth
+                    .push((self.frames.len(), self.code_start, self.code_end));
                 Ok(StepResult::Continue)
             }
             INSTR_SET_HANDLER16 => {
@@ -1826,11 +1837,8 @@ impl Interpreter {
                 let entry = unsafe { self.pc.add(off) };
                 self.push(PolyWord::from_bits(entry as usize))?;
                 self.handler_sp = self.sp;
-                self.handler_frames_depth.push((
-                    self.frames.len(),
-                    self.code_start,
-                    self.code_end,
-                ));
+                self.handler_frames_depth
+                    .push((self.frames.len(), self.code_start, self.code_end));
                 Ok(StepResult::Continue)
             }
             INSTR_DELETE_HANDLER => {
@@ -1851,9 +1859,7 @@ impl Interpreter {
             }
             INSTR_LDEXC => {
                 // Push the current exception packet (zero if none).
-                let pkt = self
-                    .exception_packet
-                    .unwrap_or_else(|| PolyWord::tagged(0));
+                let pkt = self.exception_packet.unwrap_or_else(|| PolyWord::tagged(0));
                 self.push_continue(pkt)
             }
             INSTR_RAISE_EX => {
@@ -1883,12 +1889,11 @@ impl Interpreter {
                 // code_start/code_end, even though its CALL frame
                 // is no longer on the side-stack (it's the "current"
                 // function from a frames-depth perspective).
-                let (target_depth, h_start, h_end) =
-                    self.handler_frames_depth.pop().unwrap_or((
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                    ));
+                let (target_depth, h_start, h_end) = self.handler_frames_depth.pop().unwrap_or((
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                ));
                 self.frames.truncate(target_depth);
                 self.code_start = h_start;
                 self.code_end = h_end;
@@ -2229,8 +2234,20 @@ impl Interpreter {
             INSTR_FIXED_ADD => self.fixed_add(),
             INSTR_FIXED_SUB => self.fixed_sub(),
             INSTR_FIXED_MULT => self.fixed_mult(),
-            INSTR_FIXED_QUOT => self.bin_op_tagged(|x, y| if x == 0 { Err(()) } else { Ok(y.wrapping_div(x)) }),
-            INSTR_FIXED_REM => self.bin_op_tagged(|x, y| if x == 0 { Err(()) } else { Ok(y.wrapping_rem(x)) }),
+            INSTR_FIXED_QUOT => self.bin_op_tagged(|x, y| {
+                if x == 0 {
+                    Err(())
+                } else {
+                    Ok(y.wrapping_div(x))
+                }
+            }),
+            INSTR_FIXED_REM => self.bin_op_tagged(|x, y| {
+                if x == 0 {
+                    Err(())
+                } else {
+                    Ok(y.wrapping_rem(x))
+                }
+            }),
 
             // ----- Arbitrary-precision arithmetic with tagged-int
             // fast path. Upstream falls through to add_longc /
@@ -2254,12 +2271,12 @@ impl Interpreter {
             // SHIFT untag inputs and re-tag the result. AND/OR are bit
             // identities that preserve the tag bit naturally; XOR
             // clears it (1^1=0) so must reinstate via `| 1`.
-            INSTR_WORD_ADD => self.bin_op_word(|x, y| {
-                y.wrapping_add(x).wrapping_sub(PolyWord::tagged(0).0)
-            }),
-            INSTR_WORD_SUB => self.bin_op_word(|x, y| {
-                y.wrapping_sub(x).wrapping_add(PolyWord::tagged(0).0)
-            }),
+            INSTR_WORD_ADD => {
+                self.bin_op_word(|x, y| y.wrapping_add(x).wrapping_sub(PolyWord::tagged(0).0))
+            }
+            INSTR_WORD_SUB => {
+                self.bin_op_word(|x, y| y.wrapping_sub(x).wrapping_add(PolyWord::tagged(0).0))
+            }
             INSTR_WORD_MULT => self.bin_op_word(|x, y| {
                 let ax = x >> 1;
                 let ay = y >> 1;
@@ -2369,7 +2386,10 @@ impl Interpreter {
             _ => {
                 // Roll back so PC points AT the unknown op.
                 self.pc = opcode_pc;
-                Ok(StepResult::Unimplemented { op, extended: false })
+                Ok(StepResult::Unimplemented {
+                    op,
+                    extended: false,
+                })
             }
         }
     }
@@ -2413,23 +2433,22 @@ impl Interpreter {
             // without touching memory.
             EXTINSTR_LOCK_MUTEX => {
                 let mutex = self.peek(0)?;
-                let acquired = if mutex.is_data_ptr()
-                    && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0
-                {
-                    let p = mutex.as_ptr::<PolyWord>().cast_mut();
-                    // SAFETY: pointer-aligned & is_data_ptr ⇒ valid mutex slot
-                    let old = unsafe { *p };
-                    let was_unlocked = old.0 == PolyWord::tagged(0).0;
-                    // Bump counter by 2 (PolyML convention; we don't
-                    // need the count in single-thread but preserve it
-                    // for round-trips with unlockMutex).
-                    let new_bits = old.0.wrapping_add(2);
-                    // SAFETY: same
-                    unsafe { p.write(PolyWord::from_bits(new_bits)) };
-                    was_unlocked
-                } else {
-                    true
-                };
+                let acquired =
+                    if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
+                        let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                        // SAFETY: pointer-aligned & is_data_ptr ⇒ valid mutex slot
+                        let old = unsafe { *p };
+                        let was_unlocked = old.0 == PolyWord::tagged(0).0;
+                        // Bump counter by 2 (PolyML convention; we don't
+                        // need the count in single-thread but preserve it
+                        // for round-trips with unlockMutex).
+                        let new_bits = old.0.wrapping_add(2);
+                        // SAFETY: same
+                        unsafe { p.write(PolyWord::from_bits(new_bits)) };
+                        was_unlocked
+                    } else {
+                        true
+                    };
                 self.pop()?;
                 self.push_continue(if acquired {
                     PolyWord::tagged(1)
@@ -2439,21 +2458,20 @@ impl Interpreter {
             }
             EXTINSTR_TRY_LOCK_MUTEX => {
                 let mutex = self.peek(0)?;
-                let acquired = if mutex.is_data_ptr()
-                    && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0
-                {
-                    let p = mutex.as_ptr::<PolyWord>().cast_mut();
-                    // SAFETY: same as above
-                    let old = unsafe { *p };
-                    let was_unlocked = old.0 == PolyWord::tagged(0).0;
-                    if was_unlocked {
-                        // SAFETY: same
-                        unsafe { p.write(PolyWord::tagged(1)) };
-                    }
-                    was_unlocked
-                } else {
-                    true
-                };
+                let acquired =
+                    if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
+                        let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                        // SAFETY: same as above
+                        let old = unsafe { *p };
+                        let was_unlocked = old.0 == PolyWord::tagged(0).0;
+                        if was_unlocked {
+                            // SAFETY: same
+                            unsafe { p.write(PolyWord::tagged(1)) };
+                        }
+                        was_unlocked
+                    } else {
+                        true
+                    };
                 self.pop()?;
                 self.push_continue(if acquired {
                     PolyWord::tagged(1)
@@ -2473,22 +2491,21 @@ impl Interpreter {
             // forced a spurious Full-RTS call on every uncontended unlock.
             EXTINSTR_ATOMIC_RESET => {
                 let mutex = self.pop()?;
-                let was_sole_locker = if mutex.is_data_ptr()
-                    && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0
-                {
-                    let p = mutex.as_ptr::<PolyWord>().cast_mut();
-                    // SAFETY: pointer-aligned & is_data_ptr
-                    let old = unsafe { *p };
-                    // SAFETY: same
-                    unsafe { p.write(PolyWord::tagged(0)) };
-                    old.0 == PolyWord::tagged(1).0
-                } else {
-                    // Non-pointer/misaligned defensive case (no upstream
-                    // analogue). False = conservative "contended" path,
-                    // harmless single-threaded (the follow-up
-                    // PolyThreadMutexUnlock is an idempotent reset).
-                    false
-                };
+                let was_sole_locker =
+                    if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
+                        let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                        // SAFETY: pointer-aligned & is_data_ptr
+                        let old = unsafe { *p };
+                        // SAFETY: same
+                        unsafe { p.write(PolyWord::tagged(0)) };
+                        old.0 == PolyWord::tagged(1).0
+                    } else {
+                        // Non-pointer/misaligned defensive case (no upstream
+                        // analogue). False = conservative "contended" path,
+                        // harmless single-threaded (the follow-up
+                        // PolyThreadMutexUnlock is an idempotent reset).
+                        false
+                    };
                 self.push_continue(if was_sole_locker {
                     PolyWord::tagged(1)
                 } else {
@@ -2508,9 +2525,7 @@ impl Interpreter {
             EXTINSTR_ATOMIC_EXCH_ADD => {
                 let addend = self.pop()?;
                 let obj = self.peek(0)?;
-                let old = if obj.is_data_ptr()
-                    && obj.0 & (std::mem::size_of::<usize>() - 1) == 0
-                {
+                let old = if obj.is_data_ptr() && obj.0 & (std::mem::size_of::<usize>() - 1) == 0 {
                     let p = obj.as_ptr::<PolyWord>().cast_mut();
                     // SAFETY: pointer-aligned & is_data_ptr
                     let old = unsafe { *p };
@@ -2605,8 +2620,11 @@ impl Interpreter {
                     self.stack[self.sp] = PolyWord::tagged(v);
                 } else if arbint_trace_on() {
                     let pc_off = unsafe { self.pc.offset_from(self.code_start) };
-                    eprintln!("  LONG_W_TO_TAGGED on NON-PTR top: 0x{:016x} (tagged={}) pc_off={pc_off}",
-                        p.0, p.is_tagged());
+                    eprintln!(
+                        "  LONG_W_TO_TAGGED on NON-PTR top: 0x{:016x} (tagged={}) pc_off={pc_off}",
+                        p.0,
+                        p.is_tagged()
+                    );
                     std::process::abort();
                 }
                 Ok(StepResult::Continue)
@@ -2618,10 +2636,7 @@ impl Interpreter {
             EXTINSTR_SIGNED_TO_LONG_W => {
                 let x = self.pop()?;
                 let value = x.untag(); // isize, sign-preserving
-                let space = self
-                    .alloc_space
-                    .as_mut()
-                    .ok_or(InterpError::NoAllocator)?;
+                let space = self.alloc_space.as_mut().ok_or(InterpError::NoAllocator)?;
                 let p = space.alloc(1);
                 // SAFETY: just allocated 1 word.
                 unsafe {
@@ -2638,10 +2653,7 @@ impl Interpreter {
             EXTINSTR_UNSIGNED_TO_LONG_W => {
                 let x = self.pop()?;
                 let value = x.0 >> 1; // untagged unsigned (drop tag bit)
-                let space = self
-                    .alloc_space
-                    .as_mut()
-                    .ok_or(InterpError::NoAllocator)?;
+                let space = self.alloc_space.as_mut().ok_or(InterpError::NoAllocator)?;
                 let p = space.alloc(1);
                 // SAFETY: just allocated 1 word.
                 unsafe {
@@ -2700,7 +2712,9 @@ impl Interpreter {
             EXTINSTR_FLOAT_DIV => self.float_binop(|y, x| y / x),
             EXTINSTR_FLOAT_EQUAL => self.float_cmp(|y, x| {
                 #[allow(clippy::float_cmp)]
-                { y == x }
+                {
+                    y == x
+                }
             }),
             EXTINSTR_FLOAT_LESS => self.float_cmp(|y, x| y < x),
             EXTINSTR_FLOAT_LESS_EQ => self.float_cmp(|y, x| y <= x),
@@ -2788,7 +2802,9 @@ impl Interpreter {
             EXTINSTR_REAL_DIV => self.real_binop(|y, x| y / x),
             EXTINSTR_REAL_EQUAL => self.real_cmp(|y, x| {
                 #[allow(clippy::float_cmp)]
-                { y == x }
+                {
+                    y == x
+                }
             }),
             EXTINSTR_REAL_LESS => self.real_cmp(|y, x| y < x),
             EXTINSTR_REAL_LESS_EQ => self.real_cmp(|y, x| y <= x),
@@ -2849,16 +2865,23 @@ impl Interpreter {
             EXTINSTR_LG_WORD_OR => self.lg_word_binop(|y, x| y | x),
             EXTINSTR_LG_WORD_XOR => self.lg_word_binop(|y, x| y ^ x),
             // Shift ops take a TAGGED short word (not boxed) for the shift amount.
-            EXTINSTR_LG_WORD_SHIFT_LEFT => {
+            EXTINSTR_LG_WORD_SHIFT_LEFT =>
+            {
                 #[allow(clippy::cast_possible_truncation)]
                 self.lg_word_shift_op(|y, s| y.wrapping_shl(s as u32))
             }
-            EXTINSTR_LG_WORD_SHIFT_R_LOG => {
+            EXTINSTR_LG_WORD_SHIFT_R_LOG =>
+            {
                 #[allow(clippy::cast_possible_truncation)]
                 self.lg_word_shift_op(|y, s| y.wrapping_shr(s as u32))
             }
-            EXTINSTR_LG_WORD_SHIFT_R_ARITH => {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+            EXTINSTR_LG_WORD_SHIFT_R_ARITH =>
+            {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_possible_wrap,
+                    clippy::cast_sign_loss
+                )]
                 self.lg_word_shift_op(|y, s| ((y as isize).wrapping_shr(s as u32)) as usize)
             }
             // Comparisons return tagged bool (1=true, 0=false).
@@ -2919,7 +2942,10 @@ impl Interpreter {
             // Unknown extension — surface to caller, rolled back to ESCAPE byte.
             _ => {
                 self.pc = escape_pc;
-                Ok(StepResult::Unimplemented { op: ext, extended: true })
+                Ok(StepResult::Unimplemented {
+                    op: ext,
+                    extended: true,
+                })
             }
         }
     }
@@ -2996,7 +3022,11 @@ impl Interpreter {
         // SAFETY: cell is a heap-allocated mutable ref cell.
         let new_word = unsafe {
             let cur = (*p).0;
-            let new = if incr { cur.wrapping_add(2) } else { cur.wrapping_sub(2) };
+            let new = if incr {
+                cur.wrapping_add(2)
+            } else {
+                cur.wrapping_sub(2)
+            };
             let nw = PolyWord::from_bits(new);
             p.write(nw);
             nw
@@ -3235,7 +3265,10 @@ impl Interpreter {
         self.stack[self.sp] = Self::box_float(op(v));
         Ok(StepResult::Continue)
     }
-    fn float_binop<F: FnOnce(f32, f32) -> f32>(&mut self, op: F) -> Result<StepResult, InterpError> {
+    fn float_binop<F: FnOnce(f32, f32) -> f32>(
+        &mut self,
+        op: F,
+    ) -> Result<StepResult, InterpError> {
         let x = Self::unbox_float(self.pop()?);
         let y = Self::unbox_float(self.peek(0)?);
         self.stack[self.sp] = Self::box_float(op(y, x));
@@ -3396,8 +3429,8 @@ impl Interpreter {
         // bytecode.cpp:2024-2032 — reject inputs that would overflow the
         // conversion BEFORE rounding (so rounding can't push an in-range value
         // out). Limit = MAXTAGGED + MAXTAGGED/2.
-        let limit = (crate::poly_word::MAX_TAGGED as f64)
-            + (crate::poly_word::MAX_TAGGED as f64) / 2.0;
+        let limit =
+            (crate::poly_word::MAX_TAGGED as f64) + (crate::poly_word::MAX_TAGGED as f64) / 2.0;
         if !f.is_finite() || f > limit || f < -limit {
             return None;
         }
@@ -3485,7 +3518,11 @@ impl Interpreter {
     unsafe fn read_lg_word(w: PolyWord) -> usize {
         if !w.is_data_ptr() {
             if arbint_trace_on() {
-                eprintln!("  read_lg_word on NON-PTR operand: 0x{:016x} (tagged={})", w.0, w.is_tagged());
+                eprintln!(
+                    "  read_lg_word on NON-PTR operand: 0x{:016x} (tagged={})",
+                    w.0,
+                    w.is_tagged()
+                );
                 std::process::abort();
             }
             return 0;
@@ -3556,11 +3593,7 @@ impl Interpreter {
         // Overflow or boxed args: defer to the bignum-aware RTS impl.
         // Critical for SML loops like LibrarySupport.maxShort that
         // use IS_TAGGED on the result to detect overflow.
-        let result = crate::rts::arb_mult_via_bigint(
-            self.alloc_space.as_mut(),
-            x,
-            y,
-        );
+        let result = crate::rts::arb_mult_via_bigint(self.alloc_space.as_mut(), x, y);
         self.stack[self.sp] = result;
         Ok(StepResult::Continue)
     }
@@ -3650,9 +3683,8 @@ impl Interpreter {
                     self.pop()?;
                 }
                 let name_bytes = unsafe {
-                    let total_words = crate::length_word::length_of(
-                        crate::space::MemorySpace::length_word_of(p),
-                    );
+                    let total_words =
+                        crate::length_word::length_of(crate::space::MemorySpace::length_word_of(p));
                     let name_ptr = p.add(1).cast::<u8>();
                     let max = total_words.saturating_sub(1) * std::mem::size_of::<usize>();
                     let mut end = 0;
@@ -3748,11 +3780,9 @@ impl Interpreter {
         self.handler_sp = saved_old_handler.0;
         self.pc = handler_pc_word.0 as *const u8;
         let (target_depth, h_start, h_end) =
-            self.handler_frames_depth.pop().unwrap_or((
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-            ));
+            self.handler_frames_depth
+                .pop()
+                .unwrap_or((0, std::ptr::null(), std::ptr::null()));
         self.frames.truncate(target_depth);
         self.code_start = h_start;
         self.code_end = h_end;
@@ -3870,8 +3900,7 @@ impl Interpreter {
         if !closure.is_data_ptr() || closure.0 & (std::mem::size_of::<usize>() - 1) != 0 {
             // Diagnostic dump — always print since this is fatal.
             {
-                let segment_size =
-                    unsafe { self.code_end.offset_from(self.code_start) as usize };
+                let segment_size = unsafe { self.code_end.offset_from(self.code_start) as usize };
                 eprintln!(
                     "  CALL bad closure: {closure:?} | frames depth={} | sp_depth={} | code_segment_bytes={}",
                     self.frames.len(),
@@ -3898,9 +3927,7 @@ impl Interpreter {
                     .map(|b| format!("{b:02x}"))
                     .collect::<Vec<_>>()
                     .join(" ");
-                eprintln!(
-                    "    bytes [{lo}..{hi}] = {hexdump}  (PC after fetch = {cur_off})",
-                );
+                eprintln!("    bytes [{lo}..{hi}] = {hexdump}  (PC after fetch = {cur_off})",);
                 eprintln!("  Recent CALL targets (most recent first):");
                 let n = self.recent_call_targets.len();
                 for off in 0..n {
@@ -3938,7 +3965,8 @@ impl Interpreter {
         // guard is false and the original logic runs unchanged.
         if !self.jit_cache.is_empty()
             && crate::jit_bridge::JIT_INTERP.with(|c| c.get()).is_null()
-            && let Some(entry) = self.jit_cache.get(&code_obj_ptr_for_jit).copied() {
+            && let Some(entry) = self.jit_cache.get(&code_obj_ptr_for_jit).copied()
+        {
             if let Some(d) = self.diag.as_mut() {
                 *d.jit_call_hits.entry(code_obj_ptr_for_jit).or_insert(0) += 1;
                 // Also count toward total call_targets (for compare).
@@ -3948,8 +3976,7 @@ impl Interpreter {
                 let mut arg_dump = String::new();
                 for i in (0..entry.sml_arity).rev() {
                     let v = self.stack[self.sp + i].0;
-                    arg_dump.push_str(&format!(" arg_{}=0x{v:016x}",
-                        entry.sml_arity - 1 - i));
+                    arg_dump.push_str(&format!(" arg_{}=0x{v:016x}", entry.sml_arity - 1 - i));
                 }
                 eprintln!(
                     "JIT call: code_obj=0x{code_obj_ptr_for_jit:016x} sml_arity={} arity_init={} sp_depth={} closure=0x{:016x}{arg_dump}",
@@ -3961,12 +3988,13 @@ impl Interpreter {
                 if std::env::var("JIT_TRACE_CALLS_BC").is_ok() {
                     let bc_ptr = code_obj_ptr_for_jit as *const u8;
                     let bc_len = 96usize;
-                    let bytes: Vec<u8> = (0..bc_len)
-                        .map(|i| unsafe { *bc_ptr.add(i) })
-                        .collect();
-                    let hex = bytes.iter().take(80)
+                    let bytes: Vec<u8> = (0..bc_len).map(|i| unsafe { *bc_ptr.add(i) }).collect();
+                    let hex = bytes
+                        .iter()
+                        .take(80)
                         .map(|b| format!("{b:02x}"))
-                        .collect::<Vec<_>>().join(" ");
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     eprintln!("  bytecode head: {hex}");
                 }
             }
@@ -4010,7 +4038,10 @@ impl Interpreter {
             // SML interp would have at those positions.
             let n = entry.sml_arity;
             let arity_init = entry.arity_init;
-            assert!(arity_init >= n + 2, "arity_init must include retPC + closure slots");
+            assert!(
+                arity_init >= n + 2,
+                "arity_init must include retPC + closure slots"
+            );
             let extra_older = arity_init - n - 2;
             let mut args_buf: Vec<i64> = vec![0; arity_init];
             // Older items: args_buf[0..extra_older-1].
@@ -4021,7 +4052,7 @@ impl Interpreter {
             // to read BEFORE the pop, so it's interp.stack[interp.sp + n + j].
             for i in 0..extra_older {
                 let sml_sp_pos = arity_init - 1 - i; // = N + 2 + (extra_older - 1 - i)
-                let j = sml_sp_pos - (n + 2);        // older-stack index from top
+                let j = sml_sp_pos - (n + 2); // older-stack index from top
                 let stack_pos = self.sp + n + j;
                 args_buf[i] = if stack_pos < self.stack.len() {
                     self.stack[stack_pos].0 as i64
@@ -4069,13 +4100,7 @@ impl Interpreter {
             #[allow(clippy::cast_possible_wrap)]
             let sp_in_i64 = self.sp as i64;
             let stack_base = self.stack.as_mut_ptr() as i64;
-            let result_bits = unsafe {
-                (entry.func)(
-                    args_buf.as_ptr(),
-                    sp_in_i64,
-                    stack_base,
-                )
-            };
+            let result_bits = unsafe { (entry.func)(args_buf.as_ptr(), sp_in_i64, stack_base) };
             crate::jit_bridge::JIT_INTERP.with(|c| c.set(prev));
             if jit_trace_calls_on() {
                 eprintln!("  → returned 0x{:016x}", result_bits as u64);
@@ -4122,10 +4147,8 @@ impl Interpreter {
                         let name_ptr = name_word.as_ptr::<PolyWord>();
                         let len_w = (*name_ptr).0;
                         if len_w > 0 && len_w < 256 {
-                            let chars = std::slice::from_raw_parts(
-                                name_ptr.add(1).cast::<u8>(),
-                                len_w,
-                            );
+                            let chars =
+                                std::slice::from_raw_parts(name_ptr.add(1).cast::<u8>(), len_w);
                             if let Ok(s) = std::str::from_utf8(chars) {
                                 eprintln!("  exception name string: {s:?}");
                             }
@@ -4174,17 +4197,14 @@ impl Interpreter {
                 let result_peek = self.stack[sp].0;
                 let closure_peek = self.stack[sp + 1].0;
                 let ret_pc_peek = self.stack[sp + 2].0;
-                !(self.code_start as usize <= ret_pc_peek
-                    && ret_pc_peek < self.code_end as usize)
+                !(self.code_start as usize <= ret_pc_peek && ret_pc_peek < self.code_end as usize)
                     && {
                         // Probably bad — dump frame.
                         eprintln!(
                             "  do_return PRE-POP: ret_count={return_count} \
                              cur_code=[0x{:016x}..0x{:016x}] sp_depth={} \
                              stack[sp..sp+need]:",
-                            self.code_start as usize,
-                            self.code_end as usize,
-                            depth,
+                            self.code_start as usize, self.code_end as usize, depth,
                         );
                         for i in 0..need.min(depth) {
                             let v = self.stack[sp + i].0;
@@ -4204,11 +4224,11 @@ impl Interpreter {
             }
         };
         let _ = pre_dump;
-        let result = self.pop()?;        // top: result
-        let closure = self.pop()?;        // closure
-        let ret_pc_word = self.pop()?;    // retPC
+        let result = self.pop()?; // top: result
+        let closure = self.pop()?; // closure
+        let ret_pc_word = self.pop()?; // retPC
         for _ in 0..return_count {
-            self.pop()?;                  // args
+            self.pop()?; // args
         }
         self.push(result)?;
 
@@ -4220,10 +4240,7 @@ impl Interpreter {
         }
 
         // Restore the caller's code segment bounds from our side-stack.
-        let (caller_start, caller_end) = self
-            .frames
-            .pop()
-            .ok_or(InterpError::StackUnderflow)?;
+        let (caller_start, caller_end) = self.frames.pop().ok_or(InterpError::StackUnderflow)?;
 
         // Diagnostic: if the retPC isn't in the caller's code segment,
         // something corrupted the stack. Print a detailed dump so we
@@ -4235,8 +4252,7 @@ impl Interpreter {
         // flag (NOT per-call env::var, which would syscall every return), and
         // aborts at the FIRST corrupted return — that frame IS the leak culprit.
         if arbint_trace_on()
-            && !(caller_start as usize <= ret_pc_bits
-                && ret_pc_bits < caller_end as usize)
+            && !(caller_start as usize <= ret_pc_bits && ret_pc_bits < caller_end as usize)
         {
             eprintln!(
                 "  do_return: BAD retPC! ret_count={return_count} ret_pc=0x{ret_pc_bits:016x} \
@@ -4257,7 +4273,9 @@ impl Interpreter {
             OP_RING.with(|r| {
                 let ring = r.borrow();
                 eprintln!("  --- op ring (last {}) at BAD return ---", ring.len());
-                for (code, off, op, sp) in ring.iter().rev().take(40).collect::<Vec<_>>().iter().rev() {
+                for (code, off, op, sp) in
+                    ring.iter().rev().take(40).collect::<Vec<_>>().iter().rev()
+                {
                     eprintln!("    code=0x{code:x} off={off:>5} op=0x{op:02x} sp={sp}");
                 }
             });
@@ -4347,7 +4365,11 @@ mod tests {
         };
         let mut ir = mk();
         ir.reset(2).unwrap(); // RESET_R 2: keep top, drop 2 below
-        assert_eq!(ir.peek(0).unwrap().untag(), 30, "RESET_R must preserve the top");
+        assert_eq!(
+            ir.peek(0).unwrap().untag(),
+            30,
+            "RESET_R must preserve the top"
+        );
         let mut id = mk();
         id.drop_n(2).unwrap(); // RESET 2: drop top 2
         assert_eq!(id.peek(0).unwrap().untag(), 10, "RESET must drop the top n");
@@ -4366,8 +4388,16 @@ mod tests {
             i.test_seed_top(PolyWord::from_ptr(p.cast_const()));
             let _ = i.step().unwrap();
             let res = i.peek(0).unwrap();
-            assert_eq!(unsafe { (*p).0 }, PolyWord::tagged(0).0, "mutex reset to unlocked");
-            let want = if expect_true { PolyWord::tagged(1).0 } else { PolyWord::tagged(0).0 };
+            assert_eq!(
+                unsafe { (*p).0 },
+                PolyWord::tagged(0).0,
+                "mutex reset to unlocked"
+            );
+            let want = if expect_true {
+                PolyWord::tagged(1).0
+            } else {
+                PolyWord::tagged(0).0
+            };
             assert_eq!(res.0, want, "old={old}: True iff old==TAGGED(1)");
             drop(unsafe { Box::from_raw(p.cast::<[PolyWord; 1]>()) });
         }

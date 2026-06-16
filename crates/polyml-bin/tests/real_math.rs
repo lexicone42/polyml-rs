@@ -70,19 +70,55 @@ pr "REALMATH_DONE\n";
         eprintln!("SKIP: poly could not spawn");
         return;
     };
-    assert!(out.contains("REALMATH_DONE"), "driver did not finish.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("REALMATH_DONE"),
+        "driver did not finish.\n{}",
+        tail(&out, 30)
+    );
     for f in ["SQRT", "SIN", "COS", "LN", "POW", "ATAN2", "FLI", "FLI_NEG"] {
-        assert!(out.contains(&format!("{f}=true")), "{f} math wrong (stubbed?).\n{}", tail(&out, 30));
+        assert!(
+            out.contains(&format!("{f}=true")),
+            "{f} math wrong (stubbed?).\n{}",
+            tail(&out, 30)
+        );
     }
-    assert!(out.contains("FLOOR=3"), "Real.floor wrong.\n{}", tail(&out, 30));
-    assert!(out.contains("CEIL=4"), "Real.ceil wrong.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("FLOOR=3"),
+        "Real.floor wrong.\n{}",
+        tail(&out, 30)
+    );
+    assert!(
+        out.contains("CEIL=4"),
+        "Real.ceil wrong.\n{}",
+        tail(&out, 30)
+    );
     // the formerly-zero / SEGV-under-arbitrary-int path, now correct for normal values
-    assert!(out.contains("TLI_NEAREST=4"), "toLargeInt TO_NEAREST 3.7 wrong (was 0).\n{}", tail(&out, 30));
-    assert!(out.contains("TLI_FLOOR=3"), "toLargeInt TO_NEGINF 3.7 wrong.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("TLI_NEAREST=4"),
+        "toLargeInt TO_NEAREST 3.7 wrong (was 0).\n{}",
+        tail(&out, 30)
+    );
+    assert!(
+        out.contains("TLI_FLOOR=3"),
+        "toLargeInt TO_NEGINF 3.7 wrong.\n{}",
+        tail(&out, 30)
+    );
     // negatives: round-half-to-even ~2.5 -> ~2; floor ~3.7 -> ~4. These exercise
     // the arithmetic-right-shift sign path that used to give a huge positive.
-    assert!(out.contains("TLI_NEG=~2"), "toLargeInt round-to-even of ~2.5 wrong.\n{}", tail(&out, 30));
-    assert!(out.contains("TLI_NEGFLOOR=~4"), "toLargeInt TO_NEGINF ~3.7 wrong.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("TLI_NEG=~2"),
+        "toLargeInt round-to-even of ~2.5 wrong.\n{}",
+        tail(&out, 30)
+    );
+    assert!(
+        out.contains("TLI_NEGFLOOR=~4"),
+        "toLargeInt TO_NEGINF ~3.7 wrong.\n{}",
+        tail(&out, 30)
+    );
     // huge value via the boxed-bignum IntInf shift path
-    assert!(out.contains("TLI_BIG=1152921504606846976"), "toLargeInt of 2^60 wrong.\n{}", tail(&out, 30));
+    assert!(
+        out.contains("TLI_BIG=1152921504606846976"),
+        "toLargeInt of 2^60 wrong.\n{}",
+        tail(&out, 30)
+    );
 }

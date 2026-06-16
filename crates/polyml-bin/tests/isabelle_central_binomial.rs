@@ -42,21 +42,37 @@ fn central_binomial_identity() {
         &image,
         &common::with_combinatorics(&driver),
         800_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("VANDERMONDE_OK"), "combinatorics base did not load:\n{out}");
+    assert!(
+        out.contains("VANDERMONDE_OK"),
+        "combinatorics base did not load:\n{out}"
+    );
     for (lemma, marker) in [
         ("binom_symmetry", "BINOM_SYMMETRY_OK"),
         ("central_binomial", "CENTRAL_BINOMIAL_OK"),
     ] {
-        assert!(out.contains(&format!("OK {lemma}")), "lemma `{lemma}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {lemma}")),
+            "lemma `{lemma}` did not check:\n{out}"
+        );
         assert!(out.contains(marker), "marker `{marker}` missing:\n{out}");
     }
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("PROBE_UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("PROBE_UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
 }

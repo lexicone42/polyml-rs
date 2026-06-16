@@ -52,7 +52,10 @@ fn run_with_stdin_args_and_jit(
     cwd: Option<&std::path::Path>,
 ) -> Result<(String, String), std::io::Error> {
     let Some(image) = bootstrap_image() else {
-        return Ok((String::new(), String::from("SKIP: bootstrap image not present")));
+        return Ok((
+            String::new(),
+            String::from("SKIP: bootstrap image not present"),
+        ));
     };
     let mut cmd = Command::new(poly_bin());
     cmd.arg("run").arg("--max-steps").arg(max_steps.to_string());
@@ -198,7 +201,9 @@ fn bootstrap_use_flag_runs_file_one_shot() {
     assert!(
         out.status.success(),
         "poly run --use failed: status={:?} stdout={} stderr={}",
-        out.status, stdout, stderr
+        out.status,
+        stdout,
+        stderr
     );
     assert!(
         stdout.contains("Use: script.sml"),
@@ -324,11 +329,27 @@ PolyML.print \"BASIS_LOAD_OK\";\n";
         errs.is_empty(),
         "basis load with --jit emitted compile errors:\n{}\n\n---output tail---\n{}",
         errs.join("\n"),
-        combined.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+        combined
+            .lines()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     assert!(
         combined.contains("BASIS_LOAD_OK"),
         "missing BASIS_LOAD_OK sentinel. Output tail:\n{}",
-        combined.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+        combined
+            .lines()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

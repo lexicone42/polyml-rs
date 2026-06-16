@@ -70,8 +70,7 @@ pub fn nt_helpers_path() -> PathBuf {
 /// a pure comment reordering, so the executed SML is identical to the old
 /// self-contained driver.
 pub fn with_nt_helpers(delta: &str) -> String {
-    let helpers = std::fs::read_to_string(nt_helpers_path())
-        .expect("read isabelle_nt_helpers.sml");
+    let helpers = std::fs::read_to_string(nt_helpers_path()).expect("read isabelle_nt_helpers.sml");
     format!("{helpers}\n{delta}")
 }
 
@@ -133,7 +132,8 @@ pub fn with_mult_group(delta: &str) -> String {
 /// modular-inverse function, and the assembly).
 pub fn with_wilson_pairing(delta: &str) -> String {
     let wp = std::fs::read_to_string(
-        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_wilson_pairing.sml"),
+        workspace_root()
+            .join("crates/polyml-bin/tests/isabelle_support/isabelle_wilson_pairing.sml"),
     )
     .expect("read isabelle_wilson_pairing.sml");
     with_mult_group(&format!("{wp}\n{delta}"))
@@ -144,7 +144,8 @@ pub fn with_wilson_pairing(delta: &str) -> String {
 /// on top of the Wilson-pairing base — the full base for Wilson's theorem itself.
 pub fn with_wilson_inverse(delta: &str) -> String {
     let wi = std::fs::read_to_string(
-        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_wilson_inverse.sml"),
+        workspace_root()
+            .join("crates/polyml-bin/tests/isabelle_support/isabelle_wilson_inverse.sml"),
     )
     .expect("read isabelle_wilson_inverse.sml");
     with_wilson_pairing(&format!("{wi}\n{delta}"))
@@ -156,7 +157,8 @@ pub fn with_wilson_inverse(delta: &str) -> String {
 /// coefficient identity, a Vandermonde corollary).
 pub fn with_combinatorics(delta: &str) -> String {
     let comb = std::fs::read_to_string(
-        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_combinatorics.sml"),
+        workspace_root()
+            .join("crates/polyml-bin/tests/isabelle_support/isabelle_combinatorics.sml"),
     )
     .expect("read isabelle_combinatorics.sml");
     with_binom_thm(&format!("{comb}\n{delta}"))
@@ -279,7 +281,12 @@ pub fn run_support_driver_on(
 ) -> Option<(String, i32)> {
     let hol = hol4_dir()?;
     let src = std::fs::read_to_string(support_file(driver_name)).ok()?;
-    run_image_env(image, &src, max_steps, &[("HOL4_DIR", hol.to_str().unwrap())])
+    run_image_env(
+        image,
+        &src,
+        max_steps,
+        &[("HOL4_DIR", hol.to_str().unwrap())],
+    )
 }
 
 /// A file under `crates/polyml-bin/tests/hol4_support/`.
@@ -436,7 +443,10 @@ pub fn classify_errors(out: &str) -> String {
         }
     }
 
-    let type_errs = out.lines().filter(|l| l.contains("error: Type error")).count();
+    let type_errs = out
+        .lines()
+        .filter(|l| l.contains("error: Type error"))
+        .count();
     if type_errs > 0 {
         s.push_str(&format!("type errors: {type_errs}\n"));
     }

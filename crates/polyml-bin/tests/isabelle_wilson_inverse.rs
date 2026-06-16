@@ -47,19 +47,41 @@ fn modular_inverse_function() {
         &image,
         &common::with_wilson_pairing(&driver),
         950_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
-    assert!(out.contains("PAIRING_OK"), "Wilson-pairing base did not load:\n{out}");
-    assert!(out.contains("RANGE_MOD_OK"), "range/mod phase did not complete:\n{out}");
+    assert!(
+        out.contains("PAIRING_OK"),
+        "Wilson-pairing base did not load:\n{out}"
+    );
+    assert!(
+        out.contains("RANGE_MOD_OK"),
+        "range/mod phase did not complete:\n{out}"
+    );
     for lemma in ["finv_inv", "finv_mem", "finv_invol", "finv_neq"] {
-        assert!(out.contains(&format!("OK {lemma}")), "lemma `{lemma}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {lemma}")),
+            "lemma `{lemma}` did not check:\n{out}"
+        );
     }
-    assert!(out.contains("INVERSE_FN_OK"), "INVERSE_FN_OK marker missing:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("PROBE_UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("INVERSE_FN_OK"),
+        "INVERSE_FN_OK marker missing:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("PROBE_UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
 }

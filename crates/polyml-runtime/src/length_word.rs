@@ -56,7 +56,10 @@ pub const LENGTH_MASK: usize = !FLAGS_MASK;
 /// Pack a length (in words) and a flag byte into a length word.
 #[must_use]
 pub const fn make_length_word(length: usize, flags: u8) -> PolyWord {
-    debug_assert!(length & FLAGS_MASK == 0, "length overflows length-word field");
+    debug_assert!(
+        length & FLAGS_MASK == 0,
+        "length overflows length-word field"
+    );
     PolyWord::from_bits(length | ((flags as usize) << FLAGS_SHIFT))
 }
 
@@ -152,9 +155,7 @@ pub unsafe fn const_segment_for_code(obj_ptr: *const PolyWord) -> (*const PolyWo
         let offset_bytes = (*last_word_ptr).0 as isize;
         #[allow(clippy::cast_possible_wrap)]
         let word_bytes = std::mem::size_of::<usize>() as isize;
-        let cp = last_word_ptr
-            .add(1)
-            .offset(offset_bytes / word_bytes);
+        let cp = last_word_ptr.add(1).offset(offset_bytes / word_bytes);
         let count = (*cp.sub(1)).0;
         (cp, count)
     }

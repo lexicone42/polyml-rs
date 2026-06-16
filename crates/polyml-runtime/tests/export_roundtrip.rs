@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use polyml_image::pexport::{Image, ObjectBody};
-use polyml_runtime::{export, load_image, PolyWord};
+use polyml_runtime::{PolyWord, export, load_image};
 
 fn workspace_root() -> PathBuf {
     let mut p: PathBuf = env!("CARGO_MANIFEST_DIR").into();
@@ -116,7 +116,10 @@ fn loop_closing_via_reload() {
     };
 
     // Re-loaded heap should be non-empty and have a sensible root.
-    assert!(loaded2.immutable.used_words() + loaded2.mutable.used_words() + loaded2.code.used_words() > 0);
+    assert!(
+        loaded2.immutable.used_words() + loaded2.mutable.used_words() + loaded2.code.used_words()
+            > 0
+    );
     assert!(!loaded2.root.is_null());
 
     // BFS from the re-loaded root and count reachable objects.
@@ -151,9 +154,10 @@ fn loop_closing_via_reload() {
             }
         }
     }
-    eprintln!(
-        "re-loaded BFS reached {} objects (loop closed)",
+    eprintln!("re-loaded BFS reached {} objects (loop closed)", seen.len());
+    assert!(
+        seen.len() > 10_000,
+        "expected >10k reachable, got {}",
         seen.len()
     );
-    assert!(seen.len() > 10_000, "expected >10k reachable, got {}", seen.len());
 }

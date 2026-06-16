@@ -18,8 +18,8 @@
 //! - `INSTR_RETURN_1`
 
 use crate::{Jit, JitError};
-use cranelift::prelude::*;
 use cranelift::codegen::ir::BlockArg;
+use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
 
 // Opcode constants are the SINGLE SOURCE OF TRUTH in
@@ -68,11 +68,7 @@ pub enum TranslateError {
 /// new params are plumbed through every call site but unused. Phase
 /// 2 will use them to enable CALL_CLOSURE and other dynamic-shape
 /// opcodes.
-pub type JitFn = unsafe extern "C" fn(
-    args: *const i64,
-    sp_in: i64,
-    stack_base: i64,
-) -> i64;
+pub type JitFn = unsafe extern "C" fn(args: *const i64, sp_in: i64, stack_base: i64) -> i64;
 
 /// Pop the two top operands of a binary opcode off the compile-time
 /// value stack, in interpreter order: `x` is the top-of-stack (popped
@@ -160,15 +156,9 @@ fn compile_with_consts_impl(
     rts_sig.returns.push(AbiParam::new(types::I64));
     let rts_func_id = jit
         .module
-        .declare_function(
-            "polyml_jit_rts_trampoline",
-            Linkage::Import,
-            &rts_sig,
-        )
+        .declare_function("polyml_jit_rts_trampoline", Linkage::Import, &rts_sig)
         .map_err(|e| JitError::Module(e.to_string()))?;
-    let rts_func_ref = jit
-        .module
-        .declare_func_in_func(rts_func_id, &mut ctx.func);
+    let rts_func_ref = jit.module.declare_func_in_func(rts_func_id, &mut ctx.func);
 
     // Closure-call trampoline. Same signature shape as the RTS
     // trampoline but semantically dispatches a closure value
@@ -180,11 +170,7 @@ fn compile_with_consts_impl(
     closure_sig.returns.push(AbiParam::new(types::I64));
     let closure_func_id = jit
         .module
-        .declare_function(
-            "polyml_jit_closure_call",
-            Linkage::Import,
-            &closure_sig,
-        )
+        .declare_function("polyml_jit_closure_call", Linkage::Import, &closure_sig)
         .map_err(|e| JitError::Module(e.to_string()))?;
     let closure_func_ref = jit
         .module
@@ -197,11 +183,7 @@ fn compile_with_consts_impl(
     alloc_sig.returns.push(AbiParam::new(types::I64));
     let alloc_func_id = jit
         .module
-        .declare_function(
-            "polyml_jit_alloc_tuple",
-            Linkage::Import,
-            &alloc_sig,
-        )
+        .declare_function("polyml_jit_alloc_tuple", Linkage::Import, &alloc_sig)
         .map_err(|e| JitError::Module(e.to_string()))?;
     let alloc_func_ref = jit
         .module
@@ -306,15 +288,9 @@ fn compile_with_consts_impl(
     get_tid_sig.returns.push(AbiParam::new(types::I64));
     let get_tid_id = jit
         .module
-        .declare_function(
-            "polyml_jit_get_thread_id",
-            Linkage::Import,
-            &get_tid_sig,
-        )
+        .declare_function("polyml_jit_get_thread_id", Linkage::Import, &get_tid_sig)
         .map_err(|e| JitError::Module(e.to_string()))?;
-    let get_tid_ref = jit
-        .module
-        .declare_func_in_func(get_tid_id, &mut ctx.func);
+    let get_tid_ref = jit.module.declare_func_in_func(get_tid_id, &mut ctx.func);
 
     // alloc_mut_closure: (n_captures, src_closure) -> i64.
     let mut amc_sig = jit.module.make_signature();
@@ -323,15 +299,9 @@ fn compile_with_consts_impl(
     amc_sig.returns.push(AbiParam::new(types::I64));
     let amc_id = jit
         .module
-        .declare_function(
-            "polyml_jit_alloc_mut_closure",
-            Linkage::Import,
-            &amc_sig,
-        )
+        .declare_function("polyml_jit_alloc_mut_closure", Linkage::Import, &amc_sig)
         .map_err(|e| JitError::Module(e.to_string()))?;
-    let amc_ref = jit
-        .module
-        .declare_func_in_func(amc_id, &mut ctx.func);
+    let amc_ref = jit.module.declare_func_in_func(amc_id, &mut ctx.func);
 
     // dynamic_call: (closure_word, args_ptr, args_depth) -> i64.
     // Used by CALL_CLOSURE-in-tail-position to dispatch dynamically.
@@ -342,15 +312,9 @@ fn compile_with_consts_impl(
     dc_sig.returns.push(AbiParam::new(types::I64));
     let dc_id = jit
         .module
-        .declare_function(
-            "polyml_jit_dynamic_call",
-            Linkage::Import,
-            &dc_sig,
-        )
+        .declare_function("polyml_jit_dynamic_call", Linkage::Import, &dc_sig)
         .map_err(|e| JitError::Module(e.to_string()))?;
-    let dc_ref = jit
-        .module
-        .declare_func_in_func(dc_id, &mut ctx.func);
+    let dc_ref = jit.module.declare_func_in_func(dc_id, &mut ctx.func);
 
     {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -411,8 +375,7 @@ fn compile_with_consts_impl(
                     if stack.len() < expected {
                         return Err(TranslateError::Underflow(pc));
                     }
-                    let args: Vec<BlockArg> =
-                        stack.iter().copied().map(BlockArg::from).collect();
+                    let args: Vec<BlockArg> = stack.iter().copied().map(BlockArg::from).collect();
                     builder.ins().jump(target_blk, &args);
                 }
                 builder.switch_to_block(target_blk);
@@ -520,8 +483,7 @@ fn compile_with_consts_impl(
                         return Err(TranslateError::Underflow(pc - 2));
                     }
                     let base = stack[stack.len() - 1 - depth];
-                    let offset_bytes =
-                        if op == INSTR_INDIRECT_LOCAL_B0 { 0 } else { 8 };
+                    let offset_bytes = if op == INSTR_INDIRECT_LOCAL_B0 { 0 } else { 8 };
                     let val = builder.ins().load(
                         int,
                         cranelift::prelude::MemFlags::trusted(),
@@ -549,10 +511,7 @@ fn compile_with_consts_impl(
                     }
                     stack.truncate(stack.len() - n);
                 }
-                INSTR_RESET_R_1
-                | INSTR_RESET_R_2
-                | INSTR_RESET_R_3
-                | INSTR_RESET_R_B => {
+                INSTR_RESET_R_1 | INSTR_RESET_R_2 | INSTR_RESET_R_3 | INSTR_RESET_R_B => {
                     // Preserve top, drop N below it. For RESET_R_B, N
                     // is a byte immediate; for the dedicated 1/2/3
                     // variants N is encoded in the opcode.
@@ -600,21 +559,19 @@ fn compile_with_consts_impl(
                         vals.push(stack.pop().unwrap());
                     }
                     let slot_size = std::cmp::max(8, (n * 8) as u32);
-                    let slot = builder.create_sized_stack_slot(
-                        cranelift::prelude::StackSlotData::new(
+                    let slot =
+                        builder.create_sized_stack_slot(cranelift::prelude::StackSlotData::new(
                             cranelift::prelude::StackSlotKind::ExplicitSlot,
                             slot_size,
                             3,
-                        ),
-                    );
+                        ));
                     for (k, v) in vals.iter().enumerate() {
                         let idx = n - 1 - k;
                         builder.ins().stack_store(*v, slot, (idx * 8) as i32);
                     }
                     let n_v = builder.ins().iconst(types::I64, n as i64);
                     let vals_ptr = builder.ins().stack_addr(types::I64, slot, 0);
-                    let call_inst =
-                        builder.ins().call(alloc_func_ref, &[n_v, vals_ptr]);
+                    let call_inst = builder.ins().call(alloc_func_ref, &[n_v, vals_ptr]);
                     let result_val = builder.inst_results(call_inst)[0];
                     stack.push(result_val);
                 }
@@ -649,13 +606,15 @@ fn compile_with_consts_impl(
                     let next_op = bytecode.get(pc).copied().unwrap_or(0);
                     let direct_tail = matches!(
                         next_op,
-                        INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3
-                        | INSTR_RETURN_B | INSTR_RETURN_W
+                        INSTR_RETURN_1
+                            | INSTR_RETURN_2
+                            | INSTR_RETURN_3
+                            | INSTR_RETURN_B
+                            | INSTR_RETURN_W
                     );
                     // Pattern B: 0x29 (LOCAL_0), 0x64 (RESET_R_1),
                     // 0x42 (RETURN_1).
-                    let cleanup_tail =
-                        bytecode.get(pc).copied() == Some(0x29)
+                    let cleanup_tail = bytecode.get(pc).copied() == Some(0x29)
                         && bytecode.get(pc + 1).copied() == Some(0x64)
                         && bytecode.get(pc + 2).copied() == Some(0x42);
                     if !direct_tail && !cleanup_tail {
@@ -664,26 +623,21 @@ fn compile_with_consts_impl(
                             at: pc - 1,
                         });
                     }
-                    let closure = stack.pop()
-                        .ok_or(TranslateError::Underflow(pc - 1))?;
+                    let closure = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
                     let depth = stack.len();
                     let slot_size = std::cmp::max(8, (depth * 8) as u32);
-                    let slot = builder.create_sized_stack_slot(
-                        cranelift::prelude::StackSlotData::new(
+                    let slot =
+                        builder.create_sized_stack_slot(cranelift::prelude::StackSlotData::new(
                             cranelift::prelude::StackSlotKind::ExplicitSlot,
                             slot_size,
                             3,
-                        ),
-                    );
+                        ));
                     for (i, v) in stack.iter().enumerate() {
                         builder.ins().stack_store(*v, slot, (i * 8) as i32);
                     }
                     let args_ptr = builder.ins().stack_addr(int, slot, 0);
                     let depth_v = builder.ins().iconst(int, depth as i64);
-                    let call = builder.ins().call(
-                        dc_ref,
-                        &[closure, args_ptr, depth_v],
-                    );
+                    let call = builder.ins().call(dc_ref, &[closure, args_ptr, depth_v]);
                     let result = builder.inst_results(call)[0];
                     if cleanup_tail {
                         // Skip past LOCAL_0; RESET_R_1; RETURN_1 — we
@@ -725,31 +679,25 @@ fn compile_with_consts_impl(
                     // subsequent LOCAL_K offsets match the interpreter.
                     let closure = *stack.last().unwrap();
                     let slot_size = std::cmp::max(8, (n_args * 8) as u32);
-                    let slot = builder.create_sized_stack_slot(
-                        cranelift::prelude::StackSlotData::new(
+                    let slot =
+                        builder.create_sized_stack_slot(cranelift::prelude::StackSlotData::new(
                             cranelift::prelude::StackSlotKind::ExplicitSlot,
                             slot_size,
                             3,
-                        ),
-                    );
+                        ));
                     for (i, v) in args_vec.iter().enumerate() {
                         builder.ins().stack_store(*v, slot, (i * 8) as i32);
                     }
                     let args_ptr = builder.ins().stack_addr(types::I64, slot, 0);
                     let n_args_v = builder.ins().iconst(types::I64, n_args as i64);
-                    let call_inst = builder.ins().call(
-                        closure_func_ref,
-                        &[closure, n_args_v, args_ptr],
-                    );
+                    let call_inst = builder
+                        .ins()
+                        .call(closure_func_ref, &[closure, n_args_v, args_ptr]);
                     let result_val = builder.inst_results(call_inst)[0];
                     stack.push(result_val);
                 }
-                INSTR_CALL_FAST_RTS0
-                | INSTR_CALL_FAST_RTS1
-                | INSTR_CALL_FAST_RTS2
-                | INSTR_CALL_FAST_RTS3
-                | INSTR_CALL_FAST_RTS4
-                | INSTR_CALL_FAST_RTS5 => {
+                INSTR_CALL_FAST_RTS0 | INSTR_CALL_FAST_RTS1 | INSTR_CALL_FAST_RTS2
+                | INSTR_CALL_FAST_RTS3 | INSTR_CALL_FAST_RTS4 | INSTR_CALL_FAST_RTS5 => {
                     let n_args = (op - INSTR_CALL_FAST_RTS0) as usize;
                     // Pop stub first (top), then N args. We need
                     // args[0..N] in slot[0..N] in their original
@@ -763,32 +711,27 @@ fn compile_with_consts_impl(
                     // Allocate a stack slot for the args buffer
                     // (zero-sized slot is fine when n_args == 0).
                     let slot_size = std::cmp::max(8, (n_args * 8) as u32);
-                    let slot = builder.create_sized_stack_slot(
-                        cranelift::prelude::StackSlotData::new(
+                    let slot =
+                        builder.create_sized_stack_slot(cranelift::prelude::StackSlotData::new(
                             cranelift::prelude::StackSlotKind::ExplicitSlot,
                             slot_size,
                             3,
-                        ),
-                    );
+                        ));
                     for (i, v) in args_vec.iter().enumerate() {
                         builder.ins().stack_store(*v, slot, (i * 8) as i32);
                     }
                     let args_ptr = builder.ins().stack_addr(types::I64, slot, 0);
                     let n_args_v = builder.ins().iconst(types::I64, n_args as i64);
                     let _ = stub;
-                    let call_inst = builder.ins().call(
-                        rts_func_ref,
-                        &[stub, n_args_v, args_ptr],
-                    );
+                    let call_inst = builder
+                        .ins()
+                        .call(rts_func_ref, &[stub, n_args_v, args_ptr]);
                     let result_val = builder.inst_results(call_inst)[0];
                     stack.push(result_val);
                 }
-                INSTR_CONST_ADDR8_0
-                | INSTR_CONST_ADDR8_1
-                | INSTR_CONST_ADDR8_8
+                INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 | INSTR_CONST_ADDR8_8
                 | INSTR_CONST_ADDR16_8 => {
-                    let (byte_off, idx) =
-                        read_const_addr_operands(bytecode, &mut pc, op)?;
+                    let (byte_off, idx) = read_const_addr_operands(bytecode, &mut pc, op)?;
                     let read_at = pc + byte_off + idx * 8;
                     if read_at + 8 > _full_body.len() {
                         return Err(TranslateError::Unsupported { op, at: pc });
@@ -800,20 +743,17 @@ fn compile_with_consts_impl(
                     // would become stale and crash on dereference.
                     let abs_addr = _full_body.as_ptr() as i64 + read_at as i64;
                     let base = builder.ins().iconst(int, abs_addr);
-                    let val = builder.ins().load(
-                        int,
-                        cranelift::prelude::MemFlags::trusted(),
-                        base,
-                        0,
-                    );
+                    let val =
+                        builder
+                            .ins()
+                            .load(int, cranelift::prelude::MemFlags::trusted(), base, 0);
                     stack.push(val);
                 }
                 INSTR_CALL_CONST_ADDR8_0
                 | INSTR_CALL_CONST_ADDR8_1
                 | INSTR_CALL_CONST_ADDR8_8
                 | INSTR_CALL_CONST_ADDR16_8 => {
-                    let (byte_off, idx) =
-                        read_const_addr_operands(bytecode, &mut pc, op)?;
+                    let (byte_off, idx) = read_const_addr_operands(bytecode, &mut pc, op)?;
                     let read_at = pc + byte_off + idx * 8;
                     if read_at + 8 > _full_body.len() {
                         return Err(TranslateError::Unsupported { op, at: pc });
@@ -825,9 +765,7 @@ fn compile_with_consts_impl(
                     // → first two bytes (0xff/0xe9, arity|0x80). If the
                     // prologue isn't recognisable, bail to the
                     // interpreter rather than guess arity.
-                    let Some(n_args) =
-                        closure_arity_from_addr(closure_addr_at_compile_time)
-                    else {
+                    let Some(n_args) = closure_arity_from_addr(closure_addr_at_compile_time) else {
                         return Err(TranslateError::Unsupported { op, at: pc - 2 });
                     };
                     if stack.len() < n_args {
@@ -852,38 +790,30 @@ fn compile_with_consts_impl(
                     // it without needing the install-time filter.
                     let abs_addr = _full_body.as_ptr() as i64 + read_at as i64;
                     let base = builder.ins().iconst(int, abs_addr);
-                    let closure_v = builder.ins().load(
-                        int,
-                        cranelift::prelude::MemFlags::trusted(),
-                        base,
-                        0,
-                    );
+                    let closure_v =
+                        builder
+                            .ins()
+                            .load(int, cranelift::prelude::MemFlags::trusted(), base, 0);
                     let slot_size = std::cmp::max(8, (n_args * 8) as u32);
-                    let slot = builder.create_sized_stack_slot(
-                        cranelift::prelude::StackSlotData::new(
+                    let slot =
+                        builder.create_sized_stack_slot(cranelift::prelude::StackSlotData::new(
                             cranelift::prelude::StackSlotKind::ExplicitSlot,
                             slot_size,
                             3,
-                        ),
-                    );
+                        ));
                     for (i, v) in args_vec.iter().enumerate() {
                         builder.ins().stack_store(*v, slot, (i * 8) as i32);
                     }
                     let args_ptr = builder.ins().stack_addr(types::I64, slot, 0);
                     let n_args_v = builder.ins().iconst(types::I64, n_args as i64);
-                    let call_inst = builder.ins().call(
-                        closure_func_ref,
-                        &[closure_v, n_args_v, args_ptr],
-                    );
+                    let call_inst = builder
+                        .ins()
+                        .call(closure_func_ref, &[closure_v, n_args_v, args_ptr]);
                     let result_val = builder.inst_results(call_inst)[0];
                     stack.push(result_val);
                 }
-                INSTR_INDIRECT_0
-                | INSTR_INDIRECT_1
-                | INSTR_INDIRECT_2
-                | INSTR_INDIRECT_3
-                | INSTR_INDIRECT_4
-                | INSTR_INDIRECT_5 => {
+                INSTR_INDIRECT_0 | INSTR_INDIRECT_1 | INSTR_INDIRECT_2 | INSTR_INDIRECT_3
+                | INSTR_INDIRECT_4 | INSTR_INDIRECT_5 => {
                     let field = (op - INSTR_INDIRECT_0) as i32;
                     let base = stack.pop().ok_or(TranslateError::Underflow(pc - 1))?;
                     let val = builder.ins().load(
@@ -925,12 +855,10 @@ fn compile_with_consts_impl(
                     let eight = builder.ins().iconst(int, 8);
                     let off = builder.ins().imul(index, eight);
                     let addr = builder.ins().iadd(base, off);
-                    let val = builder.ins().load(
-                        int,
-                        cranelift::prelude::MemFlags::trusted(),
-                        addr,
-                        0,
-                    );
+                    let val =
+                        builder
+                            .ins()
+                            .load(int, cranelift::prelude::MemFlags::trusted(), addr, 0);
                     // TAG: 2*val + 1
                     let doubled = builder.ins().ishl_imm(val, 1);
                     let one = builder.ins().iconst(int, 1);
@@ -948,12 +876,9 @@ fn compile_with_consts_impl(
                     let eight = builder.ins().iconst(int, 8);
                     let off = builder.ins().imul(index, eight);
                     let addr = builder.ins().iadd(base, off);
-                    builder.ins().store(
-                        cranelift::prelude::MemFlags::trusted(),
-                        to_store,
-                        addr,
-                        0,
-                    );
+                    builder
+                        .ins()
+                        .store(cranelift::prelude::MemFlags::trusted(), to_store, addr, 0);
                     let tag0 = builder.ins().iconst(int, tag(0));
                     stack.push(tag0);
                 }
@@ -973,12 +898,9 @@ fn compile_with_consts_impl(
                     let index = builder.ins().sshr_imm(index_tag, 1);
                     let addr = builder.ins().iadd(base, index);
                     let val_u8 = builder.ins().sshr_imm(to_store_tag, 1);
-                    builder.ins().istore8(
-                        cranelift::prelude::MemFlags::trusted(),
-                        val_u8,
-                        addr,
-                        0,
-                    );
+                    builder
+                        .ins()
+                        .istore8(cranelift::prelude::MemFlags::trusted(), val_u8, addr, 0);
                     let tag0 = builder.ins().iconst(int, tag(0));
                     stack.push(tag0);
                 }
@@ -988,7 +910,10 @@ fn compile_with_consts_impl(
                         return Err(TranslateError::Underflow(pc - 1));
                     }
                     let base = *stack.last().unwrap();
-                    let val = builder.ins().load(int, cranelift::prelude::MemFlags::trusted(), base, 0);
+                    let val =
+                        builder
+                            .ins()
+                            .load(int, cranelift::prelude::MemFlags::trusted(), base, 0);
                     stack.push(val);
                 }
                 INSTR_PUSH_HANDLER => {
@@ -1028,13 +953,12 @@ fn compile_with_consts_impl(
                     let n = bytecode[pc] as usize;
                     pc += 1;
                     let slot_size = std::cmp::max(8, (n * 8) as u32);
-                    let ss = builder.create_sized_stack_slot(
-                        cranelift::prelude::StackSlotData::new(
+                    let ss =
+                        builder.create_sized_stack_slot(cranelift::prelude::StackSlotData::new(
                             cranelift::prelude::StackSlotKind::ExplicitSlot,
                             slot_size,
                             3,
-                        ),
-                    );
+                        ));
                     let tag0 = builder.ins().iconst(int, tag(0));
                     for i in 0..n {
                         builder.ins().stack_store(tag0, ss, (i * 8) as i32);
@@ -1199,10 +1123,7 @@ fn compile_with_consts_impl(
                     } else {
                         block_compare_byte_ref
                     };
-                    let call = builder.ins().call(
-                        fref,
-                        &[p1, off1, p2, off2, length],
-                    );
+                    let call = builder.ins().call(fref, &[p1, off1, p2, off2, length]);
                     let result = builder.inst_results(call)[0];
                     stack.push(result);
                 }
@@ -1237,10 +1158,9 @@ fn compile_with_consts_impl(
                     } else {
                         block_move_byte_ref
                     };
-                    let _call = builder.ins().call(
-                        func_ref,
-                        &[src, src_off, dest, dest_off, length],
-                    );
+                    let _call = builder
+                        .ins()
+                        .call(func_ref, &[src, src_off, dest, dest_off, length]);
                     let tag0 = builder.ins().iconst(int, tag(0));
                     stack.push(tag0);
                 }
@@ -1280,12 +1200,13 @@ fn compile_with_consts_impl(
                     let one = builder.ins().iconst(int, 1);
                     let lsb = builder.ins().band(v, one);
                     let target_pc = pc + off;
-                    let target_blk = *block_at.get(&target_pc)
+                    let target_blk = *block_at
+                        .get(&target_pc)
                         .expect("JUMP_TAGGED_LOCAL target should be registered");
-                    let fall_blk = *block_at.get(&pc)
+                    let fall_blk = *block_at
+                        .get(&pc)
                         .expect("JUMP_TAGGED_LOCAL fallthrough should be registered");
-                    let args: Vec<BlockArg> =
-                        stack.iter().copied().map(BlockArg::from).collect();
+                    let args: Vec<BlockArg> = stack.iter().copied().map(BlockArg::from).collect();
                     // brif: if cond ≠ 0 then then-block else else-block.
                     // LSB=1 → tagged → take the jump.
                     builder.ins().brif(lsb, target_blk, &args, fall_blk, &args);
@@ -1323,25 +1244,24 @@ fn compile_with_consts_impl(
                     }
                     let local = stack[stack.len() - 1 - d];
                     let v = if op == INSTR_JUMP_NEQ_LOCAL_IND {
-                        builder.ins().load(
-                            int,
-                            cranelift::prelude::MemFlags::trusted(),
-                            local,
-                            0,
-                        )
+                        builder
+                            .ins()
+                            .load(int, cranelift::prelude::MemFlags::trusted(), local, 0)
                     } else {
                         local
                     };
-                    let want_tagged =
-                        builder.ins().iconst(int, want.wrapping_mul(2).wrapping_add(1));
+                    let want_tagged = builder
+                        .ins()
+                        .iconst(int, want.wrapping_mul(2).wrapping_add(1));
                     let eq = builder.ins().icmp(IntCC::Equal, v, want_tagged);
                     let target_pc = pc + off;
-                    let target_blk = *block_at.get(&target_pc)
+                    let target_blk = *block_at
+                        .get(&target_pc)
                         .expect("JUMP_NEQ_LOCAL target should be registered");
-                    let fall_blk = *block_at.get(&pc)
+                    let fall_blk = *block_at
+                        .get(&pc)
                         .expect("JUMP_NEQ_LOCAL fallthrough should be registered");
-                    let args: Vec<BlockArg> =
-                        stack.iter().copied().map(BlockArg::from).collect();
+                    let args: Vec<BlockArg> = stack.iter().copied().map(BlockArg::from).collect();
                     // eq=1 → fall through (equal). eq=0 → jump.
                     builder.ins().brif(eq, fall_blk, &args, target_blk, &args);
                     returned = true;
@@ -1652,10 +1572,7 @@ fn compile_with_consts_impl(
                     let length = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
                     let length_u = builder.ins().sshr_imm(length, 1);
                     let flags_u = builder.ins().sshr_imm(flags, 1);
-                    let call_inst = builder.ins().call(
-                        alloc_bytes_ref,
-                        &[length_u, flags_u],
-                    );
+                    let call_inst = builder.ins().call(alloc_bytes_ref, &[length_u, flags_u]);
                     let result_val = builder.inst_results(call_inst)[0];
                     let last = stack.len() - 1;
                     stack[last] = result_val;
@@ -1670,10 +1587,7 @@ fn compile_with_consts_impl(
                     let length_u = builder.ins().sshr_imm(length, 1);
                     let flags_u = builder.ins().sshr_imm(flags, 1);
                     // Allocate via byte_mem trampoline (uninitialized).
-                    let call_inst = builder.ins().call(
-                        alloc_bytes_ref,
-                        &[length_u, flags_u],
-                    );
+                    let call_inst = builder.ins().call(alloc_bytes_ref, &[length_u, flags_u]);
                     let result_val = builder.inst_results(call_inst)[0];
                     // Initialize the body with `init` via stores in a loop.
                     // For simplicity, emit a stack-slot fill via a constant
@@ -1695,12 +1609,9 @@ fn compile_with_consts_impl(
                     let eight = builder.ins().iconst(int, 8);
                     let off = builder.ins().imul(i, eight);
                     let addr = builder.ins().iadd(body_ptr, off);
-                    builder.ins().store(
-                        cranelift::prelude::MemFlags::trusted(),
-                        init,
-                        addr,
-                        0,
-                    );
+                    builder
+                        .ins()
+                        .store(cranelift::prelude::MemFlags::trusted(), init, addr, 0);
                     let one = builder.ins().iconst(int, 1);
                     let i_plus_1 = builder.ins().iadd(i, one);
                     builder.ins().jump(loop_header, &[BlockArg::from(i_plus_1)]);
@@ -1721,12 +1632,9 @@ fn compile_with_consts_impl(
                     let eight = builder.ins().iconst(int, 8);
                     let off = builder.ins().imul(index_u, eight);
                     let addr = builder.ins().iadd(base, off);
-                    builder.ins().store(
-                        cranelift::prelude::MemFlags::trusted(),
-                        raw_u,
-                        addr,
-                        0,
-                    );
+                    builder
+                        .ins()
+                        .store(cranelift::prelude::MemFlags::trusted(), raw_u, addr, 0);
                     let tag0 = builder.ins().iconst(int, tag(0));
                     stack.push(tag0);
                 }
@@ -1776,23 +1684,21 @@ fn compile_with_consts_impl(
                     // caps[0] = cap_N (first popped). caps[N-1] = cap_1.
                     // So slot[N-1] = caps[0], slot[0] = caps[N-1].
                     let slot_size = std::cmp::max(8, (n_captures * 8) as u32);
-                    let slot = builder.create_sized_stack_slot(
-                        cranelift::prelude::StackSlotData::new(
+                    let slot =
+                        builder.create_sized_stack_slot(cranelift::prelude::StackSlotData::new(
                             cranelift::prelude::StackSlotKind::ExplicitSlot,
                             slot_size,
                             3,
-                        ),
-                    );
+                        ));
                     for (i, v) in caps.iter().enumerate() {
                         let slot_byte_off = ((n_captures - 1 - i) * 8) as i32;
                         builder.ins().stack_store(*v, slot, slot_byte_off);
                     }
                     let caps_ptr = builder.ins().stack_addr(types::I64, slot, 0);
                     let n_v = builder.ins().iconst(types::I64, n_captures as i64);
-                    let call_inst = builder.ins().call(
-                        closure_alloc_ref,
-                        &[n_v, caps_ptr, src_closure],
-                    );
+                    let call_inst = builder
+                        .ins()
+                        .call(closure_alloc_ref, &[n_v, caps_ptr, src_closure]);
                     let result_val = builder.inst_results(call_inst)[0];
                     stack.push(result_val);
                 }
@@ -1800,12 +1706,10 @@ fn compile_with_consts_impl(
                     // peek ptr; replace top with tagged(length-word & LENGTH_MASK).
                     // length word is at ptr - 8.
                     let p = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let lw = builder.ins().load(
-                        int,
-                        cranelift::prelude::MemFlags::trusted(),
-                        p,
-                        -8,
-                    );
+                    let lw =
+                        builder
+                            .ins()
+                            .load(int, cranelift::prelude::MemFlags::trusted(), p, -8);
                     // mask = 0x00ff_ffff_ffff_ffff (low 56 bits)
                     let mask = builder.ins().iconst(int, 0x00ff_ffff_ffff_ffff_u64 as i64);
                     let len = builder.ins().band(lw, mask);
@@ -1821,12 +1725,10 @@ fn compile_with_consts_impl(
                     // (top byte of length-word, FLAGS_SHIFT = 56).
                     // Replace top with tagged(flags).
                     let p = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let lw = builder.ins().load(
-                        int,
-                        cranelift::prelude::MemFlags::trusted(),
-                        p,
-                        -8,
-                    );
+                    let lw =
+                        builder
+                            .ins()
+                            .load(int, cranelift::prelude::MemFlags::trusted(), p, -8);
                     let flags = builder.ins().ushr_imm(lw, 56);
                     // No mask needed; ushr already zeroes the top bits.
                     let shifted = builder.ins().ishl_imm(flags, 1);
@@ -1865,12 +1767,10 @@ fn compile_with_consts_impl(
                     let eight = builder.ins().iconst(int, 8);
                     let off = builder.ins().imul(index, eight);
                     let addr = builder.ins().iadd(base, off);
-                    let v = builder.ins().load(
-                        int,
-                        cranelift::prelude::MemFlags::trusted(),
-                        addr,
-                        0,
-                    );
+                    let v =
+                        builder
+                            .ins()
+                            .load(int, cranelift::prelude::MemFlags::trusted(), addr, 0);
                     let last = stack.len() - 1;
                     stack[last] = v;
                 }
@@ -1899,18 +1799,16 @@ fn compile_with_consts_impl(
                     // top with cell pointer (interp: peek init,
                     // allocate, write, pop init, push pointer).
                     let init = *stack.last().ok_or(TranslateError::Underflow(pc - 1))?;
-                    let slot = builder.create_sized_stack_slot(
-                        cranelift::prelude::StackSlotData::new(
+                    let slot =
+                        builder.create_sized_stack_slot(cranelift::prelude::StackSlotData::new(
                             cranelift::prelude::StackSlotKind::ExplicitSlot,
                             8,
                             3,
-                        ),
-                    );
+                        ));
                     builder.ins().stack_store(init, slot, 0);
                     let vals_ptr = builder.ins().stack_addr(types::I64, slot, 0);
                     let n_v = builder.ins().iconst(types::I64, 1);
-                    let call_inst =
-                        builder.ins().call(alloc_func_ref, &[n_v, vals_ptr]);
+                    let call_inst = builder.ins().call(alloc_func_ref, &[n_v, vals_ptr]);
                     let result_val = builder.inst_results(call_inst)[0];
                     let last = stack.len() - 1;
                     stack[last] = result_val;
@@ -1967,22 +1865,20 @@ fn compile_with_consts_impl(
                         args_vec.push(stack.pop().unwrap());
                     }
                     let slot_size = std::cmp::max(8, (n_args * 8) as u32);
-                    let slot = builder.create_sized_stack_slot(
-                        cranelift::prelude::StackSlotData::new(
+                    let slot =
+                        builder.create_sized_stack_slot(cranelift::prelude::StackSlotData::new(
                             cranelift::prelude::StackSlotKind::ExplicitSlot,
                             slot_size,
                             3,
-                        ),
-                    );
+                        ));
                     for (i, v) in args_vec.iter().enumerate() {
                         builder.ins().stack_store(*v, slot, (i * 8) as i32);
                     }
                     let args_ptr = builder.ins().stack_addr(types::I64, slot, 0);
                     let n_args_v = builder.ins().iconst(types::I64, n_args as i64);
-                    let call_inst = builder.ins().call(
-                        closure_func_ref,
-                        &[closure, n_args_v, args_ptr],
-                    );
+                    let call_inst = builder
+                        .ins()
+                        .call(closure_func_ref, &[closure, n_args_v, args_ptr]);
                     let result_val = builder.inst_results(call_inst)[0];
                     // Return the callee's result directly (= tail call).
                     builder.ins().return_(&[result_val]);
@@ -2024,10 +1920,10 @@ fn compile_with_consts_impl(
                         u16::from_le_bytes([lo, hi]) as usize
                     };
                     let target_pc = pc + off;
-                    let target_blk = *block_at.get(&target_pc)
+                    let target_blk = *block_at
+                        .get(&target_pc)
                         .expect("target should be registered in pass 1");
-                    let args: Vec<BlockArg> =
-                        stack.iter().copied().map(BlockArg::from).collect();
+                    let args: Vec<BlockArg> = stack.iter().copied().map(BlockArg::from).collect();
                     builder.ins().jump(target_blk, &args);
                     returned = true;
                 }
@@ -2053,10 +1949,10 @@ fn compile_with_consts_impl(
                     // pc_offset_signed(-(off+3)). Both put us back by
                     // (off + opcode_total_len) bytes.
                     let target_pc = pc - off - 1 - imm_size;
-                    let target_blk = *block_at.get(&target_pc)
+                    let target_blk = *block_at
+                        .get(&target_pc)
                         .expect("back-edge target should be registered in pass 1");
-                    let args: Vec<BlockArg> =
-                        stack.iter().copied().map(BlockArg::from).collect();
+                    let args: Vec<BlockArg> = stack.iter().copied().map(BlockArg::from).collect();
                     builder.ins().jump(target_blk, &args);
                     returned = true;
                 }
@@ -2072,8 +1968,7 @@ fn compile_with_consts_impl(
                     let arg1 = u16::from_le_bytes([bytecode[pc], bytecode[pc + 1]]) as usize;
                     pc += 2;
                     let table_start = pc;
-                    let selector =
-                        stack.pop().ok_or(TranslateError::Underflow(pc - 3))?;
+                    let selector = stack.pop().ok_or(TranslateError::Underflow(pc - 3))?;
                     // Untag: arithmetic shift right by 1 → SIGNED i64
                     // selector value `u`, matching the interpreter's
                     // `selector.untag()` (bytecode.cpp:376-385).
@@ -2084,21 +1979,18 @@ fn compile_with_consts_impl(
                         .get(&default_target)
                         .expect("CASE16 default target should be registered in pass 1");
                     // Resolve each case entry's real target block.
-                    let mut case_blks: Vec<cranelift::prelude::Block> =
-                        Vec::with_capacity(arg1);
+                    let mut case_blks: Vec<cranelift::prelude::Block> = Vec::with_capacity(arg1);
                     for i in 0..arg1 {
                         let entry_pos = table_start + i * 2;
                         if entry_pos + 1 >= bytecode.len() {
                             return Err(TranslateError::Truncated(entry_pos));
                         }
-                        let off = u16::from_le_bytes([
-                            bytecode[entry_pos],
-                            bytecode[entry_pos + 1],
-                        ]) as usize;
+                        let off = u16::from_le_bytes([bytecode[entry_pos], bytecode[entry_pos + 1]])
+                            as usize;
                         let target = table_start + off;
-                        let blk = *block_at.get(&target).expect(
-                            "CASE16 case target should be registered in pass 1",
-                        );
+                        let blk = *block_at
+                            .get(&target)
+                            .expect("CASE16 case target should be registered in pass 1");
                         case_blks.push(blk);
                     }
                     // Cranelift `br_table` requires "leaf" blocks (no args)
@@ -2140,11 +2032,10 @@ fn compile_with_consts_impl(
                     // a small i32 is caught here and sent to default.
                     builder.switch_to_block(cur_blk);
                     let arg1_v = builder.ins().iconst(int, arg1 as i64);
-                    let oob = builder.ins().icmp(
-                        IntCC::UnsignedGreaterThanOrEqual,
-                        untagged,
-                        arg1_v,
-                    );
+                    let oob =
+                        builder
+                            .ins()
+                            .icmp(IntCC::UnsignedGreaterThanOrEqual, untagged, arg1_v);
                     builder
                         .ins()
                         .brif(oob, default_leaf, &[], dispatch_blk, &[]);
@@ -2156,17 +2047,13 @@ fn compile_with_consts_impl(
                         .iter()
                         .map(|&b| builder.func.dfg.block_call(b, &[]))
                         .collect();
-                    let jtd = cranelift::prelude::JumpTableData::new(
-                        default_call,
-                        &case_calls,
-                    );
+                    let jtd = cranelift::prelude::JumpTableData::new(default_call, &case_calls);
                     let jt = builder.create_jump_table(jtd);
                     builder.ins().br_table(idx32, jt);
                     pc = table_start + arg1 * 2;
                     returned = true;
                 }
-                INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE
-                | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
+                INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
                     let off = if op == INSTR_JUMP8_FALSE || op == INSTR_JUMP8_TRUE {
                         if pc >= bytecode.len() {
                             return Err(TranslateError::Truncated(pc));
@@ -2185,19 +2072,22 @@ fn compile_with_consts_impl(
                     };
                     let target_pc = pc + off;
                     let cond = stack.pop().ok_or(TranslateError::Underflow(pc - 2))?;
-                    let target_blk = *block_at.get(&target_pc)
+                    let target_blk = *block_at
+                        .get(&target_pc)
                         .expect("target should be registered in pass 1");
                     let fall_blk = *block_at.get(&pc).expect("fallthrough should be registered");
                     let zero = builder.ins().iconst(int, tag(0));
                     let is_zero = builder.ins().icmp(IntCC::Equal, cond, zero);
-                    let args: Vec<BlockArg> =
-                        stack.iter().copied().map(BlockArg::from).collect();
-                    let jump_on_zero =
-                        op == INSTR_JUMP8_FALSE || op == INSTR_JUMP16_FALSE;
+                    let args: Vec<BlockArg> = stack.iter().copied().map(BlockArg::from).collect();
+                    let jump_on_zero = op == INSTR_JUMP8_FALSE || op == INSTR_JUMP16_FALSE;
                     if jump_on_zero {
-                        builder.ins().brif(is_zero, target_blk, &args, fall_blk, &args);
+                        builder
+                            .ins()
+                            .brif(is_zero, target_blk, &args, fall_blk, &args);
                     } else {
-                        builder.ins().brif(is_zero, fall_blk, &args, target_blk, &args);
+                        builder
+                            .ins()
+                            .brif(is_zero, fall_blk, &args, target_blk, &args);
                     }
                     returned = true;
                 }
@@ -2285,9 +2175,7 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         | INSTR_INDIRECT_CLOSURE_B0
         | INSTR_INDIRECT_CLOSURE_B1
         | INSTR_INDIRECT_CLOSURE_B2 => 2,
-        INSTR_INDIRECT_LOCAL_BB
-        | INSTR_INDIRECT_CLOSURE_BB
-        | INSTR_JUMP_TAGGED_LOCAL => 3,
+        INSTR_INDIRECT_LOCAL_BB | INSTR_INDIRECT_CLOSURE_BB | INSTR_JUMP_TAGGED_LOCAL => 3,
         // JUMP_NEQ_LOCAL{_IND}: 1 opcode + 3 imm (depth, want, off).
         // bytecode.cpp lines 552-560 (jumpNEqLocal): pc += 3.
         INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => 4,
@@ -2295,12 +2183,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1 => 2,
         INSTR_CONST_ADDR8_8 | INSTR_CALL_CONST_ADDR8_8 => 3,
         INSTR_CONST_ADDR16_8 | INSTR_CALL_CONST_ADDR16_8 => 4,
-        INSTR_CALL_FAST_RTS0
-        | INSTR_CALL_FAST_RTS1
-        | INSTR_CALL_FAST_RTS2
-        | INSTR_CALL_FAST_RTS3
-        | INSTR_CALL_FAST_RTS4
-        | INSTR_CALL_FAST_RTS5 => 1,
+        INSTR_CALL_FAST_RTS0 | INSTR_CALL_FAST_RTS1 | INSTR_CALL_FAST_RTS2
+        | INSTR_CALL_FAST_RTS3 | INSTR_CALL_FAST_RTS4 | INSTR_CALL_FAST_RTS5 => 1,
         INSTR_CALL_LOCAL_B => 2,
         // CALL_CLOSURE: no immediate bytes.
         INSTR_CALL_CLOSURE => 1,
@@ -2361,9 +2245,8 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_TAIL_B_B => 3,
         INSTR_CLOSURE_B => 2,
         INSTR_ALLOC_BYTE_MEM | INSTR_ALLOC_WORD_MEMORY | INSTR_STORE_UNTAGGED => 1,
-        INSTR_RAISE_EX | INSTR_DELETE_HANDLER | INSTR_ALLOC_REF
-        | INSTR_CELL_LENGTH | INSTR_LOAD_ML_BYTE | INSTR_LOAD_ML_WORD
-        | INSTR_NOT_BOOLEAN | INSTR_IS_TAGGED => 1,
+        INSTR_RAISE_EX | INSTR_DELETE_HANDLER | INSTR_ALLOC_REF | INSTR_CELL_LENGTH
+        | INSTR_LOAD_ML_BYTE | INSTR_LOAD_ML_WORD | INSTR_NOT_BOOLEAN | INSTR_IS_TAGGED => 1,
         INSTR_SET_HANDLER8 => 2,
         INSTR_SET_HANDLER16 => 3,
         INSTR_JUMP16 | INSTR_JUMP_BACK16 => 3,
@@ -2372,15 +2255,17 @@ fn opcode_total_len(bc: &[u8], pc: usize) -> Result<usize, TranslateError> {
         INSTR_SET_STACK_VAL_B => 2,
         INSTR_INDIRECT_B => 2,
         INSTR_LOAD_UNTAGGED | INSTR_STORE_ML_WORD | INSTR_STORE_ML_BYTE => 1,
-        INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE
-            | INSTR_BLOCK_EQUAL_BYTE | INSTR_BLOCK_COMPARE_BYTE
-            | INSTR_PUSH_HANDLER => 1,
+        INSTR_BLOCK_MOVE_WORD
+        | INSTR_BLOCK_MOVE_BYTE
+        | INSTR_BLOCK_EQUAL_BYTE
+        | INSTR_BLOCK_COMPARE_BYTE
+        | INSTR_PUSH_HANDLER => 1,
         // Container opcodes: op + 1 imm byte = 2 total.
-        INSTR_STACK_CONTAINER_B | INSTR_MOVE_TO_CONTAINER_B
-            | INSTR_INDIRECT_CONTAINER_B => 2,
+        INSTR_STACK_CONTAINER_B | INSTR_MOVE_TO_CONTAINER_B | INSTR_INDIRECT_CONTAINER_B => 2,
         // LOCK, CLEAR_MUTABLE, CELL_FLAGS, GET_THREAD_ID, LDEXC: no imm.
-        INSTR_LOCK | INSTR_CLEAR_MUTABLE | INSTR_CELL_FLAGS
-            | INSTR_GET_THREAD_ID | INSTR_LDEXC => 1,
+        INSTR_LOCK | INSTR_CLEAR_MUTABLE | INSTR_CELL_FLAGS | INSTR_GET_THREAD_ID | INSTR_LDEXC => {
+            1
+        }
         // ALLOC_MUT_CLOSURE_B, MOVE_TO_MUT_CLOSURE_B: op + 1 imm.
         INSTR_ALLOC_MUT_CLOSURE_B | INSTR_MOVE_TO_MUT_CLOSURE_B => 2,
         op => return Err(TranslateError::Unsupported { op, at: pc }),
@@ -2448,12 +2333,8 @@ fn read_const_addr_operands(
         Ok(b)
     };
     match op {
-        INSTR_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_0 => {
-            Ok((need_byte(pc)? as usize, 3))
-        }
-        INSTR_CONST_ADDR8_1 | INSTR_CALL_CONST_ADDR8_1 => {
-            Ok((need_byte(pc)? as usize, 4))
-        }
+        INSTR_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_0 => Ok((need_byte(pc)? as usize, 3)),
+        INSTR_CONST_ADDR8_1 | INSTR_CALL_CONST_ADDR8_1 => Ok((need_byte(pc)? as usize, 4)),
         INSTR_CONST_ADDR8_8 | INSTR_CALL_CONST_ADDR8_8 => {
             let off = need_byte(pc)? as usize;
             let idx_minus_3 = need_byte(pc)? as usize;
@@ -2505,8 +2386,7 @@ fn closure_arity_from_addr(addr: u64) -> Option<usize> {
             return None;
         }
         let body_len_bytes = n_words * 8;
-        let body =
-            std::slice::from_raw_parts(code_obj as *const u8, body_len_bytes);
+        let body = std::slice::from_raw_parts(code_obj as *const u8, body_len_bytes);
         // Restrict scan to bytecode-only portion (not constants area).
         let trailing_offset_word = body_len_bytes - 8;
         let trailing_offset = i64::from_le_bytes(
@@ -2635,137 +2515,152 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
     // fixpoint terminates; a hard iteration cap guards against
     // pathological/garbage input.
     let mut min_depth: i32 = 0;
-    let mut entry_depth: std::collections::HashMap<usize, i32> =
-        std::collections::HashMap::new();
+    let mut entry_depth: std::collections::HashMap<usize, i32> = std::collections::HashMap::new();
     let mut work: Vec<(usize, i32)> = vec![(start_pc, 0)];
     entry_depth.insert(start_pc, 0);
     let mut budget: usize = bytecode.len().saturating_mul(8).max(1024);
 
     while let Some((mut pc, mut depth)) = work.pop() {
-      'block: while pc < bytecode.len() {
-        budget = match budget.checked_sub(1) {
-            Some(b) => b,
-            None => return Some((-min_depth).max(0) as usize),
-        };
-        let op = bytecode[pc];
-        // --- Control-flow opcodes: compute successors and break the
-        //     straight-line walk. Stack effects mirror the main match.
-        match op {
-            INSTR_JUMP8 | INSTR_JUMP16 => {
-                let wide = op == INSTR_JUMP16;
-                let imm = if wide { 2 } else { 1 };
-                if pc + imm >= bytecode.len() { return None; }
-                let off = if wide {
-                    u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize
-                } else {
-                    bytecode[pc + 1] as usize
-                };
-                let next = pc + 1 + imm;
-                let target = next + off;
-                infer_enqueue(&mut work, &mut entry_depth, target, depth);
-                break 'block; // unconditional: no fall-through
-            }
-            INSTR_JUMP_BACK8 | INSTR_JUMP_BACK16 => {
-                let wide = op == INSTR_JUMP_BACK16;
-                let imm = if wide { 2 } else { 1 };
-                if pc + imm >= bytecode.len() { return None; }
-                let off = if wide {
-                    u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize
-                } else {
-                    bytecode[pc + 1] as usize
-                };
-                let opcode_total = 1 + imm;
-                let next = pc + opcode_total;
-                if next < off + opcode_total { return None; }
-                let target = next - off - opcode_total;
-                infer_enqueue(&mut work, &mut entry_depth, target, depth);
-                break 'block; // unconditional back-jump
-            }
-            INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE
-            | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
-                let wide = matches!(op, INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE);
-                let imm = if wide { 2 } else { 1 };
-                if pc + imm >= bytecode.len() { return None; }
-                let off = if wide {
-                    u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize
-                } else {
-                    bytecode[pc + 1] as usize
-                };
-                let next = pc + 1 + imm;
-                // pops the boolean condition.
-                depth -= 1;
-                min_depth = std::cmp::min(min_depth, depth);
-                let target = next + off;
-                infer_enqueue(&mut work, &mut entry_depth, target, depth);
-                // fall-through continues this block at `next`.
-                pc = next;
-                continue 'block;
-            }
-            INSTR_JUMP_TAGGED_LOCAL => {
-                // [depth, off]; peek-only conditional, both arms at depth.
-                if pc + 2 >= bytecode.len() { return None; }
-                let d = bytecode[pc + 1] as usize;
-                let off = bytecode[pc + 2] as usize;
-                let needed = (d as i32) + 1;
-                if depth < needed {
-                    min_depth = std::cmp::min(min_depth, depth - needed);
-                }
-                let next = pc + 3;
-                let target = next + off;
-                infer_enqueue(&mut work, &mut entry_depth, target, depth);
-                pc = next;
-                continue 'block;
-            }
-            INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => {
-                // [depth, want, off]; peek-only conditional, both arms.
-                if pc + 3 >= bytecode.len() { return None; }
-                let d = bytecode[pc + 1] as usize;
-                let off = bytecode[pc + 3] as usize;
-                let needed = (d as i32) + 1;
-                if depth < needed {
-                    min_depth = std::cmp::min(min_depth, depth - needed);
-                }
-                let next = pc + 4;
-                let target = next + off;
-                infer_enqueue(&mut work, &mut entry_depth, target, depth);
-                pc = next;
-                continue 'block;
-            }
-            INSTR_CASE16 => {
-                // Pops the selector, then branches to one of N table
-                // targets or the default, all entered at depth-1.
-                if pc + 2 >= bytecode.len() { return None; }
-                let arg1 = u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize;
-                depth -= 1; // pop selector
-                min_depth = std::cmp::min(min_depth, depth);
-                let table_start = pc + 3;
-                let default_target = table_start + arg1 * 2;
-                infer_enqueue(&mut work, &mut entry_depth, default_target, depth);
-                for i in 0..arg1 {
-                    let entry_pos = table_start + i * 2;
-                    if entry_pos + 1 >= bytecode.len() { return None; }
-                    let off = u16::from_le_bytes([
-                        bytecode[entry_pos],
-                        bytecode[entry_pos + 1],
-                    ]) as usize;
-                    let target = table_start + off;
-                    infer_enqueue(&mut work, &mut entry_depth, target, depth);
-                }
-                break 'block; // no fall-through past the table
-            }
-            INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3
-            | INSTR_RETURN_B | INSTR_RETURN_W
-            | INSTR_RAISE_EX | INSTR_TAIL_B_B | INSTR_CALL_CLOSURE => {
-                // Terminators: no successors. (The straight-line code
-                // below would have returned early on these; here we
-                // simply stop this block and move to the worklist.)
-                break 'block;
-            }
-            _ => {}
-        }
-        pc += 1;
-        let (push_count, pop_count, peek_depth, immediate_bytes): (i32, i32, Option<usize>, usize) =
+        'block: while pc < bytecode.len() {
+            budget = match budget.checked_sub(1) {
+                Some(b) => b,
+                None => return Some((-min_depth).max(0) as usize),
+            };
+            let op = bytecode[pc];
+            // --- Control-flow opcodes: compute successors and break the
+            //     straight-line walk. Stack effects mirror the main match.
             match op {
+                INSTR_JUMP8 | INSTR_JUMP16 => {
+                    let wide = op == INSTR_JUMP16;
+                    let imm = if wide { 2 } else { 1 };
+                    if pc + imm >= bytecode.len() {
+                        return None;
+                    }
+                    let off = if wide {
+                        u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize
+                    } else {
+                        bytecode[pc + 1] as usize
+                    };
+                    let next = pc + 1 + imm;
+                    let target = next + off;
+                    infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                    break 'block; // unconditional: no fall-through
+                }
+                INSTR_JUMP_BACK8 | INSTR_JUMP_BACK16 => {
+                    let wide = op == INSTR_JUMP_BACK16;
+                    let imm = if wide { 2 } else { 1 };
+                    if pc + imm >= bytecode.len() {
+                        return None;
+                    }
+                    let off = if wide {
+                        u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize
+                    } else {
+                        bytecode[pc + 1] as usize
+                    };
+                    let opcode_total = 1 + imm;
+                    let next = pc + opcode_total;
+                    if next < off + opcode_total {
+                        return None;
+                    }
+                    let target = next - off - opcode_total;
+                    infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                    break 'block; // unconditional back-jump
+                }
+                INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
+                    let wide = matches!(op, INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE);
+                    let imm = if wide { 2 } else { 1 };
+                    if pc + imm >= bytecode.len() {
+                        return None;
+                    }
+                    let off = if wide {
+                        u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize
+                    } else {
+                        bytecode[pc + 1] as usize
+                    };
+                    let next = pc + 1 + imm;
+                    // pops the boolean condition.
+                    depth -= 1;
+                    min_depth = std::cmp::min(min_depth, depth);
+                    let target = next + off;
+                    infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                    // fall-through continues this block at `next`.
+                    pc = next;
+                    continue 'block;
+                }
+                INSTR_JUMP_TAGGED_LOCAL => {
+                    // [depth, off]; peek-only conditional, both arms at depth.
+                    if pc + 2 >= bytecode.len() {
+                        return None;
+                    }
+                    let d = bytecode[pc + 1] as usize;
+                    let off = bytecode[pc + 2] as usize;
+                    let needed = (d as i32) + 1;
+                    if depth < needed {
+                        min_depth = std::cmp::min(min_depth, depth - needed);
+                    }
+                    let next = pc + 3;
+                    let target = next + off;
+                    infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                    pc = next;
+                    continue 'block;
+                }
+                INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => {
+                    // [depth, want, off]; peek-only conditional, both arms.
+                    if pc + 3 >= bytecode.len() {
+                        return None;
+                    }
+                    let d = bytecode[pc + 1] as usize;
+                    let off = bytecode[pc + 3] as usize;
+                    let needed = (d as i32) + 1;
+                    if depth < needed {
+                        min_depth = std::cmp::min(min_depth, depth - needed);
+                    }
+                    let next = pc + 4;
+                    let target = next + off;
+                    infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                    pc = next;
+                    continue 'block;
+                }
+                INSTR_CASE16 => {
+                    // Pops the selector, then branches to one of N table
+                    // targets or the default, all entered at depth-1.
+                    if pc + 2 >= bytecode.len() {
+                        return None;
+                    }
+                    let arg1 = u16::from_le_bytes([bytecode[pc + 1], bytecode[pc + 2]]) as usize;
+                    depth -= 1; // pop selector
+                    min_depth = std::cmp::min(min_depth, depth);
+                    let table_start = pc + 3;
+                    let default_target = table_start + arg1 * 2;
+                    infer_enqueue(&mut work, &mut entry_depth, default_target, depth);
+                    for i in 0..arg1 {
+                        let entry_pos = table_start + i * 2;
+                        if entry_pos + 1 >= bytecode.len() {
+                            return None;
+                        }
+                        let off = u16::from_le_bytes([bytecode[entry_pos], bytecode[entry_pos + 1]])
+                            as usize;
+                        let target = table_start + off;
+                        infer_enqueue(&mut work, &mut entry_depth, target, depth);
+                    }
+                    break 'block; // no fall-through past the table
+                }
+                INSTR_RETURN_1 | INSTR_RETURN_2 | INSTR_RETURN_3 | INSTR_RETURN_B
+                | INSTR_RETURN_W | INSTR_RAISE_EX | INSTR_TAIL_B_B | INSTR_CALL_CLOSURE => {
+                    // Terminators: no successors. (The straight-line code
+                    // below would have returned early on these; here we
+                    // simply stop this block and move to the worklist.)
+                    break 'block;
+                }
+                _ => {}
+            }
+            pc += 1;
+            let (push_count, pop_count, peek_depth, immediate_bytes): (
+                i32,
+                i32,
+                Option<usize>,
+                usize,
+            ) = match op {
                 INSTR_CONST_0..=INSTR_CONST_4 | INSTR_CONST_10 => (1, 0, None, 0),
                 INSTR_CONST_INT_B => (1, 0, None, 1),
                 INSTR_CONST_INT_W => (1, 0, None, 2),
@@ -2778,7 +2673,9 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_LOCAL_14 => (1, 0, Some(14), 0),
                 INSTR_LOCAL_15 => (1, 0, Some(15), 0),
                 INSTR_LOCAL_B => {
-                    if pc >= bytecode.len() { return None; }
+                    if pc >= bytecode.len() {
+                        return None;
+                    }
                     let d = bytecode[pc] as usize;
                     (1, 0, Some(d), 1)
                 }
@@ -2787,32 +2684,35 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 | INSTR_INDIRECT_CLOSURE_B0
                 | INSTR_INDIRECT_CLOSURE_B1
                 | INSTR_INDIRECT_CLOSURE_B2 => {
-                    if pc >= bytecode.len() { return None; }
+                    if pc >= bytecode.len() {
+                        return None;
+                    }
                     let d = bytecode[pc] as usize;
                     (1, 0, Some(d), 1)
                 }
                 INSTR_INDIRECT_LOCAL_BB | INSTR_INDIRECT_CLOSURE_BB => {
-                    if pc + 1 >= bytecode.len() { return None; }
+                    if pc + 1 >= bytecode.len() {
+                        return None;
+                    }
                     let d = bytecode[pc] as usize;
                     (1, 0, Some(d), 2)
                 }
-                INSTR_INDIRECT_0
-                | INSTR_INDIRECT_1
-                | INSTR_INDIRECT_2
-                | INSTR_INDIRECT_3
-                | INSTR_INDIRECT_4
-                | INSTR_INDIRECT_5 => (1, 1, None, 0),
+                INSTR_INDIRECT_0 | INSTR_INDIRECT_1 | INSTR_INDIRECT_2 | INSTR_INDIRECT_3
+                | INSTR_INDIRECT_4 | INSTR_INDIRECT_5 => (1, 1, None, 0),
                 INSTR_INDIRECT_B => (1, 1, None, 1),
-                INSTR_LOAD_UNTAGGED => (1, 2, None, 0),  // pop idx, peek base; net -1+1 = 0
-                INSTR_STORE_ML_WORD => (1, 3, None, 0),  // pop val,idx,base; push 1; net -2
-                INSTR_STORE_ML_BYTE => (1, 3, None, 0),  // same shape; byte store
+                INSTR_LOAD_UNTAGGED => (1, 2, None, 0), // pop idx, peek base; net -1+1 = 0
+                INSTR_STORE_ML_WORD => (1, 3, None, 0), // pop val,idx,base; push 1; net -2
+                INSTR_STORE_ML_BYTE => (1, 3, None, 0), // same shape; byte store
                 // pop length,off2,p2,off1,p1; push 1. Net -4.
-                INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE
-                    | INSTR_BLOCK_EQUAL_BYTE
-                    | INSTR_BLOCK_COMPARE_BYTE => (1, 5, None, 0),
+                INSTR_BLOCK_MOVE_WORD
+                | INSTR_BLOCK_MOVE_BYTE
+                | INSTR_BLOCK_EQUAL_BYTE
+                | INSTR_BLOCK_COMPARE_BYTE => (1, 5, None, 0),
                 INSTR_STACK_CONTAINER_B => {
                     // Push N zeros + 1 pointer. Net +(N+1).
-                    if pc >= bytecode.len() { return None; }
+                    if pc >= bytecode.len() {
+                        return None;
+                    }
                     let n = bytecode[pc] as i32;
                     (n + 1, 0, None, 1)
                 }
@@ -2861,7 +2761,9 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_RESET_1 => (0, 1, None, 0),
                 INSTR_RESET_2 => (0, 2, None, 0),
                 INSTR_RESET_B => {
-                    if pc >= bytecode.len() { return None; }
+                    if pc >= bytecode.len() {
+                        return None;
+                    }
                     let n = bytecode[pc] as i32;
                     (0, n, None, 1)
                 }
@@ -2869,23 +2771,31 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_RESET_R_2 => (1, 3, None, 0),
                 INSTR_RESET_R_3 => (1, 4, None, 0),
                 INSTR_RESET_R_B => {
-                    if pc >= bytecode.len() { return None; }
+                    if pc >= bytecode.len() {
+                        return None;
+                    }
                     let n = bytecode[pc] as i32;
                     // Preserve top (= 0 net push/pop) plus drop n below.
                     (1, n + 1, None, 1)
                 }
                 INSTR_JUMP_TAGGED_LOCAL => {
-                    if pc + 1 >= bytecode.len() { return None; }
+                    if pc + 1 >= bytecode.len() {
+                        return None;
+                    }
                     let d = bytecode[pc] as usize;
                     (0, 0, Some(d), 2)
                 }
                 INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => {
-                    if pc + 2 >= bytecode.len() { return None; }
+                    if pc + 2 >= bytecode.len() {
+                        return None;
+                    }
                     let d = bytecode[pc] as usize;
                     (0, 0, Some(d), 3)
                 }
                 INSTR_IS_TAGGED_LOCAL_B => {
-                    if pc >= bytecode.len() { return None; }
+                    if pc >= bytecode.len() {
+                        return None;
+                    }
                     let d = bytecode[pc] as usize;
                     (1, 0, Some(d), 1)
                 }
@@ -2902,17 +2812,15 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     // slice — no access to constants here. So bail.
                     return Some((-min_depth).max(0) as usize);
                 }
-                INSTR_CALL_FAST_RTS0
-                | INSTR_CALL_FAST_RTS1
-                | INSTR_CALL_FAST_RTS2
-                | INSTR_CALL_FAST_RTS3
-                | INSTR_CALL_FAST_RTS4
-                | INSTR_CALL_FAST_RTS5 => {
+                INSTR_CALL_FAST_RTS0 | INSTR_CALL_FAST_RTS1 | INSTR_CALL_FAST_RTS2
+                | INSTR_CALL_FAST_RTS3 | INSTR_CALL_FAST_RTS4 | INSTR_CALL_FAST_RTS5 => {
                     let n = (op - INSTR_CALL_FAST_RTS0) as i32;
                     (1, n + 1, None, 0)
                 }
                 INSTR_CALL_LOCAL_B => {
-                    if pc >= bytecode.len() { return None; }
+                    if pc >= bytecode.len() {
+                        return None;
+                    }
                     let n = bytecode[pc] as i32;
                     // Pop N args, peek closure at depth N (still there
                     // after call), push 1 result. Net depth: -N + 1.
@@ -2922,20 +2830,35 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_TUPLE_3 => (1, 3, None, 0),
                 INSTR_TUPLE_4 => (1, 4, None, 0),
                 INSTR_TUPLE_B => {
-                    if pc >= bytecode.len() { return None; }
+                    if pc >= bytecode.len() {
+                        return None;
+                    }
                     let n = bytecode[pc] as i32;
                     (1, n, None, 1)
                 }
-                INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
-                | INSTR_FIXED_QUOT | INSTR_FIXED_REM
-                | INSTR_WORD_ADD | INSTR_WORD_SUB | INSTR_WORD_MULT
-                | INSTR_WORD_DIV | INSTR_WORD_MOD
-                | INSTR_WORD_AND | INSTR_WORD_OR | INSTR_WORD_XOR
-                | INSTR_WORD_SHIFT_LEFT | INSTR_WORD_SHIFT_R_LOG
-                | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED
-                | INSTR_LESS_UNSIGNED | INSTR_LESS_EQ_SIGNED
-                | INSTR_LESS_EQ_UNSIGNED | INSTR_GREATER_SIGNED
-                | INSTR_GREATER_UNSIGNED | INSTR_GREATER_EQ_SIGNED
+                INSTR_FIXED_ADD
+                | INSTR_FIXED_SUB
+                | INSTR_FIXED_MULT
+                | INSTR_FIXED_QUOT
+                | INSTR_FIXED_REM
+                | INSTR_WORD_ADD
+                | INSTR_WORD_SUB
+                | INSTR_WORD_MULT
+                | INSTR_WORD_DIV
+                | INSTR_WORD_MOD
+                | INSTR_WORD_AND
+                | INSTR_WORD_OR
+                | INSTR_WORD_XOR
+                | INSTR_WORD_SHIFT_LEFT
+                | INSTR_WORD_SHIFT_R_LOG
+                | INSTR_EQUAL_WORD
+                | INSTR_LESS_SIGNED
+                | INSTR_LESS_UNSIGNED
+                | INSTR_LESS_EQ_SIGNED
+                | INSTR_LESS_EQ_UNSIGNED
+                | INSTR_GREATER_SIGNED
+                | INSTR_GREATER_UNSIGNED
+                | INSTR_GREATER_EQ_SIGNED
                 | INSTR_GREATER_EQ_UNSIGNED => (1, 2, None, 0),
                 INSTR_SET_STACK_VAL_B => {
                     // Pops 1; writes into a stack slot below — depth
@@ -2952,7 +2875,9 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_TAIL_B_B => {
                     // tail_count + skip; behaves like return (consumes
                     // the call group + leaves nothing for fallthrough).
-                    if pc + 1 >= bytecode.len() { return None; }
+                    if pc + 1 >= bytecode.len() {
+                        return None;
+                    }
                     let n = bytecode[pc] as i32; // tail_count
                     // SML arity = n - 2; pops that many + 1 closure.
                     let consumed = (n - 1).max(0);
@@ -2966,7 +2891,9 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                 INSTR_SET_HANDLER16 => (1, 0, None, 2),
                 INSTR_DELETE_HANDLER => (0, 1, None, 0),
                 INSTR_CLOSURE_B => {
-                    if pc >= bytecode.len() { return None; }
+                    if pc >= bytecode.len() {
+                        return None;
+                    }
                     let n = bytecode[pc] as i32;
                     // Pops n_captures + 1 src closure, pushes 1.
                     (1, n + 1, None, 1)
@@ -2984,7 +2911,7 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     // Pops 3 (raw, index, base), pushes tag(0). Net -2.
                     (1, 3, None, 0)
                 }
-                INSTR_ALLOC_REF => (1, 1, None, 0),  // peek init, push cell
+                INSTR_ALLOC_REF => (1, 1, None, 0), // peek init, push cell
                 INSTR_CELL_LENGTH => (1, 1, None, 0), // peek ptr, push len
                 INSTR_LOAD_ML_BYTE => (1, 2, None, 0), // pop idx, peek base, push byte
                 INSTR_LOAD_ML_WORD => (1, 2, None, 0), // pop idx, peek base, push word
@@ -2995,21 +2922,21 @@ fn infer_arg_count(bytecode: &[u8], start_pc: usize) -> Option<usize> {
                     return Some((-min_depth).max(0) as usize);
                 }
             };
-        // Effects: peek doesn't move sp; pop then push for binops.
-        if let Some(d) = peek_depth {
-            // depth-relative read; conceptually requires depth > d.
-            let needed = (d as i32) + 1;
-            if depth < needed {
-                min_depth = std::cmp::min(min_depth, depth - needed);
+            // Effects: peek doesn't move sp; pop then push for binops.
+            if let Some(d) = peek_depth {
+                // depth-relative read; conceptually requires depth > d.
+                let needed = (d as i32) + 1;
+                if depth < needed {
+                    min_depth = std::cmp::min(min_depth, depth - needed);
+                }
             }
+            for _ in 0..pop_count {
+                depth -= 1;
+                min_depth = std::cmp::min(min_depth, depth);
+            }
+            depth += push_count;
+            pc += immediate_bytes;
         }
-        for _ in 0..pop_count {
-            depth -= 1;
-            min_depth = std::cmp::min(min_depth, depth);
-        }
-        depth += push_count;
-        pc += immediate_bytes;
-      }
     }
     Some((-min_depth).max(0) as usize)
 }
@@ -3080,7 +3007,11 @@ struct OpScan {
 impl OpScan {
     fn fallthrough(pc: usize, depth: usize) -> Self {
         OpScan {
-            edges: vec![ControlEdge { pc, depth, is_block_target: false }],
+            edges: vec![ControlEdge {
+                pc,
+                depth,
+                is_block_target: false,
+            }],
         }
     }
     fn terminator() -> Self {
@@ -3132,8 +3063,7 @@ fn scan_branch_targets(
     let mut depth_at: Vec<Option<usize>> = vec![None; bytecode.len()];
     // Block-target pcs (destinations of control-flow EDGES) -> the
     // authoritative depth pass-2 gives the block. Strict-merged.
-    let mut targets: std::collections::BTreeMap<usize, usize> =
-        std::collections::BTreeMap::new();
+    let mut targets: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
 
     let (start_pc, prologue_arg_count) = function_prologue(bytecode);
     let arg_count = compute_arg_count(bytecode, start_pc, prologue_arg_count);
@@ -3336,8 +3266,16 @@ fn scan_one_opcode(
                 let taken = pc + off;
                 return Ok(OpScan {
                     edges: vec![
-                        ControlEdge { pc: taken, depth, is_block_target: true },
-                        ControlEdge { pc, depth, is_block_target: true },
+                        ControlEdge {
+                            pc: taken,
+                            depth,
+                            is_block_target: true,
+                        },
+                        ControlEdge {
+                            pc,
+                            depth,
+                            is_block_target: true,
+                        },
                     ],
                 });
             }
@@ -3367,17 +3305,21 @@ fn scan_one_opcode(
                 let taken = pc + off;
                 return Ok(OpScan {
                     edges: vec![
-                        ControlEdge { pc: taken, depth, is_block_target: true },
-                        ControlEdge { pc, depth, is_block_target: true },
+                        ControlEdge {
+                            pc: taken,
+                            depth,
+                            is_block_target: true,
+                        },
+                        ControlEdge {
+                            pc,
+                            depth,
+                            is_block_target: true,
+                        },
                     ],
                 });
             }
-            INSTR_INDIRECT_0
-            | INSTR_INDIRECT_1
-            | INSTR_INDIRECT_2
-            | INSTR_INDIRECT_3
-            | INSTR_INDIRECT_4
-            | INSTR_INDIRECT_5 => {
+            INSTR_INDIRECT_0 | INSTR_INDIRECT_1 | INSTR_INDIRECT_2 | INSTR_INDIRECT_3
+            | INSTR_INDIRECT_4 | INSTR_INDIRECT_5 => {
                 if depth == 0 {
                     return Err(TranslateError::Underflow(pc - 1));
                 }
@@ -3395,24 +3337,34 @@ fn scan_one_opcode(
             }
             INSTR_LOAD_UNTAGGED => {
                 // Pop idx, peek base, push value. Net 0; min depth 2.
-                if depth < 2 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth < 2 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth -= 1; // net effect (-2 +1)
             }
             INSTR_STORE_ML_WORD => {
                 // Pop val + idx + base, push tag(0). Net -2; min depth 3.
-                if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth < 3 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth -= 2;
             }
             INSTR_STORE_ML_BYTE => {
                 // Same shape as STORE_ML_WORD: pop val+idx+base, push tag(0).
-                if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth < 3 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth -= 2;
             }
-            INSTR_BLOCK_MOVE_WORD | INSTR_BLOCK_MOVE_BYTE
-                | INSTR_BLOCK_EQUAL_BYTE | INSTR_BLOCK_COMPARE_BYTE => {
+            INSTR_BLOCK_MOVE_WORD
+            | INSTR_BLOCK_MOVE_BYTE
+            | INSTR_BLOCK_EQUAL_BYTE
+            | INSTR_BLOCK_COMPARE_BYTE => {
                 // Pop length, off2, p2, off1; peek p1; trampoline;
                 // pop p1; push 1 result. Net -4; min depth 5.
-                if depth < 5 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth < 5 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth -= 4;
             }
             INSTR_STACK_CONTAINER_B => {
@@ -3430,7 +3382,9 @@ fn scan_one_opcode(
                     return Err(TranslateError::Truncated(pc));
                 }
                 pc += 1; // consume immediate
-                if depth < 2 { return Err(TranslateError::Underflow(pc - 2)); }
+                if depth < 2 {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
                 depth -= 1;
             }
             INSTR_INDIRECT_CONTAINER_B => {
@@ -3439,17 +3393,23 @@ fn scan_one_opcode(
                     return Err(TranslateError::Truncated(pc));
                 }
                 pc += 1; // consume immediate
-                if depth == 0 { return Err(TranslateError::Underflow(pc - 2)); }
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
             }
             INSTR_LOCK | INSTR_CLEAR_MUTABLE => {
                 // Both peek top, clear F_MUTABLE_BIT in heap object's
                 // length word. LOCK keeps stack as is; CLEAR_MUTABLE
                 // pops top and pushes tagged 0. Net 0 either way.
-                if depth == 0 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
             }
             INSTR_CELL_FLAGS => {
                 // Peek top (ptr), replace top with tagged(flags). Net 0.
-                if depth == 0 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
             }
             INSTR_GET_THREAD_ID => {
                 // Push allocated pointer. Net +1.
@@ -3465,7 +3425,9 @@ fn scan_one_opcode(
                     return Err(TranslateError::Truncated(pc));
                 }
                 pc += 1;
-                if depth == 0 { return Err(TranslateError::Underflow(pc - 2)); }
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
             }
             INSTR_MOVE_TO_MUT_CLOSURE_B => {
                 // Pop value, peek target. Net -1.
@@ -3473,7 +3435,9 @@ fn scan_one_opcode(
                     return Err(TranslateError::Truncated(pc));
                 }
                 pc += 1;
-                if depth < 2 { return Err(TranslateError::Underflow(pc - 2)); }
+                if depth < 2 {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
                 depth -= 1;
             }
             INSTR_PUSH_HANDLER => {
@@ -3488,24 +3452,29 @@ fn scan_one_opcode(
             }
             INSTR_NO_OP => {}
             INSTR_RESET_1 => {
-                if depth == 0 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth -= 1;
             }
             INSTR_RESET_2 => {
-                if depth < 2 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth < 2 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth -= 2;
             }
             INSTR_RESET_B => {
-                if pc >= bytecode.len() { return Err(TranslateError::Truncated(pc)); }
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
                 let n = bytecode[pc] as usize;
                 pc += 1;
-                if depth < n { return Err(TranslateError::Underflow(pc - 2)); }
+                if depth < n {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
                 depth -= n;
             }
-            INSTR_RESET_R_1
-            | INSTR_RESET_R_2
-            | INSTR_RESET_R_3
-            | INSTR_RESET_R_B => {
+            INSTR_RESET_R_1 | INSTR_RESET_R_2 | INSTR_RESET_R_3 | INSTR_RESET_R_B => {
                 let n = match op {
                     INSTR_RESET_R_1 => 1,
                     INSTR_RESET_R_2 => 2,
@@ -3520,15 +3489,13 @@ fn scan_one_opcode(
                     }
                     _ => unreachable!(),
                 };
-                if depth < n + 1 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth < n + 1 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth -= n;
             }
-            INSTR_CALL_FAST_RTS0
-            | INSTR_CALL_FAST_RTS1
-            | INSTR_CALL_FAST_RTS2
-            | INSTR_CALL_FAST_RTS3
-            | INSTR_CALL_FAST_RTS4
-            | INSTR_CALL_FAST_RTS5 => {
+            INSTR_CALL_FAST_RTS0 | INSTR_CALL_FAST_RTS1 | INSTR_CALL_FAST_RTS2
+            | INSTR_CALL_FAST_RTS3 | INSTR_CALL_FAST_RTS4 | INSTR_CALL_FAST_RTS5 => {
                 let n = (op - INSTR_CALL_FAST_RTS0) as usize;
                 if depth < n + 1 {
                     return Err(TranslateError::Underflow(pc - 1));
@@ -3565,19 +3532,21 @@ fn scan_one_opcode(
                     INSTR_TUPLE_3 => 3,
                     INSTR_TUPLE_4 => 4,
                     INSTR_TUPLE_B => {
-                        if pc >= bytecode.len() { return Err(TranslateError::Truncated(pc)); }
+                        if pc >= bytecode.len() {
+                            return Err(TranslateError::Truncated(pc));
+                        }
                         let n = bytecode[pc] as usize;
                         pc += 1;
                         n
                     }
                     _ => unreachable!(),
                 };
-                if depth < n { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth < n {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth = depth - n + 1;
             }
-            INSTR_CONST_ADDR8_0
-            | INSTR_CONST_ADDR8_1
-            | INSTR_CONST_ADDR8_8
+            INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 | INSTR_CONST_ADDR8_8
             | INSTR_CONST_ADDR16_8 => {
                 let (_, _) = read_const_addr_operands(bytecode, &mut pc, op)?;
                 depth += 1;
@@ -3586,8 +3555,7 @@ fn scan_one_opcode(
             | INSTR_CALL_CONST_ADDR8_1
             | INSTR_CALL_CONST_ADDR8_8
             | INSTR_CALL_CONST_ADDR16_8 => {
-                let (byte_off, idx) =
-                    read_const_addr_operands(bytecode, &mut pc, op)?;
+                let (byte_off, idx) = read_const_addr_operands(bytecode, &mut pc, op)?;
                 let read_at = pc + byte_off + idx * 8;
                 if read_at + 8 > full_body.len() {
                     return Err(TranslateError::Unsupported { op, at: pc });
@@ -3617,16 +3585,29 @@ fn scan_one_opcode(
                 pc += 2;
                 depth += 1;
             }
-            INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
-            | INSTR_FIXED_QUOT | INSTR_FIXED_REM
-            | INSTR_WORD_ADD | INSTR_WORD_SUB | INSTR_WORD_MULT
-            | INSTR_WORD_DIV | INSTR_WORD_MOD
-            | INSTR_WORD_AND | INSTR_WORD_OR | INSTR_WORD_XOR
-            | INSTR_WORD_SHIFT_LEFT | INSTR_WORD_SHIFT_R_LOG
-            | INSTR_EQUAL_WORD | INSTR_LESS_SIGNED
-            | INSTR_LESS_UNSIGNED | INSTR_LESS_EQ_SIGNED
-            | INSTR_LESS_EQ_UNSIGNED | INSTR_GREATER_SIGNED
-            | INSTR_GREATER_UNSIGNED | INSTR_GREATER_EQ_SIGNED
+            INSTR_FIXED_ADD
+            | INSTR_FIXED_SUB
+            | INSTR_FIXED_MULT
+            | INSTR_FIXED_QUOT
+            | INSTR_FIXED_REM
+            | INSTR_WORD_ADD
+            | INSTR_WORD_SUB
+            | INSTR_WORD_MULT
+            | INSTR_WORD_DIV
+            | INSTR_WORD_MOD
+            | INSTR_WORD_AND
+            | INSTR_WORD_OR
+            | INSTR_WORD_XOR
+            | INSTR_WORD_SHIFT_LEFT
+            | INSTR_WORD_SHIFT_R_LOG
+            | INSTR_EQUAL_WORD
+            | INSTR_LESS_SIGNED
+            | INSTR_LESS_UNSIGNED
+            | INSTR_LESS_EQ_SIGNED
+            | INSTR_LESS_EQ_UNSIGNED
+            | INSTR_GREATER_SIGNED
+            | INSTR_GREATER_UNSIGNED
+            | INSTR_GREATER_EQ_SIGNED
             | INSTR_GREATER_EQ_UNSIGNED => {
                 if depth < 2 {
                     return Err(TranslateError::Underflow(pc - 1));
@@ -3705,16 +3686,22 @@ fn scan_one_opcode(
             }
             INSTR_ALLOC_BYTE_MEM => {
                 // Pop flags + peek length + replace top with pointer.
-                if depth < 2 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth < 2 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth -= 1;
             }
             INSTR_ALLOC_WORD_MEMORY => {
                 // Pops 3 (init, flags, length), pushes pointer.
-                if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth < 3 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth -= 2;
             }
             INSTR_STORE_UNTAGGED => {
-                if depth < 3 { return Err(TranslateError::Underflow(pc - 1)); }
+                if depth < 3 {
+                    return Err(TranslateError::Underflow(pc - 1));
+                }
                 depth -= 2;
             }
             INSTR_ALLOC_REF => {
@@ -3748,15 +3735,23 @@ fn scan_one_opcode(
                 return Ok(OpScan::terminator());
             }
             INSTR_RETURN_B => {
-                if pc >= bytecode.len() { return Err(TranslateError::Truncated(pc)); }
+                if pc >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
                 pc += 1;
-                if depth == 0 { return Err(TranslateError::Underflow(pc - 2)); }
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 2));
+                }
                 return Ok(OpScan::terminator());
             }
             INSTR_RETURN_W => {
-                if pc + 1 >= bytecode.len() { return Err(TranslateError::Truncated(pc)); }
+                if pc + 1 >= bytecode.len() {
+                    return Err(TranslateError::Truncated(pc));
+                }
                 pc += 2;
-                if depth == 0 { return Err(TranslateError::Underflow(pc - 3)); }
+                if depth == 0 {
+                    return Err(TranslateError::Underflow(pc - 3));
+                }
                 return Ok(OpScan::terminator());
             }
             INSTR_JUMP8 | INSTR_JUMP16 => {
@@ -3765,7 +3760,11 @@ fn scan_one_opcode(
                 let target = pc + off;
                 // Unconditional: ONLY the target edge (no fall-through).
                 return Ok(OpScan {
-                    edges: vec![ControlEdge { pc: target, depth, is_block_target: true }],
+                    edges: vec![ControlEdge {
+                        pc: target,
+                        depth,
+                        is_block_target: true,
+                    }],
                 });
             }
             INSTR_JUMP_BACK8 | INSTR_JUMP_BACK16 => {
@@ -3773,18 +3772,24 @@ fn scan_one_opcode(
                 // Total opcode size = 1 + imm_bytes. Target = pc - off - opcode_total_len
                 let opcode_total_len = 1 + imm_bytes;
                 if pc < off + opcode_total_len {
-                    return Err(TranslateError::Unsupported { op, at: pc - opcode_total_len });
+                    return Err(TranslateError::Unsupported {
+                        op,
+                        at: pc - opcode_total_len,
+                    });
                 }
                 let target = pc - off - opcode_total_len;
                 // Back-edge into a loop header. With CFG propagation the
                 // header's depth is found by fixpoint; min-merge keeps it
                 // consistent. Emit only the target edge (terminator).
                 return Ok(OpScan {
-                    edges: vec![ControlEdge { pc: target, depth, is_block_target: true }],
+                    edges: vec![ControlEdge {
+                        pc: target,
+                        depth,
+                        is_block_target: true,
+                    }],
                 });
             }
-            INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE
-            | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
+            INSTR_JUMP8_FALSE | INSTR_JUMP8_TRUE | INSTR_JUMP16_FALSE | INSTR_JUMP16_TRUE => {
                 let (off, _) = read_jump_off(bytecode, &mut pc, op)?;
                 if depth == 0 {
                     return Err(TranslateError::Underflow(pc));
@@ -3793,8 +3798,16 @@ fn scan_one_opcode(
                 let taken = pc + off;
                 return Ok(OpScan {
                     edges: vec![
-                        ControlEdge { pc: taken, depth: post_pop, is_block_target: true },
-                        ControlEdge { pc, depth: post_pop, is_block_target: true },
+                        ControlEdge {
+                            pc: taken,
+                            depth: post_pop,
+                            is_block_target: true,
+                        },
+                        ControlEdge {
+                            pc,
+                            depth: post_pop,
+                            is_block_target: true,
+                        },
                     ],
                 });
             }
@@ -3841,10 +3854,8 @@ fn scan_one_opcode(
                     if entry_pos + 1 >= bytecode.len() {
                         return Err(TranslateError::Truncated(entry_pos));
                     }
-                    let off = u16::from_le_bytes([
-                        bytecode[entry_pos],
-                        bytecode[entry_pos + 1],
-                    ]) as usize;
+                    let off =
+                        u16::from_le_bytes([bytecode[entry_pos], bytecode[entry_pos + 1]]) as usize;
                     let target = table_start + off;
                     edges.push(ControlEdge {
                         pc: target,
@@ -3948,7 +3959,11 @@ mod tests {
     fn translate_multiple_constants_returns_top() {
         // Push 1, 2, 3, 4; return → top = 4
         let bc = vec![
-            INSTR_CONST_1, INSTR_CONST_2, INSTR_CONST_3, INSTR_CONST_4, INSTR_RETURN_1,
+            INSTR_CONST_1,
+            INSTR_CONST_2,
+            INSTR_CONST_3,
+            INSTR_CONST_4,
+            INSTR_RETURN_1,
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
@@ -3985,13 +4000,21 @@ mod tests {
         let bc = vec![0xFD, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let err = compile(&mut jit, &bc).unwrap_err();
-        assert!(matches!(err, TranslateError::Unsupported { op: 0xFD, .. }), "got {err:?}");
+        assert!(
+            matches!(err, TranslateError::Unsupported { op: 0xFD, .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn translate_fixed_add_1_plus_2() {
         // push 1; push 2; ADD; return → 3
-        let bc = vec![INSTR_CONST_1, INSTR_CONST_2, INSTR_FIXED_ADD, INSTR_RETURN_1];
+        let bc = vec![
+            INSTR_CONST_1,
+            INSTR_CONST_2,
+            INSTR_FIXED_ADD,
+            INSTR_RETURN_1,
+        ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
         assert_eq!(untag(call0(f)), 3);
@@ -4000,7 +4023,12 @@ mod tests {
     #[test]
     fn translate_fixed_sub_4_minus_1() {
         // push 4; push 1; SUB → y_n - x_n = 4 - 1 = 3
-        let bc = vec![INSTR_CONST_4, INSTR_CONST_1, INSTR_FIXED_SUB, INSTR_RETURN_1];
+        let bc = vec![
+            INSTR_CONST_4,
+            INSTR_CONST_1,
+            INSTR_FIXED_SUB,
+            INSTR_RETURN_1,
+        ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
         assert_eq!(untag(call0(f)), 3);
@@ -4009,7 +4037,12 @@ mod tests {
     #[test]
     fn translate_fixed_mult_3_times_4() {
         // push 3; push 4; MULT → 12
-        let bc = vec![INSTR_CONST_3, INSTR_CONST_4, INSTR_FIXED_MULT, INSTR_RETURN_1];
+        let bc = vec![
+            INSTR_CONST_3,
+            INSTR_CONST_4,
+            INSTR_FIXED_MULT,
+            INSTR_RETURN_1,
+        ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
         assert_eq!(untag(call0(f)), 12);
@@ -4019,8 +4052,12 @@ mod tests {
     fn translate_polynomial_3_times_3_plus_10() {
         // 3 * 3 + 10 — push 3, push 3, MULT, push 10, ADD, return
         let bc = vec![
-            INSTR_CONST_3, INSTR_CONST_3, INSTR_FIXED_MULT, INSTR_CONST_10,
-            INSTR_FIXED_ADD, INSTR_RETURN_1,
+            INSTR_CONST_3,
+            INSTR_CONST_3,
+            INSTR_FIXED_MULT,
+            INSTR_CONST_10,
+            INSTR_FIXED_ADD,
+            INSTR_RETURN_1,
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
@@ -4035,7 +4072,8 @@ mod tests {
         // sign-extend assumption; the codegen never emits negative
         // constants via CONST_INT_B.)
         let bc = vec![
-            INSTR_CONST_INT_B, 0xFB,
+            INSTR_CONST_INT_B,
+            0xFB,
             INSTR_CONST_3,
             INSTR_FIXED_ADD,
             INSTR_RETURN_1,
@@ -4060,11 +4098,12 @@ mod tests {
         // To keep pass 1 happy we replace the dead bytes with no-op-
         // shaped opcodes: a CONST + RETURN_1 just tracks depth 1→0.
         let bc = vec![
-            INSTR_JUMP8, 2,           // 0..2
-            INSTR_CONST_2,            // 2
-            INSTR_RETURN_1,           // 3
-            INSTR_CONST_4,            // 4 (target)
-            INSTR_RETURN_1,           // 5
+            INSTR_JUMP8,
+            2,              // 0..2
+            INSTR_CONST_2,  // 2
+            INSTR_RETURN_1, // 3
+            INSTR_CONST_4,  // 4 (target)
+            INSTR_RETURN_1, // 5
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
@@ -4084,12 +4123,14 @@ mod tests {
         //  6: CONST_2            (else-arm: push 2)
         //  7: RETURN_1
         let bc = vec![
-            INSTR_CONST_1,            // 0
-            INSTR_JUMP8_FALSE, 3,     // 1..3, target = 3 + 3 = 6
-            INSTR_CONST_1,            // 3 (then)
-            INSTR_JUMP8, 1,           // 4..6, target = 6 + 1 = 7
-            INSTR_CONST_2,            // 6 (else)
-            INSTR_RETURN_1,           // 7
+            INSTR_CONST_1, // 0
+            INSTR_JUMP8_FALSE,
+            3,             // 1..3, target = 3 + 3 = 6
+            INSTR_CONST_1, // 3 (then)
+            INSTR_JUMP8,
+            1,              // 4..6, target = 6 + 1 = 7
+            INSTR_CONST_2,  // 6 (else)
+            INSTR_RETURN_1, // 7
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
@@ -4107,9 +4148,11 @@ mod tests {
         //  7: RETURN_1
         let bc = vec![
             INSTR_CONST_0,
-            INSTR_JUMP8_FALSE, 3,
+            INSTR_JUMP8_FALSE,
+            3,
             INSTR_CONST_1,
-            INSTR_JUMP8, 1,
+            INSTR_JUMP8,
+            1,
             INSTR_CONST_2,
             INSTR_RETURN_1,
         ];
@@ -4128,9 +4171,11 @@ mod tests {
         //  7: RETURN_1
         let bc = vec![
             INSTR_CONST_3,
-            INSTR_JUMP8_TRUE, 3,
+            INSTR_JUMP8_TRUE,
+            3,
             INSTR_CONST_0,
-            INSTR_JUMP8, 1,
+            INSTR_JUMP8,
+            1,
             INSTR_CONST_4,
             INSTR_RETURN_1,
         ];
@@ -4142,7 +4187,12 @@ mod tests {
     #[test]
     fn translate_equal_word_matches() {
         // push 3; push 3; EQUAL → tagged 1 (true); return
-        let bc = vec![INSTR_CONST_3, INSTR_CONST_3, INSTR_EQUAL_WORD, INSTR_RETURN_1];
+        let bc = vec![
+            INSTR_CONST_3,
+            INSTR_CONST_3,
+            INSTR_EQUAL_WORD,
+            INSTR_RETURN_1,
+        ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
         assert_eq!(untag(call0(f)), 1);
@@ -4150,7 +4200,12 @@ mod tests {
 
     #[test]
     fn translate_equal_word_mismatch() {
-        let bc = vec![INSTR_CONST_2, INSTR_CONST_3, INSTR_EQUAL_WORD, INSTR_RETURN_1];
+        let bc = vec![
+            INSTR_CONST_2,
+            INSTR_CONST_3,
+            INSTR_EQUAL_WORD,
+            INSTR_RETURN_1,
+        ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
         assert_eq!(untag(call0(f)), 0);
@@ -4159,7 +4214,12 @@ mod tests {
     #[test]
     fn translate_less_signed() {
         // push y=2, push x=4, LESS_SIGNED → y<x → 2<4 → tagged 1
-        let bc = vec![INSTR_CONST_2, INSTR_CONST_4, INSTR_LESS_SIGNED, INSTR_RETURN_1];
+        let bc = vec![
+            INSTR_CONST_2,
+            INSTR_CONST_4,
+            INSTR_LESS_SIGNED,
+            INSTR_RETURN_1,
+        ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
         assert_eq!(untag(call0(f)), 1);
@@ -4206,13 +4266,15 @@ mod tests {
         //
         // Since the test is always-equal, the loop exits on first iteration.
         let bc = vec![
-            INSTR_CONST_3,        // 0
-            INSTR_CONST_3,        // 1
-            INSTR_EQUAL_WORD,     // 2
-            INSTR_JUMP8_TRUE, 2,  // 3..5, target = 5 + 2 = 7
-            INSTR_JUMP_BACK8, 5,  // 5..7, target = 7 - 5 - 2 = 0
-            INSTR_CONST_4,        // 7
-            INSTR_RETURN_1,       // 8
+            INSTR_CONST_3,    // 0
+            INSTR_CONST_3,    // 1
+            INSTR_EQUAL_WORD, // 2
+            INSTR_JUMP8_TRUE,
+            2, // 3..5, target = 5 + 2 = 7
+            INSTR_JUMP_BACK8,
+            5,              // 5..7, target = 7 - 5 - 2 = 0
+            INSTR_CONST_4,  // 7
+            INSTR_RETURN_1, // 8
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
@@ -4223,7 +4285,11 @@ mod tests {
     fn translate_local_0_duplicates_top() {
         // push 7; LOCAL_0 (= dup top); ADD; return → 14
         let bc = vec![
-            INSTR_CONST_INT_B, 7, INSTR_LOCAL_0, INSTR_FIXED_ADD, INSTR_RETURN_1,
+            INSTR_CONST_INT_B,
+            7,
+            INSTR_LOCAL_0,
+            INSTR_FIXED_ADD,
+            INSTR_RETURN_1,
         ];
         let mut jit = Jit::new().unwrap();
         let f = compile(&mut jit, &bc).unwrap();
@@ -4234,8 +4300,11 @@ mod tests {
     fn translate_local_b_with_explicit_depth() {
         // push 1, 2, 3; LOCAL_B 2 (= peek depth 2 = the "1"); return
         let bc = vec![
-            INSTR_CONST_1, INSTR_CONST_2, INSTR_CONST_3,
-            INSTR_LOCAL_B, 2,
+            INSTR_CONST_1,
+            INSTR_CONST_2,
+            INSTR_CONST_3,
+            INSTR_LOCAL_B,
+            2,
             INSTR_RETURN_1,
         ];
         let mut jit = Jit::new().unwrap();
@@ -4247,7 +4316,12 @@ mod tests {
     fn translate_local_2_skipping_two_above() {
         // push 5, 6, 7; LOCAL_2 (= peek 2 down = "5"); ADD → 12
         let bc = vec![
-            INSTR_CONST_INT_B, 5, INSTR_CONST_INT_B, 6, INSTR_CONST_INT_B, 7,
+            INSTR_CONST_INT_B,
+            5,
+            INSTR_CONST_INT_B,
+            6,
+            INSTR_CONST_INT_B,
+            7,
             0x2b, // INSTR_LOCAL_2
             INSTR_FIXED_ADD,
             INSTR_RETURN_1,
@@ -4265,8 +4339,9 @@ mod tests {
         // pattern without errors. End-to-end execution lives in
         // the integration test that runs real bootstrap code.
         let bc = vec![
-            INSTR_CONST_0,         // push a value (won't be deref'd)
-            INSTR_INDIRECT_LOCAL_B0, 0,
+            INSTR_CONST_0, // push a value (won't be deref'd)
+            INSTR_INDIRECT_LOCAL_B0,
+            0,
             INSTR_RETURN_1,
         ];
         let mut jit = Jit::new().unwrap();
@@ -4277,11 +4352,7 @@ mod tests {
 
     #[test]
     fn translate_indirect_closure_compiles() {
-        let bc = vec![
-            INSTR_CONST_1,
-            INSTR_INDIRECT_CLOSURE_B0, 0,
-            INSTR_RETURN_1,
-        ];
+        let bc = vec![INSTR_CONST_1, INSTR_INDIRECT_CLOSURE_B0, 0, INSTR_RETURN_1];
         let mut jit = Jit::new().unwrap();
         let _f = compile(&mut jit, &bc).expect("compile must succeed");
     }

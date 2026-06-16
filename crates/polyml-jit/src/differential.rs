@@ -37,7 +37,7 @@
 //!   via `INDIRECT_CLOSURE_BN` will deref null. Pass a real closure
 //!   via `with_closure`.
 
-use polyml_runtime::{with_jit_interp, Interpreter, JitEntry, PolyWord, StepResult};
+use polyml_runtime::{Interpreter, JitEntry, PolyWord, StepResult, with_jit_interp};
 
 /// Result of a single differential run.
 #[derive(Debug, Clone)]
@@ -66,7 +66,8 @@ impl DiffReport {
             "code_obj=0x{:016x} sml_arity={} args=[{}] closure=0x{:016x}",
             self.code_obj_ptr,
             self.sml_arity,
-            self.args.iter()
+            self.args
+                .iter()
                 .map(|v| format!("0x{v:016x}"))
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -82,7 +83,11 @@ impl DiffReport {
         }
         s.push_str(&format!(
             "\n  Match: {}",
-            if self.matches { "YES" } else { "NO — DIFFERENTIAL BUG" }
+            if self.matches {
+                "YES"
+            } else {
+                "NO — DIFFERENTIAL BUG"
+            }
         ));
         s.push_str(&format!("\n  bc[0..64]: {}", self.bytecode_head));
         // If both look like pointers, dump 4 words of pointed-to data.
@@ -176,7 +181,11 @@ pub fn diff_function(
     let bytecode_head = unsafe {
         let p = code_obj_ptr as *const u8;
         let bytes: Vec<u8> = (0..64).map(|i| *p.add(i)).collect();
-        bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+        bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
     DiffReport {
         code_obj_ptr,
@@ -242,7 +251,9 @@ fn run_under_interp(
     interp.test_seed_top(PolyWord::from_bits(0));
     interp.test_seed_top(PolyWord::from_bits(closure_word as usize));
     // SAFETY: caller supplies a valid code-object pointer.
-    unsafe { interp.set_code_segment_to_code_obj(code_obj_ptr); }
+    unsafe {
+        interp.set_code_segment_to_code_obj(code_obj_ptr);
+    }
     let _ = sml_arity; // currently unused; kept for symmetry with JIT path
     // Run with a step budget so a runaway interp run doesn't hang
     // the tester. 10M steps is generous for any reasonable function.
@@ -314,8 +325,7 @@ fn compare_results(jit: i64, interp: i64, _arity: usize) -> bool {
             if vj != vi {
                 // Same recent-alloc handling as before.
                 let both_look_like_recent_alloc =
-                    (vj as u64) & 7 == 0 && (vi as u64) & 7 == 0
-                        && vj != 0 && vi != 0;
+                    (vj as u64) & 7 == 0 && (vi as u64) & 7 == 0 && vj != 0 && vi != 0;
                 if !both_look_like_recent_alloc {
                     return false;
                 }

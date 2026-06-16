@@ -132,7 +132,7 @@ pub fn jit_dispatch_alloc_bytes(n_words: usize, flags: u8) -> Option<u64> {
 /// Tail-call only: the JIT'd caller is expected to RETURN this value
 /// immediately. The trampoline doesn't try to maintain caller-side
 /// stack state for further bytecode execution.
-pub fn jit_dispatch_dynamic_call(
+pub unsafe fn jit_dispatch_dynamic_call(
     closure_word: u64,
     args_ptr: *const i64,
     args_depth: i64,
@@ -183,9 +183,18 @@ pub fn jit_dispatch_dynamic_call(
             // their trailing operand bytes against `code_byte_len`.
             let b = unsafe { *code_ptr.add(scan_pc) };
             match b {
-                0x42 => { inferred = Some(1); break; } // RETURN_1
-                0x43 => { inferred = Some(2); break; } // RETURN_2
-                0x44 => { inferred = Some(3); break; } // RETURN_3
+                0x42 => {
+                    inferred = Some(1);
+                    break;
+                } // RETURN_1
+                0x43 => {
+                    inferred = Some(2);
+                    break;
+                } // RETURN_2
+                0x44 => {
+                    inferred = Some(3);
+                    break;
+                } // RETURN_3
                 0x1f => {
                     // RETURN_B: next byte is arity
                     if scan_pc + 1 >= code_byte_len {
@@ -240,10 +249,7 @@ pub fn jit_dispatch_dynamic_call(
 /// filled in later by `MOVE_TO_MUT_CLOSURE_B` instructions.
 ///
 /// Flags: F_CLOSURE_OBJ | F_MUTABLE_BIT.
-pub fn jit_dispatch_alloc_mut_closure(
-    n_captures: usize,
-    src_closure_word: u64,
-) -> Option<u64> {
+pub fn jit_dispatch_alloc_mut_closure(n_captures: usize, src_closure_word: u64) -> Option<u64> {
     let interp_ptr = JIT_INTERP.with(|c| c.get());
     if interp_ptr.is_null() {
         return None;
@@ -262,7 +268,8 @@ pub fn jit_dispatch_alloc_mut_closure(
     // SAFETY: body has n_words slots.
     unsafe {
         crate::space::set_length_word(
-            body, n_words,
+            body,
+            n_words,
             crate::length_word::F_CLOSURE_OBJ | crate::length_word::F_MUTABLE_BIT,
         );
         body.write(code_addr_word);
@@ -304,7 +311,7 @@ pub fn jit_dispatch_get_thread_id() -> Option<u64> {
 /// `src_closure_word` must be a valid PolyWord-bits value pointing
 /// at a heap closure object. `captures_ptr` must point at
 /// `n_captures` valid PolyWord-bits values.
-pub fn jit_dispatch_closure_alloc(
+pub unsafe fn jit_dispatch_closure_alloc(
     n_captures: usize,
     captures_ptr: *const i64,
     src_closure_word: u64,
@@ -348,7 +355,7 @@ pub fn jit_dispatch_closure_alloc(
 /// # Safety
 /// `values_ptr` must point at `n_words` valid `PolyWord` bits.
 /// The thread-local interp must be set (via [`with_jit_interp`]).
-pub fn jit_dispatch_alloc(n_words: usize, flags: u8, values_ptr: *const i64) -> Option<u64> {
+pub unsafe fn jit_dispatch_alloc(n_words: usize, flags: u8, values_ptr: *const i64) -> Option<u64> {
     let interp_ptr = JIT_INTERP.with(|c| c.get());
     if interp_ptr.is_null() {
         return None;
@@ -380,6 +387,10 @@ pub fn jit_dispatch_alloc(n_words: usize, flags: u8, values_ptr: *const i64) -> 
 ///
 /// # Errors
 /// Forwards [`InterpError`]s from the nested interpreter run.
+// `cur_depth < MAX_JIT_DEPTH` is always false while MAX_JIT_DEPTH == 0 (nested
+// JIT→JIT dispatch is intentionally disabled); the comparison is the re-enable
+// knob, meaningful only once MAX_JIT_DEPTH is bumped above 0.
+#[allow(clippy::absurd_extreme_comparisons)]
 pub fn jit_dispatch_closure_call(
     closure: PolyWord,
     args: &[PolyWord],
@@ -446,9 +457,7 @@ pub fn jit_dispatch_closure_call(
         #[allow(clippy::cast_possible_wrap)]
         let sp_in_i64 = interp.jit_current_sp() as i64;
         let stack_base = interp.jit_stack_base_mut() as i64;
-        let result = unsafe {
-            (entry.func)(args_buf.as_ptr(), sp_in_i64, stack_base)
-        };
+        let result = unsafe { (entry.func)(args_buf.as_ptr(), sp_in_i64, stack_base) };
         return Ok(PolyWord::from_bits(result as usize));
     }
 
@@ -488,11 +497,14 @@ pub fn jit_dispatch_closure_call(
         use std::io::Write;
         let (cs, ce) = interp.peek_code_seg_for_debug();
         let len = (ce as usize).saturating_sub(cs as usize).min(64);
-        let bytes: Vec<u8> = (0..len)
-            .map(|i| unsafe { *cs.add(i) })
-            .collect();
-        let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-        let _ = writeln!(std::io::stderr(),
+        let bytes: Vec<u8> = (0..len).map(|i| unsafe { *cs.add(i) }).collect();
+        let hex = bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(
+            std::io::stderr(),
             "    [tramp ENTER] code=0x{:016x} len={len} bytes: {hex}",
             cs as usize,
         );
@@ -500,7 +512,8 @@ pub fn jit_dispatch_closure_call(
         let sp = interp.peek_sp_for_debug();
         for i in 0..12usize {
             let val = interp.peek_stack_for_debug(sp + i);
-            let _ = writeln!(std::io::stderr(),
+            let _ = writeln!(
+                std::io::stderr(),
                 "    [tramp ENTER stack] sp[{i:2}] = 0x{val:016x}",
             );
         }
@@ -509,8 +522,7 @@ pub fn jit_dispatch_closure_call(
     let result = loop {
         if trace_step {
             inner_steps += 1;
-            let should_print =
-                trace_each || inner_steps <= 10 || inner_steps % 100 == 0;
+            let should_print = trace_each || inner_steps <= 10 || inner_steps % 100 == 0;
             if should_print {
                 use std::io::Write;
                 let pc = interp.peek_pc_for_debug() as usize;
@@ -533,7 +545,8 @@ pub fn jit_dispatch_closure_call(
                         }
                     })
                     .collect();
-                let _ = writeln!(std::io::stderr(),
+                let _ = writeln!(
+                    std::io::stderr(),
                     "    [tramp step {inner_steps}] sp={sp:5} pc_off=0x{:04x} op=0x{opcode_byte:02x} next={}",
                     pc.saturating_sub(cs as usize),
                     next_bytes.join(" "),

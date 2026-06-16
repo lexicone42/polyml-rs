@@ -30,8 +30,8 @@
 //!   appropriate arity.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::poly_word::PolyWord;
 
@@ -105,7 +105,6 @@ pub fn trace_call(name: &str, n_args: usize) {
         eprintln!("  RTS  {name}({n_args} args)");
     }
 }
-
 
 // ---- RtsFn ------------------------------------------------------------
 
@@ -283,32 +282,62 @@ fn register_builtins(t: &mut RtsTable) {
     // C signature is `()`. PolyML's C side gets away with it because
     // x86-64 passes the unused arg in rdi/rsi which the C body
     // ignores; we have to be explicit and register as Arity1.
-    t.register("PolyIsBigEndian", RtsFn::Arity1(|_, _| poly_is_big_endian_inner()));
+    t.register(
+        "PolyIsBigEndian",
+        RtsFn::Arity1(|_, _| poly_is_big_endian_inner()),
+    );
     // These are called as `rtsCallFast0` from LibrarySupport.sml.
     // All return reasonable defaults for our environment.
-    t.register("PolyGetMaxAllocationSize", RtsFn::Arity0(|_| {
-        // Max object length: 1 << 24 words = plenty for any sensible alloc.
-        PolyWord::tagged(1 << 24)
-    }));
-    t.register("PolyGetMaxStringSize", RtsFn::Arity0(|_| {
-        // Same upper bound, in bytes.
-        PolyWord::tagged((1isize << 24) * 8)
-    }));
+    t.register(
+        "PolyGetMaxAllocationSize",
+        RtsFn::Arity0(|_| {
+            // Max object length: 1 << 24 words = plenty for any sensible alloc.
+            PolyWord::tagged(1 << 24)
+        }),
+    );
+    t.register(
+        "PolyGetMaxStringSize",
+        RtsFn::Arity0(|_| {
+            // Same upper bound, in bytes.
+            PolyWord::tagged((1isize << 24) * 8)
+        }),
+    );
     t.register("PolyGetOSType", RtsFn::Arity0(|_| PolyWord::tagged(0))); // 0 = Unix
-    t.register("PolyGetPolyVersionNumber", RtsFn::Arity0(|_| PolyWord::tagged(592)));
+    t.register(
+        "PolyGetPolyVersionNumber",
+        RtsFn::Arity0(|_| PolyWord::tagged(592)),
+    );
     // Compact 32-in-64 mode unit size; returns 0 in native 64-bit mode.
     t.register("PolyGetC32UnitSize", RtsFn::Arity0(|_| PolyWord::tagged(0)));
     // Stubs for PolyML.make compiling CodeArray.ML — these mutate code
     // objects in the runtime's code area. Returns unit / tagged 0.
     t.register("PolySetCodeByte", RtsFn::Arity3(poly_set_code_byte));
     t.register("PolyGetCodeConstant", RtsFn::Arity3(poly_get_code_constant));
-    t.register("PolyChunkSizeArbitrary", RtsFn::Arity0(|_| PolyWord::tagged(64)));
-    t.register("PolyGetUserStatsCount", RtsFn::Arity0(|_| PolyWord::tagged(0)));
-    t.register("PolyThreadNumPhysicalProcessors", RtsFn::Arity0(|_| PolyWord::tagged(1)));
-    t.register("PolyThreadNumProcessors", RtsFn::Arity0(|_| PolyWord::tagged(1)));
+    t.register(
+        "PolyChunkSizeArbitrary",
+        RtsFn::Arity0(|_| PolyWord::tagged(64)),
+    );
+    t.register(
+        "PolyGetUserStatsCount",
+        RtsFn::Arity0(|_| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyThreadNumPhysicalProcessors",
+        RtsFn::Arity0(|_| PolyWord::tagged(1)),
+    );
+    t.register(
+        "PolyThreadNumProcessors",
+        RtsFn::Arity0(|_| PolyWord::tagged(1)),
+    );
     // Real / float RTS stubs (basis layer uses these).
-    t.register("PolyGetRoundingMode", RtsFn::Arity1(|_, _| PolyWord::tagged(0))); // TO_NEAREST
-    t.register("PolySetRoundingMode", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyGetRoundingMode",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    ); // TO_NEAREST
+    t.register(
+        "PolySetRoundingMode",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     t.register("PolyRealFrexp", RtsFn::Arity2(poly_real_frexp));
     t.register(
         "PolyRealDoubleToString",
@@ -327,25 +356,76 @@ fn register_builtins(t: &mut RtsTable) {
     // return 0 AND, crucially, made `toArbitrary o realFloor` (Real.toLargeInt,
     // and the default Real.floor under arbitrary-precision int) read the bytes of
     // a tagged int as a boxed double → wrong value / SEGV. Implement them for real.
-    t.register("PolyRealSqrt", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sqrt())));
-    t.register("PolyRealSin", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sin())));
-    t.register("PolyRealCos", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).cos())));
-    t.register("PolyRealTan", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).tan())));
-    t.register("PolyRealArcSin", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).asin())));
-    t.register("PolyRealArcCos", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).acos())));
-    t.register("PolyRealArctan", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).atan())));
-    t.register("PolyRealSinh", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sinh())));
-    t.register("PolyRealCosh", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).cosh())));
-    t.register("PolyRealTanh", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).tanh())));
-    t.register("PolyRealExp", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).exp())));
-    t.register("PolyRealLog", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).ln())));
-    t.register("PolyRealLog10", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).log10())));
+    t.register(
+        "PolyRealSqrt",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sqrt())),
+    );
+    t.register(
+        "PolyRealSin",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sin())),
+    );
+    t.register(
+        "PolyRealCos",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).cos())),
+    );
+    t.register(
+        "PolyRealTan",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).tan())),
+    );
+    t.register(
+        "PolyRealArcSin",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).asin())),
+    );
+    t.register(
+        "PolyRealArcCos",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).acos())),
+    );
+    t.register(
+        "PolyRealArctan",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).atan())),
+    );
+    t.register(
+        "PolyRealSinh",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sinh())),
+    );
+    t.register(
+        "PolyRealCosh",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).cosh())),
+    );
+    t.register(
+        "PolyRealTanh",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).tanh())),
+    );
+    t.register(
+        "PolyRealExp",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).exp())),
+    );
+    t.register(
+        "PolyRealLog",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).ln())),
+    );
+    t.register(
+        "PolyRealLog10",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).log10())),
+    );
     // floor/ceil/trunc obvious; round = round-half-to-even (matches upstream
     // PolyRealRound, reals.cpp:350-359).
-    t.register("PolyRealFloor", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).floor())));
-    t.register("PolyRealCeil", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).ceil())));
-    t.register("PolyRealRound", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).round_ties_even())));
-    t.register("PolyRealTrunc", RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).trunc())));
+    t.register(
+        "PolyRealFloor",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).floor())),
+    );
+    t.register(
+        "PolyRealCeil",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).ceil())),
+    );
+    t.register(
+        "PolyRealRound",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).round_ties_even())),
+    );
+    t.register(
+        "PolyRealTrunc",
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).trunc())),
+    );
     // FLOAT (Real32) unary math (rtsCallFastF_F: Real32 -> Real32, no threadId).
     // On 64-bit, Real32 args/results are TAGGED floats (f32 bits in the high 32,
     // low bit = tag). The typed fast-call path (call_fast_f_to_f, mod.rs) passes
@@ -355,157 +435,344 @@ fn register_builtins(t: &mut RtsTable) {
     // reals.cpp:445-586 (sqrtf/sinf/...; FTrunc = trunc toward zero; FRound =
     // round-half-to-even). Registration order is unchanged from the old stub array
     // so baked RTS dispatch tokens in warm checkpoints stay valid.
-    t.register("PolyRealFSqrt", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).sqrt())));
-    t.register("PolyRealFSin", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).sin())));
-    t.register("PolyRealFCos", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).cos())));
-    t.register("PolyRealFTan", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).tan())));
-    t.register("PolyRealFArcSin", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).asin())));
-    t.register("PolyRealFArcCos", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).acos())));
-    t.register("PolyRealFArctan", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).atan())));
-    t.register("PolyRealFSinh", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).sinh())));
-    t.register("PolyRealFCosh", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).cosh())));
-    t.register("PolyRealFTanh", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).tanh())));
-    t.register("PolyRealFExp", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).exp())));
-    t.register("PolyRealFLog", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).ln())));
-    t.register("PolyRealFLog10", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).log10())));
-    t.register("PolyRealFFloor", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).floor())));
-    t.register("PolyRealFCeil", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).ceil())));
-    t.register("PolyRealFRound", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).round_ties_even())));
-    t.register("PolyRealFTrunc", RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).trunc())));
+    t.register(
+        "PolyRealFSqrt",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).sqrt())),
+    );
+    t.register(
+        "PolyRealFSin",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).sin())),
+    );
+    t.register(
+        "PolyRealFCos",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).cos())),
+    );
+    t.register(
+        "PolyRealFTan",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).tan())),
+    );
+    t.register(
+        "PolyRealFArcSin",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).asin())),
+    );
+    t.register(
+        "PolyRealFArcCos",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).acos())),
+    );
+    t.register(
+        "PolyRealFArctan",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).atan())),
+    );
+    t.register(
+        "PolyRealFSinh",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).sinh())),
+    );
+    t.register(
+        "PolyRealFCosh",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).cosh())),
+    );
+    t.register(
+        "PolyRealFTanh",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).tanh())),
+    );
+    t.register(
+        "PolyRealFExp",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).exp())),
+    );
+    t.register(
+        "PolyRealFLog",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).ln())),
+    );
+    t.register(
+        "PolyRealFLog10",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).log10())),
+    );
+    t.register(
+        "PolyRealFFloor",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).floor())),
+    );
+    t.register(
+        "PolyRealFCeil",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).ceil())),
+    );
+    t.register(
+        "PolyRealFRound",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).round_ties_even())),
+    );
+    t.register(
+        "PolyRealFTrunc",
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).trunc())),
+    );
     // DOUBLE binary math (rtsCallFastRR_R: real*real -> real, no threadId).
-    t.register("PolyRealAtan2", RtsFn::Arity2(|c, y, x| box_real(c, read_real_word(y).atan2(read_real_word(x)))));
-    t.register("PolyRealPow", RtsFn::Arity2(|c, b, e| box_real(c, read_real_word(b).powf(read_real_word(e)))));
-    t.register("PolyRealCopySign", RtsFn::Arity2(|c, a, b| box_real(c, read_real_word(a).copysign(read_real_word(b)))));
-    t.register("PolyRealRem", RtsFn::Arity2(|c, a, b| box_real(c, read_real_word(a) % read_real_word(b))));
+    t.register(
+        "PolyRealAtan2",
+        RtsFn::Arity2(|c, y, x| box_real(c, read_real_word(y).atan2(read_real_word(x)))),
+    );
+    t.register(
+        "PolyRealPow",
+        RtsFn::Arity2(|c, b, e| box_real(c, read_real_word(b).powf(read_real_word(e)))),
+    );
+    t.register(
+        "PolyRealCopySign",
+        RtsFn::Arity2(|c, a, b| box_real(c, read_real_word(a).copysign(read_real_word(b)))),
+    );
+    t.register(
+        "PolyRealRem",
+        RtsFn::Arity2(|c, a, b| box_real(c, read_real_word(a) % read_real_word(b))),
+    );
     // Real.nextAfter (Real.sml:480). Registered FIRST here to preserve the
     // dispatch-token ordinal it had as the head of the old stub array.
-    t.register("PolyRealNextAfter", RtsFn::Arity2(|c, a, b| box_real(c, next_after(read_real_word(a), read_real_word(b)))));
+    t.register(
+        "PolyRealNextAfter",
+        RtsFn::Arity2(|c, a, b| box_real(c, next_after(read_real_word(a), read_real_word(b)))),
+    );
     // FLOAT (Real32) binary math (rtsCallFastFF_F: Real32*Real32 -> Real32, no
     // threadId). Same tagged-f32 in / boxed-f64 out convention as the unary
     // F-variants above. Registration order unchanged so baked tokens stay valid.
     // Upstream reals.cpp:531-600.
-    t.register("PolyRealFAtan2", RtsFn::Arity2(|c, y, x| box_f32_tagged(c, read_f32_tagged(y).atan2(read_f32_tagged(x)))));
-    t.register("PolyRealFCopySign", RtsFn::Arity2(|c, a, b| box_f32_tagged(c, read_f32_tagged(a).copysign(read_f32_tagged(b)))));
-    t.register("PolyRealFNextAfter", RtsFn::Arity2(|c, a, b| box_f32_tagged(c, next_after_f32(read_f32_tagged(a), read_f32_tagged(b)))));
-    t.register("PolyRealFPow", RtsFn::Arity2(|c, b, e| box_f32_tagged(c, real_f_pow(read_f32_tagged(b), read_f32_tagged(e)))));
-    t.register("PolyRealFRem", RtsFn::Arity2(|c, a, b| box_f32_tagged(c, read_f32_tagged(a) % read_f32_tagged(b))));
+    t.register(
+        "PolyRealFAtan2",
+        RtsFn::Arity2(|c, y, x| box_f32_tagged(c, read_f32_tagged(y).atan2(read_f32_tagged(x)))),
+    );
+    t.register(
+        "PolyRealFCopySign",
+        RtsFn::Arity2(|c, a, b| box_f32_tagged(c, read_f32_tagged(a).copysign(read_f32_tagged(b)))),
+    );
+    t.register(
+        "PolyRealFNextAfter",
+        RtsFn::Arity2(|c, a, b| {
+            box_f32_tagged(c, next_after_f32(read_f32_tagged(a), read_f32_tagged(b)))
+        }),
+    );
+    t.register(
+        "PolyRealFPow",
+        RtsFn::Arity2(|c, b, e| {
+            box_f32_tagged(c, real_f_pow(read_f32_tagged(b), read_f32_tagged(e)))
+        }),
+    );
+    t.register(
+        "PolyRealFRem",
+        RtsFn::Arity2(|c, a, b| box_f32_tagged(c, read_f32_tagged(a) % read_f32_tagged(b))),
+    );
     // Real.fromManAndExp = ldexp(man, exp) = man * 2^exp (Real.sml:265,
     // rtsCallFastRI_R: real * int -> real). exp clamped to a range beyond which
     // the result is already inf/0 in f64.
-    t.register("PolyRealLdexp", RtsFn::Arity2(|c, m, e| {
-        #[allow(clippy::cast_possible_truncation)]
-        let exp = e.untag().clamp(-2000, 2000) as i32;
-        box_real(c, read_real_word(m) * 2f64.powi(exp))
-    }));
+    t.register(
+        "PolyRealLdexp",
+        RtsFn::Arity2(|c, m, e| {
+            #[allow(clippy::cast_possible_truncation)]
+            let exp = e.untag().clamp(-2000, 2000) as i32;
+            box_real(c, read_real_word(m) * 2f64.powi(exp))
+        }),
+    );
     // Real.fromLargeInt (and, under arbitrary-precision int, Real.fromInt): convert
     // an arbitrary-precision int (tagged or boxed bignum) to a boxed double.
     // reals.cpp:240 PolyFloatArbitraryPrecision(arg) -> double. Fast call, ONE arg
     // (the old Arity2 stub was both wrong-arity and returned tagged(0), which made
     // `val zero/one/four = fromInt …` in basis/Real.sml produce fake reals and SEGV
     // the load under arbitrary int).
-    t.register("PolyFloatArbitraryPrecision", RtsFn::Arity1(|c, x| {
-        use num_traits::ToPrimitive;
-        box_real(c, poly_word_to_bigint(x).and_then(|n| n.to_f64()).unwrap_or(0.0))
-    }));
+    t.register(
+        "PolyFloatArbitraryPrecision",
+        RtsFn::Arity1(|c, x| {
+            use num_traits::ToPrimitive;
+            box_real(
+                c,
+                poly_word_to_bigint(x)
+                    .and_then(|n| n.to_f64())
+                    .unwrap_or(0.0),
+            )
+        }),
+    );
     // Timing / system. TICKS_PER_MICROSECOND==1 on Unix (timing.cpp:149).
-    t.register("PolyTimingTicksPerMicroSec", RtsFn::Arity1(|_, _| PolyWord::tagged(1)));
+    t.register(
+        "PolyTimingTicksPerMicroSec",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(1)),
+    );
     // gettimeofday -> microseconds since the Unix epoch (timing.cpp:205,
     // Make_arb_from_pair_scaled(...,1000000)). Time.sml:184 getNow.
-    t.register("PolyTimingGetNow", RtsFn::Arity1(|c, _| {
-        #[allow(clippy::cast_possible_wrap)]
-        let us = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros() as i128)
-            .unwrap_or(0);
-        int_to_poly_word(c, us)
-    }));
-    t.register("PolyTimingBaseYear", RtsFn::Arity1(|_, _| PolyWord::tagged(1970)));
+    t.register(
+        "PolyTimingGetNow",
+        RtsFn::Arity1(|c, _| {
+            #[allow(clippy::cast_possible_wrap)]
+            let us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_micros() as i128)
+                .unwrap_or(0);
+            int_to_poly_word(c, us)
+        }),
+    );
+    t.register(
+        "PolyTimingBaseYear",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(1970)),
+    );
     t.register("PolyTimingConvertDateStuct", RtsFn::Arity2(zero2));
-    t.register("PolyTimingLocalOffset", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyTimingSummerApplies", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyTimingYearOffset", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyTimingLocalOffset",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyTimingSummerApplies",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyTimingYearOffset",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     // CPU time used by this process, in microseconds (getrusage(RUSAGE_SELF);
     // timing.cpp:452/483 ru_utime / ru_stime). LargeInt.int, Arity1.
-    t.register("PolyTimingGetUser", RtsFn::Arity1(|c, _| {
-        int_to_poly_word(c, getrusage_micros(RUSAGE_SELF, true))
-    }));
-    t.register("PolyTimingGetSystem", RtsFn::Arity1(|c, _| {
-        int_to_poly_word(c, getrusage_micros(RUSAGE_SELF, false))
-    }));
+    t.register(
+        "PolyTimingGetUser",
+        RtsFn::Arity1(|c, _| int_to_poly_word(c, getrusage_micros(RUSAGE_SELF, true))),
+    );
+    t.register(
+        "PolyTimingGetSystem",
+        RtsFn::Arity1(|c, _| int_to_poly_word(c, getrusage_micros(RUSAGE_SELF, false))),
+    );
     // Real (wall-clock) time since process start, in microseconds
     // (timing.cpp:534, gettimeofday - startTime). Baseline captured on
     // first call. Monotonic — important for the SML Timer/scheduler path.
-    t.register("PolyTimingGetReal", RtsFn::Arity1(|c, _| {
-        use std::sync::OnceLock;
-        static START: OnceLock<std::time::Instant> = OnceLock::new();
-        let base = START.get_or_init(std::time::Instant::now);
-        #[allow(clippy::cast_possible_wrap)]
-        let us = base.elapsed().as_micros() as i128;
-        int_to_poly_word(c, us)
-    }));
-    t.register("PolyTimingGetGCUser", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyTimingGetGCSystem", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyTimingGetChildUser", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyTimingGetChildSystem", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyTimingGetReal",
+        RtsFn::Arity1(|c, _| {
+            use std::sync::OnceLock;
+            static START: OnceLock<std::time::Instant> = OnceLock::new();
+            let base = START.get_or_init(std::time::Instant::now);
+            #[allow(clippy::cast_possible_wrap)]
+            let us = base.elapsed().as_micros() as i128;
+            int_to_poly_word(c, us)
+        }),
+    );
+    t.register(
+        "PolyTimingGetGCUser",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyTimingGetGCSystem",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyTimingGetChildUser",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyTimingGetChildSystem",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     // Process / OS / Foreign stubs.
-    t.register("PolyGetProcessName", RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)));
+    t.register(
+        "PolyGetProcessName",
+        RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)),
+    );
     t.register("PolyGetEnv", RtsFn::Arity2(poly_get_env));
-    t.register("PolyGetEnvironment", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyGetEnvironment",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     t.register("PolyFullGC", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyGetLocalStats", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyShowHierarchy", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyShowLoadedModules", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyGetLocalStats",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyShowHierarchy",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyShowLoadedModules",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     t.register("PolyExport", RtsFn::Arity3(poly_export));
     // Portable variant uses the same pexport text format as our regular
     // export — both go through the same snapshot path.
     t.register("PolyExportPortable", RtsFn::Arity3(poly_export));
     t.register("PolyChDir", RtsFn::Arity2(zero2));
-    t.register("PolyGetModuleDirectory", RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)));
+    t.register(
+        "PolyGetModuleDirectory",
+        RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)),
+    );
     // FFI library loading stubs.
-    t.register("PolyFFILoadExecutable", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyFFILoadExecutable",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     t.register("PolyFFILoadLibrary", RtsFn::Arity2(zero2));
-    t.register("PolyFFIUnloadLibrary", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyFFIUnloadLibrary",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     t.register("PolyFFIGetSymbolAddress", RtsFn::Arity2(zero2));
     t.register("PolyFFIMalloc", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyFFICreateExtData", RtsFn::Arity2(zero2));
     t.register("PolyFFICreateExtFn", RtsFn::Arity2(zero2));
     // Network stubs (we don't support sockets).
-    t.register("PolyNetworkGetFamilyFromAddress", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyNetworkGetAddrList", RtsFn::Arity1(|_, _| poly_network_get_addr_list_inner()));
-    t.register("PolyNetworkGetHostName", RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)));
-    t.register("PolyNetworkGetSockTypeList", RtsFn::Arity1(|_, _| poly_network_get_sock_type_list_inner()));
-    t.register("PolyNetworkReturnIP4AddressAny", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyNetworkReturnIP6AddressAny", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyNetworkGetFamilyFromAddress",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyNetworkGetAddrList",
+        RtsFn::Arity1(|_, _| poly_network_get_addr_list_inner()),
+    );
+    t.register(
+        "PolyNetworkGetHostName",
+        RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)),
+    );
+    t.register(
+        "PolyNetworkGetSockTypeList",
+        RtsFn::Arity1(|_, _| poly_network_get_sock_type_list_inner()),
+    );
+    t.register(
+        "PolyNetworkReturnIP4AddressAny",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyNetworkReturnIP6AddressAny",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     // Many more network stubs — all unimplemented; Socket.sml will
     // fail at runtime if you try to use them, but registration is
     // enough for compile-time.
     let net_stubs_arity1: &[&str] = &[
-        "PolyNetworkBytesAvailable", "PolyNetworkCloseSocket",
-        "PolyNetworkGetAtMark", "PolyNetworkGetSocketError",
-        "PolyNetworkGetPeerName", "PolyNetworkGetSockName",
+        "PolyNetworkBytesAvailable",
+        "PolyNetworkCloseSocket",
+        "PolyNetworkGetAtMark",
+        "PolyNetworkGetSocketError",
+        "PolyNetworkGetPeerName",
+        "PolyNetworkGetSockName",
         "PolyNetworkGetLinger",
     ];
     for n in net_stubs_arity1 {
         t.register(n, RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     }
     let net_stubs_arity2: &[&str] = &[
-        "PolyNetworkAccept", "PolyNetworkBind", "PolyNetworkConnect",
-        "PolyNetworkGetProtByName", "PolyNetworkGetProtByNo",
-        "PolyNetworkListen", "PolyNetworkSetLinger", "PolyNetworkShutdown",
-        "PolyNetworkGetServByName", "PolyNetworkGetServByPort",
-        "PolyNetworkCreateIP4Address", "PolyNetworkCreateIP6Address",
+        "PolyNetworkAccept",
+        "PolyNetworkBind",
+        "PolyNetworkConnect",
+        "PolyNetworkGetProtByName",
+        "PolyNetworkGetProtByNo",
+        "PolyNetworkListen",
+        "PolyNetworkSetLinger",
+        "PolyNetworkShutdown",
+        "PolyNetworkGetServByName",
+        "PolyNetworkGetServByPort",
+        "PolyNetworkCreateIP4Address",
+        "PolyNetworkCreateIP6Address",
         "PolyNetworkGetAddressAndPortFromIP4",
         "PolyNetworkGetAddressAndPortFromIP6",
-        "PolyNetworkGetAddrInfo", "PolyNetworkGetNameInfo",
+        "PolyNetworkGetAddrInfo",
+        "PolyNetworkGetNameInfo",
         "PolyNetworkCreateSocket",
-        "PolyNetworkStringToIP6Address", "PolyNetworkIP6AddressToString",
+        "PolyNetworkStringToIP6Address",
+        "PolyNetworkIP6AddressToString",
     ];
     for n in net_stubs_arity2 {
         t.register(n, RtsFn::Arity2(zero2));
     }
     let net_stubs_arity3: &[&str] = &[
-        "PolyNetworkGetOption", "PolyNetworkSetOption",
-        "PolyNetworkReceive", "PolyNetworkSend",
+        "PolyNetworkGetOption",
+        "PolyNetworkSetOption",
+        "PolyNetworkReceive",
+        "PolyNetworkSend",
         "PolyNetworkGetServByNameAndProtocol",
         "PolyNetworkGetServByPortAndProtocol",
         "PolyNetworkCreateSocketPair",
@@ -514,19 +781,38 @@ fn register_builtins(t: &mut RtsTable) {
         t.register(n, RtsFn::Arity3(zero3));
     }
     let net_stubs_arity4: &[&str] = &[
-        "PolyNetworkReceiveFrom", "PolyNetworkSendTo",
+        "PolyNetworkReceiveFrom",
+        "PolyNetworkSendTo",
         "PolyNetworkSelect",
     ];
     for n in net_stubs_arity4 {
         t.register(n, RtsFn::Arity4(zero4));
     }
     // process_env return values.
-    t.register("PolyProcessEnvFailureValue", RtsFn::Arity1(|_, _| PolyWord::tagged(1)));
-    t.register("PolyProcessEnvSuccessValue", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyProcessEnvErrorMessage", RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)));
-    t.register("PolyProcessEnvErrorFromString", RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)));
-    t.register("PolyProcessEnvSystem", RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)));
-    t.register("PolyTerminate", RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyProcessEnvFailureValue",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(1)),
+    );
+    t.register(
+        "PolyProcessEnvSuccessValue",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyProcessEnvErrorMessage",
+        RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)),
+    );
+    t.register(
+        "PolyProcessEnvErrorFromString",
+        RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyProcessEnvSystem",
+        RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyTerminate",
+        RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)),
+    );
     t.register("PolyPollIODescriptors", RtsFn::Arity4(zero4));
     // rtsCallFull2 → threadId + 2 args → CALL_FAST_RTS3.
     t.register("PolySetSignalHandler", RtsFn::Arity3(zero3));
@@ -535,7 +821,10 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyPosixSleep", RtsFn::Arity3(zero3));
     t.register("PolyUnixExecute", RtsFn::Arity4(zero4));
     t.register("PolyNetworkUnixPathToSockAddr", RtsFn::Arity2(zero2));
-    t.register("PolyNetworkUnixSockAddrToPath", RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)));
+    t.register(
+        "PolyNetworkUnixSockAddrToPath",
+        RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)),
+    );
     t.register("PolyGetRemoteStats", RtsFn::Arity2(zero2));
     t.register("PolySetUserStat", RtsFn::Arity3(zero3));
     t.register("PolyObjProfile", RtsFn::Arity2(zero2));
@@ -550,7 +839,10 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyReleaseModule", RtsFn::Arity2(zero2));
     t.register("PolyRenameParent", RtsFn::Arity3(zero3));
     t.register("PolySaveState", RtsFn::Arity3(zero3));
-    t.register("PolyShowParent", RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)));
+    t.register(
+        "PolyShowParent",
+        RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)),
+    );
     t.register("PolyStoreModule", RtsFn::Arity3(zero3));
     t.register("PolyGetModuleInfo", RtsFn::Arity2(zero2));
     // Thread cond var stubs (no-ops in single-threaded mode).
@@ -560,34 +852,78 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyFFIGetError", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyFFISetError", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyFFIFree", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyFFICallbackException", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyFFICallbackException",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     // Threading stubs.
-    t.register("PolyThreadIsActive", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyThreadKillThread", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    t.register(
+        "PolyThreadIsActive",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
+    t.register(
+        "PolyThreadKillThread",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     // Size queries (FFI). Use sizeof(T) values from the host.
-    t.register("PolySizeInt", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<i32>())));
-    t.register("PolySizeShort", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<i16>())));
-    t.register("PolySizeLong", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())));
-    t.register("PolySizeLonglong", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<i64>())));
-    t.register("PolySizeIntptr", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())));
-    t.register("PolySizeUintptr", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<usize>())));
-    t.register("PolySizePtrdiff", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())));
-    t.register("PolySizeSize", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<usize>())));
-    t.register("PolySizeSsize", RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())));
+    t.register(
+        "PolySizeInt",
+        RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<i32>())),
+    );
+    t.register(
+        "PolySizeShort",
+        RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<i16>())),
+    );
+    t.register(
+        "PolySizeLong",
+        RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())),
+    );
+    t.register(
+        "PolySizeLonglong",
+        RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<i64>())),
+    );
+    t.register(
+        "PolySizeIntptr",
+        RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())),
+    );
+    t.register(
+        "PolySizeUintptr",
+        RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<usize>())),
+    );
+    t.register(
+        "PolySizePtrdiff",
+        RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())),
+    );
+    t.register(
+        "PolySizeSize",
+        RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<usize>())),
+    );
+    t.register(
+        "PolySizeSsize",
+        RtsFn::Arity1(|_, _| size_word(std::mem::size_of::<isize>())),
+    );
     // IntInf.log2 long path (IntInf.sml:55): floor(log2(|x|)) = highest set bit
     // index = bits()-1. Was a hard stub returning 0 (silent wrong answer for any
     // value >= 2^62). The SML wrapper only calls this for boxed (large) values.
-    t.register("PolyLog2Arbitrary", RtsFn::Arity1(|_, x| {
-        match poly_word_to_bigint(x) {
-            Some(n) if n.bits() > 0 => {
+    t.register(
+        "PolyLog2Arbitrary",
+        RtsFn::Arity1(|_, x| match poly_word_to_bigint(x) {
+            Some(n) if n.bits() > 0 =>
+            {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                 PolyWord::tagged((n.bits() - 1) as isize)
             }
             _ => PolyWord::tagged(0),
-        }
-    }));
-    t.register("PolySizeDouble", RtsFn::Arity1(|_, _| poly_size_double_inner()));
-    t.register("PolySizeFloat", RtsFn::Arity1(|_, _| poly_size_float_inner()));
+        }),
+    );
+    t.register(
+        "PolySizeDouble",
+        RtsFn::Arity1(|_, _| poly_size_double_inner()),
+    );
+    t.register(
+        "PolySizeFloat",
+        RtsFn::Arity1(|_, _| poly_size_float_inner()),
+    );
     // PolyFinish: (threadId, exitCode). C signature has 2 args
     // — never returns in upstream, but in our setup we treat it as
     // a "return cleanly to the test harness" signal.
@@ -613,7 +949,10 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyInterpretedGetAbiList",
         RtsFn::Arity1(|_, _| poly_interpreted_get_abi_list_inner()),
     );
-    t.register("PolyThreadMaxStackSize", RtsFn::Arity1(poly_thread_max_stack_size));
+    t.register(
+        "PolyThreadMaxStackSize",
+        RtsFn::Arity1(poly_thread_max_stack_size),
+    );
     t.register(
         "PolyGetCommandlineArguments",
         RtsFn::Arity1(poly_get_commandline_arguments),
@@ -653,20 +992,41 @@ fn register_builtins(t: &mut RtsTable) {
     // ~line 1292) and allocate a boxed result — so e.g. IntInf.pow(2,100)
     // computes correctly, not just tagged-range arithmetic.
     t.register("PolyAddArbitrary", RtsFn::Arity3(poly_add_arbitrary));
-    t.register("PolySubtractArbitrary", RtsFn::Arity3(poly_subtract_arbitrary));
-    t.register("PolyMultiplyArbitrary", RtsFn::Arity3(poly_multiply_arbitrary));
+    t.register(
+        "PolySubtractArbitrary",
+        RtsFn::Arity3(poly_subtract_arbitrary),
+    );
+    t.register(
+        "PolyMultiplyArbitrary",
+        RtsFn::Arity3(poly_multiply_arbitrary),
+    );
     t.register("PolyDivideArbitrary", RtsFn::Arity3(poly_divide_arbitrary));
-    t.register("PolyRemainderArbitrary", RtsFn::Arity3(poly_remainder_arbitrary));
-    t.register("PolyQuotRemArbitraryPair", RtsFn::Arity3(poly_quot_rem_arbitrary_pair));
+    t.register(
+        "PolyRemainderArbitrary",
+        RtsFn::Arity3(poly_remainder_arbitrary),
+    );
+    t.register(
+        "PolyQuotRemArbitraryPair",
+        RtsFn::Arity3(poly_quot_rem_arbitrary_pair),
+    );
     t.register("PolyQuotRemArbitrary", RtsFn::Arity4(zero4));
-    t.register("PolyCompareArbitrary", RtsFn::Arity2(poly_compare_arbitrary)); // no threadId
+    t.register(
+        "PolyCompareArbitrary",
+        RtsFn::Arity2(poly_compare_arbitrary),
+    ); // no threadId
     t.register("PolyGCDArbitrary", RtsFn::Arity3(poly_gcd_arbitrary));
     t.register("PolyLCMArbitrary", RtsFn::Arity3(poly_lcm_arbitrary));
     t.register("PolyAndArbitrary", RtsFn::Arity3(poly_and_arbitrary));
     t.register("PolyOrArbitrary", RtsFn::Arity3(poly_or_arbitrary));
     t.register("PolyXorArbitrary", RtsFn::Arity3(poly_xor_arbitrary));
-    t.register("PolyShiftLeftArbitrary", RtsFn::Arity3(poly_shift_left_arbitrary));
-    t.register("PolyShiftRightArbitrary", RtsFn::Arity3(poly_shift_right_arbitrary));
+    t.register(
+        "PolyShiftLeftArbitrary",
+        RtsFn::Arity3(poly_shift_left_arbitrary),
+    );
+    t.register(
+        "PolyShiftRightArbitrary",
+        RtsFn::Arity3(poly_shift_right_arbitrary),
+    );
     t.register(
         "PolyGetLowOrderAsLargeWord",
         RtsFn::Arity2(poly_get_low_order_as_large_word),
@@ -680,15 +1040,24 @@ fn register_builtins(t: &mut RtsTable) {
     // assume it's already free and reset the mutex object to
     // TAGGED(0) (= unlocked). The caller's subsequent tryLockMutex
     // then succeeds and the SML `lock` retry loop exits.
-    t.register("PolyThreadMutexBlock", RtsFn::Arity2(poly_thread_mutex_block));
+    t.register(
+        "PolyThreadMutexBlock",
+        RtsFn::Arity2(poly_thread_mutex_block),
+    );
     // PolyThreadMutexUnlock(threadId, mutex): reset to unlocked.
     // Mirrors InterpreterReleaseMutex (bytecode.cpp:2465).
-    t.register("PolyThreadMutexUnlock", RtsFn::Arity2(poly_thread_mutex_unlock));
+    t.register(
+        "PolyThreadMutexUnlock",
+        RtsFn::Arity2(poly_thread_mutex_unlock),
+    );
     // Single-threaded mode: no other thread exists to wake / interrupt /
     // broadcast to, so these are no-ops.
     t.register("PolyThreadCondVarWake", RtsFn::Arity2(noop2));
     // PolyThreadForkThread takes (threadId, function, attrs, stack) — 4 args.
-    t.register("PolyThreadForkThread", RtsFn::Arity4(poly_thread_fork_thread));
+    t.register(
+        "PolyThreadForkThread",
+        RtsFn::Arity4(poly_thread_fork_thread),
+    );
     t.register("PolyThreadInterruptThread", RtsFn::Arity2(noop2));
     t.register("PolyThreadBroadcastInterrupt", RtsFn::Arity1(noop1));
 
@@ -703,7 +1072,10 @@ fn register_builtins(t: &mut RtsTable) {
         RtsFn::Arity3(poly_copy_byte_vec_to_closure),
     );
     //   PolyLockMutableClosure(threadId, closure) → 2
-    t.register("PolyLockMutableClosure", RtsFn::Arity2(poly_lock_mutable_closure));
+    t.register(
+        "PolyLockMutableClosure",
+        RtsFn::Arity2(poly_lock_mutable_closure),
+    );
 
     // Interpreted-mode FFI
     //   PolyInterpretedCreateCIF(threadId, abi, resType, argTypes) → 4
@@ -804,11 +1176,7 @@ pub fn clear_finish_requested() {
 /// the dispatcher checks at the top of `step()`. The interpreter
 /// then yields `StepResult::Returned(code)` cleanly.
 #[allow(clippy::needless_pass_by_value)]
-fn poly_finish(
-    _: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    exit_code: PolyWord,
-) -> PolyWord {
+fn poly_finish(_: &mut RtsContext<'_>, _tid: PolyWord, exit_code: PolyWord) -> PolyWord {
     if RTS_TRACE.load(Ordering::Relaxed) {
         eprintln!("  PolyFinish called with exit code {exit_code:?}");
     }
@@ -1034,7 +1402,8 @@ fn static_string_int_list(items: &'static [(&'static str, isize)]) -> usize {
             base.add(cons_off + 1).write(base.add(tuple_off) as usize); // head = tuple ptr
             if i + 1 < n {
                 let next_cons_body = base_offset_for_conses + (i + 1) * 3 + 1;
-                base.add(cons_off + 2).write(base.add(next_cons_body) as usize);
+                base.add(cons_off + 2)
+                    .write(base.add(next_cons_body) as usize);
             } else {
                 base.add(cons_off + 2).write(PolyWord::tagged(0).0); // nil
             }
@@ -1051,11 +1420,7 @@ fn poly_network_get_addr_list_inner() -> PolyWord {
     static LIST: OnceLock<usize> = OnceLock::new();
     let addr = *LIST.get_or_init(|| {
         // Common AF_* values on Linux x86-64.
-        static ITEMS: &[(&str, isize)] = &[
-            ("UNIX", 1),
-            ("INET", 2),
-            ("INET6", 10),
-        ];
+        static ITEMS: &[(&str, isize)] = &[("UNIX", 1), ("INET", 2), ("INET6", 10)];
         static_string_int_list(ITEMS)
     });
     PolyWord::from_bits(addr)
@@ -1065,11 +1430,7 @@ fn poly_network_get_sock_type_list_inner() -> PolyWord {
     use std::sync::OnceLock;
     static LIST: OnceLock<usize> = OnceLock::new();
     let addr = *LIST.get_or_init(|| {
-        static ITEMS: &[(&str, isize)] = &[
-            ("STREAM", 1),
-            ("DGRAM", 2),
-            ("RAW", 3),
-        ];
+        static ITEMS: &[(&str, isize)] = &[("STREAM", 1), ("DGRAM", 2), ("RAW", 3)];
         static_string_int_list(ITEMS)
     });
     PolyWord::from_bits(addr)
@@ -1087,10 +1448,10 @@ fn poly_specific_general(
 ) -> PolyWord {
     let c = code.untag();
     let s: &[u8] = match c {
-        9 => b"polyml-rs",          // GIT_VERSION
-        10 => b"Portable-5.9.0",    // RTS version (interpreted)
-        12 => b"Interpreted",       // architecture name
-        19 => b"",                  // RTS arg help (empty)
+        9 => b"polyml-rs",       // GIT_VERSION
+        10 => b"Portable-5.9.0", // RTS version (interpreted)
+        12 => b"Interpreted",    // architecture name
+        19 => b"",               // RTS arg help (empty)
         _ => return PolyWord::tagged(0),
     };
     alloc_poly_string(ctx, s)
@@ -1141,11 +1502,7 @@ fn poly_interpreted_get_abi_list_inner() -> PolyWord {
             let str_ptr = base.add(1);
             str_ptr.add(0).write(7); // byte length
             let chars: &[u8; 8] = b"default\0";
-            std::ptr::copy_nonoverlapping(
-                chars.as_ptr(),
-                str_ptr.add(1).cast::<u8>(),
-                8,
-            );
+            std::ptr::copy_nonoverlapping(chars.as_ptr(), str_ptr.add(1).cast::<u8>(), 8);
             // ABI word — 1 byte-object word.
             base.add(3).write(make_length_word(1, F_BYTE_OBJ).0);
             let abi_ptr = base.add(4);
@@ -1308,11 +1665,7 @@ fn poly_wait_for_signal(_: &mut RtsContext<'_>, _arg: PolyWord) -> PolyWord {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn poly_get_function_name(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    _code: PolyWord,
-) -> PolyWord {
+fn poly_get_function_name(ctx: &mut RtsContext<'_>, _tid: PolyWord, _code: PolyWord) -> PolyWord {
     alloc_empty_string(ctx)
 }
 
@@ -1681,9 +2034,12 @@ fn poly_subtract_arbitrary(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn poly_multiply_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
-    -> PolyWord
-{
+fn poly_multiply_arbitrary(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
     // Mult needs the bigint path because SML's `maxShort` loop
     // multiplies until overflow and uses `largeIntIsSmall` on the
     // result — without a boxed result, that loop never terminates.
@@ -1780,9 +2136,12 @@ fn poly_compare_arbitrary(_: &mut RtsContext<'_>, arg1: PolyWord, arg2: PolyWord
 // operand is BOXED, so the both-tagged fast path is a dead optimisation and the old
 // tagged(0) fallback made every real call return 0. num_bigint's signed BitAnd/BitOr/
 // BitXor are two's-complement, matching upstream logical_long (arb.cpp:1311-1456).
-fn poly_or_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
-    -> PolyWord
-{
+fn poly_or_arbitrary(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
     if both_tagged(arg1, arg2).is_some() {
         return PolyWord::from_bits(arg1.0 | arg2.0);
     }
@@ -1792,9 +2151,12 @@ fn poly_or_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, a
     }
 }
 
-fn poly_and_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
-    -> PolyWord
-{
+fn poly_and_arbitrary(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
     if both_tagged(arg1, arg2).is_some() {
         return PolyWord::from_bits(arg1.0 & arg2.0);
     }
@@ -1804,9 +2166,12 @@ fn poly_and_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, 
     }
 }
 
-fn poly_xor_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
-    -> PolyWord
-{
+fn poly_xor_arbitrary(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
     if both_tagged(arg1, arg2).is_some() {
         // XOR cancels the tag bits → set it back.
         return PolyWord::from_bits((arg1.0 ^ arg2.0) | 1);
@@ -1875,9 +2240,12 @@ fn poly_shift_right_arbitrary(
 /// GCD with an i64 tagged fast path and a BigInt fallback for boxed operands
 /// (arb.cpp:1864-1904). The old tagged-only impl returned 0 for any boxed input.
 #[allow(clippy::needless_pass_by_value)]
-fn poly_gcd_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
-    -> PolyWord
-{
+fn poly_gcd_arbitrary(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
     if let Some((x, y)) = both_tagged(arg2, arg1) {
         let mut a = x.unsigned_abs();
         let mut b = y.unsigned_abs();
@@ -1902,9 +2270,12 @@ fn poly_gcd_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, 
 /// LCM = (|x| / gcd(x,y)) * |y|, with care around zero. Tagged fast path + BigInt
 /// fallback for boxed operands / tagged-overflow results (was 0 for both before).
 #[allow(clippy::needless_pass_by_value)]
-fn poly_lcm_arbitrary(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg1: PolyWord, arg2: PolyWord)
-    -> PolyWord
-{
+fn poly_lcm_arbitrary(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg1: PolyWord,
+    arg2: PolyWord,
+) -> PolyWord {
     if let Some((x, y)) = both_tagged(arg2, arg1) {
         if x == 0 || y == 0 {
             return PolyWord::tagged(0);
@@ -1971,9 +2342,7 @@ fn poly_quot_rem_arbitrary_pair(
             (PolyWord::tagged(dvd / dvdr), PolyWord::tagged(dvd % dvdr))
         }
     } else {
-        let (Some(a), Some(b)) =
-            (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2))
-        else {
+        let (Some(a), Some(b)) = (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) else {
             return PolyWord::tagged(0);
         };
         // Zero divisor with a boxed dividend (e.g. divMod(2^70, 0)) — raise Div.
@@ -2062,9 +2431,7 @@ fn poly_copy_byte_vec_to_closure(
     byte_vec: PolyWord,
     closure: PolyWord,
 ) -> PolyWord {
-    use crate::length_word::{
-        F_CODE_OBJ, F_MUTABLE_BIT, flags_of, is_byte_object, length_of,
-    };
+    use crate::length_word::{F_CODE_OBJ, F_MUTABLE_BIT, flags_of, is_byte_object, length_of};
     if !byte_vec.is_data_ptr() || !closure.is_data_ptr() {
         if RTS_TRACE.load(Ordering::Relaxed) {
             eprintln!(
@@ -2181,9 +2548,7 @@ fn poly_set_code_constant(
                 // Cases 1/3/4/etc. are native-code relocations we
                 // don't need in the interpreter. Trace and skip.
                 if RTS_TRACE.load(Ordering::Relaxed) {
-                    eprintln!(
-                        "  PolySetCodeConstant: unsupported flag {flag_kind} (skipped)"
-                    );
+                    eprintln!("  PolySetCodeConstant: unsupported flag {flag_kind} (skipped)");
                 }
             }
         }
@@ -2296,7 +2661,10 @@ fn poly_real_double_to_string(
         0.0
     };
     let kind_ch = if kind.is_tagged() {
-        u32::try_from(kind.untag()).ok().and_then(char::from_u32).unwrap_or('G')
+        u32::try_from(kind.untag())
+            .ok()
+            .and_then(char::from_u32)
+            .unwrap_or('G')
     } else {
         'G'
     };
@@ -2455,7 +2823,11 @@ fn next_after(x: f64, y: f64) -> f64 {
         return f64::from_bits(1).copysign(y);
     }
     let bits = x.to_bits();
-    let next = if (y > x) == (x > 0.0) { bits + 1 } else { bits - 1 };
+    let next = if (y > x) == (x > 0.0) {
+        bits + 1
+    } else {
+        bits - 1
+    };
     f64::from_bits(next)
 }
 
@@ -2473,7 +2845,11 @@ fn next_after_f32(x: f32, y: f32) -> f32 {
         return f32::from_bits(1).copysign(y);
     }
     let bits = x.to_bits();
-    let next = if (y > x) == (x > 0.0) { bits + 1 } else { bits - 1 };
+    let next = if (y > x) == (x > 0.0) {
+        bits + 1
+    } else {
+        bits - 1
+    };
     f32::from_bits(next)
 }
 
@@ -2580,11 +2956,11 @@ fn alloc_thread_object_stub(ctx: &mut RtsContext<'_>) -> PolyWord {
     // SAFETY: just allocated 9 words
     unsafe {
         crate::space::set_length_word(p, length, F_MUTABLE_BIT);
-        p.add(0).write(PolyWord::tagged(0));     // threadRef (dummy)
-        p.add(1).write(PolyWord::tagged(2));     // flags = PFLAG_SYNCH
-        p.add(2).write(PolyWord::tagged(0));     // threadLocal = nil
-        p.add(3).write(PolyWord::tagged(0));     // requestCopy = none
-        p.add(4).write(PolyWord::tagged(0));     // mlStackSize = unlimited
+        p.add(0).write(PolyWord::tagged(0)); // threadRef (dummy)
+        p.add(1).write(PolyWord::tagged(2)); // flags = PFLAG_SYNCH
+        p.add(2).write(PolyWord::tagged(0)); // threadLocal = nil
+        p.add(3).write(PolyWord::tagged(0)); // requestCopy = none
+        p.add(4).write(PolyWord::tagged(0)); // mlStackSize = unlimited
         for i in 5..length {
             p.add(i).write(PolyWord::tagged(0)); // debuggerSlots
         }
@@ -2662,8 +3038,7 @@ fn write_array(strm: PolyWord, arg: PolyWord) -> PolyWord {
 /// Global state for open directories. Each entry is a Vec of
 /// remaining filenames (as bytes). Index = the "fd" stored in
 /// the wrapped-stream object (we use `id + 1`, 0 = closed).
-static DIR_STATE: std::sync::Mutex<Vec<Option<Vec<Vec<u8>>>>> =
-    std::sync::Mutex::new(Vec::new());
+static DIR_STATE: std::sync::Mutex<Vec<Option<Vec<Vec<u8>>>>> = std::sync::Mutex::new(Vec::new());
 
 /// IO subcode 50: open directory. Wraps the read-dir iterator in
 /// a stream-like object keyed by an integer id.
@@ -3177,11 +3552,7 @@ fn read_array_from_stream(strm: PolyWord, arg: PolyWord) -> PolyWord {
 /// piped input actually reaches the bootstrap. Other fds return an
 /// empty string (= EOF) for now — extending to real file fds will
 /// require a real file-open path (subcodes 3/4) first.
-fn read_string_from_stream(
-    ctx: &mut RtsContext<'_>,
-    strm: PolyWord,
-    arg: PolyWord,
-) -> PolyWord {
+fn read_string_from_stream(ctx: &mut RtsContext<'_>, strm: PolyWord, arg: PolyWord) -> PolyWord {
     use std::io::Read;
     if !strm.is_data_ptr() {
         return alloc_empty_string(ctx);
@@ -3335,7 +3706,11 @@ fn wrap_file_descriptor(ctx: &mut RtsContext<'_>, fd: u32) -> PolyWord {
     let p = space.alloc(1);
     // SAFETY: just allocated 1 word
     unsafe {
-        crate::space::set_length_word(p, 1, F_BYTE_OBJ | F_WEAK_BIT | F_MUTABLE_BIT | F_NO_OVERWRITE);
+        crate::space::set_length_word(
+            p,
+            1,
+            F_BYTE_OBJ | F_WEAK_BIT | F_MUTABLE_BIT | F_NO_OVERWRITE,
+        );
         p.write(PolyWord::from_bits((fd as usize) + 1));
     }
     PolyWord::from_ptr(p.cast_const())
@@ -3371,7 +3746,11 @@ mod tests {
         let t = RtsTable::new();
         let token = t.token_for("PolyIsBigEndian").unwrap();
         let entry = t.entry(token).unwrap();
-        let mut ctx = RtsContext { alloc_space: None, raised_exception: None, rts: None };
+        let mut ctx = RtsContext {
+            alloc_space: None,
+            raised_exception: None,
+            rts: None,
+        };
         // SML's rtsCallFast1 means PolyIsBigEndian is invoked with a
         // dummy unit arg, even though the C function takes none.
         let result = match entry.func {
@@ -3397,7 +3776,11 @@ mod tests {
     }
 
     fn ctx() -> RtsContext<'static> {
-        RtsContext { alloc_space: None, raised_exception: None, rts: None }
+        RtsContext {
+            alloc_space: None,
+            raised_exception: None,
+            rts: None,
+        }
     }
     fn t() -> PolyWord {
         PolyWord::tagged(0)
@@ -3437,9 +3820,11 @@ mod tests {
     #[test]
     fn arb_rem_fast_path() {
         // 20 rem 6 = 2 (sign of dividend)
-        let r = poly_remainder_arbitrary(&mut ctx(), t(), PolyWord::tagged(20), PolyWord::tagged(6));
+        let r =
+            poly_remainder_arbitrary(&mut ctx(), t(), PolyWord::tagged(20), PolyWord::tagged(6));
         assert_eq!(r.untag(), 2);
-        let r = poly_remainder_arbitrary(&mut ctx(), t(), PolyWord::tagged(-20), PolyWord::tagged(6));
+        let r =
+            poly_remainder_arbitrary(&mut ctx(), t(), PolyWord::tagged(-20), PolyWord::tagged(6));
         assert_eq!(r.untag(), -2);
     }
 
@@ -3461,24 +3846,47 @@ mod tests {
     fn arb_compare_boxed_bignums() {
         // The reachable path: at least one operand boxed. 2^70 vs 2^70+1.
         let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
-        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let mut c = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
         let big = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 70u32));
         let big1 = bigint_to_poly_word(&mut c, &((BigInt::from(1u8) << 70u32) + BigInt::from(1u8)));
         assert!(big.is_data_ptr() && big1.is_data_ptr(), "2^70 should box");
-        assert_eq!(poly_compare_arbitrary(&mut c, big, big1).untag(), -1, "2^70 < 2^70+1");
-        assert_eq!(poly_compare_arbitrary(&mut c, big1, big).untag(), 1, "2^70+1 > 2^70");
+        assert_eq!(
+            poly_compare_arbitrary(&mut c, big, big1).untag(),
+            -1,
+            "2^70 < 2^70+1"
+        );
+        assert_eq!(
+            poly_compare_arbitrary(&mut c, big1, big).untag(),
+            1,
+            "2^70+1 > 2^70"
+        );
         assert_eq!(poly_compare_arbitrary(&mut c, big, big).untag(), 0, "equal");
         // negative boxed
         let nbig = bigint_to_poly_word(&mut c, &(-(BigInt::from(1u8) << 70u32)));
-        assert_eq!(poly_compare_arbitrary(&mut c, nbig, big).untag(), -1, "-2^70 < 2^70");
+        assert_eq!(
+            poly_compare_arbitrary(&mut c, nbig, big).untag(),
+            -1,
+            "-2^70 < 2^70"
+        );
     }
 
     #[test]
     fn arb_bitwise_and_gcd_boxed() {
         let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
-        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let mut c = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
         // (2^64 | 0xF) & 0xFF == 0xF   (boxed operand -> RTS path)
-        let a = bigint_to_poly_word(&mut c, &((BigInt::from(1u8) << 64u32) | BigInt::from(0xFu8)));
+        let a = bigint_to_poly_word(
+            &mut c,
+            &((BigInt::from(1u8) << 64u32) | BigInt::from(0xFu8)),
+        );
         assert!(a.is_data_ptr());
         let r = poly_and_arbitrary(&mut c, t(), a, PolyWord::tagged(0xFF));
         assert_eq!(poly_word_to_bigint(r).unwrap(), BigInt::from(0xFu8));
@@ -3506,16 +3914,32 @@ mod tests {
     #[test]
     fn real32_sqrt_floor_ceil() {
         let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
-        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let mut c = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
         // RTS result is a BOXED f64 (the live dispatch path reads as_ptr::<f64>()).
         let asf32 = |w: PolyWord| -> f32 {
             assert!(w.is_data_ptr(), "Real32 RTS result must be a boxed f64");
             unsafe { *w.as_ptr::<f64>() as f32 }
         };
-        assert_eq!(asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(4.0)).sqrt())), 2.0);
-        assert_eq!(asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(3.7)).floor())), 3.0);
-        assert_eq!(asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(3.2)).ceil())), 4.0);
-        assert_eq!(asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(3.7)).trunc())), 3.0);
+        assert_eq!(
+            asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(4.0)).sqrt())),
+            2.0
+        );
+        assert_eq!(
+            asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(3.7)).floor())),
+            3.0
+        );
+        assert_eq!(
+            asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(3.2)).ceil())),
+            4.0
+        );
+        assert_eq!(
+            asf32(box_f32_tagged(&mut c, read_f32_tagged(tf32(3.7)).trunc())),
+            3.0
+        );
     }
 
     #[test]
@@ -3549,10 +3973,17 @@ mod tests {
     #[test]
     fn error_name_returns_string() {
         let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
-        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let mut c = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
         // errno 2 == ENOENT (errors.cpp errortable). Must return a BOXED string.
         let r = poly_process_env_error_name(&mut c, t(), PolyWord::tagged(2));
-        assert!(r.is_data_ptr(), "errorName must return a boxed string, not tagged(0)");
+        assert!(
+            r.is_data_ptr(),
+            "errorName must return a boxed string, not tagged(0)"
+        );
         assert_eq!(poly_string_to_rust(r).as_deref(), Some("ENOENT"));
         // Unknown code falls back to ERROR<n> (process_env.cpp:255).
         let r = poly_process_env_error_name(&mut c, t(), PolyWord::tagged(99999));
@@ -3562,7 +3993,11 @@ mod tests {
     #[test]
     fn timing_get_now_and_real_advance() {
         let mut space = crate::space::MemorySpace::new(256, crate::space::SpaceKind::Mutable);
-        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let mut c = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
         let table = RtsTable::new();
         let call = |c: &mut RtsContext<'_>, name: &str| -> i128 {
             let tok = table.token_for(name).unwrap();
@@ -3570,16 +4005,24 @@ mod tests {
                 RtsFn::Arity1(f) => f(c, PolyWord::tagged(0)),
                 _ => panic!("arity"),
             };
-            poly_word_to_bigint(w).and_then(|n| num_traits::ToPrimitive::to_i128(&n)).unwrap()
+            poly_word_to_bigint(w)
+                .and_then(|n| num_traits::ToPrimitive::to_i128(&n))
+                .unwrap()
         };
         // GetNow is microseconds since the epoch — far larger than the old
         // tagged(0) stub, and well past year-2020 in microseconds (1.5e15).
         let now = call(&mut c, "PolyTimingGetNow");
-        assert!(now > 1_500_000_000_000_000, "getNow should be epoch microseconds, got {now}");
+        assert!(
+            now > 1_500_000_000_000_000,
+            "getNow should be epoch microseconds, got {now}"
+        );
         // GetReal is monotonic non-decreasing across two reads.
         let r1 = call(&mut c, "PolyTimingGetReal");
         let r2 = call(&mut c, "PolyTimingGetReal");
-        assert!(r2 >= r1 && r1 >= 0, "getReal should be monotonic, {r1} then {r2}");
+        assert!(
+            r2 >= r1 && r1 >= 0,
+            "getReal should be monotonic, {r1} then {r2}"
+        );
         // GetUser/GetSystem are non-negative CPU microseconds.
         assert!(call(&mut c, "PolyTimingGetUser") >= 0);
         assert!(call(&mut c, "PolyTimingGetSystem") >= 0);
@@ -3590,7 +4033,11 @@ mod tests {
         // andb(~1, 2^80): ~1 is all-ones in two's complement, so the result
         // must be 2^80. Differential test vs upstream caught ours returning 0.
         let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
-        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let mut c = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
         let big = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 80u32));
         assert!(big.is_data_ptr(), "2^80 must box");
         let r = poly_and_arbitrary(&mut c, t(), PolyWord::tagged(-1), big);
@@ -3629,23 +4076,15 @@ mod tests {
     #[test]
     fn arb_shift_left_simple() {
         // arg2-style ordering: shift_left(arg, shift) means arg << shift.
-        let r = poly_shift_left_arbitrary(
-            &mut ctx(),
-            t(),
-            PolyWord::tagged(5),
-            PolyWord::tagged(3),
-        );
+        let r =
+            poly_shift_left_arbitrary(&mut ctx(), t(), PolyWord::tagged(5), PolyWord::tagged(3));
         assert_eq!(r.untag(), 40);
     }
 
     #[test]
     fn arb_shift_right_simple() {
-        let r = poly_shift_right_arbitrary(
-            &mut ctx(),
-            t(),
-            PolyWord::tagged(40),
-            PolyWord::tagged(3),
-        );
+        let r =
+            poly_shift_right_arbitrary(&mut ctx(), t(), PolyWord::tagged(40), PolyWord::tagged(3));
         assert_eq!(r.untag(), 5);
     }
 
@@ -3653,27 +4092,20 @@ mod tests {
     fn arb_shift_right_negative_is_arithmetic() {
         // `IntInf.~>>` is an ARITHMETIC (floor) shift: -40 ~>> 3 = -5, not a huge
         // positive. Regression for the logical-shift-on-negatives bug.
-        let r = poly_shift_right_arbitrary(
-            &mut ctx(),
-            t(),
-            PolyWord::tagged(-40),
-            PolyWord::tagged(3),
-        );
+        let r =
+            poly_shift_right_arbitrary(&mut ctx(), t(), PolyWord::tagged(-40), PolyWord::tagged(3));
         assert_eq!(r.untag(), -5);
         // floor rounding toward -inf: -1 ~>> 1 = -1 (not 0).
-        let r = poly_shift_right_arbitrary(&mut ctx(), t(), PolyWord::tagged(-1), PolyWord::tagged(1));
+        let r =
+            poly_shift_right_arbitrary(&mut ctx(), t(), PolyWord::tagged(-1), PolyWord::tagged(1));
         assert_eq!(r.untag(), -1);
     }
 
     #[test]
     fn arb_shift_left_negative_preserves_sign() {
         // -5 << 3 = -40.
-        let r = poly_shift_left_arbitrary(
-            &mut ctx(),
-            t(),
-            PolyWord::tagged(-5),
-            PolyWord::tagged(3),
-        );
+        let r =
+            poly_shift_left_arbitrary(&mut ctx(), t(), PolyWord::tagged(-5), PolyWord::tagged(3));
         assert_eq!(r.untag(), -40);
     }
 
@@ -3682,7 +4114,11 @@ mod tests {
         // 1 << 70 doesn't fit in a tagged int — must box (old tagged-only path
         // returned 0). Needs an alloc space.
         let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
-        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let mut c = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
         let r = poly_shift_left_arbitrary(&mut c, t(), PolyWord::tagged(1), PolyWord::tagged(70));
         assert!(r.is_data_ptr(), "1<<70 should be boxed");
         let bi = poly_word_to_bigint(r).expect("readable bignum");
@@ -3695,7 +4131,11 @@ mod tests {
     #[test]
     fn get_low_order_negates_negative_boxed() {
         let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
-        let mut c = RtsContext { alloc_space: Some(&mut space), raised_exception: None, rts: None };
+        let mut c = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
         // -(2^64 + 7): magnitude needs >64 bits so it boxes; negative-flagged.
         let n = -(BigInt::from(1u128 << 64) + BigInt::from(7u8));
         let boxed = bigint_to_poly_word(&mut c, &n);
@@ -3703,7 +4143,11 @@ mod tests {
         let res = poly_get_low_order_as_large_word(&mut c, t(), boxed);
         // low limb of magnitude (2^64+7) is 7; two's-complement-negated = -7.
         let low = unsafe { *res.as_ptr::<usize>() };
-        assert_eq!(low, 0usize.wrapping_sub(7), "negative boxed low word must be negated");
+        assert_eq!(
+            low,
+            0usize.wrapping_sub(7),
+            "negative boxed low word must be negated"
+        );
     }
 
     #[test]
@@ -3718,19 +4162,9 @@ mod tests {
 
     #[test]
     fn arb_gcd_lcm() {
-        let g = poly_gcd_arbitrary(
-            &mut ctx(),
-            t(),
-            PolyWord::tagged(12),
-            PolyWord::tagged(18),
-        );
+        let g = poly_gcd_arbitrary(&mut ctx(), t(), PolyWord::tagged(12), PolyWord::tagged(18));
         assert_eq!(g.untag(), 6);
-        let l = poly_lcm_arbitrary(
-            &mut ctx(),
-            t(),
-            PolyWord::tagged(4),
-            PolyWord::tagged(6),
-        );
+        let l = poly_lcm_arbitrary(&mut ctx(), t(), PolyWord::tagged(4), PolyWord::tagged(6));
         assert_eq!(l.untag(), 12);
     }
 
@@ -3738,9 +4172,8 @@ mod tests {
     fn arb_mult_no_overflow_stays_tagged() {
         let mut ctx = ctx();
         // Both small — should stay tagged.
-        let r = poly_multiply_arbitrary(
-            &mut ctx, t(), PolyWord::tagged(123), PolyWord::tagged(456),
-        );
+        let r =
+            poly_multiply_arbitrary(&mut ctx, t(), PolyWord::tagged(123), PolyWord::tagged(456));
         assert!(r.is_tagged());
         assert_eq!(r.untag(), 123 * 456);
     }
@@ -3755,9 +4188,15 @@ mod tests {
             rts: None,
         };
         let r = poly_multiply_arbitrary(
-            &mut ctx, t(), PolyWord::tagged(1 << 31), PolyWord::tagged(1 << 31),
+            &mut ctx,
+            t(),
+            PolyWord::tagged(1 << 31),
+            PolyWord::tagged(1 << 31),
         );
-        assert!(r.is_data_ptr(), "2^62 should be boxed (MAX_TAGGED = 2^62-1)");
+        assert!(
+            r.is_data_ptr(),
+            "2^62 should be boxed (MAX_TAGGED = 2^62-1)"
+        );
         let bi = poly_word_to_bigint(r).expect("readable bignum");
         assert_eq!(bi, BigInt::from(1u64 << 62), "wrong product");
     }

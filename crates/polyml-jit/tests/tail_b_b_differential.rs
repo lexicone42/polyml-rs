@@ -17,7 +17,7 @@
 //! several inputs. This exercises the trampoline → dispatch → callee
 //! chain through the FIXED translation.
 
-use polyml_jit::{translate, Jit};
+use polyml_jit::{Jit, translate};
 use polyml_runtime::{Interpreter, JitEntry, PolyWord, StepResult};
 
 const INSTR_CONST_INT_B: u8 = 0x28;
@@ -121,12 +121,12 @@ fn caller_full_body(callee_closure_ptr: usize) -> (Vec<u8>, usize) {
     // imm at body[2]; pc after imm = 3. read_at = 3 + imm + 24 = 32 -> imm = 5.
     body[2] = 5;
     body[3] = INSTR_LOCAL_3; // retPC placeholder = caller's retPC
-                             // (now at sp[3] after the two pushes above)
+    // (now at sp[3] after the two pushes above)
     body[4] = INSTR_TAIL_B_B;
     body[5] = 3; // tail_count: retPC + closure + 1 arg
     body[6] = 0; // skip = 0 (no caller-frame slots to drop in this
-                 // hand-built frame; the JIT ignores skip regardless,
-                 // and the interp's shift is then a no-op)
+    // hand-built frame; the JIT ignores skip regardless,
+    // and the interp's shift is then a no-op)
     body[32..40].copy_from_slice(&(callee_closure_ptr as u64).to_le_bytes());
     let bytecode_end = 7;
     (body, bytecode_end)

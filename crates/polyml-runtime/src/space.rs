@@ -83,7 +83,6 @@ impl<'a> IntoIterator for &'a MemorySpace {
 }
 
 impl MemorySpace {
-
     /// Bump-allocate space for an object of `n_words` words, plus its
     /// preceding length word. Returns the **object pointer** — the
     /// address of the *first body word*, with the length word at offset

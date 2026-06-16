@@ -14,7 +14,7 @@
 //!     A continues with B's result
 //!   A returns
 
-use polyml_jit::{translate, Jit};
+use polyml_jit::{Jit, translate};
 use polyml_runtime::{Interpreter, JitEntry, PolyWord};
 
 const INSTR_LOCAL_2: u8 = 0x2b;

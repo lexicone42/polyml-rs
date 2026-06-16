@@ -45,24 +45,40 @@ fn combinatorial_identities() {
         &image,
         &common::with_binom_thm(&driver),
         800_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
 
     // the binomial-theorem base must load first
-    assert!(out.contains("BINOM_THM_DONE"), "binomial-theorem base did not load:\n{out}");
+    assert!(
+        out.contains("BINOM_THM_DONE"),
+        "binomial-theorem base did not load:\n{out}"
+    );
     // each identity, by named lemma + phase marker
     for (lemma, marker) in [
         ("pascal_row_sum", "PASCAL_ROW_SUM_OK"),
         ("hockey_stick", "HOCKEY_STICK_OK"),
         ("vandermonde", "VANDERMONDE_OK"),
     ] {
-        assert!(out.contains(&format!("OK {lemma}")), "identity `{lemma}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {lemma}")),
+            "identity `{lemma}` did not check:\n{out}"
+        );
         assert!(out.contains(marker), "marker `{marker}` missing:\n{out}");
     }
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("PROBE_UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("PROBE_UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
 }

@@ -47,7 +47,11 @@ fn congruence_mod_m_is_a_congruence_relation() {
         &image,
         &driver,
         280_000_000_000,
-        &[("ML_SYSTEM", "polyml"), ("ML_PLATFORM", "x86_64-linux"), ("ISABELLE_HOME", "/tmp/isa")],
+        &[
+            ("ML_SYSTEM", "polyml"),
+            ("ML_PLATFORM", "x86_64-linux"),
+            ("ISABELLE_HOME", "/tmp/isa"),
+        ],
     ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
@@ -55,13 +59,28 @@ fn congruence_mod_m_is_a_congruence_relation() {
 
     // equivalence relation
     for law in ["cong_refl", "cong_sym", "cong_trans"] {
-        assert!(out.contains(&format!("OK {law}")), "equivalence law `{law}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {law}")),
+            "equivalence law `{law}` did not check:\n{out}"
+        );
     }
     // compatible with + and *  =>  Z/mZ is a commutative ring
     for law in ["cong_add", "cong_mult"] {
-        assert!(out.contains(&format!("OK {law}")), "ring-compat law `{law}` did not check:\n{out}");
+        assert!(
+            out.contains(&format!("OK {law}")),
+            "ring-compat law `{law}` did not check:\n{out}"
+        );
     }
-    assert!(out.contains("MODULAR_DONE"), "modular-arithmetic development did not complete:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains("UNSOUND"), "a soundness probe fired UNSOUND:\n{out}");
+    assert!(
+        out.contains("MODULAR_DONE"),
+        "modular-arithmetic development did not complete:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("UNSOUND"),
+        "a soundness probe fired UNSOUND:\n{out}"
+    );
 }
