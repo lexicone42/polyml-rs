@@ -274,6 +274,18 @@ the phase.
 
 ### Phase 2.7 — Portable image format (`bicimage`) (~6 weeks)
 
+> **Scoping update (2026-06-16, `docs/tier-b-portable-images-design.md`):**
+> `bicimage` (below) is the *native-code-speed* portable image — load then JIT
+> per-arch. But the "portable across arches" headline does **not** need it:
+> because we ship an **interpreter**, our existing pexport images are already
+> bytecode (no native code to relocate), and bytecode + object-ID pointers +
+> by-name RTS linking are arch-neutral at a fixed word size. So **x86_64 →
+> aarch64 (64-bit LE) works on pexport today**, modulo a load-side word-size
+> validation guard and an actual aarch64 demo (design-doc milestones M1–M3).
+> `bicimage` becomes worthwhile only once the JIT is the hot path (currently it
+> is not — see the JIT perf-coverage wall). Cross-*word-size* (64↔32) is the
+> real format work and stays a stretch goal (M4–M5).
+
 Implement option E from `notes/hard-problems.md` §5: portable data +
 embedded BIC for code objects.
 
