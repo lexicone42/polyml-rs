@@ -103,7 +103,7 @@ the C++ it ports (`libpolyml/bytecode.cpp`) by line.
 
 ## Build & test
 
-Requires the pinned toolchain (Rust 1.95, via `rust-toolchain.toml`).
+Requires the pinned toolchain (Rust 1.96, via `rust-toolchain.toml`).
 
 ```sh
 cargo build --release -p polyml-bin     # build the `poly` binary

@@ -9,7 +9,7 @@ This page is how to obtain them.
 ## 0. Toolchain
 
 ```sh
-rustup show            # installs the pinned toolchain from rust-toolchain.toml (Rust 1.95)
+rustup show            # installs the pinned toolchain from rust-toolchain.toml (Rust 1.96)
 cargo build --release -p polyml-bin
 ```
 

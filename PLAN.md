@@ -350,9 +350,9 @@ done. 2.8 is continuous from 2.3 onwards.
 
 ## 5. Toolchain & licensing — locked
 
-- **Rust toolchain**: rustup-managed. Current stable is **1.95.0** as
-  of 2026-05-15 (rustup updated this session). A `rust-toolchain.toml`
-  at the repo root pins stable; we re-pin when we want a newer one.
+- **Rust toolchain**: rustup-managed. Pinned at **1.96.0** (re-pinned
+  2026-06-16 from 1.95.0) via a `rust-toolchain.toml` at the repo root;
+  we re-pin when we want a newer one.
 - **Rust edition**: 2024 (current stable). MSRV-pin via
   `rust-version` in `Cargo.toml` once we know Cranelift 0.131's actual
   floor.
@@ -390,7 +390,7 @@ In order. Each is a small enough chunk to be a single PR / merge unit.
 
 1. **[DONE]** Repo scaffolding: cargo workspace with `polyml-runtime`,
    `polyml-image`, `polyml-bin`. `rust-toolchain.toml` pins stable
-   1.95. `Cargo.toml` configures dual MIT/Apache-2.0 plus
+   1.96. `Cargo.toml` configures dual MIT/Apache-2.0 plus
    workspace-wide clippy::pedantic+nursery.
    *Deferred crates*: `polyml-interpreter`, `polyml-codegen-cl`,
    `polyml-bootstrap` — created when their phases land.
