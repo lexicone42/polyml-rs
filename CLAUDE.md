@@ -522,9 +522,20 @@ run`, diff the results. Any difference is a faithfulness bug in OUR port.
   the backend source).
 - `tools/diff-oracle.sh [--dir <d>] <file.sml ...>` runs each snippet through
   both and compares `@@<label>=<value>` lines (the filter strips REPL chatter).
-- `tools/diff-corpus/*.sml` — ~1300 deterministic comparisons across 40 files
+- `tools/diff-corpus/*.sml` — ~1600 deterministic comparisons across 44 files
   (30 Basis categories + compiler-stress programs). Run:
   `tools/diff-oracle.sh --dir tools/diff-corpus` (wired into `regression.sh full`).
+  The 2026-06-16 faithfulness sweep (ultracode wf_a7f8686d-310) added 317
+  edge-case comparisons in `numeric_edge.sml` (divMod/quotRem sign conventions,
+  IntInf.pow/divMod corners, Word shifts at/beyond wordSize), `real_edge.sml`
+  (inf/nan/subnormal classify, the full Real.toLargeInt rounding matrix,
+  copySign/nextAfter, Real32 paths), `text_edge.sml` (Char.chr/escape
+  boundaries, String.collate/tokens/translate/scan, Substring), and
+  `struct_edge.sml` (List/Vector/Array/ListPair edge + exception cases,
+  ref-vs-structural equality, exnName/exnMessage, functor/signature/record/
+  exception-payload compiler stress) — ALL byte-identical to upstream (0
+  divergences, triaged + independently re-verified through both the native and
+  bytecode-interp oracles).
 
 **Verdict (2026-06-09, final):** the interpreter is FAITHFUL to upstream on all
 ~1300 cases. The one apparent divergence (`IntInf.andb`/`orb` with a short operand
