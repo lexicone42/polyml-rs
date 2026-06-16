@@ -373,6 +373,17 @@ where
                 "    0x{addr:016x}  would-be LW @ -8: raw=0x{lw_val:016x}  length_of={raw_len}  flags=0x{raw_flags:02x}",
             );
         }
+        // A from-space pointer matching no tracked object means a missed GC root;
+        // `replace_storage` (below) drops from-space, which would leave that slot
+        // dangling — a silent use-after-free. Fail fast instead of corrupting the
+        // heap. (In correct operation this set is always empty; this only fires on
+        // a genuine collector bug, exactly when crashing beats continuing.)
+        panic!(
+            "GC invariant violated: {} untracked from-space pointer occurrence(s) \
+             (e.g. 0x{:016x}); a root was missed",
+            col.untracked_addrs.len(),
+            sample.first().copied().unwrap_or(0)
+        );
     }
     alloc.replace_storage(scratch, new_used);
     new_used

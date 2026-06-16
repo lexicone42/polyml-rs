@@ -2906,27 +2906,31 @@ impl Interpreter {
 
             // ----- Wider jumps / case
             EXTINSTR_JUMP32 => {
+                // The 32-bit offset is SIGNED — upstream sign-extends it
+                // (bytecode.cpp:2236). `as i32 as isize` sign-extends so a
+                // backward long jump stays negative (was zero-extended → ~4GB
+                // forward jump on backward jumps in functions >64KB).
                 let lo = u32::from(self.fetch_u16_le()?);
                 let hi = u32::from(self.fetch_u16_le()?);
-                let off = (hi << 16) | lo;
-                self.pc_offset_signed(off as isize)?;
+                let off = ((hi << 16) | lo) as i32 as isize;
+                self.pc_offset_signed(off)?;
                 Ok(StepResult::Continue)
             }
             EXTINSTR_JUMP32_FALSE => {
                 let lo = u32::from(self.fetch_u16_le()?);
                 let hi = u32::from(self.fetch_u16_le()?);
-                let off = (hi << 16) | lo;
+                let off = ((hi << 16) | lo) as i32 as isize; // signed (see JUMP32)
                 if self.pop()? == PolyWord::tagged(0) {
-                    self.pc_offset_signed(off as isize)?;
+                    self.pc_offset_signed(off)?;
                 }
                 Ok(StepResult::Continue)
             }
             EXTINSTR_JUMP32_TRUE => {
                 let lo = u32::from(self.fetch_u16_le()?);
                 let hi = u32::from(self.fetch_u16_le()?);
-                let off = (hi << 16) | lo;
+                let off = ((hi << 16) | lo) as i32 as isize; // signed (see JUMP32)
                 if self.pop()? != PolyWord::tagged(0) {
-                    self.pc_offset_signed(off as isize)?;
+                    self.pc_offset_signed(off)?;
                 }
                 Ok(StepResult::Continue)
             }
