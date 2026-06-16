@@ -67,6 +67,15 @@ pub enum LoadError {
     TaggedOutOfRange { value: i64 },
     #[error("reference to object {id} which has no allocation")]
     UnresolvedRef { id: u32 },
+    #[error(
+        "image was produced for a {image_bytes}-byte word size but this host's \
+         word size is {host_bytes} bytes; cross-word-size image loading is not \
+         yet supported (same-word-size cross-arch, e.g. x86_64 -> aarch64, is)"
+    )]
+    WordSizeMismatch {
+        image_bytes: usize,
+        host_bytes: usize,
+    },
 }
 
 /// Compute the number of body words an object of the given variant
@@ -177,6 +186,22 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
         return Err(LoadError::BadRoot {
             root: image.root,
             count: image.objects.len(),
+        });
+    }
+
+    // We rebuild objects at the host's native word size: every body_word_count
+    // / code-layout site below uses `size_of::<usize>()`, not the image's
+    // recorded word size. An image produced for a different word size would be
+    // mis-sized object-by-object, silently corrupting the heap, so reject it
+    // up front with a clear error. Same-word-size cross-arch (x86_64 ->
+    // aarch64, both 64-bit LE) is unaffected — the bytecode and object graph
+    // are arch-neutral. See docs/tier-b-portable-images-design.md (M1).
+    let host_bytes = size_of::<usize>();
+    let image_bytes = image.word_size.bytes();
+    if image_bytes != host_bytes {
+        return Err(LoadError::WordSizeMismatch {
+            image_bytes,
+            host_bytes,
         });
     }
 
@@ -435,6 +460,25 @@ mod tests {
         let obj1 = root_word.as_ptr::<PolyWord>();
         let obj1_word = unsafe { *obj1 };
         assert_eq!(obj1_word.untag(), 7, "obj1[0] = {obj1_word:?}");
+    }
+
+    #[test]
+    fn rejects_cross_word_size_image() {
+        // A header declaring a word size different from the host's must be
+        // rejected rather than silently mis-sizing every variable-length
+        // object. (We only ever build 64-bit; "4" is the cross size there.)
+        let (decl, want_image): (&[u8], usize) = if size_of::<usize>() == 8 {
+            (b"Objects\t1\nRoot\t0 I 4\n0:O1|7\n", 4)
+        } else {
+            (b"Objects\t1\nRoot\t0 I 8\n0:O1|7\n", 8)
+        };
+        let img = Image::parse(decl).unwrap();
+        let err = load_image(&img).err().expect("expected a load error");
+        assert!(
+            matches!(err, LoadError::WordSizeMismatch { image_bytes, host_bytes }
+                if image_bytes == want_image && host_bytes == size_of::<usize>()),
+            "expected WordSizeMismatch, got {err:?}"
+        );
     }
 
     #[test]
