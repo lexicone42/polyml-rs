@@ -155,6 +155,19 @@ patterns are endian-agnostic. No work needed for the target arches.
       64-bit host (round-trip test).
 - [ ] M5 (stretch) — arbint tagged/long normalization across word sizes.
 
+## Real-hardware path: Apple Silicon macOS
+
+The qemu/`cross` route (M2/M3) is the CI-friendly demo, but a native **Apple
+Silicon Mac** (arm64) is a stronger artifact: it exercises cross-arch **and**
+cross-OS at once (x86_64-Linux-built bytecode → arm64-macOS) on real hardware,
+no emulation. The macOS build is pre-vetted clean (2026-06-16): no Linux-isms
+(only `#[cfg(unix)]` getrusage, which macOS satisfies), and the JIT is opt-in
+behind `--jit` so a plain `poly run` never invokes Cranelift. Recipe:
+`cargo build --release -p polyml-bin` (target `aarch64-apple-darwin`, native),
+then `poly run bootstrap64.txt` (expect `Tagged(0)`) and `fact 10` through
+`polyexport` (→ `3628800`). Gated on getting the repo onto GitHub + transferring
+the (git-ignored) `vendor/` images. A test machine is available for this.
+
 ## Bottom line
 
 The "portable across arches" headline is **M1 + M2 + M3** — a validation guard
