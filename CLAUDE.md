@@ -1203,6 +1203,29 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   Three soundness probes on the result pass (needs the prime hyp; residue is p−1 not 0; not the false
   `≡1`). **Euler's theorem is the next summit and reuses `pairing_lemma` + `finv` directly** (product
   over the reduced residues, x↦a·x permutes them).
+- **EULER'S THEOREM** (`isabelle_euler.rs`, `isabelle_euler.sml`, 2026-06-16 — the summit
+  predicted above, the generalisation of Fermat's little theorem to a composite modulus):
+  `⊢ 1<n ⟹ unit_test n a ⟹ cong n (pow a (phiU n)) 1` — i.e. **a^φ(n) ≡ 1 (mod n)** for a a
+  unit mod n, a 0-hyp LCF kernel theorem (only classical assumption = `ex_middle`; axiom audit
+  clean — all 74 axioms are the established conservative foundation). THE DESIGN UNLOCK:
+  coprimality is defined AS invertibility — `unit_test n r = searchCond n r (finv n r)` (the
+  inverse-search succeeds) — so "is a unit" and "has an inverse" coincide BY CONSTRUCTION
+  (`unit_has_inv` / `inv_imp_unit`), closing the gap the earlier gcd-based run hit (coprime via
+  gcd with no bridge to inverse-existence). Proof = Lagrange in the unit group: Phase 1 (25
+  sub-lemmas, `EULER_BIJ_OK`) builds the unit group + the **multiply-by-a bijection** on the
+  reduced residues (`urrl`/`phiU`, the units; `f r = rmod(a·r)n` is closed/injective/surjective,
+  so `bij_prod : lprod(map f (urrl n)) = lprod(urrl n)` via the derived permutation-invariance
+  lemma `lprod_perm`); Phase 2 factors `lprod(map (mult a) U) = a^|U|·lprod U` (`prod_map_factor`),
+  bridges the rmod-map to the plain map (`rmod_bridge`), and cancels the unit product `U`
+  (`prod_unit` + `gen_cancel`) to get a^φ(n)·U ≡ U ⟹ a^φ(n) ≡ 1. Four soundness probes pass
+  (aconv intended; needs `unit_test`; exponent is φ(n) not n; residue is 1). Built by a 6-agent
+  multi-phase ultracode fleet (wf_72da364c-704, ~2.3h); **re-verified end-to-end by hand**
+  (3,269,745,139 steps, Result: Tagged(0), 145 OK markers, zero exceptions). CAVEAT: the driver
+  is currently SELF-CONTAINED (embeds its own foundation, re-asserting gcdf/rfilter/rrl), so it
+  is run DIRECTLY (no `with_*` splice), like isabelle_modular/power/fta_unique — consolidating it
+  onto `with_wilson_inverse` + isabelle_euler_foundations.sml is a tracked follow-up. With Wilson,
+  FLT, Euclid, √2, FTA, CRT, this rounds out the landmark theorems of elementary number theory on
+  the Rust interpreter.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
