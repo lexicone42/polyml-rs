@@ -712,10 +712,12 @@ impl Interpreter {
                     img_objects_scanned += 1;
                 }
             }
-            eprintln!(
-                "  GC roots: image-mut objects scanned = {img_objects_scanned}, total image-mut words = {}",
-                image_roots.iter().map(|(_, l)| l).sum::<usize>()
-            );
+            if std::env::var("POLYML_GC_QUIET").is_err() {
+                eprintln!(
+                    "  GC roots: image-mut objects scanned = {img_objects_scanned}, total image-mut words = {}",
+                    image_roots.iter().map(|(_, l)| l).sum::<usize>()
+                );
+            }
             // Suppress unused
             let _ = handler_sp;
         });

@@ -340,8 +340,15 @@ impl<'a> Cursor<'a> {
                 at: start,
             });
         }
-        // SAFETY: digits are ASCII.
-        let s = std::str::from_utf8(&self.bytes[start..self.pos]).unwrap();
+        // start..pos is all ASCII digits (skip_while above), so this is
+        // infallible — but propagate rather than unwrap to keep the parser
+        // panic-free on arbitrary (untrusted) input.
+        let s = std::str::from_utf8(&self.bytes[start..self.pos]).map_err(|_| {
+            ParseError::BadNumber {
+                reason: "non-utf8 digits",
+                at: start,
+            }
+        })?;
         s.parse::<u64>().map_err(|_| ParseError::BadNumber {
             reason: "overflow",
             at: start,
@@ -374,7 +381,14 @@ impl<'a> Cursor<'a> {
                 at: start,
             });
         }
-        let s = std::str::from_utf8(&self.bytes[start..self.pos]).unwrap();
+        // start..pos is `-`? followed by ASCII digits, so infallible — but
+        // propagate rather than unwrap to keep the parser panic-free on input.
+        let s = std::str::from_utf8(&self.bytes[start..self.pos]).map_err(|_| {
+            ParseError::BadNumber {
+                reason: "non-utf8 digits",
+                at: start,
+            }
+        })?;
         s.parse::<i64>().map_err(|_| ParseError::BadNumber {
             reason: "overflow",
             at: start,
