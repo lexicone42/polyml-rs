@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The headline HOL4 / Isabelle / bootstrap demos need obtained data
+# (vendor/polyml, vendor/hol4, vendor/isabelle) and warm /tmp checkpoints,
+# so they are NOT run here — see docs/REPRODUCING.md to run them locally.
+# This workflow is the vendor-free gate: formatting, lints, a full workspace
+# build (which compiles every crate + test target), and the data-free unit
+# tests for the runtime and JIT.
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # Non-blocking for now: the tree predates CI and isn't fully rustfmt-clean.
+      # Flip to a hard gate after a one-shot `cargo fmt --all` cleanup pass.
+      - name: Formatting (informational)
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+      - name: Build workspace (compiles all crates + test targets)
+        run: cargo build --release --workspace --all-targets
+
+      - name: Clippy
+        run: cargo clippy --release --workspace --all-targets
+
+      - name: Runtime unit tests (data-free)
+        run: cargo test --release -p polyml-runtime --lib
+
+      - name: JIT unit tests (data-free)
+        run: cargo test --release -p polyml-jit --lib

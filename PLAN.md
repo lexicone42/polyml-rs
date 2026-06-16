@@ -4,6 +4,16 @@
 > `notes/boundaries.md`, `notes/hard-problems.md`, `notes/bootstrap.md`,
 > `notes/runtime-*.md`, `notes/codegen-native.md`, `notes/heap-image.md`.
 
+> **STATUS UPDATE (2026-06).** This is the original plan; much of Stage 2 has
+> landed. **Done:** the bytecode interpreter (2.1), the real copying GC (2.3),
+> pexport load/save, and an experimental Cranelift JIT (2.2, a correctness
+> testbed — not yet a speedup). The x86-64 runtime is faithful enough to boot
+> upstream Poly/ML, self-compile the 7-stage chain, and host HOL4 + Isabelle
+> (validated by a ~1,300-case differential oracle). **Not yet:** concurrency
+> (2.4), aarch64 (2.5), macOS (2.6), and **the portable `bicimage` format (2.7)
+> — the headline goal**. See [`README.md`](README.md) for the current
+> capability summary and the near-term (Tier A/B) release path.
+
 ---
 
 ## 0. Anchor: what we're building
