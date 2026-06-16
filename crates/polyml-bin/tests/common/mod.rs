@@ -127,6 +127,18 @@ pub fn with_mult_group(delta: &str) -> String {
     with_gcd(&format!("{mg}\n{delta}"))
 }
 
+/// Prepend the Wilson-pairing development (`isabelle_wilson_pairing.sml`: the
+/// natlist list-product library + the involution `pairing_lemma`) on top of the
+/// multiplicative-group base, for the Wilson finale (the residue-range list, the
+/// modular-inverse function, and the assembly).
+pub fn with_wilson_pairing(delta: &str) -> String {
+    let wp = std::fs::read_to_string(
+        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_wilson_pairing.sml"),
+    )
+    .expect("read isabelle_wilson_pairing.sml");
+    with_mult_group(&format!("{wp}\n{delta}"))
+}
+
 /// Prepend the combinatorial-identities development (`isabelle_combinatorics.sml`:
 /// Pascal row sum, hockey stick, and Vandermonde) on top of the binomial-theorem
 /// base, for drivers that build on those identities (e.g. the central binomial

@@ -1170,6 +1170,20 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   discharged with `mp`, not `implies_elim`. **NEXT toward full Wilson:** construct the list `[2..p-2]`
   / `[1..p-1]` and prove it closed under the modular inverse (the residue-range construction), then
   assemble `(p-1)! = 1·∏[2..p-2]·(p-1) ≡ -1`. **Euler's theorem reuses `pairing_lemma` directly.**
+- **THE MODULAR-INVERSE FUNCTION + RESIDUE RANGE** (`isabelle_wilson_inverse.rs`,
+  `isabelle_wilson_inverse.sml`, 2026-06-15 — the second Wilson-finale piece). The `pairing_lemma`
+  needs the modular inverse as a literal involution FUNCTION, but the object logic has no choice
+  operator and `cong` is not directly decidable. THE UNLOCK: define a `mod` function (rmod/rdiv via
+  conservative axioms from the division theorem) so congruence becomes DECIDABLE EQUALITY —
+  `cong_iff_rmod : 0<p ⟹ (cong p a b ⟺ rmod a p = rmod b p)` (both directions) — then the inverse
+  is built by a list SEARCH over the residue range. Defined `upto n = [1..n]` (with `lnodup`,
+  `lmem_upto`) and `finv p x` (search `upto(p-1)` for x's inverse), proved for prime p and x in
+  [1..p-1]: `finv_inv` (cong p (x·finv p x) 1), `finv_mem` (in range), `finv_invol` (`finv p (finv
+  p x) = x` LITERAL involution, via `inverse_unique`), `finv_neq` (fixed-point free on [2..p-2], via
+  `lagrange_roots`) — exactly `pairing_lemma`'s hypotheses. Each 0-hyp, aconv intended, probed.
+  Built via `common::with_wilson_pairing`. Proved by a 2-phase ultracode fleet (wf_a22d8bd7-115,
+  ~106 min); re-verified by hand. NEXT (the finale): apply `pairing_lemma` to [2..p-2] with `finv`
+  ⟹ `lprod[2..p-2] ≡ 1`, then `(p-1)! = 1·lprod[2..p-2]·(p-1) ≡ -1` — Wilson's theorem.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
