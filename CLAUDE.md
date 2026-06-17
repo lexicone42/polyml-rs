@@ -1439,6 +1439,29 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   `list_laws_verified.sml` — shows the hand-built object logic handles a second inductive
   datatype with its own induction principle. Soundness probe rejects a garbled rev_rev.
   3-seat ultracode fleet (wf_666cb3a1-e29).
+- **ZECKENDORF'S THEOREM** (`isabelle_zeckendorf.rs`, `isabelle_zeckendorf.sml`, 2026-06-17 —
+  introduces FIBONACCI to the tower; a combinatorial-NT flavour distinct from the modular/QR
+  arc): every positive integer has a UNIQUE representation as a sum of NON-CONSECUTIVE
+  Fibonacci numbers (e.g. 100 = 89+8+3). On `with_nt_helpers`, define `zfib` (the distinct
+  Fibonacci 1,2,3,5,8,… via conservative recursion), a fresh `ixlist = INil | ICons nat
+  ixlist` of zfib INDICES, `rep_sum`, and `valid_rep` (via `vb`: strictly-decreasing indices
+  with gaps ≥ 2 = the genuine non-consecutive condition), then prove BOTH halves 0-hyp,
+  aconv-checked, soundness-probed: **EXISTENCE** (`⊢ ∀n. 0<n ⟹ ∃r. valid_rep r ∧ rep_sum r =
+  n`, by the GREEDY algorithm — largest `zfib k ≤ n`, recurse on `n − zfib k`, the remainder
+  bound `< zfib(k−1)` forcing the next index ≤ k−2 — under strong induction) and the harder
+  **UNIQUENESS** (`⊢ ∀n r1 r2. valid_rep r1 ⟹ valid_rep r2 ⟹ rep_sum r1 = n ⟹ rep_sum r2 = n
+  ⟹ r1 = r2`). The CRUX is the sum-bound `zfib k ≤ rep_sum r < zfib(k+1)` for a valid rep
+  topping at k (upper bound via the maximal-non-consecutive partial-sum identity = zfib(k+1)−1),
+  which pins the largest index from n ALONE (`zfib_index_unique`); strip it + `add_left_cancel`
+  + strong induction on the tails. The only non-Peano assumption is excluded middle. Built on
+  `with_nt_helpers` directly (a fresh tailored index-list beats dragging in `with_wilson_pairing`'s
+  heavy gcd/mult_group chain just for a natlist). 3-seat ultracode fleet (wf_20b7a36f-ce3) — all
+  three proved BOTH halves independently; the banked "robust" seat carries kernel soundness probes
+  (the rep is genuinely non-consecutive; `req` genuinely discriminates lists — the kernel DERIVES
+  `oFalse` from a false `req INil (ICons …)`, so it is not the vacuous-True predicate; uniqueness
+  genuinely concludes `r1 = r2`, not the trivial `r1 = r1`). NB the fresh-const discipline: adding
+  zfib/ixlist EXTENDS the theory, so the whole development runs on ONE final context (`ctxtZ`/
+  `ctermZ`) with every reused base lemma re-`varify`'d onto it.
 - **FUNDAMENTAL THEOREM OF ARITHMETIC (existence)** (`isabelle_fta.rs`, 2026-06-13 — the
   finale that FUSES the list theory with the primes machinery): `⊢ ∀n. 2≤n ⟹ ∃ps. all_prime
   ps ∧ product ps = n` — every n≥2 is a product of primes. A 0-hyp theorem by strong
