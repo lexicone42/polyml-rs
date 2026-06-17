@@ -1280,6 +1280,23 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   like euler/criterion). foundation→3-seat→verify ultracode fleet (wf_cf5755d5-b5f, all 3 seats
   incl. the square case); re-verified by hand through the real splice. LEFT: the small cases
   (n=2,3,4) + a single combined-iff wrapper theorem — this proves the dvd-the-factorial heart.
+- **−1 IS A QUADRATIC RESIDUE mod p for p ≡ 1 (mod 4)** (`isabelle_neg1_qr.rs`,
+  `isabelle_neg1_qr.sml`, 2026-06-16 — the Lagrange / First Supplement to Quadratic Reciprocity,
+  easy direction; the GATEWAY to Fermat's two-square theorem): `⊢ prime2 p ⟹ (p−1=4k) ⟹
+  ∃x. cong p (x·x) (p−1)` (and the explicit `wsq : cong p (w·w) (p−1)` with w = ((p−1)/2)!), i.e.
+  for a prime p≡1 mod4, `((p−1)/2)!` is a square root of −1 (≡ p−1) mod p. Both 0-hyp; only
+  classical assumption = `ex_middle`. Proof: m=(p−1)/2 even; **Wilson** (the PROVEN `wilson`, not
+  re-axiomatized) gives (p−1)! ≡ −1; pairing j with p−j gives (p−1)! ≡ (−1)^m·(m!)², and m even
+  kills the sign ⟹ (m!)²≡−1. THE CRUX was the parity-of-product lemma — cracked via the **pair-up**
+  route (`parity_crux`: each pair (p−a)(p−b) ≡ a·b cancels its own signs, NO (−1)^m). Adds
+  `common::with_wilson` (Wilson's theorem on the modular-inverse base) so it banks as a clean
+  ~1146-line delta. foundation→3-seat→verify ultracode fleet (wf_a1850dba-804; all 3 seats, two
+  independent routes — pair-up + signed — converging with a p=5 numeric cross-check); re-verified
+  by hand (60-axiom audit clean: only the conservative foundation + `ex_middle` + the conservative
+  `uprod` recursion; Wilson is the proven theorem; probes confirm it needs prime + p≡1mod4 and the
+  residue is p−1=−1 not 0). LEFT: the converse (p≡3mod4 ⟹ −1 NOT a QR), and piece B of two-square
+  — Thue's pigeonhole descent (`x²≡−1` ⟹ `p=a²+b²`), which needs finite-counting machinery the
+  tower lacks.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values

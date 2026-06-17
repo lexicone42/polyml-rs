@@ -163,6 +163,18 @@ pub fn with_wilson_inverse(delta: &str) -> String {
     with_wilson_pairing(&format!("{wi}\n{delta}"))
 }
 
+/// Prepend Wilson's THEOREM (`isabelle_wilson.sml`: `wilson : prime2 p ⟹
+/// (p−1)! ≡ −1 (mod p)`) on top of the Wilson modular-inverse base, for drivers
+/// that use Wilson's theorem itself (e.g. −1 is a QR mod p for p ≡ 1 mod 4 via
+/// the `((p−1)/2)!` construction).
+pub fn with_wilson(delta: &str) -> String {
+    let w = std::fs::read_to_string(
+        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_wilson.sml"),
+    )
+    .expect("read isabelle_wilson.sml");
+    with_wilson_inverse(&format!("{w}\n{delta}"))
+}
+
 /// Prepend the combinatorial-identities development (`isabelle_combinatorics.sml`:
 /// Pascal row sum, hockey stick, and Vandermonde) on top of the binomial-theorem
 /// base, for drivers that build on those identities (e.g. the central binomial
