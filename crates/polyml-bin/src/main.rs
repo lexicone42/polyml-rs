@@ -14,8 +14,21 @@ use clap::{Parser, Subcommand};
 use polyml_image::pexport::{Image, ObjectBody};
 use polyml_runtime::{
     Interpreter, MemorySpace, PolyWord, RtsTable, StepResult, interpreter::diag::DiagState,
-    length_word, load_image, patch_entry_points,
+    length_word, load_image, loader::LoadedImage, patch_entry_points,
 };
+
+/// Reject an image whose root is not a runnable closure BEFORE any run path
+/// derefs its first word as a code pointer. An untrusted/corrupt image with a
+/// non-closure or mis-pointed root would otherwise wild-deref -> SEGV (found by
+/// loader fuzzing). `load_image` records `runnable`; every run entry point gates
+/// on it here.
+fn ensure_runnable(loaded: &LoadedImage) -> Result<(), Box<dyn std::error::Error>> {
+    loaded
+        .runnable
+        .map_err(|why| -> Box<dyn std::error::Error> {
+            format!("image is not runnable: {why}").into()
+        })
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -262,6 +275,7 @@ fn run_image(
     let bytes = std::fs::read(path)?;
     let image = Image::parse(&bytes)?;
     let mut loaded = load_image(&image)?;
+    ensure_runnable(&loaded)?;
 
     if trace_rts {
         polyml_runtime::rts::set_rts_trace(true);
@@ -662,6 +676,7 @@ fn load(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let image = Image::parse(&bytes)?;
     let loaded = load_image(&image)?;
+    ensure_runnable(&loaded)?;
 
     println!("Loaded {}", path.display());
     println!(
@@ -747,6 +762,7 @@ fn diff_command(
     let bytes = std::fs::read(image_path)?;
     let image = Image::parse(&bytes)?;
     let mut loaded = load_image(&image)?;
+    ensure_runnable(&loaded)?;
 
     let rts = Arc::new(RtsTable::new());
     polyml_runtime::rts::clear_finish_requested();
@@ -879,6 +895,7 @@ fn disasm_command(
     let bytes = std::fs::read(image_path)?;
     let image = Image::parse(&bytes)?;
     let mut loaded = load_image(&image)?;
+    ensure_runnable(&loaded)?;
     let rts = Arc::new(RtsTable::new());
     polyml_runtime::rts::clear_finish_requested();
     let _ = patch_entry_points(&mut loaded, &rts);
@@ -1042,6 +1059,7 @@ fn scan_isolated_command(image_path: &PathBuf) -> Result<ExitCode, Box<dyn std::
     let bytes = std::fs::read(image_path)?;
     let image = Image::parse(&bytes)?;
     let mut loaded = load_image(&image)?;
+    ensure_runnable(&loaded)?;
     let rts = Arc::new(RtsTable::new());
     polyml_runtime::rts::clear_finish_requested();
     let _ = patch_entry_points(&mut loaded, &rts);

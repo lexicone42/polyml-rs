@@ -48,6 +48,13 @@ pub struct LoadedImage {
     /// `PolyWord::ZERO` as a placeholder. Use [`crate::rts::patch_entry_points`]
     /// to fill these with RTS dispatch tokens after load.
     pub entry_points: Vec<(String, *mut PolyWord)>,
+    /// Whether this image is safe to RUN: `Ok(())` iff the root is a closure
+    /// whose code address references a code object (the run path derefs root
+    /// word0 as a code pointer). `Err(reason)` for untrusted/corrupt images that
+    /// would otherwise wild-deref at startup (a loader-fuzz finding). `load_image`
+    /// stays permissive — it loads data-only images too (e.g. in tests) — so the
+    /// run path MUST check this before treating the root as a closure.
+    pub runnable: Result<(), &'static str>,
 }
 
 // Pointers into the loaded heap are necessarily raw — both Send and
@@ -245,6 +252,28 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
         }
     }
 
+    // Record whether this image is RUNNABLE: the run path derefs root word0 as
+    // a code pointer, so the root must be a closure whose code address resolves
+    // to a code object. An untrusted image with a non-closure / mis-pointed root
+    // would otherwise wild-deref (SEGV) at startup — found by loader fuzzing.
+    // We only RECORD it here (load stays permissive for data-only images / tests).
+    let runnable: Result<(), &'static str> = (|| {
+        let root = &image.objects[root_idx];
+        let code_id = match &root.body {
+            ObjectBody::Closure { code_addr, .. } => *code_addr as usize,
+            ObjectBody::LegacyClosure { values } => match values.first() {
+                Some(Value::Ref(id)) => *id as usize,
+                _ => return Err("root legacy-closure has no code-address reference"),
+            },
+            _ => return Err("root object is not a closure"),
+        };
+        match flags_for.get(code_id) {
+            Some(f) if f & 0x03 == F_CODE_OBJ => Ok(()),
+            Some(_) => Err("root closure's code address does not reference a code object"),
+            None => Err("root closure's code address references a missing object"),
+        }
+    })();
+
     let root_ptr: *const PolyWord = pointers[root_idx];
 
     Ok(LoadedImage {
@@ -253,6 +282,7 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
         code,
         root: root_ptr,
         entry_points,
+        runnable,
     })
 }
 
@@ -442,6 +472,21 @@ fn write_bytes_packed(obj_ptr: *mut PolyWord, word_offset: usize, bytes: &[u8]) 
 mod tests {
     use super::*;
     use polyml_image::pexport::Image;
+
+    #[test]
+    fn non_closure_root_is_not_runnable() {
+        // Root index in range but pointing at a NON-closure: load_image SUCCEEDS
+        // (it stays permissive — data-only images load) but `runnable` is Err, so
+        // the run path rejects it instead of wild-derefing word0 as a code
+        // pointer. This is the 28-byte loader-fuzz SEGV repro.
+        let src = b"Objects\t1\nRoot\t0 I 8\n0:O1|0\n";
+        let img = Image::parse(src).unwrap();
+        let loaded = load_image(&img).unwrap();
+        assert!(
+            loaded.runnable.is_err(),
+            "non-closure root must be flagged non-runnable"
+        );
+    }
 
     #[test]
     fn load_minimal_image() {

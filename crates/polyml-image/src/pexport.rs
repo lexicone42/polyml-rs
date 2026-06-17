@@ -637,7 +637,24 @@ fn parse_object_line(c: &mut Cursor<'_>, n_objects: u32) -> Result<(ObjectId, Ob
         }
     };
 
-    // Skip to end of line (the writer always ends with '\n').
+    // The payload must consume the whole line. A lenient skip-to-EOL here would
+    // silently DROP unconsumed content: e.g. `O0|@a,@b` (a 0-tuple with two
+    // trailing refs) would load as an empty tuple, and the interpreter,
+    // field-accessing the original 2-slot shape, reads past the object -> SEGV
+    // (a loader-fuzz finding). Tolerate only trailing spaces/tabs, then require
+    // the line terminator (or EOF); any other trailing byte means the type/count
+    // did not match its payload.
+    c.skip_while(|b| matches!(b, b' ' | b'\t'));
+    match c.peek() {
+        Ok(b'\n' | b'\r') | Err(_) => {}
+        Ok(got) => {
+            return Err(ParseError::Expected {
+                what: "end of object line (payload did not consume the line — type/count mismatch)",
+                at: c.pos,
+                got,
+            });
+        }
+    }
     c.skip_while(|b| !matches!(b, b'\n' | b'\r'));
     Ok((id, Object { flags, body }))
 }
@@ -850,6 +867,22 @@ mod tests {
         assert!(f.contains(ObjFlags::MUTABLE));
         assert!(f.contains(ObjFlags::NO_OVERWRITE));
         assert!(!f.contains(ObjFlags::WEAK));
+    }
+
+    #[test]
+    fn object_line_trailing_content_rejected() {
+        // O0 (a 0-tuple) followed by two trailing refs: the count/payload
+        // mismatch must be a PARSE ERROR, not silently dropped. Dropping them
+        // produced an under-sized object the interpreter then read past -> SEGV
+        // (loader-fuzz finding).
+        let src = b"Objects\t2\nRoot\t1 I 8\n0:O1|7\n1:O0|@0,@0\n";
+        assert!(
+            Image::parse(src).is_err(),
+            "trailing payload after O0 must be rejected"
+        );
+        // The well-formed version (matching count) still parses.
+        let ok = b"Objects\t2\nRoot\t1 I 8\n0:O1|7\n1:O2|@0,@0\n";
+        assert!(Image::parse(ok).is_ok(), "well-formed O2 must still parse");
     }
 
     #[test]
