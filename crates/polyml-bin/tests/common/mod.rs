@@ -74,6 +74,18 @@ pub fn with_nt_helpers(delta: &str) -> String {
     format!("{helpers}\n{delta}")
 }
 
+/// Prepend Euclid's-theorem development (`isabelle_euclid.sml`: `fact` (n!),
+/// `fact_pos`, `dvd_fact`, `consec_coprime`, and the infinitude of primes) on
+/// top of the classical foundation, for drivers that build on the factorial /
+/// Euclid machinery (e.g. infinitely many primes ≡ 3 mod 4).
+pub fn with_euclid(delta: &str) -> String {
+    let euclid = std::fs::read_to_string(
+        workspace_root().join("crates/polyml-bin/tests/isabelle_support/isabelle_euclid.sml"),
+    )
+    .expect("read isabelle_euclid.sml");
+    with_nt_helpers(&format!("{euclid}\n{delta}"))
+}
+
 /// Prepend the UNIFIED number-theory base to a driver `delta`: the classical
 /// foundation (`isabelle_nt_helpers.sml`) PLUS the `isabelle_ntbase.sml`
 /// additions — the division theorem (`div_mod_exists`), Euclid, Euclid's lemma,

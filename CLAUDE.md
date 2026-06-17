@@ -1326,6 +1326,20 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   self-derived Isabelle number theory now runs: object logic → Peano → semiring → summation
   → order → divisibility → strong induction → classical FOL → genuine prime-divisor →
   **Euclid's theorem**, all on the Rust PolyML interpreter.
+- **INFINITELY MANY PRIMES ≡ 3 (mod 4)** (`isabelle_primes_3mod4.rs`,
+  `isabelle_primes_3mod4.sml`, 2026-06-16 — the classical baby case of Dirichlet's theorem on
+  primes in arithmetic progressions, one rung above Euclid): `⊢ ∀n. ∃q. prime2 q ∧ n < q ∧
+  q ≡ 3 (mod 4)` (mod-4 encoded additively as `∃t. q = 4·t + 3`; n<q is genuine strict order).
+  0-hyp, only classical assumption = `ex_middle`. Euclid-style: N = 4·n!−1 = 4·(n!−1)+3 ≡ 3 mod4,
+  N>1; the KEY LEMMA (strong induction) — a number ≡3 mod4 with m>1 has a prime factor ≡3 mod4,
+  because a product of `≡1`-factors stays `≡1` (`mul_r3_split`) — gives a prime q≡3 mod4 dividing
+  N; q>n via `dvd_fact` + `consec_coprime` (q≤n ⟹ q∣n! ∧ q∣4n!=N+1 ⟹ q∣1). Built on the new
+  `common::with_euclid` splice (the factorial / `dvd_fact` / `consec_coprime` machinery on the
+  classical-primes foundation) by a foundation→3-seat→verify ultracode fleet (wf_e8b99c4e-d3e,
+  all 3 seats); re-verified by hand (1.18B steps, Tagged(0), 30-axiom audit clean, 3 soundness
+  probes confirming the n<q orientation + mod-4 + primality conjuncts are genuinely present).
+  Scope: the elementary 3-mod-4 case only (the ≡1-mod-4 companion needs −1-is-a-QR, beyond
+  Euclid; full Dirichlet needs L-functions).
 - **√2 IS IRRATIONAL** (`isabelle_sqrt2.rs`, 2026-06-13 — the companion capstone):
   `⊢ ¬(∃a. 0<a ∧ ∃b. a·a = 2·(b·b))` — no positive naturals a,b with a²=2b². A 0-hyp
   theorem by INFINITE DESCENT via strong induction; only classical assumption = excluded
