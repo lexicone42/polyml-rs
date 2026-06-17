@@ -1266,6 +1266,20 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   steps, Tagged(0), all EC_*_OK + PROBE_OK markers, zero exceptions). **NOT proved: the REVERSE
   (a^m≡1 ⟹ a is a QR), the harder half of the full iff — needs a primitive-root/roots-counting
   argument** (the gateway toward quadratic reciprocity). Self-contained driver (run directly).
+- **WILSON'S CONVERSE** (`isabelle_wilson_converse.rs`, `isabelle_wilson_converse.sml`,
+  2026-06-16): `⊢ composite n ⟹ 4 < n ⟹ dvd n (factorial n)` — every composite n>4 divides
+  (n−1)! (so (n−1)! ≡ 0, not −1, mod n). With Wilson's theorem this is the non-trivial half of
+  the primality characterization **n prime ⟺ (n−1)! ≡ −1 (mod n)** (the n=4 exception, 3!=6≡2,
+  is excluded by 4<n). A 0-hyp theorem that adds **NO new axioms** (the delta is purely derived
+  over the base; only classical assumption = the base's single `ex_middle`). ELEMENTARY proof
+  (does NOT use Wilson's theorem): a composite has a proper divisor a with cofactor b (n=a·b),
+  both in [1..n−1]; KEY LEMMA = two DISTINCT list members x≠y ⟹ `dvd (mult x y) (lprod L)` (via
+  `extract` twice); perfect-square case n=a² uses a and 2a (distinct, both <n iff n>4). FIRST
+  CLEAN SPLICE in the recent summits: built on `common::with_wilson_inverse` (has lprod/upto/
+  extract/lremove/dvd), so it banks as a small ~668-line DELTA (not a self-contained monolith
+  like euler/criterion). foundation→3-seat→verify ultracode fleet (wf_cf5755d5-b5f, all 3 seats
+  incl. the square case); re-verified by hand through the real splice. LEFT: the small cases
+  (n=2,3,4) + a single combined-iff wrapper theorem — this proves the dvd-the-factorial heart.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
