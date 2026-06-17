@@ -868,7 +868,16 @@ fn diff_command(
     println!("{}", report.pretty());
     if report.matches {
         Ok(ExitCode::SUCCESS)
+    } else if report.interp_err.is_some() {
+        // The interpreter errored FIRST (e.g. NotAClosure on a bad-arg deref),
+        // so the JIT was deliberately SKIPPED (jit_result is a fabricated 0, not
+        // a real JIT output). This is NOT a JIT divergence — emit a distinct
+        // exit code so the isolated scanner buckets it as "interp-errored / JIT
+        // skipped" rather than mislabelling it a divergence (the false-positive
+        // class the JIT-differential triage flagged, wf_fa3f34cd-e6c).
+        Ok(ExitCode::from(3))
     } else {
+        // Both engines ran and disagreed: a genuine JIT-vs-interp divergence.
         Ok(ExitCode::from(2))
     }
 }
@@ -1088,6 +1097,7 @@ fn scan_isolated_command(image_path: &PathBuf) -> Result<ExitCode, Box<dyn std::
     let mut segv = 0usize;
     let mut timeout_n = 0usize;
     let mut other = 0usize;
+    let mut errored = 0usize;
     let mut diverged: Vec<(usize, i64, String)> = Vec::new();
 
     let scan_start = std::time::Instant::now();
@@ -1125,6 +1135,9 @@ fn scan_isolated_command(image_path: &PathBuf) -> Result<ExitCode, Box<dyn std::
                     eprintln!("  idx={idx:4} arg={arg:7} → DIVERGENCE");
                 }
                 (None, Some(11)) | (Some(139), _) => segv += 1,
+                // exit 3 = interp errored first, JIT skipped — NOT a divergence
+                // (see diff_command). Bucket separately so it isn't mislabelled.
+                (Some(3), _) => errored += 1,
                 (None, _) if output.status.success() => other += 1,
                 (Some(124), _) => timeout_n += 1,
                 _ => other += 1,
@@ -1147,7 +1160,8 @@ fn scan_isolated_command(image_path: &PathBuf) -> Result<ExitCode, Box<dyn std::
     let elapsed = scan_start.elapsed();
     println!(
         "Isolated scan: tested {tested} in {:.1}s — matched {matched}, \
-         diverged {}, SEGV {segv}, timeout {timeout_n}, other {other}",
+         diverged {}, interp-errored/JIT-skipped {errored}, SEGV {segv}, \
+         timeout {timeout_n}, other {other}",
         elapsed.as_secs_f64(),
         diverged.len(),
     );
