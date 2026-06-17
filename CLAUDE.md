@@ -560,7 +560,15 @@ form. So we reproduce upstream's stage-0 behavior *including its bug, byte for
 byte* — the strongest faithfulness statement available. The corpus `intinf`
 divergence is an artifact of comparing our stage-0-built basis against their
 stage-N-built poly. See `docs/differential-oracle-2026-06-09.md` (RESOLVED
-section). The interp-vs-JIT differential is clean (40/40).
+section). The interp-vs-JIT differential is clean: **scaled from 40/40 to all 727
+installed functions × varied args (1201 (fn,args) tests, 2026-06-17, ultracode
+wf_fa3f34cd-e6c) — ZERO real JIT translation bugs.** That run also fixed a harness
+false-positive (`poly diff` now exits 3 for an interp-error short-circuit vs 2 for
+a genuine both-ran divergence; commit 41688de) and documented a coverage GAP: the
+JIT's exception-flow opcodes (RAISE_EX/PUSH_HANDLER/SET_HANDLER) are coverage-only
+stubs and the differential's interp-first short-circuit MASKS them, so it cannot
+detect a wrong-value bug on an exception-raising path (not triggered in the
+installed set; relates to the LDEXC install-stub note, task #96).
 
 A bytecode dumper (`/tmp/dump.sml` pattern: closure word0 → code obj →
 `RunCall.loadByte`) + the `disasm` module (`crates/polyml-runtime/src/interpreter/
