@@ -1295,8 +1295,26 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   by hand (60-axiom audit clean: only the conservative foundation + `ex_middle` + the conservative
   `uprod` recursion; Wilson is the proven theorem; probes confirm it needs prime + p≡1mod4 and the
   residue is p−1=−1 not 0). LEFT: the converse (p≡3mod4 ⟹ −1 NOT a QR), and piece B of two-square
-  — Thue's pigeonhole descent (`x²≡−1` ⟹ `p=a²+b²`), which needs finite-counting machinery the
-  tower lacks.
+  — Thue's pigeonhole descent (`x²≡−1` ⟹ `p=a²+b²`), which needed finite-counting machinery the
+  tower lacked — **NOW BUILT** (see THUE'S LEMMA below).
+- **THUE'S LEMMA** (`isabelle_thue.rs`, `isabelle_thue.sml`, 2026-06-17 — the pigeonhole gateway to
+  Fermat's two-square theorem): `⊢ 0<p ⟹ ∃s x1 x2 y1 y2. (s²≤p ∧ p<(s+1)²) ∧ x1≤s ∧ x2≤s ∧ y1≤s ∧
+  y2≤s ∧ ¬(x1=x2 ∧ y1=y2) ∧ cong p (x1 + a·y2) (x2 + a·y1)` — for the given a there are two DISTINCT
+  points in the [0..s]² grid (s=⌊√p⌋) whose `i + a·(s−j)` residues collide mod p (the ℕ-friendly,
+  subtraction-free collision form: X=x1−x2, Y=y1−y2 give X≡a·Y, |X|,|Y|≤s<√p, not both 0). 0-hyp;
+  only classical assumption = `ex_middle`. Required NEW machinery the tower lacked, all kernel-proved:
+  **`floor_sqrt`** (integer √, `∃s. s²≤n<(s+1)²` by induction), a list **`list_pigeonhole`**, a
+  `[0..m−1]` range list, and the crux **image-collision pigeonhole** (`dup_gridres`) — proved
+  DIRECTLY for the concrete residue recursion (NOT an axiomatized `Free f`, which would be unsound)
+  by the "minus-one-value" induction. Built on `common::with_wilson_pairing` (`cong` + the `natlist`
+  lib, without the heavy Wilson theorem) by TWO ultracode fleets: wf_010172c9-d24 built the infra +
+  bridge + `collision_exists` (the residue list has a duplicate); wf_67a27224-97d closed the
+  image-collision pigeonhole + packaged the existential (all 3 seats, two routes). Re-verified by hand
+  (byte-identical re-derivation, Tagged(0), 55-axiom audit clean, aconv + 0-hyp + distinctness/
+  non-degeneracy probes; a fleet caught + corrected a latent `rearrange` bug → `rearrange2`). NEXT
+  (the dream): Fermat two-square — instantiate Thue at an a with a²≡−1 (banked: `isabelle_neg1_qr` for
+  p≡1 mod4), giving u²+v²≡0 mod p with 0<u²+v²<2p ⟹ p=u²+v². Reachable on `with_wilson` (extends this
+  base with Wilson's theorem) + the banked neg1_qr; the hard combinatorial core (the pigeonhole) is done.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
