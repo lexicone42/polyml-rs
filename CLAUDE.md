@@ -1315,6 +1315,21 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   (the dream): Fermat two-square — instantiate Thue at an a with a²≡−1 (banked: `isabelle_neg1_qr` for
   p≡1 mod4), giving u²+v²≡0 mod p with 0<u²+v²<2p ⟹ p=u²+v². Reachable on `with_wilson` (extends this
   base with Wilson's theorem) + the banked neg1_qr; the hard combinatorial core (the pigeonhole) is done.
+- **FERMAT'S TWO-SQUARE THEOREM** (`isabelle_twosquare.rs`, `isabelle_twosquare.sml`, 2026-06-17
+  — A CROWN JEWEL): `⊢ prime2 p ⟹ (p−1 = 4k) ⟹ ∃a b. p = a²+b²` — every prime p ≡ 1 (mod 4) is a
+  sum of two squares (13=2²+3², 29=2²+5², …), a landmark of elementary number theory, machine-checked
+  on the self-bootstrapped Rust PolyML interpreter. 0-hyp over the GENUINE structural prime; only
+  classical assumption = `ex_middle`. The classical proof, assembled from the banked cores: Wilson ⟹
+  `((p−1)/2)!² ≡ −1` so −1 is a QR (`isabelle_neg1_qr`); **Thue's lemma** (`isabelle_thue`) ⟹ a
+  nontrivial collision `x₁+c·y₂ ≡ x₂+c·y₁`; the descent U=|x₁−x₂|, V=|y₁−y₂| give `U²≡c²V²≡−V²` so
+  `p∣U²+V²`, and with `0<U²+V²<2p` (needs "a prime is not a perfect square", `not_square`) the only
+  multiple of p in range forces `U²+V²=p`. Built by a foundation→2-seat→verify ultracode fleet
+  (wf_737ad703-71d; both seats proved it independently, identical conservative 67-axiom base). The
+  driver is SELF-CONTAINED (embeds the full Wilson+QR+Thue chain with one clashing axiom renamed
+  during the splice → `rmod_lt_th`), run directly. Re-verified by hand (Tagged(0), aconv + 0-hyp;
+  soundness probes confirm it needs the prime hyp + p≡1mod4 and the conclusion is genuinely a SUM of
+  two squares; Thue/QR/Wilson are USED as proven lemmas, residue stays concrete). The campaign was
+  THREE fleets: Thue infra+bridge → close the image-collision pigeonhole → the two-square descent.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
