@@ -522,8 +522,14 @@ run`, diff the results. Any difference is a faithfulness bug in OUR port.
   the backend source).
 - `tools/diff-oracle.sh [--dir <d>] <file.sml ...>` runs each snippet through
   both and compares `@@<label>=<value>` lines (the filter strips REPL chatter).
-- `tools/diff-corpus/*.sml` — ~1600 deterministic comparisons across 45 files
-  (30 Basis categories + compiler-stress programs, incl. `cstress_heavy.sml`:
+- `tools/diff-corpus/*.sml` — ~18K deterministic comparisons across 51 files.
+  Includes 5 **deterministic LCG fuzz drivers** (`fuzz_{intinf,int,word,real,convert}.sml`,
+  2026-06-17) — a seeded PRNG generates ~16K random arithmetic cases (305/4457/7697/657/2880),
+  each op run BOTH inline (opcode path) and ref-forced (`I a OP I b`, the RTS Poly*Arbitrary
+  path), all byte-identical to native upstream — the standing fence for the
+  PolySubtractArbitrary-negation class (commit dcdbbd4) and any opcode-vs-RTS arithmetic
+  discrepancy. Plus `intinf_rts_arith.sml` (targeted RTS-path subtraction fence). And the rest:
+  30 Basis categories + compiler-stress programs, incl. `cstress_heavy.sml`:
   heavy-compute stress — Ackermann/naive-fib call storms, 100k-deep mutual TCO,
   bignum factorials/powers/gcd/powmod + GC pressure, 100k-element folds, and
   exception raise/handle loops — all byte-identical to upstream). Run:
