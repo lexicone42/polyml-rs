@@ -1250,6 +1250,22 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   onto `with_wilson_inverse` + isabelle_euler_foundations.sml is a tracked follow-up. With Wilson,
   FLT, Euclid, √2, FTA, CRT, this rounds out the landmark theorems of elementary number theory on
   the Rust interpreter.
+- **EULER'S CRITERION (±1 dichotomy + QR-forward)** (`isabelle_euler_criterion.rs`,
+  `isabelle_euler_criterion.sml`, 2026-06-16): for an ODD prime p (p−1 = 2m) coprime to a,
+  **`a^((p−1)/2) ≡ ±1 (mod p)`** — `⊢ prime2 p ⟹ ¬(dvd p a) ⟹ oeq (sub p 1)(add m m) ⟹
+  Disj (cong p (pow a m) 1) (cong p (Suc (pow a m)) 0)` (−1 as `Suc(a^m)≡0` to dodge truncated ℕ
+  sub) — plus **QR-forward** `(∃x. cong p (mult x x) a) ⟹ cong p (pow a m) 1` (a quadratic residue
+  forces +1). Both 0-hyp; only classical assumption = `ex_middle`; 38-axiom audit clean (no axiom
+  mentions cong/criterion/lagrange). Proof: y=a^m, y·y = a^(m+m) = a^(p−1) ≡ 1 (Fermat-for-units
+  `apm1`), so `lagrange_roots` (only sqrt of 1 mod a prime are ±1) ⟹ y≡1 ∨ y≡−1. THE
+  BASE-COMPOSITION UNLOCK: Fermat (isabelle_flt) and `lagrange_roots` (isabelle_mult_group) live in
+  different branches; the foundation re-derives `mod_cancel`+`lagrange_roots` on the **flt base**
+  (both euclid_lemma-based, lighter than euler's 3.3B-step base) so Fermat-power-algebra + lagrange +
+  pow/cong coexist in one context. Built by a foundation→3-seat→verify ultracode fleet
+  (wf_0415115b-1a5, all 3 seats proved dichotomy+QR-forward); **re-verified by hand** (2,184,717,059
+  steps, Tagged(0), all EC_*_OK + PROBE_OK markers, zero exceptions). **NOT proved: the REVERSE
+  (a^m≡1 ⟹ a is a QR), the harder half of the full iff — needs a primitive-root/roots-counting
+  argument** (the gateway toward quadratic reciprocity). Self-contained driver (run directly).
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
