@@ -63,10 +63,13 @@ if [ "$MODE" = "full" ]; then
 
   echo; echo "--- differential vs upstream PolyML (if oracle built) ---"
   if [ -x /tmp/polybuild/poly ] && [ -f /tmp/basis_loaded ]; then
-    # 11/12 expected: the lone known divergence is the basis-compiled
-    # IntInf.andb compiler bug (docs/differential-oracle-2026-06-09.md).
+    # 53/55 expected: the only known divergences are the basis-compiled
+    # IntInf.andb/orb stage-0 compiler bug (intinf.sml + intinf_bitwise_order.sml,
+    # the same andb(~1,2^80) family — docs/differential-oracle-2026-06-09.md).
+    # Includes the generative fuzz_{int,word,real,intinf,convert} (numerics) +
+    # fuzz_{list,string,array,vector} (structures, ~53.7K cases) drivers.
     tools/diff-oracle.sh --dir tools/diff-corpus || \
-      echo "  (differential reported divergences — expected: intinf.sml andb, else investigate)"
+      echo "  (differential reported divergences — expected: 2 intinf andb/orb stage-0, else investigate)"
   else
     echo "  (skipped — build the oracle: tools/build-oracle.sh)"
   fi
