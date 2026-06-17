@@ -2029,8 +2029,15 @@ fn poly_subtract_arbitrary(
     arg1: PolyWord,
     arg2: PolyWord,
 ) -> PolyWord {
-    // Upstream order: result = arg2 - arg1 (arb_binop already mirrors that).
-    arb_binop(ctx, arg1, arg2, i128::checked_sub, |a, b| a - b)
+    // Subtraction is NOT commutative. Upstream PolySubtractArbitrary(arg1, arg2)
+    // computes arg1 - arg2: sub_longc(taskData, pushedArg2, pushedArg1) returns
+    // x - y = pushedArg1 - pushedArg2 (arb.cpp:907/1702). Since `arb_binop(P1, P2,
+    // op)` computes op(P2, P1), we must pass (arg2, arg1) to get arg1 - arg2.
+    // Passing (arg1, arg2) computed arg2 - arg1 — the NEGATION — a real bug found
+    // by upstream Tests/Succeed/Test101.ML (the RTS path; the bytecode opcode
+    // arb_sub_pair was already correct). add/mult are commutative so their order
+    // is irrelevant; div/rem hand-roll the order below.
+    arb_binop(ctx, arg2, arg1, i128::checked_sub, |a, b| a - b)
 }
 
 #[allow(clippy::needless_pass_by_value)]
