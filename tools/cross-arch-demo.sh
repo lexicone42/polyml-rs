@@ -14,10 +14,18 @@
 # Usage:
 #   tools/cross-arch-demo.sh            # build aarch64 poly + run the demos
 #   tools/cross-arch-demo.sh --build    # only cross-build the aarch64 binary
+# Env:
+#   CROSS_CONTAINER_ENGINE=podman   # if docker has no daemon (cross default is docker)
+#   CROSS_CONTAINER_OPTS=-i         # set below: forwards host stdin into the
+#                                   # container so M3b's piped REPL input reaches qemu
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 TARGET=aarch64-unknown-linux-gnu
+# `cross run` does NOT forward host stdin into the container by default, so a
+# piped REPL (M3b: `echo … | cross run`) hits EOF and compiles nothing. Pass -i
+# to the container engine so stdin is forwarded. (Caller-overridable.)
+export CROSS_CONTAINER_OPTS="${CROSS_CONTAINER_OPTS:--i}"
 BOOTSTRAP=vendor/polyml/bootstrap/bootstrap64.txt
 POLYEXPORT=vendor/polyml/polyexport   # self-bootstrapped full image (optional)
 

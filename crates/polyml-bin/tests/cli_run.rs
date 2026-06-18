@@ -52,9 +52,15 @@ fn run_with_stdin_args_and_jit(
     cwd: Option<&std::path::Path>,
 ) -> Result<(String, String), std::io::Error> {
     let Some(image) = bootstrap_image() else {
-        return Ok((
-            String::new(),
-            String::from("SKIP: bootstrap image not present"),
+        // No vendor image (e.g. a fresh clone): signal SKIP via Err so every
+        // caller's `let Ok(..) = run_with_stdin(..) else { return }` guard fires
+        // and the test skips cleanly. Returning Ok(("", "SKIP")) here used to
+        // slip the placeholder past the guard, making image-dependent tests
+        // (type-error / PolyML.print) assert on the SKIP string and FAIL on a
+        // fresh `cargo test`.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "SKIP: bootstrap image not present",
         ));
     };
     let mut cmd = Command::new(poly_bin());
