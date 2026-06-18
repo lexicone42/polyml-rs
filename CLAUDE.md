@@ -1360,13 +1360,21 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   material in `tests/isabelle_support/four_square_resume/`): PART B back-end `pm_from_cong`
   (`cong p N 0 ⟹ 0<N ⟹ N<p·p ⟹ four_sq N ⟹ ∃m. 0<m∧m<p∧four_sq(m·p)`) + PART C front-end
   `sym_residue_thm` (the symmetric residue lemma) + `four_residue_sum_thm` (the m·r decomposition).
-  **OPEN cruxes** (the two number-theoretic hearts; plan in `docs/four-square-progress-2026-06-17.md`):
-  (1) PART B front-end = the residue-set pigeonhole `∃a b. cong p (a²+b²+1) 0` for an odd prime —
-  structurally the SAME Thue image-collision pigeonhole (`dup_gridres`/`list_pigeonhole`); feeds the
-  proven `pm_from_cong`; (2) PART C descent step `1<m ⟹ four_sq(m·p) ⟹ ∃m2<m. four_sq(m2·p)` — from
-  the proven `four_residue_sum`, needs r=0 exclusion + r<m + the EXPENSIVE Euler-identity
-  divide-by-m² (proveStarFor on real witnesses ~13 min). Then iterate to m=1 and discharge the
-  assembly. A follow-up workflow (2 prove-seats on the resume base) closes it.
+  **2026-06-18 UPDATE (descent workflow wf_d352530c-63b — PART B DONE, PART C keystone DONE):**
+  PART B is now CLOSED — `pigeon_thm` (`prime2 p ⟹ p=2m+1 ⟹ ∃a b. a≤m∧b≤m∧cong p (a²+b²+1) 0`, the
+  residue-set pigeonhole via Thue's `list_pigeonhole`) + `primemult_thm` (`prime2 p ⟹ p=2m+1 ⟹ ∃m'.
+  0<m'∧m'<p∧four_sq(m'·p)`, composing with `pm_from_cong`): **every odd prime has a four-square
+  multiple**. Both 0-hyp, aconv, probed (`L4_PARTB_ALL_OK`); resume `partB_frontend_delta.sml` (+4
+  conservative axioms for the `bres`/`fdec` helpers); re-verified by hand. PART C keystone proved:
+  `sym_residue_signed` (`0<m ⟹ ∃a'. (cong m a' a ∨ cong m (a'+a) 0) ∧ a'+a'≤m`; resume
+  `partC_keystone_signed_delta.sml`, standalone `sr_full.sml` `SR_SIGNED_OK`). **KEY DIAGNOSTIC:** the
+  originally-banked `sym_residue_thm`/`four_residue_sum_thm` give only the SQUARED congruence
+  `a'²≡a² (mod m)`, which is too weak for the descent (r=0 exclusion needs `a'=0⟹m∣a` but m isn't
+  prime, so `m∣a²` ⊬ `m∣a`; the Euler divide needs per-coordinate sign divisibility) — both need the
+  SIGNED `a'≡±a (mod m)` (mirrors `isabelle_twosquare`'s pos/neg descent split). The signed keystone
+  is the right missing piece. **REMAINING** (the large open piece, plan in
+  `docs/four-square-progress-2026-06-17.md`): signed `four_residue_sum` → r=0 exclusion → r<m →
+  Euler divide-by-m² (`proveStarFor`, ~13 min/call) → iterate to m=1 → discharge `lagrange_assembly`.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values

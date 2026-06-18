@@ -1,4 +1,49 @@
-# Lagrange's four-square theorem — progress (2026-06-17)
+# Lagrange's four-square theorem — progress (2026-06-17, updated 2026-06-18)
+
+Staged ultracode campaign (wf_abb7c4f3-0ba, then wf_d352530c-63b) toward
+`⊢ ∀n. ∃a b c d. n = a²+b²+c²+d²` on the Isabelle/Pure interpreter. The full
+theorem is **NOT yet proved**; the graceful floor banked four genuine 0-hyp
+results, with the remaining descent step cleanly scoped below.
+
+## 2026-06-18 UPDATE (descent workflow wf_d352530c-63b) — Part B DONE, Part C keystone DONE
+
+The descent workflow advanced the two cruxes and landed one of them in full:
+
+- **PART B — PROVED** (both 0-hyp, aconv, soundness-probed; resume
+  `partB_frontend_delta.sml`; re-verified by hand `L4_PARTB_ALL_OK`, Tagged(0)):
+  - `pigeon_thm`    : `prime2 p ⟹ p = 2m+1 ⟹ ∃a b. a≤m ∧ b≤m ∧ cong p (a²+b²+1) 0`
+    (the residue-set pigeonhole, via Thue's `list_pigeonhole`; +4 conservative
+    recursion/case-def axioms for the helper consts `bres`/`fdec`).
+  - `primemult_thm` : `prime2 p ⟹ p = 2m+1 ⟹ ∃m'. 0<m' ∧ m'<p ∧ four_sq (m'·p)`
+    (composes `pigeon_thm` with the proven `pm_from_cong`). **Every odd prime has
+    a four-square multiple** — Part B is closed.
+- **PART C keystone — PROVED** (`sym_residue_signed`, 0-hyp, aconv; resume
+  `partC_keystone_signed_delta.sml`; standalone `sr_full.sml` re-verified
+  `SR_SIGNED_OK`, Tagged(0)):
+  `0<m ⟹ ∃a'. (cong m a' a ∨ cong m (a'+a) 0) ∧ a'+a' ≤ m`.
+- **KEY DIAGNOSTIC (why the descent stalled, now corrected):** the *originally*
+  banked `sym_residue_thm`/`four_residue_sum_thm` deliver only the **squared**
+  congruence `a'²≡a² (mod m)`, which is **strictly too weak** for the descent:
+  the r=0 exclusion needs `a'=0 ⟹ m∣a` (and m is NOT prime here, so `m∣a²` does
+  not give `m∣a`), and the Euler divide-by-m² needs per-coordinate sign
+  divisibility — both require the **signed** relation `a'≡±a (mod m)`. This
+  mirrors `isabelle_twosquare.sml`'s descent, which genuinely splits into
+  `pos_descent` (`cong p U (c·V)`) and `neg_descent` (`cong p (U+c·V) 0`). So the
+  new signed keystone is the *right* missing piece, not a detour.
+
+REMAINING (precise, the genuinely large open piece): from `sym_residue_signed`,
+(a) build a **signed `four_residue_sum`** (thread the per-coordinate ± disjunction
+through all four coordinates → `a'²+b'²+c'²+d'² = m·r` with the SIGNED residues),
+(b) the **r=0 exclusion** (`a'=…=d'=0 ⟹ m∣a,b,c,d ⟹ m²∣m·p ⟹ m∣p`, contra),
+(c) **r<m**, (d) the **Euler divide-by-m²** (`(m·p)(m·r)=w²+x²+y²+z²` via
+`proveStarFor`, `m∣w,x,y,z`, divide → `four_sq(r·p)`), then iterate the descent
+to m=1 (`four_sq p`) and discharge `lagrange_assembly`. (c)/(d) are the
+expensive ring-procedure steps (~13 min/`proveStarFor` call).
+
+(Original 2026-06-17 status below; superseded where it lists Part B / the keystone
+as open.)
+
+---
 
 Staged ultracode campaign (wf_abb7c4f3-0ba) toward
 `⊢ ∀n. ∃a b c d. n = a²+b²+c²+d²` on the Isabelle/Pure interpreter. The full
