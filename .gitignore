@@ -22,3 +22,7 @@ vendor/hol4/
 
 # Claude Code tool state
 .claude/
+
+# genprog working output (reproducible from tools/diff-corpus-gen/*.sml;
+# the VETTED bundles live under tools/diff-corpus/, which IS tracked)
+tools/diff-corpus-gen/out/
