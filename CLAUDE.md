@@ -1344,6 +1344,29 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   soundness probes confirm it needs the prime hyp + p≡1mod4 and the conclusion is genuinely a SUM of
   two squares; Thue/QR/Wilson are USED as proven lemmas, residue stays concrete). The campaign was
   THREE fleets: Thue infra+bridge → close the image-collision pigeonhole → the two-square descent.
+- **TOWARD LAGRANGE'S FOUR-SQUARE THEOREM — the proved core** (`isabelle_four_square.rs`,
+  `isabelle_four_square.sml`, 2026-06-17): the full theorem `⊢ ∀n. ∃a b c d. n = a²+b²+c²+d²` is
+  **NOT yet proved**; a staged ultracode campaign (wf_abb7c4f3-0ba) with a graceful floor banked two
+  genuine 0-hyp results and cleanly scoped the two open cruxes. **PROVED + fenced**: (A) **Euler's
+  four-square IDENTITY / multiplicativity** `four_sq_mult : ⊢ four_sq m ⟹ four_sq n ⟹ four_sq (m·n)`
+  (the product of two sums of four squares is a sum of four squares; `four_sq k := ∃a b c d.
+  k=a²+b²+c²+d²`, an object existential, NOT an axiom — proved by a ring-over-ℕ decision procedure
+  `proveStarFor`/`proveIdentityG` with absdiff handling the signed cross terms w,x,y,z); (B) the
+  **multiplicative-closure REDUCTION** `lagrange_assembly : ⊢ (⋀p. prime2 p ⟹ four_sq p) ⟹ (⋀n.
+  four_sq n)` (IF every prime is a sum of four squares THEN every natural is, via prime_cases +
+  strong_induct + four_sq_mult). Both 0-hyp, aconv, soundness-probed; markers `L4_IDENTITY_ALL_OK` /
+  `L4_ASM_ALL_OK`. Self-contained driver (embeds the two-square base) run directly; 0 new axioms over
+  the 67-axiom conservative base; only classical assumption = ex_middle. **ALSO proved** (resume
+  material in `tests/isabelle_support/four_square_resume/`): PART B back-end `pm_from_cong`
+  (`cong p N 0 ⟹ 0<N ⟹ N<p·p ⟹ four_sq N ⟹ ∃m. 0<m∧m<p∧four_sq(m·p)`) + PART C front-end
+  `sym_residue_thm` (the symmetric residue lemma) + `four_residue_sum_thm` (the m·r decomposition).
+  **OPEN cruxes** (the two number-theoretic hearts; plan in `docs/four-square-progress-2026-06-17.md`):
+  (1) PART B front-end = the residue-set pigeonhole `∃a b. cong p (a²+b²+1) 0` for an odd prime —
+  structurally the SAME Thue image-collision pigeonhole (`dup_gridres`/`list_pigeonhole`); feeds the
+  proven `pm_from_cong`; (2) PART C descent step `1<m ⟹ four_sq(m·p) ⟹ ∃m2<m. four_sq(m2·p)` — from
+  the proven `four_residue_sum`, needs r=0 exclusion + r<m + the EXPENSIVE Euler-identity
+  divide-by-m² (proveStarFor on real witnesses ~13 min). Then iterate to m=1 and discharge the
+  assembly. A follow-up workflow (2 prove-seats on the resume base) closes it.
 - **STRONG INDUCTION + STRICT LINEAR ORDER + PRIMALITY** (`isabelle_primes.rs`,
   2026-06-12, the top of the ladder). FULLY GENUINE (0-hyp, pure kernel, no axioms
   beyond the ladder's Peano/discrimination set): **`strong_induct`** — course-of-values
