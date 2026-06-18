@@ -294,6 +294,27 @@ basis load under --jit Tagged(0) (the gate that was failing), and a
 JIT==interp differential with a negative control
 (`tests/tail_b_b_differential.rs`).
 
+**UPDATE 2026-06-18 — the "JIT cannot win" verdict below is REFUTED at the
+margin (deep-dive wf_d6d6e506-2e5, docs/jit-feasibility-2026-06-18.md).** The
+~5%-slower number is for the DEFAULT install set, which is the *cold periphery*.
+Actually installing the HOT functions flips it: +#1 hottest (7.4% of steps) →
+2.9% FASTER than interp; +5 hot fns (~18% step coverage) → **4.7% faster
+(1.047×), all Tagged(0)**. The trampoline boundary is **35.6 ns/call — CHEAPER
+than the interpreter's own 42 ns frame setup** (crossover 7.3 steps/call; hot fns
+average 37.5), so physics is NOT the wall. The real blockers are tractable bugs:
+(1) the install filter's `bc.contains(&0x16)` FALSE-POSITIVELY flags CONST_ADDR
+immediate bytes as CALL_LOCAL_B and rejects the #1 hottest fn (fix = make the
+scan instruction-boundary-aware); (2) naive "install all hot" REGRESSES because a
+call-heavy fn (#4) is net-NEGATIVE under the Vec-allocating trampoline (fix = a
+per-function net-benefit gate); (3) the CALL_CONST_ADDR SEGV is an unisolated
+multi-fn INTERACTION bug (curated installs are correct). PHASE 0 (~1wk, low-risk):
+boundary-aware filter + net-benefit gate + halve the boundary (stack array instead
+of args_buf Vec; FxHash/pointer-map instead of SipHash jit_cache). The win is
+MODEST (single-digit %, ~1.3–2× ceiling), not "native speed" — bicimage should be
+gated on a measured >1.5× after Phase 0, else pursue whole-region compilation. The
+2026-06-12 analysis below is kept for its coverage detail but its "uncertain payoff
+/ multi-front" pessimism is superseded by the measured result.
+
 **PERF REALITY CHECK (measured 2026-06-12 — read before doing ANY more
 JIT perf work).** `--jit` with 727 installs is ~5% SLOWER than the plain
 interpreter on the basis load (25.2s vs 24.1s, 3 runs each). Two levers
