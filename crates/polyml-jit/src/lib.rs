@@ -19,6 +19,224 @@ pub mod translate;
 #[cfg(test)]
 mod bench;
 
+/// The set of "blocker" opcodes whose JIT translations we don't yet
+/// fully trust at install time. A function whose bytecode contains any
+/// of these *at a real instruction boundary* is left in the
+/// interpreter (see `install_all_jit_entries`).
+mod blocker_opcodes {
+    use polyml_runtime::interpreter::opcodes::*;
+    pub const CALL_LOCAL_B: u8 = INSTR_CALL_LOCAL_B; // 0x16
+    pub const CALL_CONST_ADDR8_0: u8 = INSTR_CALL_CONST_ADDR8_0; // 0x57
+    pub const CALL_CONST_ADDR8_1: u8 = INSTR_CALL_CONST_ADDR8_1; // 0x58
+    pub const CALL_CONST_ADDR8_8: u8 = INSTR_CALL_CONST_ADDR8_8; // 0x17
+    pub const CALL_CONST_ADDR16_8: u8 = INSTR_CALL_CONST_ADDR16_8; // 0x18
+    pub const CONST_ADDR8_0: u8 = INSTR_CONST_ADDR8_0; // 0x55
+    pub const CONST_ADDR8_1: u8 = INSTR_CONST_ADDR8_1; // 0x56
+    pub const CONST_ADDR8_8: u8 = INSTR_CONST_ADDR8_8; // 0x15
+    pub const CONST_ADDR16_8: u8 = INSTR_CONST_ADDR16_8; // 0x14
+    pub const CALL_FAST_RTS_BASE: u8 = INSTR_CALL_FAST_RTS0; // 0x83
+    pub const CALL_FAST_RTS_LAST: u8 = INSTR_CALL_FAST_RTS5; // 0x88
+    pub const ESCAPE: u8 = INSTR_ESCAPE; // 0xfe
+    pub const CASE16: u8 = INSTR_CASE16; // 0x0a
+
+    #[inline]
+    pub fn is_call_const_addr(b: u8) -> bool {
+        b == CALL_CONST_ADDR8_0
+            || b == CALL_CONST_ADDR8_1
+            || b == CALL_CONST_ADDR8_8
+            || b == CALL_CONST_ADDR16_8
+    }
+    #[inline]
+    pub fn is_const_addr(b: u8) -> bool {
+        b == CONST_ADDR8_0 || b == CONST_ADDR8_1 || b == CONST_ADDR8_8 || b == CONST_ADDR16_8
+    }
+    #[inline]
+    pub fn is_call_fast_rts(b: u8) -> bool {
+        (CALL_FAST_RTS_BASE..=CALL_FAST_RTS_LAST).contains(&b)
+    }
+}
+
+/// Which blocker opcodes a function's bytecode contains, computed by an
+/// **instruction-boundary-aware** walk (so an opcode byte that is
+/// actually an immediate of a preceding instruction — e.g. the `0x16`
+/// immediate of `CONST_ADDR8_8`/`CONST_ADDR16_8` — is NOT
+/// false-positively flagged as `CALL_LOCAL_B`).
+#[derive(Clone, Copy, Default)]
+struct BlockerScan {
+    call_local_b: bool,
+    call_const_addr: bool,
+    const_addr: bool,
+    call_fast_rts: bool,
+}
+
+impl BlockerScan {
+    /// A `const_addr` followed (anywhere) by a `call_fast_rts` is a
+    /// CONST_ADDR-RTS wrapper (still blocked — see the filter notes).
+    fn const_addr_rts_wrapper(self) -> bool {
+        self.const_addr && self.call_fast_rts
+    }
+}
+
+/// The ORIGINAL raw-byte blocker scan: flags a blocker if its opcode
+/// *byte* appears anywhere in the bytecode, with no instruction-boundary
+/// awareness. Kept (a) as the conservative fallback when the
+/// boundary-aware walk can't be trusted, and (b) behind
+/// `JIT_LEGACY_BLOCKER_SCAN=1` for A/B measurement. This is intentionally
+/// over-conservative — it false-positively rejects functions whose
+/// blocker byte is merely an immediate of another instruction.
+fn scan_blockers_raw(bc: &[u8]) -> BlockerScan {
+    use blocker_opcodes as bo;
+    BlockerScan {
+        call_local_b: bc.contains(&bo::CALL_LOCAL_B),
+        call_const_addr: bc.iter().any(|&b| bo::is_call_const_addr(b)),
+        const_addr: bc.iter().any(|&b| bo::is_const_addr(b)),
+        call_fast_rts: bc.iter().any(|&b| bo::is_call_fast_rts(b)),
+    }
+}
+
+/// A static estimate of a function's outgoing-call density, used by
+/// the per-function net-benefit install gate (Change 3). When a
+/// function is JIT-installed, every *outgoing* call it makes pays the
+/// interp→JIT trampoline boundary (a Cranelift `call` into
+/// `closure_call_trampoline` / `dynamic_call_trampoline` / the RTS
+/// trampoline, each of which does a dispatch + result marshalling).
+/// A function dominated by outgoing calls is therefore a likely net
+/// LOSS when JIT'd (the doc's "#4-class" regression: ~3.6% of steps,
+/// many outgoing trampolined calls). A function with mostly
+/// straight-line work amortizes the single inbound-boundary cost over
+/// many native instructions and is a win.
+///
+/// `total_instrs` counts decoded instructions; `outgoing_calls`
+/// counts the opcodes that an *installable* function can contain that
+/// emit a trampoline boundary call: `CALL_CLOSURE`, `TAIL_B_B`, and
+/// the `CALL_FAST_RTS<N>` family. (`CALL_LOCAL_B` /
+/// `CALL_CONST_ADDR*` are already rejected by the blocker filter, so
+/// an installed function never contains them.)
+#[derive(Clone, Copy, Default)]
+struct CallDensity {
+    total_instrs: usize,
+    outgoing_calls: usize,
+}
+
+impl CallDensity {
+    /// `outgoing_calls / total_instrs`, the fraction of instructions
+    /// that pay an outgoing trampoline boundary. 0.0 for a function
+    /// with no decoded instructions (which the gate treats as a
+    /// non-loser — it can't be call-dominated).
+    #[allow(clippy::cast_precision_loss)] // counts are tiny (« 2^52)
+    fn density(self) -> f64 {
+        if self.total_instrs == 0 {
+            0.0
+        } else {
+            self.outgoing_calls as f64 / self.total_instrs as f64
+        }
+    }
+}
+
+/// Walk `bc` instruction by instruction (boundary-aware, same
+/// `disasm::decode` machinery as the blocker scan) and tally the
+/// outgoing-call density. Returns `None` on any point the walk can't
+/// trust (ESCAPE / unknown opcode / truncation) — the caller then
+/// treats the function as "unknown density" and does NOT gate it out
+/// (conservative: the gate only ever SKIPS functions it can prove are
+/// call-dominated, so an untrusted walk must not cause a skip).
+fn scan_call_density(bc: &[u8]) -> Option<CallDensity> {
+    use polyml_runtime::interpreter::disasm::decode;
+    use polyml_runtime::interpreter::opcodes as op;
+    let mut cd = CallDensity::default();
+    let mut pc = 0usize;
+    while pc < bc.len() {
+        let b = bc[pc];
+        if b == op::INSTR_ESCAPE {
+            return None;
+        }
+        let d = decode(bc, pc);
+        if d.total_len == 0 {
+            return None;
+        }
+        if d.op != op::INSTR_CASE16 && d.mnemonic == "?" {
+            return None;
+        }
+        cd.total_instrs += 1;
+        let is_outgoing_call = b == op::INSTR_CALL_CLOSURE
+            || b == op::INSTR_TAIL_B_B
+            || (op::INSTR_CALL_FAST_RTS0..=op::INSTR_CALL_FAST_RTS5).contains(&b);
+        if is_outgoing_call {
+            cd.outgoing_calls += 1;
+        }
+        let step = d.total_len;
+        if pc + step > bc.len() {
+            return None;
+        }
+        pc += step;
+    }
+    Some(cd)
+}
+
+/// Walk `bc` instruction by instruction (via the shared
+/// `disasm::decode`, which respects immediate widths and the
+/// variable-length `CASE16`) and record which blocker opcodes appear
+/// at a real instruction boundary.
+///
+/// Returns `None` if the walk hits a point it cannot trust — an
+/// `ESCAPE` (whose extended opcode has its own, here-undecoded
+/// immediates), a truncated tail, or an opcode the decoder doesn't
+/// recognise — so the caller falls back to the conservative raw-byte
+/// scan for that function. This guarantees the boundary walk can only
+/// ever *unblock* a function (when it completes cleanly and finds no
+/// real blocker); it can never let a real blocker slip through.
+fn scan_blockers_boundary_aware(bc: &[u8]) -> Option<BlockerScan> {
+    use blocker_opcodes as bo;
+    use polyml_runtime::interpreter::disasm::decode;
+    let mut scan = BlockerScan::default();
+    let mut pc = 0usize;
+    while pc < bc.len() {
+        let op = bc[pc];
+        // ESCAPE: `decode` reports total_len=2 but the extended opcode
+        // can carry further immediates we don't model here — walking
+        // past it could misalign and MISS a downstream blocker. Bail
+        // to the conservative raw scan. (Functions containing ESCAPE
+        // don't translate, so this is belt-and-suspenders.)
+        if op == bo::ESCAPE {
+            return None;
+        }
+        let d = decode(bc, pc);
+        // Unknown opcode (decoder doesn't recognise it) or truncation:
+        // the decoder yields total_len <= 1 with an "?"/"<EOF>"
+        // mnemonic. Don't trust the rest of the walk — bail.
+        if d.total_len == 0 {
+            return None;
+        }
+        if d.op != bo::CASE16 && d.mnemonic == "?" {
+            return None;
+        }
+        // Record blockers seen at this real instruction boundary.
+        if op == bo::CALL_LOCAL_B {
+            scan.call_local_b = true;
+        }
+        if bo::is_call_const_addr(op) {
+            scan.call_const_addr = true;
+        }
+        if bo::is_const_addr(op) {
+            scan.const_addr = true;
+        }
+        if bo::is_call_fast_rts(op) {
+            scan.call_fast_rts = true;
+        }
+        // A decoded instruction must consume at least its opcode byte;
+        // `decode` guarantees total_len >= 1 here (the == 0 case bailed
+        // above). Advancing by total_len keeps us on real boundaries.
+        let step = d.total_len;
+        // Sanity: a multi-byte instruction whose immediates run off the
+        // end means a truncated body — bail conservatively.
+        if pc + step > bc.len() {
+            return None;
+        }
+        pc += step;
+    }
+    Some(scan)
+}
+
 /// Walk all code objects in a [`polyml_runtime::LoadedImage`],
 /// JIT-translate each one that the translator accepts, and install
 /// every successful translation in the given interpreter's JIT
@@ -189,46 +407,45 @@ pub fn install_all_jit_entries(
             //   bootstrap + HOL4 cleanly. +239 functions installed.
             //
             // Going from 326 → 611 installed by removing the safe ones.
-            const INSTR_CONST_ADDR8_0_OP: u8 = 0x55;
-            const INSTR_CONST_ADDR8_1_OP: u8 = 0x56;
-            const INSTR_CONST_ADDR8_8_OP: u8 = 0x15;
-            const INSTR_CONST_ADDR16_8_OP: u8 = 0x14;
-            const INSTR_CALL_CONST_ADDR8_0_OP: u8 = 0x57;
-            const INSTR_CALL_CONST_ADDR8_1_OP: u8 = 0x58;
-            const INSTR_CALL_CONST_ADDR8_8_OP: u8 = 0x17;
-            const INSTR_CALL_CONST_ADDR16_8_OP: u8 = 0x18;
-            const INSTR_CALL_LOCAL_B_OP: u8 = 0x16;
-            const INSTR_TAIL_B_B_OP: u8 = 0x7b;
-            // CALL_FAST_RTS variants: 0x83..=0x88.
-            const INSTR_CALL_FAST_RTS_BASE: u8 = 0x83;
-            const INSTR_CALL_FAST_RTS_LAST: u8 = 0x88;
             let bc = &full_body[..bytecode_len];
-            let has_call_local_b = bc.contains(&INSTR_CALL_LOCAL_B_OP);
-            let has_tail_b_b = bc.contains(&INSTR_TAIL_B_B_OP);
-            let has_call_const_addr = bc.iter().any(|&b| {
-                b == INSTR_CALL_CONST_ADDR8_0_OP
-                    || b == INSTR_CALL_CONST_ADDR8_1_OP
-                    || b == INSTR_CALL_CONST_ADDR8_8_OP
-                    || b == INSTR_CALL_CONST_ADDR16_8_OP
-            });
-            // The CONST_ADDR (load) regression on Stage1 basis load was
-            // a CONST_ADDR-loaded RTS stub passed to CALL_FAST_RTS. The
-            // CONST_ADDR load itself isn't broken, but the RTS path
-            // somehow misbehaves when JIT'd. Until that's diagnosed,
-            // only skip CONST_ADDR functions whose bytecode ALSO
-            // contains a CALL_FAST_RTS — leaving plain const-load
-            // patterns (e.g., loading a constant for a comparison)
-            // available to JIT.
-            let has_const_addr = bc.iter().any(|&b| {
-                b == INSTR_CONST_ADDR8_0_OP
-                    || b == INSTR_CONST_ADDR8_1_OP
-                    || b == INSTR_CONST_ADDR8_8_OP
-                    || b == INSTR_CONST_ADDR16_8_OP
-            });
-            let has_call_fast_rts = bc
-                .iter()
-                .any(|&b| (INSTR_CALL_FAST_RTS_BASE..=INSTR_CALL_FAST_RTS_LAST).contains(&b));
-            let const_addr_rts_wrapper = has_const_addr && has_call_fast_rts;
+            // INSTRUCTION-BOUNDARY-AWARE blocker detection. The old
+            // `bc.contains(&OPCODE)` raw-byte scans false-positively
+            // rejected clean functions whose bytecode merely contained
+            // a blocker *byte* as an IMMEDIATE of another instruction —
+            // most notably the #1 hottest function (632 bytes, 7.4% of
+            // all steps), whose `0x16` bytes are immediates of
+            // CONST_ADDR16_8/CONST_ADDR8_8, NOT real CALL_LOCAL_B
+            // opcodes. We now decode the body instruction by
+            // instruction and flag a blocker ONLY when it sits at a real
+            // instruction boundary.
+            //
+            // Correctness is conservative-by-design: if the boundary
+            // walk hits anything it can't trust (ESCAPE, an
+            // unrecognised opcode, or a truncated tail), it returns
+            // `None` and we FALL BACK to the original raw-byte scan for
+            // that function. So this change can only ever *unblock*
+            // clean functions; it never relaxes which opcodes are
+            // blocked, and never lets a real blocker slip past (which
+            // would re-introduce the CALL_CONST_ADDR / CALL_LOCAL_B
+            // SEGV class).
+            // Bisection escape hatch: `JIT_LEGACY_BLOCKER_SCAN=1`
+            // forces the old raw-byte `contains()` scan (with its
+            // immediate-byte false positives), so the
+            // boundary-aware-vs-legacy install sets can be A/B measured
+            // without rebuilding. Default = the boundary-aware scan.
+            let use_legacy = std::env::var("JIT_LEGACY_BLOCKER_SCAN").is_ok();
+            let scan = if use_legacy {
+                scan_blockers_raw(bc)
+            } else {
+                // Conservative fallback to the raw scan when the
+                // boundary walk can't be trusted (ESCAPE / unknown /
+                // truncated) — so this can only ever *unblock* clean
+                // functions, never let a real blocker slip past.
+                scan_blockers_boundary_aware(bc).unwrap_or_else(|| scan_blockers_raw(bc))
+            };
+            let has_call_local_b = scan.call_local_b;
+            let has_call_const_addr = scan.call_const_addr;
+            let const_addr_rts_wrapper = scan.const_addr_rts_wrapper();
             // TAIL_B_B (0x7b) is now SAFE to install (2026-06-12).
             //
             // Root cause of the old break: the JIT translation of
@@ -255,8 +472,68 @@ pub fn install_all_jit_entries(
             // currently-untrusted opcode (CALL_LOCAL_B / CALL_CONST_ADDR
             // / a CONST_ADDR-RTS wrapper) — those remain blocked by their
             // own filters below, independent of the tail-call fix.
-            let _ = has_tail_b_b;
             if has_call_local_b || has_call_const_addr || const_addr_rts_wrapper {
+                return;
+            }
+            // CHANGE 3 — PER-FUNCTION NET-BENEFIT INSTALL GATE.
+            //
+            // A function that is dominated by *outgoing* calls is a
+            // likely net LOSS when JIT-installed: every outgoing call
+            // pays the interp→JIT trampoline boundary (a Cranelift
+            // `call` into closure_call_trampoline /
+            // dynamic_call_trampoline / the RTS trampoline + dispatch
+            // + result marshalling), with little straight-line native
+            // work in between to amortize the single inbound-boundary
+            // cost. The feasibility doc's "#4-class" regression (a
+            // call-heavy function, ~3.6% of steps, that made many
+            // outgoing trampolined calls and cost +1.6 s when JIT'd)
+            // is exactly this shape. We estimate net benefit from a
+            // cheap static signal — outgoing-call density (fraction of
+            // decoded instructions that are CALL_CLOSURE / TAIL_B_B /
+            // CALL_FAST_RTS) — and SKIP installing functions above a
+            // conservative threshold.
+            //
+            // The gate is conservative-by-design and MONOTONE:
+            //  - It only ever SKIPS (never installs an extra function),
+            //    so the gated set is a SUBSET of the ungated 823.
+            //  - The default threshold (0.5) only fires on functions
+            //    where MORE THAN HALF of all decoded instructions are
+            //    outgoing trampoline calls — clear net-losers with
+            //    almost no straight-line work to accelerate. Most
+            //    installed functions have density well under 0.1, so
+            //    the gate touches only the extreme call-dominated tail.
+            //  - If the density walk can't be trusted (ESCAPE / unknown
+            //    opcode / truncation) it returns None and we do NOT
+            //    gate the function out (an untrusted walk must never
+            //    cause a skip).
+            //
+            // Tunable for measurement / A/B:
+            //   JIT_NET_GATE_DENSITY=<f>  — override the 0.5 threshold.
+            //   JIT_NET_GATE_DENSITY=1.0  — effectively disables the
+            //     gate (density can never exceed 1.0; > 1.0 = off).
+            //   JIT_NET_GATE_DUMP=1       — log every candidate's
+            //     (addr, total_instrs, outgoing_calls, density,
+            //     gated?) so the density distribution can be correlated
+            //     with the profiler's hot CALL targets.
+            let gate_density_threshold: f64 = std::env::var("JIT_NET_GATE_DENSITY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.5);
+            let call_density = scan_call_density(bc);
+            let gated_out = match call_density {
+                Some(cd) => cd.density() > gate_density_threshold,
+                None => false, // untrusted walk → never gate out
+            };
+            if std::env::var("JIT_NET_GATE_DUMP").is_ok() {
+                let (ti, oc, dens) = match call_density {
+                    Some(cd) => (cd.total_instrs, cd.outgoing_calls, cd.density()),
+                    None => (0, 0, -1.0),
+                };
+                eprintln!(
+                    "  net_gate: code_obj=0x{body_start:016x} total_instrs={ti} outgoing_calls={oc} density={dens:.3} gated_out={gated_out}"
+                );
+            }
+            if gated_out {
                 return;
             }
             // Bisection: check limit + skip set BEFORE incrementing
