@@ -28,8 +28,8 @@
 //! ```
 
 mod common;
-use common::with_nt_helpers;
 use common::run_image_env;
+use common::with_nt_helpers;
 use std::path::PathBuf;
 
 fn checkpoint() -> Option<PathBuf> {
@@ -63,7 +63,10 @@ fn zeckendorf_existence_and_uniqueness() {
     };
 
     // base machinery (zfib + ixlist + rep_sum + valid_rep + the crux sum-bound)
-    assert!(out.contains("BASE_OK"), "Zeckendorf base did not check:\n{out}");
+    assert!(
+        out.contains("BASE_OK"),
+        "Zeckendorf base did not check:\n{out}"
+    );
     // EXISTENCE: every n>0 has a valid non-consecutive Fibonacci representation
     assert!(
         out.contains("ZK_EXIST_OK"),
@@ -86,7 +89,10 @@ fn zeckendorf_existence_and_uniqueness() {
     // both halves together
     assert!(out.contains("ZK_ALL_OK"), "ZK_ALL_OK not reached:\n{out}");
 
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
     assert!(
         !out.contains("PROBE_UNSOUND"),
         "a soundness probe fired UNSOUND:\n{out}"

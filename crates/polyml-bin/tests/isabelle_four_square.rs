@@ -82,7 +82,10 @@ fn four_square_identity_and_reduction() {
         out.contains("L4_ASM_ALL_OK"),
         "lagrange_assembly (multiplicative reduction) did not check:\n{out}"
     );
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
     assert!(
         !out.contains(": error:") && !out.contains("Static Errors"),
         "a compile error slipped through:\n{out}"

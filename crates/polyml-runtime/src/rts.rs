@@ -3203,7 +3203,11 @@ fn fs_full_path(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
         return alloc_empty_string(ctx);
     };
     // Empty path is treated as "." (the cwd), matching upstream.
-    let name = if name.is_empty() { ".".to_owned() } else { name };
+    let name = if name.is_empty() {
+        ".".to_owned()
+    } else {
+        name
+    };
     let canon = std::fs::canonicalize(&name).unwrap_or_else(|_| name.into());
     alloc_poly_string(ctx, canon.into_os_string().into_encoded_bytes().as_slice())
 }
@@ -3857,7 +3861,9 @@ mod tests {
     // Serialized against `poly_finish_sets_flag` via `FINISH_FLAG_LOCK`.
     #[test]
     fn terminate_sets_finish_flag() {
-        let _g = FINISH_FLAG_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = FINISH_FLAG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_finish_requested();
         assert_eq!(finish_requested(), None, "flag must start clear");
 
@@ -3886,7 +3892,9 @@ mod tests {
     // too so the shared `FINISH_REQUESTED` convention can't silently drift.
     #[test]
     fn poly_finish_sets_flag() {
-        let _g = FINISH_FLAG_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = FINISH_FLAG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_finish_requested();
         let _ = poly_finish(&mut ctx(), t(), PolyWord::tagged(7));
         assert_eq!(finish_requested(), Some(7));
@@ -3919,7 +3927,10 @@ mod tests {
         // The empty path must canonicalize to the cwd, not stay empty…
         assert!(!empty_str.is_empty(), "fullPath \"\" should not be empty");
         // …and must equal fullPath "." (the actual Test196 assertion).
-        assert_eq!(empty_str, dot_str, "fullPath \"\" must equal fullPath \".\"");
+        assert_eq!(
+            empty_str, dot_str,
+            "fullPath \"\" must equal fullPath \".\""
+        );
     }
 
     #[test]

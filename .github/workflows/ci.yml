@@ -25,7 +25,7 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
 
-      # Non-blocking for now: the tree predates CI and isn't fully rustfmt-clean.
+      # Blocking: the tree is kept rustfmt-clean (run `cargo fmt --all` before committing).
       - name: Formatting
         run: cargo fmt --all -- --check
 
