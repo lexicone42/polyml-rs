@@ -307,13 +307,25 @@ immediate bytes as CALL_LOCAL_B and rejects the #1 hottest fn (fix = make the
 scan instruction-boundary-aware); (2) naive "install all hot" REGRESSES because a
 call-heavy fn (#4) is net-NEGATIVE under the Vec-allocating trampoline (fix = a
 per-function net-benefit gate); (3) the CALL_CONST_ADDR SEGV is an unisolated
-multi-fn INTERACTION bug (curated installs are correct). PHASE 0 (~1wk, low-risk):
-boundary-aware filter + net-benefit gate + halve the boundary (stack array instead
-of args_buf Vec; FxHash/pointer-map instead of SipHash jit_cache). The win is
-MODEST (single-digit %, ~1.3–2× ceiling), not "native speed" — bicimage should be
-gated on a measured >1.5× after Phase 0, else pursue whole-region compilation. The
-2026-06-12 analysis below is kept for its coverage detail but its "uncertain payoff
-/ multi-front" pessimism is superseded by the measured result.
+multi-fn INTERACTION bug (curated installs are correct).
+**PHASE 0 LANDED 2026-06-18 (commit a4eb60d, wf_33864cc2-368)** — all three fixes,
+correctness-gated + hand-verified: `--jit` now BEATS the interpreter (+~2%, faster in
+every interleaved round; was −4%). Change 1 = boundary-aware install filter
+(disasm-walk `scan_blockers_boundary_aware`, raw-scan fallback on ESCAPE/unknown,
+`JIT_LEGACY_BLOCKER_SCAN=1` A/B) → 727→823 installs, cache-hit 1.6%→15.4%, the #1 hot
+fn installs. Change 2 = the CROSSOVER (do_call args `vec![0;arity]`→`[i64;16]` stack
+slice; jit_cache SipHash→dependency-free FxHash) — basis-load step count BYTE-IDENTICAL
+(1,609,041,476) = exact semantics. Change 3 = static call-density net-benefit gate
+(`scan_call_density`, `JIT_NET_GATE_DENSITY` default 0.5) — monotone NO-OP on the 823
+set, latent insurance for the coverage phase. **bicimage NOT greenlit:** the >1.5×
+gate is NOT reached/reachable by the trampoline JIT at current coverage (9/top-10 hot
+fns still blocked by CALL_CONST_ADDR / CALL_LOCAL_B / CASE16-ESCAPE). NEXT for bicimage
+= coverage work (root-cause the CALL_CONST_ADDR multi-fn INTERACTION SEGV, ~22% of hot
+steps) then, if the trampoline stalls <1.5×, WHOLE-REGION compilation (keep nested
+calls in native code — removes the per-call boundary, the real road to native speed).
+The win is MODEST; pexport already ships portable, so bicimage stays gated on a
+demonstrated >1.5×. The 2026-06-12 analysis below is kept for its coverage detail but
+its "uncertain payoff / multi-front" pessimism is superseded by the measured result.
 
 **PERF REALITY CHECK (measured 2026-06-12 — read before doing ANY more
 JIT perf work).** `--jit` with 727 installs is ~5% SLOWER than the plain
