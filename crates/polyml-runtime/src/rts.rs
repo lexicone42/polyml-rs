@@ -809,10 +809,7 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyProcessEnvSystem",
         RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)),
     );
-    t.register(
-        "PolyTerminate",
-        RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)),
-    );
+    t.register("PolyTerminate", RtsFn::Arity2(poly_terminate));
     t.register("PolyPollIODescriptors", RtsFn::Arity4(zero4));
     // rtsCallFull2 → threadId + 2 args → CALL_FAST_RTS3.
     t.register("PolySetSignalHandler", RtsFn::Arity3(zero3));
@@ -1179,6 +1176,26 @@ pub fn clear_finish_requested() {
 fn poly_finish(_: &mut RtsContext<'_>, _tid: PolyWord, exit_code: PolyWord) -> PolyWord {
     if RTS_TRACE.load(Ordering::Relaxed) {
         eprintln!("  PolyFinish called with exit code {exit_code:?}");
+    }
+    let code = exit_code.untag();
+    #[allow(clippy::cast_sign_loss)]
+    FINISH_REQUESTED.store((code as usize).wrapping_add(1), Ordering::Relaxed);
+    PolyWord::tagged(0)
+}
+
+/// `PolyTerminate(threadId, code)` — immediate process exit. Upstream
+/// (`process_env.cpp:228`) calls `_exit(i)` directly: it does NOT run
+/// the `atExit` list or flush buffers, and never returns. From inside
+/// the interpreter we can't `_exit`, so — exactly as for [`poly_finish`]
+/// — we set the global finish flag the dispatcher checks at the top of
+/// `step()`, halting cleanly with the requested code. The basis wraps
+/// this as `terminate n = (doCall n; raise Fail "never")`
+/// (`basis/OS.sml:1169`); because we halt, the `raise Fail "never"`
+/// never executes, matching upstream's "doesn't return" semantics.
+#[allow(clippy::needless_pass_by_value)]
+fn poly_terminate(_: &mut RtsContext<'_>, _tid: PolyWord, exit_code: PolyWord) -> PolyWord {
+    if RTS_TRACE.load(Ordering::Relaxed) {
+        eprintln!("  PolyTerminate called with exit code {exit_code:?}");
     }
     let code = exit_code.untag();
     #[allow(clippy::cast_sign_loss)]
@@ -3177,10 +3194,16 @@ fn fs_is_dir(arg: PolyWord) -> PolyWord {
 }
 
 /// IO subcode 60: `OS.FileSys.fullPath` — canonicalize.
+///
+/// Upstream (`basicio.cpp:648` `fullPath`) special-cases the empty
+/// string by substituting `"."` before calling `realpath`, so
+/// `fullPath "" = fullPath "."` = the current directory (Test196).
 fn fs_full_path(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
     let Some(name) = poly_string_to_rust(arg) else {
         return alloc_empty_string(ctx);
     };
+    // Empty path is treated as "." (the cwd), matching upstream.
+    let name = if name.is_empty() { ".".to_owned() } else { name };
     let canon = std::fs::canonicalize(&name).unwrap_or_else(|_| name.into());
     alloc_poly_string(ctx, canon.into_os_string().into_encoded_bytes().as_slice())
 }
@@ -3735,6 +3758,10 @@ fn reset_mutex(mutex: PolyWord) {
 mod tests {
     use super::*;
 
+    // Serializes the few tests that touch the process-global
+    // `FINISH_REQUESTED` flag, since `cargo test` runs in parallel.
+    static FINISH_FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn builtin_lookup() {
         let t = RtsTable::new();
@@ -3802,15 +3829,97 @@ mod tests {
 
     #[test]
     fn arb_sub_fast_path() {
-        // arg2 - arg1 = 7 - 4 = 3
+        // Upstream PolySubtractArbitrary(arg1, arg2) computes arg1 - arg2
+        // (the dcdbbd4 fix; the old code computed the negation arg2 - arg1).
+        // arg1 = 4, arg2 = 7 → 4 - 7 = -3.
         let r = poly_subtract_arbitrary(&mut ctx(), t(), PolyWord::tagged(4), PolyWord::tagged(7));
-        assert_eq!(r.untag(), 3);
+        assert_eq!(r.untag(), -3);
     }
 
     #[test]
     fn arb_mul_fast_path() {
         let r = poly_multiply_arbitrary(&mut ctx(), t(), PolyWord::tagged(6), PolyWord::tagged(7));
         assert_eq!(r.untag(), 42);
+    }
+
+    // Regression for Test190 (`OS.Process.terminate`).
+    //
+    // The basis wraps the RTS call as `terminate n = (doCall n; raise
+    // Fail "never")` (`basis/OS.sml:1169`); upstream `process_env.cpp:228`
+    // `_exit(i)`s and never returns, so the `raise` is unreachable. The old
+    // stub `|_, _, _| tagged(0)` simply returned, letting control fall back
+    // into the basis and fire `raise Fail "never"`. The fix sets the same
+    // `FINISH_REQUESTED` flag `poly_finish` uses, which the interpreter's
+    // `step()` loop checks to halt cleanly with the requested code — so the
+    // `raise` never executes, matching upstream's "doesn't return".
+    //
+    // Asserts the function sets the finish flag to the right exit code.
+    // Serialized against `poly_finish_sets_flag` via `FINISH_FLAG_LOCK`.
+    #[test]
+    fn terminate_sets_finish_flag() {
+        let _g = FINISH_FLAG_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_finish_requested();
+        assert_eq!(finish_requested(), None, "flag must start clear");
+
+        // success (exit 0)
+        let r = poly_terminate(&mut ctx(), t(), PolyWord::tagged(0));
+        assert_eq!(r, PolyWord::tagged(0), "terminate returns unit/tagged(0)");
+        assert_eq!(
+            finish_requested(),
+            Some(0),
+            "terminate(0) must request a clean halt with code 0"
+        );
+
+        // failure (exit 1) — exit code must propagate, not be hard-coded.
+        clear_finish_requested();
+        let _ = poly_terminate(&mut ctx(), t(), PolyWord::tagged(1));
+        assert_eq!(
+            finish_requested(),
+            Some(1),
+            "terminate(1) must request a halt with code 1"
+        );
+
+        clear_finish_requested();
+    }
+
+    // `poly_finish` is the sibling halt path `poly_terminate` reuses; pin it
+    // too so the shared `FINISH_REQUESTED` convention can't silently drift.
+    #[test]
+    fn poly_finish_sets_flag() {
+        let _g = FINISH_FLAG_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_finish_requested();
+        let _ = poly_finish(&mut ctx(), t(), PolyWord::tagged(7));
+        assert_eq!(finish_requested(), Some(7));
+        clear_finish_requested();
+    }
+
+    // Regression for Test196 (`OS.FileSys.fullPath ""` = `fullPath "."`).
+    // Upstream `basicio.cpp:648` substitutes "." for the empty path
+    // before `realpath`. Our `fs_full_path` previously passed "" straight
+    // to `canonicalize`, which errors → the `unwrap_or_else` fell back to
+    // the empty string, so `fullPath "" = ""` ≠ `fullPath "."`.
+    #[test]
+    fn fullpath_empty_is_cwd() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Immutable);
+        let mut ctx = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
+        // Build poly-string args for "" and "." in the same space.
+        let empty_arg = alloc_poly_string(&mut ctx, b"");
+        let dot_arg = alloc_poly_string(&mut ctx, b".");
+
+        let empty_res = fs_full_path(&mut ctx, empty_arg);
+        let dot_res = fs_full_path(&mut ctx, dot_arg);
+
+        let empty_str = poly_string_to_rust(empty_res).expect("fullPath \"\" decodes");
+        let dot_str = poly_string_to_rust(dot_res).expect("fullPath \".\" decodes");
+
+        // The empty path must canonicalize to the cwd, not stay empty…
+        assert!(!empty_str.is_empty(), "fullPath \"\" should not be empty");
+        // …and must equal fullPath "." (the actual Test196 assertion).
+        assert_eq!(empty_str, dot_str, "fullPath \"\" must equal fullPath \".\"");
     }
 
     #[test]
