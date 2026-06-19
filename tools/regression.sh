@@ -29,6 +29,11 @@ run cargo test --release -p polyml-runtime --lib
 # They live in tests/*.rs so `--lib` skips them; wire them explicitly. Both are
 # cheap (~1 s) and cover the export-after-GC fixpoint + adversarial graphs.
 run cargo test --release -p polyml-runtime --test export_roundtrip --test export_roundtrip_fuzz
+# Tiny-heap GC use-after-free fence (task #109): drives the bootstrap under a
+# 1 MB alloc space so the Cheney collector fires on nearly every burst; a
+# below-sp dangling pointer / unforwarded root makes it SIGSEGV in-process
+# (cargo reports the binary as failed). ~0.1 s; SKIPs if the image is absent.
+run cargo test --release -p polyml-runtime --test gc_tiny_heap_uaf
 run cargo test --release -p polyml-jit
 run cargo test --release -p polyml-bin            # non-#[ignore]: cli_run, golden_sml
 

@@ -200,13 +200,11 @@ fn run_poly_gc_audited(
 /// or interpreter change that re-introduces a residual-from-space-pointer bug
 /// (the heap-corruption class) is caught here.
 ///
-/// NOTE on scope: the audit scans only the LIVE stack region `[sp, len)` (the
-/// same root set the collector forwards), so it cannot catch a stale
-/// *below-sp* dangling pointer — that distinct latent class is documented in
-/// `examples/gc_tiny_heap_stress.rs` and is not reachable through any `poly
-/// run` invocation (the CLI never builds a small enough alloc-space Box). This
-/// fence covers the tracked-state residual class, which is the one the audit
-/// was built to detect.
+/// NOTE on scope: the audit now scans the FULL stack `[0, len)` (task #109).
+/// The collector scrubs the below-sp free region to `Tagged(0)` on each collect,
+/// so the audit catches both the tracked-state residual class AND the
+/// formerly-blind below-sp dangling-pointer class (a residual below sp now means
+/// the scrub regressed). On a correct run it reports zero residuals.
 #[test]
 #[ignore = "slow: loads full basis library (~few minutes) under GC audit; run with `cargo test -- --ignored`"]
 fn gc_audit_smoke_basis_load() {

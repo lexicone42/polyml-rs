@@ -1,5 +1,24 @@
 # GC + memory-safety soak — findings (2026-06-19)
 
+> **CORRECTION (2026-06-19, the fix workflow wf_e2bd8923-916).** The "root cause"
+> below is PARTLY MISATTRIBUTED. Forensics during the fix (gdb + a from-space
+> tripwire) showed the reproducer's *SIGSEGV* was actually a **harness bug**: the
+> `gc_tiny_heap_stress` example never registered the image's MUTABLE space as a GC
+> root (the real CLI always does — `main.rs:340-353`), so an image-mutable word
+> pointing into the alloc-space couldn't be forwarded, dangled when collect freed
+> from-space, and `INDIRECT_LOCAL_B0` later derefed it. So the *crash* was never
+> reachable via `poly run` (which registers the root) — it was an incomplete
+> reproducer. SEPARATELY, the below-sp dangling-pointer hazard described below IS
+> real but **latent/non-crashing** (44 residuals on the reproducer, ~26831 on a
+> basis load — overwritten before re-deref in practice). The fix landed BOTH: the
+> example now registers the root (kills the reproducer SEGV), and the GC now scrubs
+> `[0,sp)` to `Tagged(0)` on each collect + the audit is widened to `[0,len)`
+> (closes the latent below-sp hazard + makes the detector honest). Both are real,
+> sound, byte-identical; commit forthcoming. Read the rest with this correction in
+> mind — the below-sp analysis is accurate as a *latent hazard*, not as the
+> reproducer's proximate crash cause.
+
+
 Dedicated stress round on the memory layer (Cheney GC + image writer), the one
 runtime area without a prior dedicated round and the scariest bug class.
 ultracode wf_0eab2712-02c (20 agents). Three angles: GC-audit, leak/soak, export

@@ -798,6 +798,32 @@ impl Interpreter {
             let _ = handler_sp;
         });
 
+        // ---- Scrub the below-sp (free/garbage) region.
+        //
+        // The collector forwards only the LIVE set [sp, len). Slots in
+        // [0, sp) are the free/garbage zone (drop_n/RESET bump sp past
+        // them, leaving stale values BY DESIGN — see "Below sp is free"
+        // above). Those stale values can be pointers into the from-space
+        // Box that `collect` just FREED via replace_storage, so they now
+        // DANGLE. A later sp-lowering op that re-exposes one before
+        // writing it would let the dispatch loop dereference freed
+        // memory → use-after-free SIGSEGV.
+        //
+        // Overwrite every below-sp slot with a safe tagged sentinel
+        // (Tagged(0)). This is sound because below-sp is dead-for-
+        // correctness: every legitimate stack READ is at index >= sp,
+        // and every sp-lowering op writes the newly-exposed slot before
+        // it is read. So if a scrubbed slot were ever re-exposed and
+        // read it would be a benign tagged int 0, not a wild deref.
+        // O(sp) once per collect — cheap vs the Cheney copy; deliberately
+        // NOT on the hot drop_n/RESET path. This runs AFTER from-space is
+        // freed (replace_storage inside collect) and BEFORE any op or the
+        // audit, closing the dangling-pointer window. See
+        // docs/gc-memory-soak-findings-2026-06-19.md (task #109).
+        for i in 0..self.sp {
+            self.stack[i] = PolyWord::tagged(0);
+        }
+
         // Apply updates.
         self.exception_packet = if exn_slot.0 == 0 || exn_slot.is_tagged() {
             None
@@ -842,8 +868,14 @@ impl Interpreter {
         let in_old = |addr: usize| addr >= from_lo && addr < from_hi;
         let mut residual = 0usize;
         let mut samples: Vec<(&'static str, usize, usize)> = Vec::new();
-        // 1. Interpreter stack
-        for i in self.sp..self.stack.len() {
+        // 1. Interpreter stack — scan the FULL stack [0, len), not just
+        //    the live set [sp, len). Below-sp slots are scrubbed to
+        //    Tagged(0) on each collect (see Interpreter::gc), so on a
+        //    correct run they hold no from-space pointers; scanning the
+        //    whole stack makes the detector honest for the below-sp
+        //    use-after-free class (task #109) without firing on clean
+        //    runs.
+        for i in 0..self.stack.len() {
             let v = self.stack[i].0;
             if in_old(v) {
                 residual += 1;
