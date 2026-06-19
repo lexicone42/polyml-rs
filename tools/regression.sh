@@ -25,6 +25,10 @@ run cargo build --release -p polyml-bin -p polyml-jit
 
 echo; echo "--- always-on unit + integration tests ---"
 run cargo test --release -p polyml-runtime --lib
+# Export round-trip integration targets (memory-layer image writer/reader).
+# They live in tests/*.rs so `--lib` skips them; wire them explicitly. Both are
+# cheap (~1 s) and cover the export-after-GC fixpoint + adversarial graphs.
+run cargo test --release -p polyml-runtime --test export_roundtrip --test export_roundtrip_fuzz
 run cargo test --release -p polyml-jit
 run cargo test --release -p polyml-bin            # non-#[ignore]: cli_run, golden_sml
 
@@ -44,7 +48,7 @@ if [ "$MODE" = "full" ]; then
 
   echo; echo "--- headline #[ignore] integration suite ---"
   ipass=0; ifail=0
-  for t in real_math parsetree_introspect isabelle_pure isabelle_pure_arbint \
+  for t in export_roundtrip_live real_math parsetree_introspect isabelle_pure isabelle_pure_arbint \
            isabelle_kernel isabelle_theorem_kernel isabelle_proving isabelle_object_logic isabelle_arithmetic isabelle_number_theory isabelle_summation isabelle_ordering isabelle_divisibility isabelle_primes isabelle_classical_primes isabelle_euclid isabelle_primes_3mod4 isabelle_sqrt2 isabelle_list_theory isabelle_fta isabelle_division isabelle_euclid_lemma isabelle_euclid_list isabelle_fta_unique isabelle_modular isabelle_power isabelle_ntbase isabelle_binom isabelle_sum isabelle_binom_thm isabelle_flt isabelle_gcd isabelle_crt isabelle_combinatorics isabelle_summation_forms isabelle_prodf isabelle_mult_group isabelle_central_binomial isabelle_wilson_pairing isabelle_wilson_inverse isabelle_wilson isabelle_wilson_converse isabelle_neg1_qr isabelle_thue isabelle_twosquare isabelle_euler_foundations isabelle_euler isabelle_euler_criterion isabelle_zeckendorf isabelle_four_square isabelle_pyth intflip_basis \
            hol4_taut hol4_meson hol4_metis hol4_pelletier hol4_num_prover \
            hol4_arith hol4_order hol4_induction hol4_list hol4_simp hol4_fancy \

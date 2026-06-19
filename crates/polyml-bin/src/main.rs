@@ -380,13 +380,12 @@ fn run_image(
         // Fast path: a single in-crate run_until loop. The per-step trace/diag
         // branches are compiled out (production picks the non-instrumented
         // monomorphisation), and there is no per-opcode cross-crate step() call.
-        match interp.run_until(max_steps) {
-            Ok((s, r)) => {
-                steps = s;
-                Ok(r)
-            }
-            Err(e) => Err(e),
-        }
+        // `run_until` reports the executed-step count on BOTH the success and
+        // the error path, so a fault (e.g. stack overflow) after billions of
+        // steps no longer prints "Executed 0 bytecode step(s)".
+        let (s, r) = interp.run_until(max_steps);
+        steps = s;
+        r
     } else {
         // Slow path: per-step checkpoint logging (POLY_CHECKPOINT_EVERY).
         loop {

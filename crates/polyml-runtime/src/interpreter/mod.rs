@@ -1312,14 +1312,22 @@ impl Interpreter {
     }
 
     /// Run up to `max_steps` instructions in a tight in-crate loop and return
-    /// `(steps_executed, terminating_result)`. Picks the instrumented vs fast
-    /// code path ONCE: in production (no `--profile`, no RTS trace) the fast
-    /// path is monomorphised with the per-step trace/diag branches compiled
-    /// out entirely. GC and finish cadence are byte-identical to `step()` —
-    /// only the always-off debug checks differ — so timing/GC behaviour is
-    /// unchanged. (Perf lever, task #88: hoists the per-step global checks the
-    /// CLI loop used to pay across the crate boundary on every opcode.)
-    pub fn run_until(&mut self, max_steps: u64) -> Result<(u64, StepResult), InterpError> {
+    /// `(steps_executed, terminating_result)`. The step count is reported on
+    /// BOTH the success and the error path: the error variant of the inner
+    /// `Result` does not carry a count, so returning it alongside `steps`
+    /// keeps the executed-step total honest even when the run halts on a
+    /// fault (e.g. stack overflow). Previously a `?`-propagated error
+    /// discarded the local counter, so callers reported "Executed 0 steps"
+    /// for a run that had executed billions before faulting.
+    ///
+    /// Picks the instrumented vs fast code path ONCE: in production (no
+    /// `--profile`, no RTS trace) the fast path is monomorphised with the
+    /// per-step trace/diag branches compiled out entirely. GC and finish
+    /// cadence are byte-identical to `step()` — only the always-off debug
+    /// checks differ — so timing/GC behaviour is unchanged. (Perf lever,
+    /// task #88: hoists the per-step global checks the CLI loop used to pay
+    /// across the crate boundary on every opcode.)
+    pub fn run_until(&mut self, max_steps: u64) -> (u64, Result<StepResult, InterpError>) {
         let instrumented = self.diag.is_some() || arbint_trace_on() || crate::rts::is_traced();
         if instrumented {
             self.run_until_impl::<true>(max_steps)
@@ -1332,16 +1340,17 @@ impl Interpreter {
     fn run_until_impl<const INSTR: bool>(
         &mut self,
         max_steps: u64,
-    ) -> Result<(u64, StepResult), InterpError> {
+    ) -> (u64, Result<StepResult, InterpError>) {
         let mut steps = 0u64;
         loop {
             if steps >= max_steps {
-                return Ok((steps, StepResult::Continue));
+                return (steps, Ok(StepResult::Continue));
             }
             steps += 1;
-            match self.step_impl::<INSTR>()? {
-                StepResult::Continue => {}
-                other => return Ok((steps, other)),
+            match self.step_impl::<INSTR>() {
+                Ok(StepResult::Continue) => {}
+                Ok(other) => return (steps, Ok(other)),
+                Err(e) => return (steps, Err(e)),
             }
         }
     }
