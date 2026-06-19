@@ -1480,7 +1480,23 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   all 3 seats); re-verified by hand (1.18B steps, Tagged(0), 30-axiom audit clean, 3 soundness
   probes confirming the n<q orientation + mod-4 + primality conjuncts are genuinely present).
   Scope: the elementary 3-mod-4 case only (the ≡1-mod-4 companion needs −1-is-a-QR, beyond
-  Euclid; full Dirichlet needs L-functions).
+  Euclid; full Dirichlet needs L-functions). (The ≡1-mod-4 companion is now DONE — below.)
+- **INFINITELY MANY PRIMES ≡ 1 (mod 4)** (`isabelle_primes_1mod4.rs`, `isabelle_primes_1mod4.sml`,
+  2026-06-19 — the companion the ≡3 case said it couldn't reach): `⊢ ∀n. ∃q. prime2 q ∧ n<q ∧
+  (∃t. q = 4·t + 1)`. 0-hyp, only classical assumption = `ex_middle`. KEY LEMMA (the First
+  Supplement's HARD direction — the converse of the banked `neg1_qr`): `⊢ prime2 q ⟹ 2<q ⟹ ¬(q∣x)
+  ⟹ x²≡−1 (mod q) ⟹ ∃t. q=4t+1`, via **FLT + parity** (q∤x ⟹ x^(q−1)≡1 by FLT; if q≡3 mod4 then
+  (q−1)/2 is odd so x^(q−1)=(x²)^((q−1)/2)≡(−1)^odd=−1≢1 — contra). INFINITUDE: Euclid construction
+  N=(2·n!)²+1; a prime divisor q has (2n!)²≡−1 (mod q) so q≡1 mod4 by the key lemma, and q>n via
+  `dvd_fact`+`consec_coprime`. THE BASE-MERGE (the risk flagged + handled): this needed MERGING the
+  FLT/euler-criterion branch (`lagrange_roots`/`apm1`, modular powers) with the euclid/classical-primes
+  branch (`prime_divisor_exists`/`dvd_fact`/`consec_coprime`) — the factorial machinery re-derived onto
+  the merged theory (mirrors the criterion's flt+lagrange merge). Self-contained driver (run directly,
+  like twosquare/euler — no shared `with_*` composes both branches yet; consolidation = task #87).
+  0 axioms mention prime2/cong/dvd/the-mod-4-conjunct (all DEFINED via FOL); both results 0-hyp +
+  aconv + soundness-probed. foundation-floor→stretch ultracode fleet (wf_76164d04-62a; the KEY LEMMA
+  was the graceful floor, but the full INFINITUDE landed); re-verified by hand (~2.6B steps, Tagged(0),
+  40-axiom audit clean, markers P1M4_KEY_OK + P1M4_INF_OK).
 - **√2 IS IRRATIONAL** (`isabelle_sqrt2.rs`, 2026-06-13 — the companion capstone):
   `⊢ ¬(∃a. 0<a ∧ ∃b. a·a = 2·(b·b))` — no positive naturals a,b with a²=2b². A 0-hyp
   theorem by INFINITE DESCENT via strong induction; only classical assumption = excluded
