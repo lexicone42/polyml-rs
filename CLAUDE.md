@@ -1526,6 +1526,25 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   genuinely concludes `r1 = r2`, not the trivial `r1 = r1`). NB the fresh-const discipline: adding
   zfib/ixlist EXTENDS the theory, so the whole development runs on ONE final context (`ctxtZ`/
   `ctermZ`) with every reused base lemma re-`varify`'d onto it.
+- **PYTHAGOREAN TRIPLES PARAMETRIZATION** (`isabelle_pyth.rs`, `isabelle_pyth.sml` +
+  `isabelle_pyth_gen.sml`, 2026-06-17 — a fresh flavour: parametrizing ALL solutions, not a
+  modular/divisibility result): every primitive Pythagorean triple with the even leg arises as
+  `(m²−n², 2mn, m²+n²)` for coprime `m>n`. On `common::with_gcd` (coprime + Euclid's lemma + the
+  semiring), final context `ctxtS2`; 0 new axioms, 0 new constants — pure derivations; only
+  classical assumption = `ex_middle`. THREE results, each 0-hyp + aconv-intended + soundness-probed:
+  (1) **GENERATION** (`isabelle_pyth_gen.sml`, marker `GEN_OK`): `⊢ n<m ⟹ ∃d. m²=n²+d ∧
+  d²+(2mn)²=(m²+n²)²` — the parametrized form is always a triple (a pure semiring identity, stated
+  subtraction-freely via the le-witness). (2) **KEY LEMMA** (`isabelle_pyth.sml`, `KEY_OK`):
+  `⊢ coprime u v ⟹ u·v = w·w ⟹ (∃s. u=s²) ∧ (∃t. v=t²)` — a product of coprime naturals is a
+  square only if each factor is (Route B: Euclid's lemma + strong induction on w, with local
+  `mult_left_cancel`/`mult_eq_zero`/`lt_self_mult`); independently valuable. (3) **CHARACTERIZATION**
+  (`isabelle_pyth.sml`, `PYTH_CHAR_OK`, the headline): `⊢ pyth_triple(a,b,c) ⟹ primitive(a,b) ⟹
+  even b ⟹ ∃m n. n<m ∧ coprime(m,n) ∧ c=m²+n² ∧ b=2mn ∧ a+n²=m²` — via parity machinery (from
+  `div_mod_exists` at 2), `b²=(c−a)(c+a)`, the coprime halves `(c±a)/2` squared by the KEY LEMMA,
+  reassembly (`sqrt_unique`, `lt_sq_rev`). coprime/primitive = the ∀-divisor predicate (no gcd
+  function needed); subtraction-free renderings (`a+n²=m²` for `a=m²−n²`). 3-seat ultracode fleet
+  (wf_494e9c98-2e3); re-verified by hand. (NB an earlier weaker 4-conjunct char variant was
+  dropped in favour of this stronger 5-conjunct one.)
 - **FUNDAMENTAL THEOREM OF ARITHMETIC (existence)** (`isabelle_fta.rs`, 2026-06-13 — the
   finale that FUSES the list theory with the primes machinery): `⊢ ∀n. 2≤n ⟹ ∃ps. all_prime
   ps ∧ product ps = n` — every n≥2 is a product of primes. A 0-hyp theorem by strong
