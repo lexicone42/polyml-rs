@@ -1325,8 +1325,21 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   CLEAN SPLICE in the recent summits: built on `common::with_wilson_inverse` (has lprod/upto/
   extract/lremove/dvd), so it banks as a small ~668-line DELTA (not a self-contained monolith
   like euler/criterion). foundation→3-seat→verify ultracode fleet (wf_cf5755d5-b5f, all 3 seats
-  incl. the square case); re-verified by hand through the real splice. LEFT: the small cases
-  (n=2,3,4) + a single combined-iff wrapper theorem — this proves the dvd-the-factorial heart.
+  incl. the square case); re-verified by hand through the real splice. (The combined-iff wrapper
+  noted as LEFT here is now DONE — see WILSON'S IFF below.)
+- **WILSON'S IFF — the full primality criterion** (`isabelle_wilson_iff.rs`,
+  `isabelle_wilson_iff.sml`, 2026-06-19): `⊢ 1<n ⟹ (prime2 n ⟺ cong n ((n−1)!) (n−1))` — for n>1,
+  n is (structurally) prime IFF (n−1)! ≡ −1 (mod n), the way Wilson's theorem is usually STATED.
+  Assembles the two banked halves on the modular-inverse base (a CLEAN single-base assembly, low
+  base-risk — deliberately chosen after the four-square base-clash): FORWARD = instantiate the
+  PROVEN `wilson` at n; BACKWARD (contrapositive) = 1<n ∧ ¬prime2 n ⟹ composite, the 4<n case via
+  the PROVEN `wc_converse` (≡0≢−1 since 0<n−1<n), the n=4 case computed from scratch (3!=6≡2≢3),
+  using the derived `prime_cases` (ex_middle) case-split. 0-hyp (modulo the 1<n side-condition),
+  aconv the intended biconditional, 3 soundness probes (keeps 1<n; genuinely both directions; the
+  residue is n−1=−1 not 0). 0 new axioms (wilson + wc_converse are PROVEN theorems, NOT
+  re-axiomatized; only ex_middle classical). Banked via `common::with_wilson` (the .sml prepends the
+  converse delta then the iff-assembly delta). ultracode wf_1c71659d-8ce; re-verified by hand
+  (Tagged(0), ~2.99B steps). prime2 throughout (the legacy `prime` is dead — de-Bruijn capture bug).
 - **−1 IS A QUADRATIC RESIDUE mod p for p ≡ 1 (mod 4)** (`isabelle_neg1_qr.rs`,
   `isabelle_neg1_qr.sml`, 2026-06-16 — the Lagrange / First Supplement to Quadratic Reciprocity,
   easy direction; the GATEWAY to Fermat's two-square theorem): `⊢ prime2 p ⟹ (p−1=4k) ⟹
