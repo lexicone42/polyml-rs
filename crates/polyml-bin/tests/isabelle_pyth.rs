@@ -108,8 +108,14 @@ fn pythagorean_key_lemma() {
     );
     assert!(out.contains("KEY_OK"), "marker KEY_OK missing:\n{out}");
     // no kernel failure, no compile error, no soundness probe firing
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains(": error:"), "compile error during proof:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains(": error:"),
+        "compile error during proof:\n{out}"
+    );
     assert!(
         !out.contains("Static Errors"),
         "static errors during proof:\n{out}"
@@ -170,8 +176,14 @@ fn pythagorean_characterization() {
         "marker PYTH_CHAR_OK missing:\n{out}"
     );
     // no kernel failure, no compile error, no soundness probe firing
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains(": error:"), "compile error during proof:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains(": error:"),
+        "compile error during proof:\n{out}"
+    );
     assert!(
         !out.contains("Static Errors"),
         "static errors during proof:\n{out}"
@@ -226,8 +238,14 @@ fn pythagorean_generation() {
         "generation identity did not check (aconv/0-hyp):\n{out}"
     );
     assert!(out.contains("GEN_OK"), "marker GEN_OK missing:\n{out}");
-    assert!(!out.contains("Exception-"), "exception during proof:\n{out}");
-    assert!(!out.contains(": error:"), "compile error during proof:\n{out}");
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains(": error:"),
+        "compile error during proof:\n{out}"
+    );
     assert!(
         !out.contains("Static Errors"),
         "static errors during proof:\n{out}"
