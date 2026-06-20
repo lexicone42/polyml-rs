@@ -1,9 +1,53 @@
-# Lagrange's four-square theorem — progress (2026-06-17, updated 2026-06-18)
+# Lagrange's four-square theorem — progress (2026-06-17, updated 2026-06-18, 2026-06-20)
 
-Staged ultracode campaign (wf_abb7c4f3-0ba, then wf_d352530c-63b) toward
-`⊢ ∀n. ∃a b c d. n = a²+b²+c²+d²` on the Isabelle/Pure interpreter. The full
-theorem is **NOT yet proved**; the graceful floor banked four genuine 0-hyp
-results, with the remaining descent step cleanly scoped below.
+Staged ultracode campaign (wf_abb7c4f3-0ba, then wf_d352530c-63b, then
+wf_236bdf0c-5cd) toward `⊢ ∀n. ∃a b c d. n = a²+b²+c²+d²` on the Isabelle/Pure
+interpreter. The full theorem is **NOT yet proved**; the graceful floor banked
+genuine 0-hyp results, with the remaining descent step cleanly scoped below.
+
+## 2026-06-20 UPDATE (descent workflow wf_236bdf0c-5cd) — descent SETUP banked; the deep obstruction ROOT-CAUSED
+
+A third fleet (3 descent seats raced + an independent verifier) banked one more
+genuine increment AND — the real prize — root-caused exactly why the descent
+resists the ℕ formalization. The full theorem did NOT close (predicted).
+
+- **BANKED + VERIFIED (re-run from scratch to Tagged(0), 0-hyp, aconv, axiom-clean):**
+  `descent_residue` (seat1, resume `seat1_descent_residue_delta.sml`, 900 lines,
+  ZERO add_axiom_global — pure derivation, does NOT use proveStarFor):
+  `⊢ prime2 p ⟹ 1<m ⟹ m<p ⟹ four_sq(m·p) ⟹ ∃r. 0<r ∧ r≤m ∧ four_sq(m·r)`.
+  This is the descent **SETUP** (stages a/b/c: signed four_residue_sum + r=0
+  exclusion + the AM `r≤m` bound) — NOT the descent **STEP**: `r≤m` is
+  NON-STRICT, so it cannot start strong induction (needs strict `r<m` + the divide
+  to `four_sq(r·p)`). A second pure-derivation variant is banked as
+  `seat3_descent_ab_delta.sml`; a 3-square-rejection soundness probe as
+  `three_square_rejection_probe.sml` (7 = 2²+1²+1²+1² is provable; 7 is NOT a sum
+  of three squares — so the `∀n. ∃a b c d` form is genuinely non-collapsible).
+
+- **THE DEEP OBSTRUCTION (independently re-derived by two agents — the key finding).**
+  With the flag-form signed residues (per-coordinate independent signs, `a'≡a OR
+  a'≡−a (mod m)`), the Euler witness `W = a·a'+b·b'+c·c'+d·d' ≡ ±a²±b²±c²±d² (mod m)`
+  is `≡0` **only when all four signs agree**. Aligning the signs (replace `a'` by
+  `m−a'`) restores the divisibility `m∣W` needed for the divide-by-m² — but
+  DESTROYS the `2x'≤m` bound that gives `r<m`. **This bound-vs-sign conflict is
+  irreducible in the ℕ flag-encoding.** The textbook ℤ proof escapes it via a
+  single signed representative in `(−m/2, m/2]`. So closing the descent needs a
+  from-scratch **signed Euler identity over ℕ** (or a thin signed-integer layer)
+  that tracks per-coordinate divisibility — a dedicated multi-phase fleet, exactly
+  as Thue's lemma and the two-square crown jewel each took 2–3 fleets.
+
+- **DEV-LOOP BLOCKER (force-multiplier for the next fleet — fix FIRST).** The
+  cheap-iteration path is BROKEN: `L4_STAR_CHEAP=1` makes `star_i = Thm.assume(...)`,
+  which CAPTURES the exE eigenvariables (`nd_w`) → "forall_intr: variable nd_w free
+  in assumptions" → four_sq_mult undeclared → Static Errors. So EVERY descent test
+  currently needs the full ~25-min real base run (one real proveStarFor in PART A).
+  **Phase 0 of any descent fleet must be:** bank a WARM four-square checkpoint
+  (export `thyGR`/`ctxtGR` post-`four_sq_mult`) OR repair STAR_CHEAP to not capture
+  eigenvariables — otherwise debugging the signed divide is impractical.
+
+- **Remaining (precise):** (1) strict `r<m` (the `r=m` exclusion — tractable,
+  ~6–10 lemmas: equal-share + sqrt-on-bound + Euclid's lemma); (2) THE SIGNED EULER
+  DIVIDE-BY-m² over ℕ (large — needs the signed identity above). Then iterate the
+  descent to m=1 (`four_sq p`) and discharge the proven `lagrange_assembly`.
 
 ## 2026-06-18 UPDATE (descent workflow wf_d352530c-63b) — Part B DONE, Part C keystone DONE
 

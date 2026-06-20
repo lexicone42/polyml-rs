@@ -1,0 +1,6 @@
+# Regenerable assembled base (cat base.sml + the 6 deltas, prefix-strip partC) — too large to track
+_assembled_base.sml
+# Run logs
+*.log
+# Redundant alternate stage-AB partial (seat1 + seat3 deltas cover this)
+seat2_descent_stageAB_delta.sml
