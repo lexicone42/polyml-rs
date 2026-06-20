@@ -585,7 +585,15 @@ run`, diff the results. Any difference is a faithfulness bug in OUR port.
   each op run BOTH inline (opcode path) and ref-forced (`I a OP I b`, the RTS Poly*Arbitrary
   path), all byte-identical to native upstream — the standing fence for the
   PolySubtractArbitrary-negation class (commit dcdbbd4) and any opcode-vs-RTS arithmetic
-  discrepancy. Plus `intinf_rts_arith.sml` (targeted RTS-path subtraction fence). And the rest:
+  discrepancy. Plus `intinf_rts_arith.sml` (targeted RTS-path subtraction fence). **The
+  2026-06-20 RTS-ONLY sweep (commit 299017a, task #96) added 4 more (~26K cases):
+  `fuzz_{core_rts_only,conversions,real32,formatting_scanning}_rts.sml` — these ref-force
+  the RTS-ONLY ops with NO inline twin (gcd/lcm/and/or/xor/shifts/PolyCompareArbitrary),
+  which opcode-path fuzzing never reached. Found + fixed the LCM sign/zero/overflow bug +
+  the realRound sign-of-zero bug; documents the kept deliberate divergences (Real32
+  out-of-domain = IEEE NaN vs upstream's uninitialized notANumberF=0.0; Real.round
+  tie-break = native half-even). LESSON: test EVERY dispatch path — an op with no inline
+  twin is invisible to opcode-path fuzzing.** And the rest:
   30 Basis categories + compiler-stress programs, incl. `cstress_heavy.sml`:
   heavy-compute stress — Ackermann/naive-fib call storms, 100k-deep mutual TCO,
   bignum factorials/powers/gcd/powmod + GC pressure, 100k-element folds, and
