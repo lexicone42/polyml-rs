@@ -189,20 +189,53 @@ impl SnapshotBuilder {
         // actual bytecode ends at `cp - 8`. We need to subtract that
         // single PolyWord so the snapshot doesn't include the count
         // word as if it were bytecode.
+        let word_bytes = std::mem::size_of::<usize>();
         let (cp_start, count) = unsafe { length_word::const_segment_for_code(body_ptr) };
         let cp_start_addr = cp_start as usize;
         let body_start_addr = body_ptr as usize;
-        let bytecode_len_bytes = (cp_start_addr.saturating_sub(body_start_addr))
-            .saturating_sub(std::mem::size_of::<usize>());
+        // The whole object body spans [body_start_addr, obj_end_addr). The
+        // const-segment pointer and count come from `const_segment_for_code`,
+        // which reads the object's own (loader-written) trailing-offset and
+        // count words and applies only DEBUG-time sanity guards (no release
+        // bounds check, by design). On a self-built heap those words are
+        // consistent and `cp_start..cp_start+count` lies inside the body. But
+        // a corrupted / type-confused code object (the lf_ref_52 / task #96
+        // untrusted-input class) can drive `cp_start` and `count` to arbitrary
+        // values, turning the `0..count` loop below into an unbounded OOB read
+        // (and, via `value_for`, a recursive wild-pointer walk). Export is a
+        // cold, one-shot path, so we clamp both against the object's own length
+        // word `n` here — keeping the read provably in-bounds regardless of the
+        // trailer's contents. See tests/export_corrupt_code_oob_repro.rs.
+        let obj_end_addr = body_start_addr + n.saturating_mul(word_bytes);
+        let bytecode_len_bytes = cp_start_addr
+            .min(obj_end_addr) // clamp a wild (too-high) cp into the body
+            .saturating_sub(body_start_addr)
+            .saturating_sub(word_bytes);
         let code_bytes: Vec<u8> = (0..bytecode_len_bytes)
             .map(|i| unsafe { *body_ptr.cast::<u8>().add(i) })
             .collect();
-        let mut constants = Vec::with_capacity(count);
-        for i in 0..count {
+        // A valid const segment starts inside the body and ends at or before
+        // the trailing-offset word (the LAST body word, `body[n-1]`); the const
+        // region is `[cp, cp+count)` with `cp+count == &body[n-1]` (loader.rs:
+        // 372-374, mirroring upstream machine_dep.h:61-67). If `cp_start` is out
+        // of range (below body, or at/after the trailing word), no constant can
+        // be safely read. Otherwise cap `count` to the whole words that fit
+        // between `cp_start` and the trailing word — never reading the offset
+        // word itself nor past the object body.
+        let consts_end_addr = obj_end_addr.saturating_sub(word_bytes); // &body[n-1]
+        let safe_count = if cp_start_addr >= body_start_addr && cp_start_addr < consts_end_addr {
+            let avail_words = (consts_end_addr - cp_start_addr) / word_bytes;
+            count.min(avail_words)
+        } else {
+            0
+        };
+        let mut constants = Vec::with_capacity(safe_count);
+        for i in 0..safe_count {
+            // SAFETY: i < safe_count <= (obj_end - cp_start)/word_bytes, so
+            // cp_start.add(i) lies within [cp_start, obj_end) ⊆ the object body.
             let w = unsafe { *cp_start.add(i) };
             constants.push(self.value_for(w));
         }
-        let _ = n;
         ObjectBody::Code {
             code_bytes,
             constants,

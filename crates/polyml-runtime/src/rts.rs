@@ -2534,7 +2534,7 @@ fn poly_set_code_constant(
     c_word: PolyWord,
     flags: PolyWord,
 ) -> PolyWord {
-    use crate::length_word::is_code_object;
+    use crate::length_word::{is_code_object, length_of};
     if !closure.is_data_ptr() {
         return PolyWord::tagged(0);
     }
@@ -2542,19 +2542,57 @@ fn poly_set_code_constant(
     // slot 0 points at one.
     let cl_ptr = closure.as_ptr::<PolyWord>();
     // SAFETY: caller trusted.
-    let start_code: *mut u8 = unsafe {
+    // `code_obj` is the PolyWord-pointer to the code object's body;
+    // `start_code` is the same address as a byte pointer. We derive the
+    // code object's byte length from its own length word so the offset
+    // can be bounds-checked below.
+    let (start_code, code_byte_len): (*mut u8, usize) = unsafe {
         let lw = crate::space::MemorySpace::length_word_of(cl_ptr);
         if is_code_object(lw) {
-            cl_ptr as *mut u8
+            (
+                cl_ptr as *mut u8,
+                length_of(lw) * std::mem::size_of::<PolyWord>(),
+            )
         } else {
             // closure[0] is the code-object pointer
-            (*cl_ptr).as_ptr::<u8>().cast_mut()
+            let code_word = *cl_ptr;
+            if !code_word.is_data_ptr() {
+                return PolyWord::tagged(0);
+            }
+            let code_obj = code_word.as_ptr::<PolyWord>();
+            let clw = crate::space::MemorySpace::length_word_of(code_obj);
+            (
+                code_word.as_ptr::<u8>().cast_mut(),
+                length_of(clw) * std::mem::size_of::<PolyWord>(),
+            )
         }
     };
     #[allow(clippy::cast_sign_loss)]
     let off = offset.untag() as usize;
     let flag_kind = flags.untag();
-    // SAFETY: code-segment write into freshly-allocated mutable space.
+    // BOUNDS CHECK (unsafe-audit finding #9): the compiler emits
+    // in-bounds offsets, but a corrupted/adversarial image could drive
+    // an out-of-range `off`, turning this into an OOB heap write into a
+    // code object (the highest-value corruption target). Reject any
+    // write whose target window [off, off+width) would fall outside the
+    // code object's own body. Upstream PolyML trusts the offset; we add
+    // this guard because `poly run` accepts untrusted images.
+    let write_width = match flag_kind {
+        0 | 2 => std::mem::size_of::<usize>(),
+        // Unsupported native-code relocation cases write nothing below.
+        _ => 0,
+    };
+    if write_width != 0 && (off > code_byte_len || off + write_width > code_byte_len) {
+        if RTS_TRACE.load(Ordering::Relaxed) {
+            eprintln!(
+                "  PolySetCodeConstant: out-of-range offset {off} (+{write_width}) \
+                 for code object of {code_byte_len} bytes (rejected)"
+            );
+        }
+        return PolyWord::tagged(0);
+    }
+    // SAFETY: code-segment write into freshly-allocated mutable space;
+    // the offset is now bounds-checked against the code object body.
     unsafe {
         let instr_addr = start_code.add(off);
         match flag_kind {
@@ -2629,8 +2667,23 @@ fn poly_set_code_byte(
         if !code_word.is_data_ptr() {
             return PolyWord::tagged(0);
         }
+        let code_obj = code_word.as_ptr::<PolyWord>();
+        let code_byte_len =
+            crate::length_word::length_of(crate::space::MemorySpace::length_word_of(code_obj))
+                * std::mem::size_of::<PolyWord>();
         let code_ptr = code_word.as_ptr::<u8>().cast_mut();
         let off = offset.untag() as usize;
+        // BOUNDS CHECK (unsafe-audit finding #9): reject an out-of-range
+        // single-byte write into the code object. See poly_set_code_constant.
+        if off >= code_byte_len {
+            if RTS_TRACE.load(Ordering::Relaxed) {
+                eprintln!(
+                    "  PolySetCodeByte: out-of-range offset {off} for code object \
+                     of {code_byte_len} bytes (rejected)"
+                );
+            }
+            return PolyWord::tagged(0);
+        }
         let b = byte_val.untag() as u8;
         code_ptr.add(off).write(b);
     }
@@ -2657,8 +2710,19 @@ fn poly_get_code_constant(
         if !code_word.is_data_ptr() {
             return PolyWord::tagged(0);
         }
+        let code_obj = code_word.as_ptr::<PolyWord>();
+        let code_byte_len =
+            crate::length_word::length_of(crate::space::MemorySpace::length_word_of(code_obj))
+                * std::mem::size_of::<PolyWord>();
         let code_ptr = code_word.as_ptr::<u8>();
         let off = offset.untag() as usize;
+        // BOUNDS CHECK (unsafe-audit finding #9, read sibling): reject an
+        // out-of-range PolyWord-sized read past the code object body. This
+        // getter is debug-only upstream, but an out-of-range offset from a
+        // corrupted image is still an OOB over-read (info leak / SIGSEGV).
+        if off > code_byte_len || off + std::mem::size_of::<PolyWord>() > code_byte_len {
+            return PolyWord::tagged(0);
+        }
         let val_ptr = code_ptr.add(off).cast::<PolyWord>();
         val_ptr.read_unaligned()
     }
@@ -3031,8 +3095,26 @@ fn write_array(strm: PolyWord, arg: PolyWord) -> PolyWord {
     if len == 0 {
         return PolyWord::tagged(0);
     }
-    // SAFETY: vec is a byte object; reading off..off+len bytes of
-    // its body is well-defined for trusted callers.
+    // Defence-in-depth (unsafe-audit finding #6): the trusted basis
+    // (`LibraryIOSupport.writeArray`) always sends an in-bounds
+    // (vec, offset, length) derived from a slice bounds-checked at
+    // creation, so type-safe SML never trips this. A corrupted image (or
+    // hostile `RunCall.rtsCallFull3 "PolyBasicIOGeneral"` + `unsafeCast`)
+    // could forge `length` far larger than `vec`'s byte body, causing
+    // `from_raw_parts(base.add(off), len)` to over-read past the object.
+    // Verify vec is a byte object and `off + len` fits its body before the
+    // unsafe slice; on violation return the existing "wrote nothing" stub.
+    {
+        use crate::length_word::{is_byte_object, length_of};
+        // SAFETY: vec.is_data_ptr() checked above, so vec-1 is a length word.
+        let lw = unsafe { crate::space::MemorySpace::length_word_of(vec.as_ptr()) };
+        let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
+        if !is_byte_object(lw) || off.checked_add(len).is_none_or(|end| end > body_bytes) {
+            return PolyWord::tagged(0);
+        }
+    }
+    // SAFETY: vec is a byte object and `off + len <= body_bytes` was just
+    // verified, so reading off..off+len bytes of its body is in-bounds.
     let base = vec.as_ptr::<u8>();
     let slice = unsafe { std::slice::from_raw_parts(base.add(off), len) };
     // Route via std::io for fds 1/2; write real files via their fd.
@@ -3297,13 +3379,40 @@ fn poly_string_to_rust(s: PolyWord) -> Option<String> {
     if !s.is_data_ptr() {
         return None;
     }
-    // SAFETY: caller passes a PolyString. Layout: word 0 = byte
-    // length; subsequent words hold the chars (zero-padded).
+    // Defence-in-depth (unsafe-audit finding #8, sibling of finding #6's
+    // write_array/read_array guards): the trusted compiler always hands a real
+    // PolyStringObject (a byte object whose word 0 is the byte length and whose
+    // body actually holds that many chars), so type-safe SML never trips this.
+    // A corrupted image (or hostile `RunCall.rtsCallFull1 "PolyBasicIOGeneral"`
+    // + `RunCall.unsafeCast` to forge a filename arg) could pass either (a) a
+    // non-string pointer (e.g. a word/tuple object) whose word 0 is then
+    // mis-read as a length, or (b) a byte object whose word-0 length LIES — far
+    // larger than its real body — causing `from_raw_parts(chars_ptr, len)` to
+    // over-read past the object. The old `len > 1_000_000` cap bounded the
+    // over-read to ~1 MB but did NOT prevent it. Verify the object is a byte
+    // object and `len` fits its body (matching `name_for_code_object` in
+    // length_word.rs and the write_array guard).
     let p = s.as_ptr::<PolyWord>();
+    use crate::length_word::{is_byte_object, length_of};
+    // SAFETY: s.is_data_ptr() checked above, so p-1 is a length word.
+    let lw = unsafe { crate::space::MemorySpace::length_word_of(p) };
+    if !is_byte_object(lw) {
+        return None;
+    }
+    let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
+    // word 0 of the body holds the byte count; the chars follow.
+    // SAFETY: p is a byte object (just checked) of >= 1 word, so reading its
+    // word 0 (the stored byte length) is in-bounds.
     let len = unsafe { (*p).0 };
     if len > 1_000_000 {
-        return None; // sanity bound
+        return None; // sanity bound (kept as a cheap early-out)
     }
+    // The length field (word 0) plus the `len` char bytes must fit the body.
+    if std::mem::size_of::<usize>().saturating_add(len) > body_bytes {
+        return None; // the stored length over-runs the object body
+    }
+    // SAFETY: `len + size_of::<usize>() <= body_bytes`, so the `len` char
+    // bytes starting at body word 1 are in-bounds.
     let chars_ptr = unsafe { p.add(1).cast::<u8>() };
     let slice = unsafe { std::slice::from_raw_parts(chars_ptr, len) };
     String::from_utf8(slice.to_vec()).ok()
@@ -3555,7 +3664,24 @@ fn read_array_from_stream(strm: PolyWord, arg: PolyWord) -> PolyWord {
     if len == 0 {
         return PolyWord::tagged(0);
     }
-    // SAFETY: buf is an ML byte array; off + len bounded by caller.
+    // Defence-in-depth (unsafe-audit finding #6): mirror of write_array but
+    // a WRITE (from_raw_parts_mut + Read::read into the slice) — the more
+    // dangerous direction (heap corruption, not just over-read). The
+    // trusted basis always sends an in-bounds (buf, offset, length); a
+    // corrupted image / hostile RunCall could forge an over-long `length`.
+    // Verify buf is a byte object and `off + len` fits its body before the
+    // unsafe mutable slice; on violation return the "read nothing" stub.
+    {
+        use crate::length_word::{is_byte_object, length_of};
+        // SAFETY: buf.is_data_ptr() checked above, so buf-1 is a length word.
+        let lw = unsafe { crate::space::MemorySpace::length_word_of(buf.as_ptr()) };
+        let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
+        if !is_byte_object(lw) || off.checked_add(len).is_none_or(|end| end > body_bytes) {
+            return PolyWord::tagged(0);
+        }
+    }
+    // SAFETY: buf is a byte object and `off + len <= body_bytes` was just
+    // verified, so writing off..off+len bytes of its body is in-bounds.
     let base = buf.as_ptr::<u8>().cast_mut();
     let slice = unsafe { std::slice::from_raw_parts_mut(base.add(off), len) };
     #[allow(clippy::cast_possible_truncation)]
@@ -3824,6 +3950,121 @@ mod tests {
         PolyWord::tagged(0)
     }
 
+    // ---- AUDIT REPRO (unsafe-audit finding #9): out-of-range offset
+    // in PolySetCodeConstant / PolySetCodeByte performs an OOB heap
+    // write. Demonstrates the missing bounds check, and (after the fix)
+    // asserts the write is now rejected. -------------------------------
+
+    /// Build a small code object in `space` and a sentinel word object
+    /// immediately after it, returning (code_obj_ptr, sentinel_ptr,
+    /// byte distance from code body start to sentinel body start).
+    fn build_code_then_sentinel(
+        space: &mut crate::space::MemorySpace,
+    ) -> (*mut PolyWord, *mut PolyWord, usize) {
+        use crate::length_word::{F_CODE_OBJ, F_MUTABLE_BIT};
+        // A 2-word mutable code object (body = 2 words = 16 bytes).
+        let code = space.alloc(2);
+        unsafe {
+            crate::space::set_length_word(code, 2, F_CODE_OBJ | F_MUTABLE_BIT);
+            code.write(PolyWord::ZERO);
+            code.add(1).write(PolyWord::ZERO);
+        }
+        // A sentinel ordinary word object right after it.
+        let sentinel = space.alloc(1);
+        unsafe {
+            crate::space::set_length_word(sentinel, 1, 0);
+            sentinel.write(PolyWord::tagged(0x5555));
+        }
+        let dist = (sentinel as usize) - (code as usize);
+        (code, sentinel, dist)
+    }
+
+    #[test]
+    fn set_code_constant_in_bounds_writes_correctly() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Code);
+        let (code, _sentinel, _dist) = build_code_then_sentinel(&mut space);
+        // Offset 8 (the 2nd body word) is in bounds for a 2-word object.
+        // SML offsets are tagged ints; tagged(8) untags to 8.
+        let r = poly_set_code_constant(
+            &mut ctx(),
+            PolyWord::from_ptr(code.cast_const()),
+            PolyWord::tagged(8),
+            PolyWord::tagged(0x1234),
+            PolyWord::tagged(0), // flag 0 = absolute PolyWord constant
+        );
+        assert_eq!(r.untag(), 0);
+        // In-bounds write landed in the 2nd body word.
+        let written = unsafe { code.add(1).read() };
+        assert_eq!(written.0, PolyWord::tagged(0x1234).0);
+    }
+
+    #[test]
+    fn set_code_constant_out_of_range_offset_is_rejected() {
+        // BEFORE the fix this test FAILS: the OOB write clobbers the
+        // sentinel object that lives past the code object's 16-byte
+        // body. AFTER the fix the out-of-range write is a no-op and the
+        // sentinel is preserved.
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Code);
+        let (code, sentinel, dist) = build_code_then_sentinel(&mut space);
+        let sentinel_before = unsafe { sentinel.read() };
+        // `dist` is the byte offset of the sentinel's body, well past
+        // the code object's 16-byte (2-word) body — an OOB offset.
+        let r = poly_set_code_constant(
+            &mut ctx(),
+            PolyWord::from_ptr(code.cast_const()),
+            PolyWord::tagged(dist as isize),
+            PolyWord::tagged(0x7777),
+            PolyWord::tagged(0),
+        );
+        assert_eq!(r.untag(), 0);
+        let sentinel_after = unsafe { sentinel.read() };
+        assert_eq!(
+            sentinel_after.0, sentinel_before.0,
+            "OOB SetCodeConstant clobbered an adjacent heap object \
+             (sentinel changed from {:#x} to {:#x}) — missing bounds check",
+            sentinel_before.0, sentinel_after.0
+        );
+    }
+
+    #[test]
+    fn set_code_byte_out_of_range_offset_is_rejected() {
+        // Same as above for PolySetCodeByte: build a closure whose
+        // slot 0 points at a small code object, plus a sentinel.
+        use crate::length_word::{F_CODE_OBJ, F_MUTABLE_BIT};
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Code);
+        let code = space.alloc(2);
+        unsafe {
+            crate::space::set_length_word(code, 2, F_CODE_OBJ | F_MUTABLE_BIT);
+            code.write(PolyWord::ZERO);
+            code.add(1).write(PolyWord::ZERO);
+        }
+        let sentinel = space.alloc(1);
+        unsafe {
+            crate::space::set_length_word(sentinel, 1, 0);
+            sentinel.write(PolyWord::tagged(0x33));
+        }
+        // A 1-word mutable closure whose slot 0 = code obj ptr.
+        let closure = space.alloc(1);
+        unsafe {
+            crate::space::set_length_word(closure, 1, F_MUTABLE_BIT);
+            closure.write(PolyWord::from_ptr(code.cast_const()));
+        }
+        let dist = (sentinel as usize) - (code as usize);
+        let sentinel_before = unsafe { sentinel.read() };
+        let r = poly_set_code_byte(
+            &mut ctx(),
+            PolyWord::from_ptr(closure.cast_const()),
+            PolyWord::tagged(dist as isize),
+            PolyWord::tagged(0xAB),
+        );
+        assert_eq!(r.untag(), 0);
+        let sentinel_after = unsafe { sentinel.read() };
+        assert_eq!(
+            sentinel_after.0, sentinel_before.0,
+            "OOB SetCodeByte clobbered an adjacent heap object — missing bounds check"
+        );
+    }
+
     #[test]
     fn arb_add_fast_path() {
         let r = poly_add_arbitrary(&mut ctx(), t(), PolyWord::tagged(2), PolyWord::tagged(3));
@@ -3899,6 +4140,69 @@ mod tests {
         let _ = poly_finish(&mut ctx(), t(), PolyWord::tagged(7));
         assert_eq!(finish_requested(), Some(7));
         clear_finish_requested();
+    }
+
+    // unsafe-audit finding #6: `write_array` / `read_array_from_stream` must
+    // bounds-check the forged (vec, offset, length) tuple against vec's real
+    // byte body before the `from_raw_parts` slice. A corrupted image can send
+    // a `length` far larger than vec; without the guard that is an OOB
+    // read/write past the byte object. The guard returns the existing
+    // "did nothing" stub (Tagged(0)) on an out-of-bounds tuple, and leaves
+    // the legitimate in-bounds path (small slice) untouched.
+    #[test]
+    fn write_read_array_bounds_guard() {
+        use crate::length_word::{F_BYTE_OBJ, F_MUTABLE_BIT};
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+
+        // A 2-word (16-byte) byte object = `vec`.
+        let n_words = 2usize;
+        let p = space.alloc(n_words);
+        let vec = unsafe {
+            crate::space::set_length_word(p, n_words, F_BYTE_OBJ | F_MUTABLE_BIT);
+            p.add(0).write(PolyWord::from_bits(0));
+            p.add(1).write(PolyWord::from_bits(0));
+            PolyWord::from_ptr(p.cast_const())
+        };
+
+        // The stream: a 1-word byte object holding fd+1 = 1 (=> fd 0, the
+        // benign "do nothing real IO" branch in both functions).
+        let sp = space.alloc(1);
+        let strm = unsafe {
+            crate::space::set_length_word(sp, 1, F_BYTE_OBJ | F_MUTABLE_BIT);
+            sp.add(0).write(PolyWord::tagged(0)); // tagged(0) bits=1 => fd_plus_one=1
+            PolyWord::from_ptr(sp.cast_const())
+        };
+
+        // Helper: build a (vec, offset, length) 3-tuple in the same space.
+        let mk_tuple = |space: &mut crate::space::MemorySpace, off: isize, len: isize| {
+            let tp = space.alloc(3);
+            unsafe {
+                crate::space::set_length_word(tp, 3, 0);
+                tp.add(0).write(vec);
+                tp.add(1).write(PolyWord::tagged(off));
+                tp.add(2).write(PolyWord::tagged(len));
+                PolyWord::from_ptr(tp.cast_const())
+            }
+        };
+
+        // In-bounds: off=0, len=16 == body. Both must run without faulting.
+        let ok = mk_tuple(&mut space, 0, 16);
+        // fd 0 write_array returns 0 ("nothing written") by design; the point
+        // is it does NOT trip the bounds guard and does NOT fault.
+        let _ = write_array(strm, ok);
+        let _ = read_array_from_stream(strm, ok);
+
+        // OOB: off=0, len=1<<20 >> 16-byte body. The guard must short-circuit
+        // to Tagged(0) WITHOUT constructing the over-long slice (no OOB / no
+        // fault). If the guard were missing this test would SIGSEGV.
+        let bad_len = mk_tuple(&mut space, 0, 1 << 20);
+        assert_eq!(write_array(strm, bad_len), PolyWord::tagged(0));
+        assert_eq!(read_array_from_stream(strm, bad_len), PolyWord::tagged(0));
+
+        // OOB via offset: off past the body, len small.
+        let bad_off = mk_tuple(&mut space, 1000, 8);
+        assert_eq!(write_array(strm, bad_off), PolyWord::tagged(0));
+        assert_eq!(read_array_from_stream(strm, bad_off), PolyWord::tagged(0));
     }
 
     // Regression for Test196 (`OS.FileSys.fullPath ""` = `fullPath "."`).
@@ -4115,6 +4419,63 @@ mod tests {
         // Unknown code falls back to ERROR<n> (process_env.cpp:255).
         let r = poly_process_env_error_name(&mut c, t(), PolyWord::tagged(99999));
         assert_eq!(poly_string_to_rust(r).as_deref(), Some("ERROR99999"));
+    }
+
+    // unsafe-audit finding #8: poly_string_to_rust used to over-read past the
+    // object body if word-0 (the stored byte length) lied, and read a non-byte
+    // object's word 0 as a length. The guard (is_byte_object + len fits body)
+    // must reject both WITHOUT performing the OOB read.
+    #[test]
+    fn poly_string_to_rust_rejects_oversized_length() {
+        use crate::length_word::{F_BYTE_OBJ, F_MUTABLE_BIT};
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        // A well-formed 2-word byte string: word0 = byte length 2, word1 holds
+        // the chars 'o','k' (low bytes), like a real PolyStringObject.
+        let good = space.alloc(2);
+        let good_w = unsafe {
+            crate::space::set_length_word(good, 2, F_BYTE_OBJ | F_MUTABLE_BIT);
+            good.add(0).write(PolyWord::from_bits(2)); // byte length 2
+            let chars = (b'o' as usize) | ((b'k' as usize) << 8);
+            good.add(1).write(PolyWord::from_bits(chars));
+            PolyWord::from_ptr(good.cast_const())
+        };
+        assert_eq!(
+            poly_string_to_rust(good_w).as_deref(),
+            Some("ok"),
+            "a well-formed PolyString must still decode"
+        );
+
+        // (a) A 1-word byte object whose word-0 length LIES (900_000 >> 8-byte
+        // body). The pre-fix code would from_raw_parts(.., 900_000) -> OOB read.
+        let liar = space.alloc(1);
+        let liar_w = unsafe {
+            crate::space::set_length_word(liar, 1, F_BYTE_OBJ | F_MUTABLE_BIT);
+            liar.add(0).write(PolyWord::from_bits(900_000));
+            PolyWord::from_ptr(liar.cast_const())
+        };
+        assert_eq!(
+            poly_string_to_rust(liar_w),
+            None,
+            "an oversized stored length must be rejected, not over-read"
+        );
+
+        // (b) A non-byte (word/tuple) object. Pre-fix, its word 0 (a pointer or
+        // data slot) would be mis-read as a byte length.
+        let tup = space.alloc(2);
+        let tup_w = unsafe {
+            crate::space::set_length_word(tup, 2, 0); // type 0 = word object
+            tup.add(0).write(PolyWord::tagged(5));
+            tup.add(1).write(PolyWord::tagged(7));
+            PolyWord::from_ptr(tup.cast_const())
+        };
+        assert_eq!(
+            poly_string_to_rust(tup_w),
+            None,
+            "a non-byte object must be rejected (no is_byte_object -> length confusion)"
+        );
+
+        // A tagged int is rejected by the existing is_data_ptr gate.
+        assert_eq!(poly_string_to_rust(PolyWord::tagged(42)), None);
     }
 
     #[test]
