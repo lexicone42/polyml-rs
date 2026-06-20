@@ -786,8 +786,30 @@ fn compile_with_consts_impl(
                     // GC'd between JIT compile + first call dispatched
                     // to a stale pointer. Bisection (commits e6a8280,
                     // 1d2c524, 598f312, 3d21be5) narrowed to entry #27
-                    // which uses CALL_CONST_ADDR8_0; this fix unblocks
-                    // it without needing the install-time filter.
+                    // which uses CALL_CONST_ADDR8_0; this runtime-load
+                    // fixed that (separate, real) GC-stale-VALUE issue.
+                    //
+                    // CORRECTION (task #115, 2026-06-20): this runtime
+                    // load does NOT "unblock CCA without the install
+                    // filter". It is ORTHOGONAL to the dominant CCA SEGV
+                    // class, which is a MID-FUNCTION OVER-POP: this
+                    // handler pops `n_args` SSA values + pushes one
+                    // result, but upstream CALL_CLOSURE
+                    // (bytecode.cpp:411-414) pops ONLY the closure — the
+                    // args PERSIST across the call and the callee's
+                    // RETURN_N collapses them, so the compiler addresses
+                    // surviving slots (a STACK_CONTAINER ref, etc.) by
+                    // absolute offset after the call. The over-pop
+                    // desyncs the compile-time stack → a later
+                    // INDIRECT_CONTAINER_B derefs a stale tagged-0 →
+                    // SIGSEGV. The install filter (lib.rs,
+                    // `cca_all_tail_equivalent`) therefore admits a CCA
+                    // function ONLY when every CCA in it is in
+                    // tail-equivalent position (where the over-pop is
+                    // harmless because nothing reads the corrupted slots
+                    // before the immediate return). A correct
+                    // mid-function CCA needs the non-popping model
+                    // (Tier 2 / whole-region compilation).
                     let abs_addr = _full_body.as_ptr() as i64 + read_at as i64;
                     let base = builder.ins().iconst(int, abs_addr);
                     let closure_v =

@@ -266,9 +266,19 @@ in `polyml-jit/src/lib.rs`):
   and reuses leftover slots after the call returns, so `n_args` can't
   be inferred statically — unlike TAIL_B_B, which forwards exactly its
   args).
-- CALL_CONST_ADDR variants (0x57/0x58/0x17/0x18) — translation
-  loads closure pointer at runtime, but the call still SEGVs
-  downstream in unisolated cases.
+- CALL_CONST_ADDR variants (0x57/0x58/0x17/0x18) — ROOT-CAUSED
+  (task #115, 2026-06-20, docs/jit-call-const-addr-findings-2026-06-20.md).
+  NOT an "unisolated interaction" (that framing is REFUTED — install
+  index 0 ALONE SEGVs): a per-function MID-FUNCTION OVER-POP. The CCA
+  handler pops `n_args` SSA values + pushes one result, but upstream
+  CALL_CLOSURE (bytecode.cpp:411-414) pops ONLY the closure — args
+  PERSIST across the call, callee RETURN_N collapses them — so a later
+  container/LOCAL op derefs a stale tagged-0 → SIGSEGV. Structurally
+  identical to CALL_LOCAL_B. The install gate (`cca_all_tail_equivalent`
+  in lib.rs) admits a CCA function ONLY when every CCA in it is in
+  tail-equivalent position; on the bootstrap image that safe subset is
+  EMPTY (0/1302), so it adds 0 installs — a correct mid-function CCA
+  needs whole-region compilation (Tier 2), no install gate can unlock it.
 
 TAIL_B_B (0x7b) — **NOW INSTALLS** (2026-06-12, +115 functions, the
 next perf lever after CASE16). It was SKIPPED because "re-enabling
@@ -306,8 +316,10 @@ average 37.5), so physics is NOT the wall. The real blockers are tractable bugs:
 immediate bytes as CALL_LOCAL_B and rejects the #1 hottest fn (fix = make the
 scan instruction-boundary-aware); (2) naive "install all hot" REGRESSES because a
 call-heavy fn (#4) is net-NEGATIVE under the Vec-allocating trampoline (fix = a
-per-function net-benefit gate); (3) the CALL_CONST_ADDR SEGV is an unisolated
-multi-fn INTERACTION bug (curated installs are correct).
+per-function net-benefit gate); (3) the CALL_CONST_ADDR SEGV — originally framed
+here as an "unisolated multi-fn INTERACTION bug (curated installs correct)", **a
+framing REFUTED 2026-06-20 (task #115): it is a per-function MID-FUNCTION OVER-POP,
+install index 0 ALONE SEGVs** (see the JIT Phase 1 entry below).
 **PHASE 0 LANDED 2026-06-18 (commit a4eb60d, wf_33864cc2-368)** — all three fixes,
 correctness-gated + hand-verified: `--jit` now BEATS the interpreter (+~2%, faster in
 every interleaved round; was −4%). Change 1 = boundary-aware install filter
@@ -319,10 +331,22 @@ slice; jit_cache SipHash→dependency-free FxHash) — basis-load step count BYT
 (`scan_call_density`, `JIT_NET_GATE_DENSITY` default 0.5) — monotone NO-OP on the 823
 set, latent insurance for the coverage phase. **bicimage NOT greenlit:** the >1.5×
 gate is NOT reached/reachable by the trampoline JIT at current coverage (9/top-10 hot
-fns still blocked by CALL_CONST_ADDR / CALL_LOCAL_B / CASE16-ESCAPE). NEXT for bicimage
-= coverage work (root-cause the CALL_CONST_ADDR multi-fn INTERACTION SEGV, ~22% of hot
-steps) then, if the trampoline stalls <1.5×, WHOLE-REGION compilation (keep nested
-calls in native code — removes the per-call boundary, the real road to native speed).
+fns still blocked by CALL_CONST_ADDR / CALL_LOCAL_B / CASE16-ESCAPE).
+**JIT PHASE 1 LANDED 2026-06-20 (task #115, wf_ebde3819-88c, docs/jit-call-const-addr-
+findings-2026-06-20.md): the CALL_CONST_ADDR SEGV is ROOT-CAUSED but NOT an install-gate
+fix.** It is a per-function MID-FUNCTION OVER-POP (the CCA handler pops `n_args` but
+upstream CALL_CLOSURE keeps the args on the stack across the call, RETURN_N collapses
+them; a later container/LOCAL op then derefs a stale tagged-0 → SIGSEGV), structurally
+identical to CALL_LOCAL_B — NOT a multi-fn interaction (index 0 alone SEGVs), NOT GC-stale
+(0 GC before crash), NOT a "no-container-is-safe" subset (`JIT_CCA_NO_CONTAINER=1` installs
+1661 and still SEGVs). Landed: a correctness-fenced tail-equivalent install gate
+(`cca_all_tail_equivalent`) + 5 differential tests + corrected docs — but the tail-safe
+subset is EMPTY (0/1302 CCA fns) on the bootstrap image (hot fns are mid-function-consume
+by construction), so it adds 0 installs and `--jit` stays at +1.6% (all from Phase 0).
+**No install gate can unlock the hot CCA/CALL_LOCAL_B functions — the ONLY lever for
+bicimage is WHOLE-REGION compilation** (keep nested calls in native code, model the
+non-popping convention — persistent args + RETURN-collapse + container-as-stack-pointer;
+removes the per-call boundary, the real road to native speed).
 The win is MODEST; pexport already ships portable, so bicimage stays gated on a
 demonstrated >1.5×. The 2026-06-12 analysis below is kept for its coverage detail but
 its "uncertain payoff / multi-front" pessimism is superseded by the measured result.

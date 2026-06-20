@@ -52,10 +52,18 @@ interp-steps/call to amortize; the average hot function does **37.5 steps/call**
    **Fix: a per-function net-benefit install gate** (don't install functions whose
    outgoing-call density makes them net-negative under the current trampoline).
 
-3. **`CALL_CONST_ADDR` SEGV is an unisolated multi-function INTERACTION bug**, not a
-   per-function impossibility. Trust-all (727→1959) SEGVs at 3.77M steps; curated/
-   isolated installs (the 5 hot CCA functions) are **correct + fast** to `Tagged(0)`.
-   Root-causing it unlocks ~22% of hot steps. (Deferred — harder.)
+3. **`CALL_CONST_ADDR` SEGV** — Trust-all (727→1959) SEGVs at 3.77M steps; unlocking
+   it would reach ~22% of hot steps. (Deferred — harder.)
+   **CORRECTION (task #115, 2026-06-20, docs/jit-call-const-addr-findings-2026-06-20.md):
+   this "unisolated multi-function INTERACTION bug, curated installs correct" framing is
+   REFUTED.** Install index 0 ALONE SEGVs (`JIT_INSTALL_LIMIT=1`); it is a CLASS of
+   individually-broken per-function CCA translations — a MID-FUNCTION OVER-POP (the CCA
+   handler pops `n_args` but upstream CALL_CLOSURE keeps the args on the stack across the
+   call), structurally identical to CALL_LOCAL_B. The "5 hot CCA functions correct in
+   isolation" was the isolated-install artifact (a short single-fn run doesn't exercise
+   the hazardous path). No install gate can unlock the hot CCA functions — they are
+   mid-function-consume by construction; the only lever is whole-region compilation
+   (route 1 below). The tail-equivalent safe subset is EMPTY on this image.
 
 ## Ceiling
 

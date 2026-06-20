@@ -237,6 +237,126 @@ fn scan_blockers_boundary_aware(bc: &[u8]) -> Option<BlockerScan> {
     Some(scan)
 }
 
+/// Decide whether *every* `CALL_CONST_ADDR` (0x57/0x58/0x17/0x18) in
+/// `bc` sits in a **tail-equivalent** position — i.e. one where the
+/// JIT's current mid-function CCA translation (translate.rs:752-814,
+/// which pops `n_args` SSA values and pushes a single result) produces
+/// the CORRECT return value even though it desynchronizes the
+/// compile-time stack from the persistent-stack layout the SML
+/// compiler assumes.
+///
+/// WHY a tail-position CCA is safe under the over-pop model, but a
+/// mid-function one is not (root cause, task #115):
+///
+/// Upstream CALL_CLOSURE (vendor/polyml/libpolyml/bytecode.cpp:411-414)
+/// pops ONLY the closure; the call args physically PERSIST on the
+/// stack across the call, and the callee's RETURN_N (bytecode.cpp:
+/// 454-460, `sp += returnCount`) collapses them. The compiler then
+/// addresses the surviving slots (a `STACK_CONTAINER_B` ref, fillers,
+/// etc.) by absolute LOCAL/CONTAINER offset AFTER the call. The JIT's
+/// CCA handler instead POPS those args and pushes one result, so a
+/// later `INDIRECT_CONTAINER_B` / `LOCAL_K` dereferences a stale
+/// compile-time value (a tagged-0 `iconst`, =0x1) as a heap pointer →
+/// SIGSEGV. Proven on install index 0 (head `78 81 2b 0e 02 3b 2a 57
+/// 6f 50 29 74 00 …`): the `0e 02` STACK_CONTAINER_B is live across the
+/// `57 6f` CCA, and the `74 00` INDIRECT_CONTAINER_B two ops later
+/// SEGVs.
+///
+/// In tail-equivalent position the over-pop is harmless: nothing reads
+/// the (corrupted) slots below the result — the very next thing is a
+/// RETURN that discards them. The trampoline still calls the closure
+/// with the right `n_args` and returns the right result. This is
+/// EXACTLY the gate `CALL_CLOSURE` already uses (translate.rs:606-625).
+///
+/// Tail-equivalent = the instruction immediately AFTER the CCA is one
+/// of:
+///   - `RETURN_1/2/3/B/W` (direct tail), OR
+///   - the `LOCAL_0; RESET_R_1; RETURN_1` cleanup idiom
+///     (0x29, 0x64, 0x42 — the compiler's "swap top into place before
+///     return"; functionally a return of the call result).
+///
+/// Returns `None` when the boundary walk can't be trusted (ESCAPE,
+/// unknown opcode, truncation) so the caller treats the function as
+/// **not** CCA-safe (conservative: an untrusted walk must never let a
+/// CCA function install). Returns `Some(true)` only when the walk
+/// completes cleanly AND every CCA is tail-equivalent.
+fn cca_all_tail_equivalent(bc: &[u8]) -> Option<bool> {
+    use blocker_opcodes as bo;
+    use polyml_runtime::interpreter::disasm::decode;
+    // The cleanup-tail idiom (mirrors translate.rs:617-619).
+    const LOCAL_0: u8 = 0x29;
+    const RESET_R_1: u8 = 0x64;
+    const RETURN_1: u8 = 0x42;
+    const RETURN_2: u8 = 0x43;
+    const RETURN_3: u8 = 0x44;
+    const RETURN_B: u8 = 0x1f;
+    const RETURN_W: u8 = 0x0d;
+
+    let mut pc = 0usize;
+    let mut all_tail = true;
+    let mut saw_cca = false;
+    while pc < bc.len() {
+        let op = bc[pc];
+        // ESCAPE / unknown / truncation: we cannot reliably find the
+        // next instruction boundary, so we cannot prove tail-position.
+        if op == bo::ESCAPE {
+            return None;
+        }
+        let d = decode(bc, pc);
+        if d.total_len == 0 {
+            return None;
+        }
+        if d.op != bo::CASE16 && d.mnemonic == "?" {
+            return None;
+        }
+        let step = d.total_len;
+        if pc + step > bc.len() {
+            return None;
+        }
+        if bo::is_call_const_addr(op) {
+            saw_cca = true;
+            let next_pc = pc + step;
+            let next = bc.get(next_pc).copied();
+            let direct_tail = matches!(
+                next,
+                Some(RETURN_1 | RETURN_2 | RETURN_3 | RETURN_B | RETURN_W)
+            );
+            let cleanup_tail = bc.get(next_pc).copied() == Some(LOCAL_0)
+                && bc.get(next_pc + 1).copied() == Some(RESET_R_1)
+                && bc.get(next_pc + 2).copied() == Some(RETURN_1);
+            if !direct_tail && !cleanup_tail {
+                all_tail = false;
+            }
+        }
+        pc += step;
+    }
+    // `saw_cca` is implied true by the caller (it only calls this for
+    // CCA functions), but guard anyway: a no-CCA function is vacuously
+    // tail-safe.
+    let _ = saw_cca;
+    Some(all_tail)
+}
+
+/// Public, side-effect-free predicate mirroring the install filter's
+/// CALL_CONST_ADDR (0x57/0x58/0x17/0x18) safety decision: returns
+/// `true` iff a function whose bytecode is `bc` is SAFE to install
+/// despite containing a CCA — i.e. it contains no CCA at all, or every
+/// CCA it contains is in tail-equivalent position (so the JIT's
+/// mid-function over-pop translation produces the correct return value;
+/// see `cca_all_tail_equivalent` for the root cause). Used by the CCA
+/// differential test (positive control must be `true`, the
+/// container-over-push negative control must be `false`) so the gate is
+/// fenced without relying on the bisection env toggles.
+#[must_use]
+pub fn cca_install_safe(bc: &[u8]) -> bool {
+    use blocker_opcodes as bo;
+    let has_cca = bc.iter().any(|&b| bo::is_call_const_addr(b));
+    if !has_cca {
+        return true;
+    }
+    cca_all_tail_equivalent(bc) == Some(true)
+}
+
 /// Walk all code objects in a [`polyml_runtime::LoadedImage`],
 /// JIT-translate each one that the translator accepts, and install
 /// every successful translation in the given interpreter's JIT
@@ -393,11 +513,22 @@ pub fn install_all_jit_entries(
             //   while having sml_arity=3).
             // - TAIL_B_B (0x7b): similar issue (re-enabling breaks the
             //   basis-loaded HOL4 workload).
-            // - CALL_CONST_ADDR (0x57/0x58/0x17/0x18): the runtime-load
-            //   fix in translate.rs was needed for some entries, but
-            //   when CALL_CONST_ADDR functions interact with each
-            //   other (multiple installed), bootstrap SEGVs at a
-            //   downstream STORE_ML_WORD. Bug unisolated.
+            // - CALL_CONST_ADDR (0x57/0x58/0x17/0x18): ROOT-CAUSED
+            //   (task #115, 2026-06-20). NOT a "multi-function
+            //   interaction" — install index 0 ALONE SEGVs. It is a
+            //   per-function MID-FUNCTION OVER-POP: the CCA translation
+            //   pops `n_args` SSA values + pushes one result, but
+            //   upstream CALL_CLOSURE (bytecode.cpp:411-414) pops ONLY
+            //   the closure (args PERSIST across the call, the callee's
+            //   RETURN_N collapses them), so a later container/LOCAL op
+            //   addressing a surviving slot derefs a stale tagged-0 →
+            //   SIGSEGV. See the `cca_all_tail_equivalent` gate below:
+            //   a CCA function installs ONLY when every CCA in it is in
+            //   tail-equivalent position. (On the bootstrap image that
+            //   safe subset happens to be EMPTY — every hot CCA function
+            //   uses its call result mid-function — so the count is
+            //   unchanged; a correct mid-function CCA needs the
+            //   non-popping / whole-region model.)
             //
             // Verified SAFE (re-enabled without regressions):
             // - CLOSURE_B (0xd0), ALLOC_REF/BYTE_MEM/WORD_MEM
@@ -444,7 +575,81 @@ pub fn install_all_jit_entries(
                 scan_blockers_boundary_aware(bc).unwrap_or_else(|| scan_blockers_raw(bc))
             };
             let has_call_local_b = scan.call_local_b;
-            let has_call_const_addr = scan.call_const_addr;
+            // CALL_CONST_ADDR (0x57/0x58/0x17/0x18) install gate
+            // (task #115, ROOT-CAUSED 2026-06-20).
+            //
+            // ROOT CAUSE (definitive, not "interaction"): the CCA
+            // translation is a MID-FUNCTION over-pop. It pops `n_args`
+            // SSA values off the compile-time stack and pushes one
+            // result (translate.rs:774-813), but upstream CALL_CLOSURE
+            // (bytecode.cpp:411-414) pops ONLY the closure — the args
+            // PERSIST across the call and the callee's RETURN_N
+            // (bytecode.cpp:454-460) collapses them. The compiler
+            // addresses the surviving slots (e.g. a STACK_CONTAINER_B
+            // ref) by absolute offset AFTER the call, so the over-pop
+            // desyncs the compile-time stack and a later
+            // INDIRECT_CONTAINER_B derefs a stale tagged-0 (0x1) →
+            // SIGSEGV. This is a per-function class (install index 0
+            // ALONE SEGVs), NOT a multi-function interaction — see the
+            // refuted hypotheses below.
+            //
+            // SAFE SUBSET: a CCA in TAIL-EQUIVALENT position (next op is
+            // RETURN_N or the LOCAL_0;RESET_R_1;RETURN_1 cleanup idiom)
+            // is correct under the over-pop model — nothing reads the
+            // corrupted slots below the result; the very next op returns
+            // it. This is exactly the gate CALL_CLOSURE already uses
+            // (translate.rs:606-625). `cca_all_tail_equivalent` does a
+            // boundary-aware walk and returns Some(true) only if EVERY
+            // CCA in the body is tail-equivalent, None if the walk can't
+            // be trusted (→ treated as not-safe, conservative).
+            //
+            // BISECTION ESCAPE HATCH (default-off, DO NOT SHIP ENABLED):
+            // JIT_TRUST_CALL_CONST_ADDR=1 installs ALL CCA functions
+            // (ignoring the tail gate), re-introducing the over-pop SEGV
+            // so the class can be bisected (JIT_INSTALL_LIMIT /
+            // JIT_INSTALL_SKIP). Trust-all SEGVs (823→2061 installs,
+            // exit 139) on the simple bootstrap and ~3.77M steps into
+            // the basis load.
+            let trust_call_const_addr = std::env::var("JIT_TRUST_CALL_CONST_ADDR").is_ok();
+            // EXPERIMENTAL (default-off): JIT_CCA_NO_CONTAINER=1 admits
+            // CCA functions that contain NO container opcode
+            // (STACK_CONTAINER_B / MOVE_TO_CONTAINER_B /
+            // INDIRECT_CONTAINER_B and their W ESCAPE variants), even
+            // mid-function. The over-pop net delta (-N+1) matches the
+            // interpreter when n_args == callee arity (which
+            // JIT_TRAMP_VERIFY_ARITY confirms holds for all CCA), so
+            // the SEGV class is driven by the container-ref-live-across
+            // -the-call hazard. This toggle was used to TEST whether the
+            // no-container subset is safe; it is NOT (see the basis-load
+            // verification — a no-container CCA still desyncs on a
+            // post-call absolute-offset LOCAL read), so it ships
+            // default-off and the tail-equivalent gate is authoritative.
+            let cca_no_container_experiment = std::env::var("JIT_CCA_NO_CONTAINER").is_ok();
+            // A function with a CCA is BLOCKED unless (trust toggle) OR
+            // (every CCA in it is tail-equivalent) OR (the experimental
+            // no-container toggle accepts it). A function with NO CCA
+            // short-circuits past the (extra, install-time-only) tail
+            // walk entirely.
+            let cca_safe = !scan.call_const_addr
+                || trust_call_const_addr
+                || cca_all_tail_equivalent(bc) == Some(true)
+                || (cca_no_container_experiment
+                    && scan_blockers_boundary_aware(bc).is_some()
+                    && !bc.iter().any(|&b| b == 0x0e || b == 0x24 || b == 0x74));
+            let has_call_const_addr = scan.call_const_addr && !cca_safe;
+            // Diagnostic: tally the CCA population vs how many pass the
+            // tail-equivalent gate (JIT_CCA_STATS=1).
+            if std::env::var("JIT_CCA_STATS").is_ok() && scan.call_const_addr {
+                let tail = cca_all_tail_equivalent(bc);
+                let has_container = bc.iter().any(|&b| {
+                    b == 0x0e /* STACK_CONTAINER_B */
+                        || b == 0x24 /* MOVE_TO_CONTAINER_B */
+                        || b == 0x74 /* INDIRECT_CONTAINER_B */
+                });
+                eprintln!(
+                    "  cca_stat: code_obj=0x{body_start:016x} bytecode_len={bytecode_len} all_tail={tail:?} has_container_byte={has_container}"
+                );
+            }
             let const_addr_rts_wrapper = scan.const_addr_rts_wrapper();
             // TAIL_B_B (0x7b) is now SAFE to install (2026-06-12).
             //
