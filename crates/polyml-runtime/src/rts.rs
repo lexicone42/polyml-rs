@@ -408,8 +408,10 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyRealLog10",
         RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).log10())),
     );
-    // floor/ceil/trunc obvious; round = round-half-to-even (matches upstream
-    // PolyRealRound, reals.cpp:350-359).
+    // floor/ceil/trunc obvious; round replicates upstream PolyRealRound's exact
+    // fmod/floor(x+0.5) algorithm (reals.cpp:350-359) — round-half-to-even
+    // MAGNITUDE but +0.0 (not -0.0) for arg in (-0.5, 0]. `round_ties_even`
+    // would diverge on sign-of-zero; see poly_real_round_f64.
     t.register(
         "PolyRealFloor",
         RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).floor())),
@@ -420,7 +422,7 @@ fn register_builtins(t: &mut RtsTable) {
     );
     t.register(
         "PolyRealRound",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).round_ties_even())),
+        RtsFn::Arity1(|c, x| box_real(c, poly_real_round_f64(read_real_word(x)))),
     );
     t.register(
         "PolyRealTrunc",
@@ -497,7 +499,7 @@ fn register_builtins(t: &mut RtsTable) {
     );
     t.register(
         "PolyRealFRound",
-        RtsFn::Arity1(|c, x| box_f32_tagged(c, read_f32_tagged(x).round_ties_even())),
+        RtsFn::Arity1(|c, x| box_f32_tagged(c, poly_real_round_f32(read_f32_tagged(x)))),
     );
     t.register(
         "PolyRealFTrunc",
@@ -2291,8 +2293,15 @@ fn poly_gcd_arbitrary(
     }
 }
 
-/// LCM = (|x| / gcd(x,y)) * |y|, with care around zero. Tagged fast path + BigInt
-/// fallback for boxed operands / tagged-overflow results (was 0 for both before).
+/// LCM, with upstream's SIGNED convention. Upstream `lcm_arbitrary`
+/// (arb.cpp:1671-1675) is `mult_longc(x, div_longc(gcd, y)) = x * (y / gcd)`
+/// computed with SIGNED multiply/divide, so the result sign is
+/// `sign(x) * sign(y)` (NOT the absolute value).  Differential fuzz vs upstream
+/// (fuzz_core_rts_only_rts.sml, 2026-06-20) caught ours returning the absolute
+/// value for mixed-sign operands: `lcm(-6,4)` should be -12, not 12.
+/// `lcm(x, 0) = lcm(0, y) = 0`.  Tagged fast path stays SIGNED; falls through to
+/// the BigInt path on tagged overflow.  Matches `num_integer`'s `lcm` only in
+/// magnitude — we restore the sign explicitly.
 #[allow(clippy::needless_pass_by_value)]
 fn poly_lcm_arbitrary(
     ctx: &mut RtsContext<'_>,
@@ -2300,7 +2309,14 @@ fn poly_lcm_arbitrary(
     arg1: PolyWord,
     arg2: PolyWord,
 ) -> PolyWord {
+    use num_bigint::Sign;
+    use num_integer::Integer;
     if let Some((x, y)) = both_tagged(arg2, arg1) {
+        // Upstream lcm = x*(y/gcd); gcd(0,0)=0 so lcm(0,0) divides by zero → Div.
+        // A single zero gives 0 (y/gcd = 0). (arb.cpp:1671-1675, div_longc raises Div.)
+        if x == 0 && y == 0 {
+            return raise_div(ctx);
+        }
         if x == 0 || y == 0 {
             return PolyWord::tagged(0);
         }
@@ -2312,27 +2328,42 @@ fn poly_lcm_arbitrary(
             b = a % b;
             a = t;
         }
+        // Both x and y are nonzero here, so g = gcd(|x|,|y|) >= 1.
         let g = a;
-        if g == 0 {
-            return PolyWord::tagged(0);
+        // On overflow of the |lcm| product or the tagged range, DON'T return 0 —
+        // fall through to the BigInt path, which computes the full (possibly
+        // boxed) result.  (Earlier this path `return`ed tagged(0), silently
+        // truncating large lcms to 0 — caught by fuzz_core_rts_only_rts.sml.)
+        if let Some(mag) = (orig_a / g).checked_mul(orig_b) {
+            #[allow(clippy::cast_sign_loss)]
+            let max = isize::MAX as usize;
+            if mag <= max {
+                // Signed result: sign = sign(x) * sign(y) (both nonzero here).
+                let negate = (x < 0) != (y < 0);
+                #[allow(clippy::cast_possible_wrap)]
+                let v = if negate {
+                    -(mag as isize)
+                } else {
+                    mag as isize
+                };
+                if fits_tagged(v as i128) {
+                    return PolyWord::tagged(v);
+                }
+            }
         }
-        let Some(lcm) = (orig_a / g).checked_mul(orig_b) else {
-            return PolyWord::tagged(0);
-        };
-        #[allow(clippy::cast_sign_loss)]
-        let max = isize::MAX as usize;
-        if lcm > max {
-            return PolyWord::tagged(0);
-        }
-        #[allow(clippy::cast_possible_wrap)]
-        let v = lcm as isize;
-        if fits_tagged(v as i128) {
-            return PolyWord::tagged(v);
-        }
+        // overflow: fall through to BigInt.
     }
-    use num_integer::Integer;
+    // BigInt fallback: compute |lcm| then restore the signed convention.
     match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
-        (Some(a), Some(b)) => bigint_to_poly_word(ctx, &a.lcm(&b)),
+        (Some(a), Some(b)) => {
+            let mut l = a.lcm(&b); // non-negative magnitude
+            // sign(arg1) * sign(arg2): negate iff exactly one operand is negative.
+            let neg = (a.sign() == Sign::Minus) != (b.sign() == Sign::Minus);
+            if neg && l.sign() != Sign::NoSign {
+                l = -l;
+            }
+            bigint_to_poly_word(ctx, &l)
+        }
         _ => PolyWord::tagged(0),
     }
 }
@@ -2961,6 +2992,49 @@ fn real_f_pow(x: f32, y: f32) -> f32 {
         return f32::INFINITY;
     }
     x.powf(y)
+}
+
+/// Round-to-nearest-integral matching upstream `PolyRealRound`
+/// (reals.cpp:350-359) BIT-FOR-BIT, including the sign of a zero result.
+///
+/// Upstream does NOT use C99 `rint`/`round_ties_even`: it computes
+/// `drem = fmod(arg, 2.0)` and for the exact half-way ties that should round
+/// toward even (`drem == 0.5` i.e. positive-even+0.5, or `drem == -1.5` i.e.
+/// negative-odd-0.5) returns `ceil(arg - 0.5)`, otherwise `floor(arg + 0.5)`.
+/// This produces round-half-to-EVEN magnitudes (identical to
+/// `round_ties_even`) BUT — crucially — for any `arg` in `(-0.5, 0]` the
+/// `floor(arg + 0.5)` branch yields `+0.0`, whereas `round_ties_even`
+/// preserves the negative sign and yields `-0.0`. The sign-of-zero is
+/// observable (`Real.signBit`, `Real.toString` "~0.0"), so to stay faithful
+/// to the upstream oracle we replicate the exact algorithm. See the REAL32
+/// RTS differential fuzz finding (tools/diff-corpus/fuzz_real32_rts.sml).
+// The exact `== 0.5` / `== -1.5` comparison is load-bearing: it reproduces
+// upstream's exact half-way-tie branch (reals.cpp:350-359). An epsilon
+// comparison would change which inputs take the ceil(arg-0.5) vs
+// floor(arg+0.5) branch and break bit-for-bit faithfulness.
+#[allow(clippy::float_cmp)]
+fn poly_real_round_f64(arg: f64) -> f64 {
+    let drem = arg % 2.0;
+    if drem == 0.5 || drem == -1.5 {
+        (arg - 0.5).ceil()
+    } else {
+        (arg + 0.5).floor()
+    }
+}
+
+/// Round-to-nearest-integral matching upstream `PolyRealFRound`
+/// (reals.cpp:577-586) BIT-FOR-BIT — the f32 analogue of
+/// [`poly_real_round_f64`]. Same `fmodf`/`floorf(x+0.5)` algorithm, same
+/// `+0.0` sign for `arg` in `(-0.5, 0]`.
+// Exact tie comparison is load-bearing — see poly_real_round_f64.
+#[allow(clippy::float_cmp)]
+fn poly_real_round_f32(arg: f32) -> f32 {
+    let drem = arg % 2.0;
+    if drem == 0.5 || drem == -1.5 {
+        (arg - 0.5).ceil()
+    } else {
+        (arg + 0.5).floor()
+    }
 }
 
 /// Box an `f64` as a PolyML Real (1-word byte object).
@@ -4388,9 +4462,22 @@ mod tests {
 
     #[test]
     fn real32_round_half_even() {
-        assert_eq!(0.5f32.round_ties_even(), 0.0);
-        assert_eq!(2.5f32.round_ties_even(), 2.0);
-        assert_eq!((-1.5f32).round_ties_even(), -2.0);
+        // Magnitudes are round-half-to-EVEN, matching upstream PolyRealFRound.
+        assert_eq!(poly_real_round_f32(0.5), 0.0);
+        assert_eq!(poly_real_round_f32(2.5), 2.0);
+        assert_eq!(poly_real_round_f32(-1.5), -2.0);
+        assert_eq!(poly_real_round_f32(-2.5), -2.0);
+        assert_eq!(poly_real_round_f32(3.5), 4.0);
+        // Sign-of-zero MUST be +0.0 for arg in (-0.5, 0], like upstream's
+        // floor(arg + 0.5) (NOT round_ties_even, which would give -0.0).
+        assert!(poly_real_round_f32(-0.3).is_sign_positive());
+        assert!(poly_real_round_f32(-0.5).is_sign_positive());
+        assert!(poly_real_round_f32(-0.0).is_sign_positive());
+        // f64 path identical.
+        assert_eq!(poly_real_round_f64(2.5), 2.0);
+        assert_eq!(poly_real_round_f64(-1.5), -2.0);
+        assert!(poly_real_round_f64(-0.3).is_sign_positive());
+        assert!(poly_real_round_f64(-0.5).is_sign_positive());
     }
 
     #[test]
@@ -4530,6 +4617,89 @@ mod tests {
         assert!(big.is_data_ptr(), "2^80 must box");
         let r = poly_and_arbitrary(&mut c, t(), PolyWord::tagged(-1), big);
         assert_eq!(poly_word_to_bigint(r).unwrap(), BigInt::from(1u8) << 80u32);
+    }
+
+    #[test]
+    fn arb_and_min_tagged_boxed_repro() {
+        // andb(-2^62, 2^62): -2^62 = MIN_TAGGED (tagged), 2^62 boxed.
+        // Two's-complement: result must be 2^62. Differential vs upstream
+        // caught ours returning -2^62 (sub_core_rts fuzz, 2026-06-20).
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut c = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
+        let p62 = BigInt::from(1u8) << 62u32;
+        let boxed_p62 = bigint_to_poly_word(&mut c, &p62);
+        assert!(boxed_p62.is_data_ptr(), "2^62 must box");
+        let neg_p62 = PolyWord::tagged(MIN_TAGGED); // -2^62
+        assert_eq!(BigInt::from(neg_p62.untag()), -&p62);
+        let r = poly_and_arbitrary(&mut c, t(), neg_p62, boxed_p62);
+        assert_eq!(
+            poly_word_to_bigint(r).unwrap(),
+            p62.clone(),
+            "andb(-2^62, 2^62) should be 2^62"
+        );
+        // And the 0-returning case: andb(-2^62, 2^64) = 2^64.
+        let p64 = BigInt::from(1u8) << 64u32;
+        let boxed_p64 = bigint_to_poly_word(&mut c, &p64);
+        let r2 = poly_and_arbitrary(&mut c, t(), PolyWord::tagged(MIN_TAGGED), boxed_p64);
+        assert_eq!(
+            poly_word_to_bigint(r2).unwrap(),
+            p64,
+            "andb(-2^62, 2^64) should be 2^64"
+        );
+    }
+
+    #[test]
+    fn arb_lcm_signed_convention() {
+        // Upstream lcm = x * (y / gcd), SIGNED: sign(result) = sign(x)*sign(y).
+        // Differential fuzz vs upstream (2026-06-20) caught ours returning |lcm|.
+        let lcm = |a: isize, b: isize| {
+            poly_lcm_arbitrary(&mut ctx(), t(), PolyWord::tagged(a), PolyWord::tagged(b)).untag()
+        };
+        assert_eq!(lcm(6, 4), 12, "lcm(6,4)");
+        assert_eq!(lcm(-6, 4), -12, "lcm(-6,4)");
+        assert_eq!(lcm(6, -4), -12, "lcm(6,-4)");
+        assert_eq!(lcm(-6, -4), 12, "lcm(-6,-4)");
+        assert_eq!(lcm(0, 5), 0, "lcm(0,5)");
+        assert_eq!(lcm(5, 0), 0, "lcm(5,0)");
+        // BigInt path: lcm(-2^80, 6). |lcm| = 2^80*3 = 3*2^80; signed = negative.
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Mutable);
+        let mut c = RtsContext {
+            alloc_space: Some(&mut space),
+            raised_exception: None,
+            rts: None,
+        };
+        // lcm(0,0) divides by zero (gcd=0) → upstream raises Div.
+        let _ = poly_lcm_arbitrary(&mut c, t(), PolyWord::tagged(0), PolyWord::tagged(0));
+        assert!(c.raised_exception.is_some(), "lcm(0,0) should raise Div");
+        c.raised_exception = None;
+        let neg_p80 = bigint_to_poly_word(&mut c, &(-(BigInt::from(1u8) << 80u32)));
+        let r = poly_lcm_arbitrary(&mut c, t(), neg_p80, PolyWord::tagged(6));
+        assert_eq!(
+            poly_word_to_bigint(r).unwrap(),
+            -((BigInt::from(1u8) << 80u32) * BigInt::from(3u8)),
+            "lcm(-2^80, 6) should be -(3*2^80)"
+        );
+        // Tagged-OVERFLOW case: lcm(2^62-1, 100). Both tagged, but |lcm| exceeds
+        // usize so the tagged path must FALL THROUGH to BigInt (was returning 0).
+        let max_tag = MAX_TAGGED; // 2^62 - 1
+        let r2 = poly_lcm_arbitrary(
+            &mut c,
+            t(),
+            PolyWord::tagged(max_tag),
+            PolyWord::tagged(100),
+        );
+        use num_integer::Integer as _NumInteger;
+        let mt = BigInt::from(max_tag);
+        let expected = &mt / mt.gcd(&BigInt::from(100)) * BigInt::from(100);
+        assert_eq!(
+            poly_word_to_bigint(r2).unwrap(),
+            expected,
+            "lcm(2^62-1, 100) must not truncate to 0"
+        );
     }
 
     #[test]
