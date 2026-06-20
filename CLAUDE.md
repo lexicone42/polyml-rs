@@ -1574,6 +1574,18 @@ isabelle_*.rs`, all fenced by `regression.sh full`):
   function needed); subtraction-free renderings (`a+n²=m²` for `a=m²−n²`). 3-seat ultracode fleet
   (wf_494e9c98-2e3); re-verified by hand. (NB an earlier weaker 4-conjunct char variant was
   dropped in favour of this stronger 5-conjunct one.)
+- **CLASSICAL FIBONACCI IDENTITIES** (`isabelle_fibonacci.rs`, `isabelle_fibonacci.sml`,
+  2026-06-19 — a fresh flavour: STANDARD Fibonacci, distinct from the Zeckendorf `zfib`): on
+  `with_nt_helpers`, define `fib` (0,1,1,2,3,5,8,… via fib_0/fib_1/fib_SS) and prove three classics,
+  each 0-hyp, aconv, soundness-probed: SUM `⊢ fibsum n + 1 = fib(n+2)` (∑_{i=0}^n fib i = fib(n+2)−1,
+  sub-free telescoping); the sign-free ADDITION LAW `⊢ fib(m+n+1) = fib(m+1)·fib(n+1) + fib(m)·fib(n)`
+  (induction on m with the two-consecutive-cases predicate); and **CASSINI** in its ℕ parity form —
+  `fib(2k)·fib(2k+2)+1 = fib(2k+1)²` and `fib(2k+1)·fib(2k+3) = fib(2k+2)²+1` (the +1 on OPPOSITE
+  sides = (−1)ⁿ rendered sign-free, one simultaneous induction on k via `dbl k = 2k`). Only classical
+  assumption = ex_middle; a runtime `all_axioms_of` dump confirmed ONLY Pure meta-logic + the
+  conservative NT foundation + 7 conservative recursion axioms (fib/fibsum/dbl) — every algebraic
+  lemma derived. Self-contained `with_nt_helpers` delta (fib_base + addition + cassini compose in one
+  driver). ultracode wf_c7994e02-6d9; re-verified by hand (test green 8.9s).
 - **FUNDAMENTAL THEOREM OF ARITHMETIC (existence)** (`isabelle_fta.rs`, 2026-06-13 — the
   finale that FUSES the list theory with the primes machinery): `⊢ ∀n. 2≤n ⟹ ∃ps. all_prime
   ps ∧ product ps = n` — every n≥2 is a product of primes. A 0-hyp theorem by strong
