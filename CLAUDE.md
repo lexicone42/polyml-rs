@@ -681,10 +681,18 @@ Two runtime gaps this work surfaced:
 
 HOL4 Theory subsystem status: 50/54 modules compile + load + run on the
 interpreter (the 4 stuck are the theorem-DB *search* layer: DB /
-DBSearchParser / TheoryReader — DBSearchParser needs the `regexpMatch`
-library which isn't vendored). See the per-project exo-self notes
-(2026-05-30) for the full dependency archaeology and the keystone fix
-(Thm.hash leak hidden by Overlay's opaque `open Kernel`).
+DBSearchParser / TheoryReader). CORRECTION (2026-06-20, task #54): the old
+note here said `regexpMatch` "isn't vendored" — that is WRONG. It IS vendored
+(`vendor/hol4/tools/util/regexpMatch.{sig,sml}`, self-contained: Binaryset +
+Char.compare + Systeml.pointer_eq, all available). The real reason the 4 are
+stuck is SCOPE — `regexpMatch` was deliberately left out of the
+`theory_subsystem.sml` closure because the search layer is unused by any kernel
+proof, the Isabelle work, or JIT correctness testing; the test fences at ≥50
+(`hol4_theory.rs`) treating 50 as the real milestone. Closing #54 is a ~5-line
+closure edit (splice regexpMatch.{sig,sml} + DB/TheoryReader) for purely
+cosmetic 54/54 — **WONTFIX / low-value**, not a blocker. See the per-project
+exo-self notes (2026-05-30) for the full dependency archaeology and the keystone
+fix (Thm.hash leak hidden by Overlay's opaque `open Kernel`).
 
 HOL4 **term/type parser status: WORKING** (2026-06-04). The full
 `src/parse` core — 79/79 modules including `term_grammar`, `Pretype`,
