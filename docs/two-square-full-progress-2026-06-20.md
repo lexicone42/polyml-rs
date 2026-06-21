@@ -1,3 +1,42 @@
+# Fermat's two-square theorem (FULL characterization) — progress (2026-06-20, updated 2026-06-21)
+
+## 2026-06-21 UPDATE (finish fleet wf_c883d0a5-498) — ONLY-IF DIRECTION CLOSED; if-direction substantial
+
+The "finish" fleet closed the only-if direction in full and made substantial if-direction
+progress. The full iff is still open (the if-direction's valuation-transfer + the final
+merge remain). All re-verified independently; fenced (isabelle_twosquare_full.rs, 5/5 pass
+~111s warm).
+
+- **ONLY-IF DIRECTION — PROVED + FENCED** (both seats independently closed it, same fix;
+  verifier re-ran from scratch): `⊢ prime2 p ⟹ (∃k. p=4k+3) ⟹ (0<n ∧ ∃a b. n=a²+b²) ⟹
+  ∃v m. n = pʵ·m ∧ ¬(p∣m) ∧ ∃j. v=2j` (p divides n to an even power, relational valuation,
+  no vp const). 0-hyp, aconv-intended, axiom-audit clean (49 axioms, 0 conclusion-mentioning,
+  only ex_middle classical). Concrete kernel decision probes pass: REJECT 3/7/21, ACCEPT
+  5/9/2/13 (`oi_concrete_probe.sml`). ~2.8B steps, Tagged(0), deterministic.
+  - THE caseA FIX (root cause, both seats converged): the descent's num-cases arms
+    (caseZ = n'=0 contra, caseSq = n'=Suc q descent) were wrapped in `impI_S2`, converting
+    the META-implication into an OBJECT `jT(Imp A C)` — but `disjE_elimSub` consumes its
+    arms as RAW META-implications (`jT A ⟹ jT C`) via `Thm.implies_elim`. The double-wrap
+    handed an object impl where a meta one was required → `THM("implies_elim: major premise")`.
+    FIX: drop the two `impI_S2` wrappers, pass caseZ/caseSq directly (the exact pattern apm1
+    + the dvd-EM split already use). NOT a math gap; all 11 arith sub-lemmas were already fine.
+    Banked: `oi_casea_seat2.sml` (caseA rebuilt mirroring the working caseB) + `oi_verify.sml`.
+- **IF DIRECTION — substantial progress (not closed)**, on the merged twosquare base
+  (`if_toolkit.sml`/`if_brahma.sml`/`if_blocks.sml`/`if_direction.sml`): PROVED the leaf +
+  fold machinery — brahma4 (brahmagupta on the twosquare base), two_is_sumsq (2=1²+1²),
+  sq_is_sumsq (k²=k²+0²), sumsq_times_sq, sumsq_mult, and **prod_all_sumsq** (the product
+  fold over an FTA-style list, 0-hyp+aconv+probe). NOT yet built: (a) the mod-4 trichotomy
+  (prime2 p ⟹ p=2 ∨ p=4k+1 ∨ p=4k+3 — concrete, via div_mod_exists at 4), (b) the
+  strong-induction VALUATION TRANSFER (v_q(n)=v_q(n/p) for q≠p — an FTA-uniqueness-grade
+  coprime-valuation argument; the crux). Fenced (if_direction_machinery test).
+- **FULL IFF — not assembled.** Needs: close the if-direction (trichotomy + valuation
+  transfer), then re-establish the only-if on the twosquare base (the monolith has
+  lagrange_roots/mod_cancel/cong but NOT FLT(apm1) nor key_onlyif — splice them), then mkConj
+  the two Imps (cf. isabelle_wilson_iff.sml). The 3-way merge (twosquare ⊕ FLT ⊕ FTA) + the
+  valuation transfer is the remaining work — a follow-up fleet.
+
+---
+
 # Fermat's two-square theorem (FULL characterization) — progress (2026-06-20)
 
 Ultracode campaign wf_9cb6cd8a-cdc toward

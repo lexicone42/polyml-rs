@@ -1,39 +1,64 @@
-FERMAT TWO-SQUARE FULL IFF — resume material (2026-06-20)
-=========================================================
-BANKED (both 0-hyp, aconv-intended, soundness-probed, re-verified this session):
-  - brahmagupta  : /tmp/ts_brahmagupta_full.sml  (with_nt_helpers base; |- Ex P Q. (a^2+b^2)(c^2+d^2)=P^2+Q^2)
-                   3,148,749,731 steps, Tagged(0), BRAHMAGUPTA_DONE.
-  - key_onlyif   : /tmp/ts_key_lemma.sml         (primes_1mod4/euler base; prime2 p, p=4k+3, p|a^2+b^2 ==> p|a /\ p|b)
-                   2,630,498,483 steps, Tagged(0), KEY_ONLYIF_OK.  Spine loads in 27s (warm).
+FERMAT TWO-SQUARE FULL IFF — resume material (updated 2026-06-21)
+=================================================================
+BANKED (all 0-hyp, aconv-intended, soundness-probed, re-verified; regression-fenced):
 
-ONLY-IF DIRECTION (in progress, on the ts_key_lemma spine = primes_1mod4):
-  Statement (relational valuation, no vp const):
-    only_if : 0<n ==> (Ex a b. n=a^2+b^2) ==> (fixed prime2 p, p=4k+3) ==>
-              Ex v m. n = pow p v * m  /\  ~(p|m)  /\  Ex j. v=j+j
-  Method: strong_induct descent. p|n =[key_onlyif]=> p|a,p|b => n=p^2*n', n'<n => IH => even v.
+  ---- the two graceful-floor lemmas (earlier sessions) ----
+  - brahmagupta  : ts_brahmagupta.sml (with_nt_helpers base; |- Ex P Q. (a^2+b^2)(c^2+d^2)=P^2+Q^2)
+  - key_onlyif   : ts_key_lemma.sml (primes_1mod4/euler base; prime2 p, p=4k+3, p|a^2+b^2 ==> p|a /\ p|b)
 
-  ALL ARITHMETIC HELPERS VERIFY IN ISOLATION (oi_arith.sml, all markers OK):
-    lt0_suc, lt_add_pos, lt_self_mult (well-foundedness n'<p^2*n'),
-    sq_factor ((p*a')^2=(p*p)*(a'*a')), factor_n, pow_step, even_step, pp_suc2.
-  key_onlyif_at, prime2_gt1_atSub, dvd-extract: all verify (oi_inner2/4 tests).
-  caseB (~p|n base case): builds aconv-true (OI_CASEB_OK aconv-impl=true).
+  ---- ONLY-IF DIRECTION: CLOSED (Phase 1, two seats; oi_casea fix banked) ----
+  - only_if : on the ts_key_lemma spine, 0-hyp + aconv + probe.  Statement (schematic p,n):
+      prime2 p ==> (Ex k. p = 4k+3) ==> (0<n /\ Ex a b. n=a^2+b^2)
+        ==> Ex v m. n = pow p v * m  /\  ~(p|m)  /\  Ex j. v=j+j   (relational even valuation).
+    caseA fix = drop the impI_S2 over-wrap on the disjE_elimSub case-arms (oi_casea.sml:159-162);
+    they were already correct meta-implications.  Banked seat: oi_casea_seat2.sml.
 
-  BLOCKER (the one remaining bug): caseA (the descent case, oi_casea.sml) raises
-    THM("implies_elim: major premise") in the big let-assembly.  This is the SAME
-    CLASS as the caseB bug I already fixed: a meta-vs-object implication / witness-shape
-    mismatch in the disjE_elimSub combine + impI_S2 wrapping + the IH(applyIH)->conclNp
-    chain.  NOT a math gap.  NEXT STEP: add per-step `out` markers (or `handle e=>raise`)
-    inside caseA_arm to localize which implies_elim fails (candidates: the disjE combine
-    of caseZ/caseSq, the mp_S2 conclNp, or the nested cbInner conjunct projections),
-    then fix the meta/object boundary as in caseB.  ~27s dev loop.
+  ---- IF-DIRECTION MACHINERY on the MERGED twosquare base (THIS session, 2026-06-21) ----
+  File: if_direction.sml (= if_toolkit.sml + if_brahma.sml + if_blocks.sml concatenated).
+  Appended after the FULL isabelle_twosquare.sml monolith (final context ctxtGR), which loads in
+  ~46s and gives `twosquare : prime2 p ==> p-1=4k ==> Ex a b. p=a^2+b^2` (0-hyp).  The delta adds
+  ZERO new axioms / consts / types -- pure derivations over the monolith's base.  Test:
+  isabelle_twosquare_full.rs::if_direction_machinery (cargo, ~109s, PASSES).  Markers:
+    - IF_BRAHMA_OK   : brahmagupta on ctxtGR, `brahma4 (a,b,c,d)` parametrised.  0-hyp + aconv.
+    - IF_TWO_OK      : two_is_sumsq   |- Ex a b. 2 = a^2+b^2          (1,1)
+    - IF_SQ_OK       : sq_is_sumsq k  |- Ex a b. k^2 = a^2+b^2        (k,0)
+    - IF_STSQ_OK     : sumsq_times_sq : sumsq n ==> sumsq ((k*k)*n)   (squared factor)
+    - IF_SMULT_OK    : sumsq_mult     : sumsq m ==> sumsq n ==> sumsq (m*n)   (THE brahmagupta fold)
+    - IF_PROD_OK     : prod_all_sumsq : |- !ps. (!x. lmem x ps ==> sumsq x) ==> sumsq (lprod ps)
+                       THE structural backbone -- a natlist of sums-of-two-squares multiplies to a
+                       sum of two squares (the fold over an FTA-style prime-power list).  0-hyp +
+                       aconv-intended + soundness-probed (NOT the vacuous hyp-dropped form).
+  Toolkit (if_toolkit.sml): a full `_gr` family on ctxtGR (varify base lemmas + ND rules onto the
+  monolith's final context).  if_brahma.sml: the polynomial normalizer proveIdentityG + sq_diff_law
+  + brahma4, ported verbatim from ts_brahmagupta with _C->_gr.  GOTCHA logged again: sumsqBody /
+  hypBody predicates must be built with Term.lambda over a FRESH Free (NOT Abs+Bound 0) -- the inner
+  Ex a/Ex b binders capture a literal Bound 0; and list_induct's P / base / step must be OBJECT
+  implications (impI_r to convert the meta implies_intr), the inner per-x hyp likewise.
 
-  KEY GOTCHA logged: `le`/`lt`/`dvd` are ABBREVIATIONS containing an inner Ex/Abs, so a
-  rewrite predicate `Abs("z", le m (Bound 0))` CAPTURES Bound 0 inside that inner Abs.
-  ALWAYS build such predicates with `Term.lambda (Free ...)` over a FRESH Free.  This bit
-  lt_add_pos_at / lt_self_mult_at / the PabsLt rewrites (all now fixed in oi_arith/oi_casea).
+REMAINING for the FULL IF-DIRECTION (the documented merge blocker):
+  The if-direction reduces (via prod_all_sumsq + the leaves) to: factor n by FTA into a prime-power
+  list, classify each prime mod 4, show every prime-power factor is a sum of two squares.  Two pieces:
+    1. mod-4 TRICHOTOMY for primes: prime2 p ==> (p=2) \/ (Ex k. p=4k+1) \/ (Ex k. p=4k+3).
+       Derivable from div_mod_exists at 4 (case split on r in {0,1,2,3}, rule out r=0/2 for odd p).
+       Concrete + bankable; NOT yet built.
+    2. the STRONG-INDUCTION VALUATION TRANSFER: dividing n by the chosen prime p and showing the
+       per-prime relational-valuation hypothesis H survives on the cofactor (v_q(n)=v_q(cofactor)
+       for q != p).  This is an FTA-uniqueness-grade coprime-valuation argument (euclid_lemma +
+       cancellation); it is THE hard piece and matches the multi-fleet effort the only-if needed.
+  The base has everything needed (euclid_lemma, div_mod_exists, pow_add/pow_mult_base/cong_pow,
+  dvd_trans, prime_divisor_exists, the natlist+lprod+list_induct lib) -- it is a proof-engineering
+  volume task, not a missing-primitive gap.
 
-IF DIRECTION + vp const + final iff assembly: not started (the heavier FTA/Brahmagupta-
-volume half).  Run brahmagupta on the merged base; needs FTA factorization spliced.
+REMAINING for the FULL IFF:
+  - re-establish only_if on THIS merged twosquare base: the twosquare monolith has lagrange_roots /
+    mod_cancel / cong machinery but NOT FLT/apm1 nor key_onlyif (those live in the primes_1mod4 spine).
+    So the only-if must be re-spliced (port FLT + key_onlyif + the descent onto ctxtGR), the documented
+    3-way-merge risk.  ALTERNATIVELY assemble the iff on a base that carries BOTH branches.
+  - then mkConj the two Imps (cf. isabelle_wilson_iff.sml).
 
-RUN: cd repo; (printf 'val () = restore_pure_context ();\n'; cat ts_key_lemma.sml oi_arith.sml oi_descent.sml oi_casea.sml) | \
-  ML_SYSTEM=polyml ML_PLATFORM=x86_64-linux ISABELLE_HOME=/tmp/isa ./target/release/poly run --max-steps 300000000000 /tmp/isabelle_pure
+RUN the if-direction delta:
+  cd repo; (printf 'val () = restore_pure_context ();\n' is NOT needed -- the monolith calls it)
+  cat crates/.../isabelle_twosquare.sml crates/.../twosquare_full_resume/if_direction.sml | \
+    ML_SYSTEM=polyml ML_PLATFORM=x86_64-linux ISABELLE_HOME=/tmp/isa \
+    ./target/release/poly run --max-steps 990000000000 /tmp/isabelle_pure
+  (the monolith's restore_pure_context() is its line 81.)  ~110s total, Tagged(0), all IF_*_OK.
