@@ -1,0 +1,39 @@
+FERMAT TWO-SQUARE FULL IFF — resume material (2026-06-20)
+=========================================================
+BANKED (both 0-hyp, aconv-intended, soundness-probed, re-verified this session):
+  - brahmagupta  : /tmp/ts_brahmagupta_full.sml  (with_nt_helpers base; |- Ex P Q. (a^2+b^2)(c^2+d^2)=P^2+Q^2)
+                   3,148,749,731 steps, Tagged(0), BRAHMAGUPTA_DONE.
+  - key_onlyif   : /tmp/ts_key_lemma.sml         (primes_1mod4/euler base; prime2 p, p=4k+3, p|a^2+b^2 ==> p|a /\ p|b)
+                   2,630,498,483 steps, Tagged(0), KEY_ONLYIF_OK.  Spine loads in 27s (warm).
+
+ONLY-IF DIRECTION (in progress, on the ts_key_lemma spine = primes_1mod4):
+  Statement (relational valuation, no vp const):
+    only_if : 0<n ==> (Ex a b. n=a^2+b^2) ==> (fixed prime2 p, p=4k+3) ==>
+              Ex v m. n = pow p v * m  /\  ~(p|m)  /\  Ex j. v=j+j
+  Method: strong_induct descent. p|n =[key_onlyif]=> p|a,p|b => n=p^2*n', n'<n => IH => even v.
+
+  ALL ARITHMETIC HELPERS VERIFY IN ISOLATION (oi_arith.sml, all markers OK):
+    lt0_suc, lt_add_pos, lt_self_mult (well-foundedness n'<p^2*n'),
+    sq_factor ((p*a')^2=(p*p)*(a'*a')), factor_n, pow_step, even_step, pp_suc2.
+  key_onlyif_at, prime2_gt1_atSub, dvd-extract: all verify (oi_inner2/4 tests).
+  caseB (~p|n base case): builds aconv-true (OI_CASEB_OK aconv-impl=true).
+
+  BLOCKER (the one remaining bug): caseA (the descent case, oi_casea.sml) raises
+    THM("implies_elim: major premise") in the big let-assembly.  This is the SAME
+    CLASS as the caseB bug I already fixed: a meta-vs-object implication / witness-shape
+    mismatch in the disjE_elimSub combine + impI_S2 wrapping + the IH(applyIH)->conclNp
+    chain.  NOT a math gap.  NEXT STEP: add per-step `out` markers (or `handle e=>raise`)
+    inside caseA_arm to localize which implies_elim fails (candidates: the disjE combine
+    of caseZ/caseSq, the mp_S2 conclNp, or the nested cbInner conjunct projections),
+    then fix the meta/object boundary as in caseB.  ~27s dev loop.
+
+  KEY GOTCHA logged: `le`/`lt`/`dvd` are ABBREVIATIONS containing an inner Ex/Abs, so a
+  rewrite predicate `Abs("z", le m (Bound 0))` CAPTURES Bound 0 inside that inner Abs.
+  ALWAYS build such predicates with `Term.lambda (Free ...)` over a FRESH Free.  This bit
+  lt_add_pos_at / lt_self_mult_at / the PabsLt rewrites (all now fixed in oi_arith/oi_casea).
+
+IF DIRECTION + vp const + final iff assembly: not started (the heavier FTA/Brahmagupta-
+volume half).  Run brahmagupta on the merged base; needs FTA factorization spliced.
+
+RUN: cd repo; (printf 'val () = restore_pure_context ();\n'; cat ts_key_lemma.sml oi_arith.sml oi_descent.sml oi_casea.sml) | \
+  ML_SYSTEM=polyml ML_PLATFORM=x86_64-linux ISABELLE_HOME=/tmp/isa ./target/release/poly run --max-steps 300000000000 /tmp/isabelle_pure
