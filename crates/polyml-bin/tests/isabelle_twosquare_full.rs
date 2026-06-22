@@ -421,3 +421,179 @@ fn concrete_soundness_probe() {
         "compile error during probe:\n{out}"
     );
 }
+
+/// Build the FULL merged if-direction driver: the twosquare monolith (final
+/// context `ctxtGR`, which calls `restore_pure_context`), then the banked
+/// if-direction machinery (`if_direction.sml`), the mod-4 TRICHOTOMY
+/// (`if_trichotomy.sml`), the per-prime-power leaves (`if_perprime.sml`), the
+/// VALUATION TRANSFER (`if_valuation.sml`), and finally the strong-induction
+/// assembly (`if_full_direction.sml`) [+ the conditional iff `if_iff.sml`].
+fn merged_if_driver(extra: &[&str]) -> String {
+    let monolith = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/isabelle_support/isabelle_twosquare.sml"),
+    )
+    .expect("read isabelle_twosquare.sml");
+    let mut s = monolith;
+    for f in [
+        "if_direction.sml",
+        "if_trichotomy.sml",
+        "if_perprime.sml",
+        "if_valuation.sml",
+        "if_full_direction.sml",
+    ]
+    .iter()
+    .chain(extra.iter())
+    {
+        s.push('\n');
+        s.push_str(&std::fs::read_to_string(support(f)).unwrap_or_else(|_| panic!("read {f}")));
+    }
+    s.push('\n');
+    s
+}
+
+/// THE IF-DIRECTION — CLOSED (0-hyp, aconv-intended, soundness-probed).
+///
+/// Proves, by strong induction on n on the merged twosquare base `ctxtGR`
+/// (schematic n, 0-hyp, only classical = ex_middle):
+///
+///   if_direction : 0 < n  ==>  H_pred n  ==>  sumsq n
+///
+/// where  sumsq n  ==  ∃a b. n = a²+b²  and  H_pred n  ==  hpBody n  ==
+///   ∀p. prime2 p ⟹ (∃k. p = (((k+k)+k)+k)+3) ⟹ ∀e. (∃m. n=pᵉ·m ∧ ¬p|m)
+///                                                          ⟹ ∃j. e = j+j
+/// i.e. if every prime p≡3(mod 4) divides n to an EVEN power, n is a sum of two
+/// squares (the harder direction of the full Fermat two-square characterization).
+///
+/// Composition: prime_divisor_exists peels a prime p|n; padic_split gives
+/// n = pᵛ·m, ¬p|m (so v≥1, 0<m, m<n); the IH at m (via the banked
+/// val_transfer : H survives on the cofactor) gives sumsq m; mod4_trichotomy
+/// classifies p (2 / 4k+1 / 4k+3), the three per-prime-power leaves give
+/// sumsq pᵛ (the 4k+3 case uses v even from H), and sumsq_mult folds
+/// sumsq pᵛ · sumsq m = sumsq n.  0 new axioms over the monolith.
+#[test]
+#[ignore = "needs /tmp/isabelle_pure (tools/build-isabelle-pure.sh)"]
+fn if_direction_closed() {
+    let Some(image) = checkpoint() else {
+        eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
+        return;
+    };
+    let driver = merged_if_driver(&[]);
+    let Some((out, _)) = run_image_env(&image, &driver, 990_000_000_000, ENV) else {
+        eprintln!("SKIP: poly could not spawn");
+        return;
+    };
+
+    // merged base + the three banked pieces are present.
+    assert!(out.contains("TWOSQ_ALL_OK"), "merged base not OK:\n{out}");
+    assert!(
+        out.contains("IF_PROD_OK"),
+        "if-direction machinery not OK:\n{out}"
+    );
+    assert!(
+        out.contains("TSF_TRICHOTOMY_DONE"),
+        "trichotomy not OK:\n{out}"
+    );
+    assert!(
+        out.contains("TSF_PERPRIME_ALL_OK"),
+        "per-prime leaves not OK:\n{out}"
+    );
+    assert!(
+        out.contains("VAL_TRANSFER_CLOSED"),
+        "valuation transfer not OK:\n{out}"
+    );
+    // the strong-induction assembly closes to the intended if-direction.
+    assert!(
+        out.contains("IF_DIRECTION hyps=0 aconv=true"),
+        "if_direction not 0-hyp / aconv:\n{out}"
+    );
+    assert!(
+        out.contains("PROBE_OK if_direction keeps 0<n"),
+        "soundness probe (keeps 0<n) missing:\n{out}"
+    );
+    assert!(
+        out.contains("PROBE_OK if_direction keeps the even-valuation hypothesis H"),
+        "soundness probe (keeps H) missing:\n{out}"
+    );
+    assert!(
+        out.contains("IF_DIRECTION_CLOSED"),
+        "if-direction did not close:\n{out}"
+    );
+    assert!(
+        !out.contains("IF_DIRECTION_FAILED") && !out.contains("PROBE_FAIL if_direction"),
+        "a soundness probe fired / the if-direction FAILED:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("Static Errors") && !out.contains(": error:"),
+        "compile error during proof:\n{out}"
+    );
+}
+
+/// THE FULL IFF — assembled MODULO the only-if half (the documented merge).
+///
+/// On the merged base (which carries the PROVED if_direction), with the only-if
+/// half taken as an OBJECT-implication hypothesis  Imp (sumsq n) (hpBody n):
+///
+///   twosquare_full_modulo_onlyif :
+///     0 < n  ==>  Imp (sumsq n) (hpBody n)
+///            ==>  Conj (Imp (sumsq n) (hpBody n)) (Imp (hpBody n) (sumsq n))
+///
+/// i.e. GIVEN the only-if half, the full biconditional sumsq n ⟺ hpBody n holds
+/// (under 0<n).  The SECOND conjunct is the unconditionally-PROVED if_direction;
+/// the first is the assumed only-if.  This is the honest "full iff modulo one
+/// named, scoped lemma" — the remaining piece is re-establishing the BANKED
+/// `only_if` (currently on the spine context ctxtSub, needing the FLT/key_onlyif
+/// sub-tree spliced onto ctxtGR) + valuation UNIQUENESS to upgrade its per-prime
+/// EXISTENTIAL even-valuation to the UNIVERSAL `hpBody n`.  0-hyp, aconv-intended,
+/// soundness-probed (the second conjunct is genuinely the if-direction, not a
+/// copy of the assumed only-if).
+#[test]
+#[ignore = "needs /tmp/isabelle_pure (tools/build-isabelle-pure.sh)"]
+fn full_iff_modulo_only_if() {
+    let Some(image) = checkpoint() else {
+        eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
+        return;
+    };
+    let driver = merged_if_driver(&["if_iff.sml"]);
+    let Some((out, _)) = run_image_env(&image, &driver, 990_000_000_000, ENV) else {
+        eprintln!("SKIP: poly could not spawn");
+        return;
+    };
+
+    assert!(
+        out.contains("IF_DIRECTION_CLOSED"),
+        "if-direction (the second conjunct) not closed:\n{out}"
+    );
+    assert!(
+        out.contains("TSF_IFF hyps=0 aconv=true"),
+        "conditional iff not 0-hyp / aconv:\n{out}"
+    );
+    assert!(
+        out.contains("PROBE_OK iff second conjunct is the if-direction"),
+        "soundness probe (second conjunct = if-direction) missing:\n{out}"
+    );
+    assert!(
+        out.contains("PROBE_OK iff keeps 0<n"),
+        "soundness probe (keeps 0<n) missing:\n{out}"
+    );
+    assert!(
+        out.contains("TSF_IFF_MODULO_ONLYIF_CLOSED"),
+        "conditional iff did not close:\n{out}"
+    );
+    assert!(
+        !out.contains("TSF_IFF_FAILED") && !out.contains("PROBE_FAIL iff"),
+        "a soundness probe fired / the iff FAILED:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("Static Errors") && !out.contains(": error:"),
+        "compile error during proof:\n{out}"
+    );
+}

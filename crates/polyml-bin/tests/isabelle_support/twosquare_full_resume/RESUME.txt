@@ -62,3 +62,85 @@ RUN the if-direction delta:
     ML_SYSTEM=polyml ML_PLATFORM=x86_64-linux ISABELLE_HOME=/tmp/isa \
     ./target/release/poly run --max-steps 990000000000 /tmp/isabelle_pure
   (the monolith's restore_pure_context() is its line 81.)  ~110s total, Tagged(0), all IF_*_OK.
+
+=================================================================
+UPDATE 2026-06-22 -- THE IF-DIRECTION IS CLOSED (unconditional, 0-hyp) + the
+trichotomy / per-prime / valuation-transfer floor + a CONDITIONAL full iff.
+=================================================================
+All on the twosquare monolith final context ctxtGR; 0 new axioms/consts/types
+over the monolith; only classical = ex_middle.  NEW banked files (all PROVED +
+re-run to Tagged(0); each 0-hyp + aconv-intended + soundness-probed):
+
+  - if_trichotomy.sml  (mod4_trichotomy : prime2 p ==> Disj (p=2)(Disj (Ex k.p=4k+1)
+      (Ex k.p=4k+3)); 4k = mult 4 k form).  Markers TRI_ZERO_HYP_OK / TRI_ACONV_OK
+      + 2 probes (keeps prime2; residues 1,3 not garbled).
+  - if_perprime.sml    (pow2_sumsq, p1mod4_pow_sumsq, p3mod4_even_sumsq -- the three
+      per-prime-power sum-of-2-sq leaves).  Markers TSF_PERPRIME_ALL_OK + probes.
+  - if_valuation.sml   (THE valuation transfer: val_transfer + L1-L5 padic_split/
+      val_mult_coprime/val_coprime_self/prime_div_eq/prime_not_dvd_pow).  Marker
+      VAL_TRANSFER_CLOSED + 4 probes.  RELATIONAL valuation => FTA is AVOIDED.
+  - if_full_direction.sml  (= the bridges + arith lemmas pow_pos/pow_ge_2/lt_m_Km +
+      classify_pow_sumsq + the STRONG-INDUCTION assembly).  THE DELIVERABLE:
+        if_direction : 0 < n ==> hpBody n ==> sumsq n      (schematic n, 0-hyp)
+      where hpBody n (= the if_valuation H_pred) is
+        !p. prime2 p ==> (Ex k. p=(((k+k)+k)+k)+3) ==> !e. vpred p n e ==> Ex j. e=j+j
+        vpred p n e == Ex m. n = p^e*m /\ ~(p|m) ;  sumsq n == Ex a b. n=a*a+b*b.
+      Markers IF_DIRECTION hyps=0 aconv=true / IF_DIRECTION_CLOSED + 2 probes
+      (keeps 0<n; keeps H).  ~21B steps total (monolith + all deltas), Tagged(0).
+  - if_iff.sml         (twosquare_full_modulo_onlyif : the FULL IFF assembled MODULO
+      the only-if half taken as an OBJECT hyp Imp(sumsq n)(hpBody n) :
+        0<n ==> Imp(sumsq n)(hpBody n) ==> Conj (Imp(sumsq n)(hpBody n)) (Imp(hpBody n)(sumsq n))
+      The SECOND conjunct is the PROVED if_direction.  Marker
+      TSF_IFF_MODULO_ONLYIF_CLOSED + 2 probes.)
+
+HARNESS: isabelle_twosquare_full.rs gains if_direction_closed and
+full_iff_modulo_only_if (both #[ignore], merged_if_driver helper).
+
+PROOF SKETCH (if_direction, strong induction on n on ctxtGR):
+  - n=1 : sumsq 1 = 1*1+0*0  (caseN1 via le_antisym on 0<n + ~(1<n)).
+  - n>=2: prime_divisor_exists gives prime2 p, p|n ; padic_split gives n=p^v*m, ~p|m.
+          p|n + ~p|m forces v=Suc w ; n=p^v*m>0 forces 0<m ; p^v>=2 (pow_ge_2) + 0<m
+          give m<n (lt_m_Km).  IH at m, with hpBody m from val_transfer (THE crux:
+          H survives on the cofactor), gives sumsq m.  mod4_trichotomy classifies p:
+            p=2     -> pow2_sumsq        : sumsq(p^v)
+            p=4k+1  -> p1mod4_pow_sumsq  : sumsq(p^v)
+            p=4k+3  -> v even (hpBody n at p,v + vpred p n v) -> p3mod4_even_sumsq.
+          sumsq(p^v) * sumsq m  -- sumsq_mult -->  sumsq(p^v*m) = sumsq n.
+  KEY: the if-direction needs NO FTA factorization list (the prod_all_sumsq backbone
+  in if_blocks.sml is banked but UNUSED here) -- strong induction peels ONE prime
+  power per step, sidestepping the natlist clash the SETUP feared.
+  GOTCHA logged: val_transfer / prime_divisor_exists / mod4_trichotomy / the
+  per-prime leaves are META-implication chains (Logic.mk_implies / Thm.implies_intr)
+  -> apply with OF / Thm.implies_elim, NOT mp_r ; padic_split is OBJECT Imp -> mp_r.
+  The 4k+r form differs across files (mult 4 k vs (k+k)+(k+k) vs (((k+k)+k)+k)) --
+  bridged by mult4_to_fk / mult4_to_fk3 (oeq (mult 4 k) ... both, 0-hyp).
+
+REMAINING for the UNCONDITIONAL FULL IFF (the only-if re-splice, multi-fleet):
+  Re-establish the BANKED `only_if` on ctxtGR.  It lives on the SPINE context
+  ctxtSub (ts_key_lemma.sml) and depends on key_onlyif -> FLT/apm1, which the
+  monolith ctxtGR does NOT carry (it has lagrange_roots/mod_cancel/cong/wsq=neg1_qr
+  -- the p==1mod4 facts -- but not the p==3mod4 key_onlyif).  Two sub-tasks:
+    (A) Splice the FLT/binom/key_onlyif sub-tree (~6K lines, ts_key_lemma 5954-12220)
+        onto ctxtGR : both share ctxtP byte-identically, so binom/sumf is a
+        disjoint-const extension of the SAME base; re-target the _P instantiators to
+        ctxtGR and re-varify reused lemmas.  Mechanical but heavy (multi-fleet).
+    (B) VALUATION UNIQUENESS (vpred p n e1 ==> vpred p n e2 ==> e1=e2) to upgrade
+        only_if's per-prime EXISTENTIAL even-valuation to the UNIVERSAL hpBody n.
+        Needs mult_left_cancel for a positive factor (NOT in the monolith -- only
+        add_left_cancel is) + prime_not_dvd_pow (BANKED in if_valuation).
+  Then mkConj only_if_GR with if_direction (cf. isabelle_wilson_iff.sml) under 0<n.
+
+RUN the full if-direction + conditional iff:
+  cd repo
+  cat crates/.../isabelle_twosquare.sml \
+      crates/.../twosquare_full_resume/if_direction.sml \
+      crates/.../twosquare_full_resume/if_trichotomy.sml \
+      crates/.../twosquare_full_resume/if_perprime.sml \
+      crates/.../twosquare_full_resume/if_valuation.sml \
+      crates/.../twosquare_full_resume/if_full_direction.sml \
+      crates/.../twosquare_full_resume/if_iff.sml | \
+    ML_SYSTEM=polyml ML_PLATFORM=x86_64-linux ISABELLE_HOME=/tmp/isa \
+    ./target/release/poly run --max-steps 990000000000 /tmp/isabelle_pure
+  (~12 min, Tagged(0); IF_DIRECTION_CLOSED + TSF_IFF_MODULO_ONLYIF_CLOSED).
+  OR: cargo test --release -p polyml-bin --test isabelle_twosquare_full \
+        if_direction_closed full_iff_modulo_only_if -- --ignored --nocapture

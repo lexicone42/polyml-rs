@@ -1,3 +1,34 @@
+# Fermat's two-square theorem (FULL characterization) — progress (2026-06-20, updated 2026-06-21, 2026-06-22)
+
+## 2026-06-22 UPDATE (if-direction fleet wf_dfaa09fe-380) — IF-DIRECTION PROVED UNCONDITIONAL; both directions now done
+
+The if-direction CLOSED unconditionally — the harder direction of the full characterization.
+**Both directions are now proved**; the full iff awaits only a context-merge (no new math).
+Hand-verified (isabelle_twosquare_full.rs, 7/7 pass ~191s).
+- **`if_direction`** : `⊢ 0<n ⟹ hpBody n ⟹ sumsq n` (UNCONDITIONAL, 0-hyp, aconv, 0 new axioms
+  = 78 monolith baseline; only classical = ex_middle), where `hpBody n` = every prime p≡3mod4
+  divides n to an EVEN power (relational valuation) and `sumsq n` = ∃a b. n=a²+b². This is the
+  "even-power ⟹ sum of two squares" direction. Markers IF_DIRECTION_CLOSED + VAL_TRANSFER_CLOSED.
+- Closed via: **`mod4_trichotomy`** (prime ⟹ 2 ∨ ≡1mod4 ∨ ≡3mod4, via div_mod at 4); the
+  **per-prime-power** sum-of-2-sq leaves (`pow2_sumsq`, `p1mod4_pow_sumsq` via Brahmagupta on
+  the banked `twosquare`, `p3mod4_even_sumsq` = (p^(e/2))²+0²); and — the piece the Setup feared
+  was multi-fleet but which CLOSED — the **valuation transfer** `val_transfer` (+ `val_mult_coprime`,
+  `val_coprime_self`, `padic_split`, `prime_div_eq`, `prime_not_dvd_pow`): the per-prime relational
+  valuation matches the FTA exponent, via euclid_lemma + strong induction (the same divisor/valuation
+  approach as the Euclid-Euler SCG close). Folded via the banked `prod_all_sumsq`.
+- **`twosquare_full_modulo_onlyif`** : the conditional full iff (if_direction + only_if as a
+  hypothesis) — proved. New files: if_full_direction/if_trichotomy/if_perprime/if_valuation/if_iff.sml.
+
+REMAINING for the UNCONDITIONAL FULL IFF (no new math — a CONTEXT-MERGE, multi-fleet by volume):
+`if_direction` lives on the monolith context `ctxtGR`; the banked `only_if` lives on the spine
+context `ctxtSub` (= thyP→binom→sumf, carrying FLT/apm1/key_onlyif). Both extend the SHARED `ctxtP`
+byte-identically. To `mkConj` the two directions into the full iff they must share ONE context:
+re-establish `only_if` on `ctxtGR` by splicing the FLT/binom/key_onlyif sub-tree (~6K lines,
+ts_key_lemma 5954-12220) onto thyGR + re-running the only_if descent (oi_arith/oi_descent/oi_casea).
+A dedicated context-merge fleet. Both directions are DONE; this is bookkeeping-heavy plumbing.
+
+---
+
 # Fermat's two-square theorem (FULL characterization) — progress (2026-06-20, updated 2026-06-21)
 
 ## 2026-06-21 UPDATE (finish fleet wf_c883d0a5-498) — ONLY-IF DIRECTION CLOSED; if-direction substantial
