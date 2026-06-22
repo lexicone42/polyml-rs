@@ -1,4 +1,32 @@
-# Euclid's perfect-number theorem — progress (2026-06-21)
+# Euclid's perfect-number theorem — PROVED (2026-06-21)
+
+## 2026-06-21 UPDATE (finish fleet wf_cd2b81c0-ffd) — euclid_perfect CLOSED
+
+The Route-A finish CLOSED the full theorem. `euclid_perfect` is now a complete 0-hyp LCF
+kernel theorem, hand-verified (`isabelle_euclid_perfect.rs`, 1/1 pass ~29s warm):
+  `⊢ prime2 q ⟹ q+1 = 2^p ⟹ 1<p ⟹ σ(2^(p−1)·q) = 2·(2^(p−1)·q)`
+i.e. **if 2^p−1 is prime then 2^(p−1)·(2^p−1) is a perfect number** (Elements IX.36). The
+FIRST complete famous theorem after the recent run of partials; introduces perfect numbers.
+- The crux that broke the wall: the **support bijection** `sumf f N = lsumf f L` (L = the
+  distinct support points in [0..N], f=0 off L) — a fresh small natlist + `lsumf` weighted
+  fold on the σ context — collapses the sparse-sum-over-exponential-range. Plus `pow2_dvd_char`
+  (d∣2ᵏ ⟹ ∃i≤k. d=2ⁱ, by repeated euclid_lemma), `prime2_two`, and the divisor
+  characterization of 2^a·q (= the 2(a+1) points {2ⁱ, 2ⁱ·q}). Then `sigma_char` :
+  σ(2^a·q) = (2^(a+1)−1)(q+1), and the mechanical S4 assembly.
+- 0-hyp, aconv-intended; runtime axiom audit = 70 axioms, **0 mentioning `perfect`/the
+  conclusion**; only classical assumption = ex_middle. Soundness probes (genuine inference):
+  instantiated at p=2,q=3 → n=6 perfect and p=3,q=7 → n=28 perfect (hyps=0, aconv); + the
+  conditional probes (needs prime2 q / q+1=2^p / 1<p / conclusion is 2n). The σ-floor
+  computational probes (σ 6=12, 28=56, 8=15) still hold.
+- Self-contained driver (`isabelle_euclid_perfect.sml`, run directly). Consolidation onto a
+  `common::with_sigma` splice is a tracked follow-up. NEXT branch: Euler's CONVERSE direction
+  (every even perfect number has this form) → the full Euclid–Euler characterization.
+
+The 2026-06-21 floor record below is kept for the σ-subsystem detail + the wall diagnosis.
+
+---
+
+# Euclid's perfect-number theorem — floor (2026-06-21, superseded above)
 
 Ultracode campaign wf_a1ac4dbf-1b1 toward Euclid's theorem (Elements IX.36): if 2ᵖ−1 is
 prime then n = 2^(p−1)·(2ᵖ−1) is PERFECT (σ(n) = 2n), on the Isabelle/Pure interpreter.
