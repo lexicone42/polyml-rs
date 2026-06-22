@@ -1,4 +1,31 @@
-# Euclid–Euler theorem (even perfect numbers) — Euler's converse, REDUCED to one lemma (2026-06-22)
+# Euclid–Euler theorem (even perfect numbers) — PROVED, COMPLETE (2026-06-22)
+
+## 2026-06-22 UPDATE (SCG close fleet wf_3f6516e5-ac4) — euclid_euler CLOSED UNCONDITIONALLY
+
+The residual lemma SCG was proved and discharged. `euclid_euler` is now a complete 0-hyp
+theorem, hand-verified (`isabelle_euclid_euler.rs`, 1/1 pass ~44s):
+  `⊢ 0<n ⟹ even n ⟹ (perfect n ⟺ ∃p. prime2(2^p−1) ∧ n = 2^(p−1)·(2^p−1))`
+the FULL Euclid–Euler characterization of even perfect numbers. The conditional partial is
+GONE — the SCG meta-hypothesis is discharged (EUCLID_EULER_UNCONDITIONAL_OK).
+- **SCG proved** (0-hyp): `⊢ ⋀a m. ¬(2∣m) ⟹ σ(2^a·m) = (∑_{i≤a}2^i)·σ(m)` (σ-multiplicativity
+  for any odd m), via: a general **divisor_list(m)** = filter [1..m] by ∣ (completeness
+  `lmem d (divisor_list m) ⟺ 0<d ∧ d≤m ∧ d∣m` + lnodup, the support of σ(m)); the **product
+  divisor list** `dl2 a D` with `lnodup` (cross-level 2-adic distinctness) + **completeness**
+  (the 2-adic split: every divisor of 2^a·m is 2^i·d with i≤a via pow2_dvd_char, d∣m the odd
+  cofactor peeled by euclid_lemma at prime 2); fed through the banked `sigma_mult_reduction` +
+  the support bijection. New files: `isabelle_euler_converse_dl2.sml` (dl2) +
+  `isabelle_euler_converse_close.sml` (divisor_list + SCG + the discharge).
+- 0-hyp, aconv the intended biconditional; runtime axiom audit = 80, the only σ-mentioning
+  axiom is the conservative `sigma_def`, ZERO mention perfect/euclid; only classical
+  assumption = ex_middle. Instantiated BOTH ways at n=6 and n=28 by genuine inference.
+- Self-contained: 5 drivers (base + converse + sigma_mult + dl2 + close), run directly.
+
+The 2026-06-22 "reduced to one lemma" record below is kept for the SCG diagnosis + the
+supporting-lemma detail.
+
+---
+
+# Euclid–Euler theorem — Euler's converse, REDUCED to one lemma (superseded above)
 
 Ultracode campaign wf_1fc90eed-991 toward Euler's converse + the full Euclid–Euler iff:
 **every even perfect number is 2^(p−1)(2ᵖ−1) with 2ᵖ−1 prime**. Euclid's direction is the
