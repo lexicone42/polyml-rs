@@ -7,6 +7,33 @@ Isabelle/Pure interpreter. The full theorem is **NOT yet proved**; the graceful
 floor banked genuine 0-hyp results, with the remaining descent step cleanly
 scoped below.
 
+## 2026-06-23 UPDATE (divide-leaf fleet) — most of the sign-leaves now proven
+
+A multi-agent fleet ran the remaining divide sign-leaves on the warm
+`/tmp/l4_foursq_star` checkpoint, each parameterizing the proven `++++` template
+(N coordinates take the RIGHT congruence branch). State now:
+
+- **VERIFIED (independently replayed by a separate agent — hyps=7, the genuine
+  `four_sq (p·r)` existential, 0 new axioms, `Tagged(0)`):** `PPPP` (prior),
+  `PPPN`, `PPNN`, `PNPP`, `PNPN` — **5 of 8**.
+- **Proven but pending independent verification:** `PPNP`, `PNNP`, `PNNN`. Their
+  deltas are complete and soundness-clean (self-contained, end-to-end, **no new
+  axioms**) and each author-agent recorded "proven", but they fell out of the
+  fleet's structured report, so they are being re-replayed by hand to confirm. If
+  they hold, **all 8 divide leaves are done.**
+
+Operational notes from the fleet (for the next run): each leaf needs
+`POLYML_HEAP_BYTES=8000000000 POLYML_GC_THRESHOLD=88`; the 4-pair leaves peak
+~28 GB RSS during the divide-by-m² and **must run one-at-a-time** (two concurrent
+OOM-kill on a 31 GB machine); ~17–31 min wall each. Deltas:
+`tests/isabelle_support/four_square_resume/divide_leaf_<pat>_delta.sml` (gitignored
+resume scratch).
+
+**Remaining to close the theorem (fleet 2):** the 16→8 disjE assembly tree
+(route each signed-flag combination to its leaf), strict r<m (r=m exclusion),
+then strong-induct on m to m=1 (`four_sq p`) and discharge the PROVEN
+`lagrange_assembly`.
+
 ## 2026-06-22b UPDATE (DIVIDE-leaf session) — the divide PIPELINE PROVEN (one leaf end-to-end); 8-star count CONFIRMED; dev-loop UNBLOCKED
 
 The single biggest de-risking step landed: the **Euler divide-by-m² closes
