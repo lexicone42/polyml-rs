@@ -339,14 +339,21 @@ fn run_image(
     // scanning it the GC would collect freshly-compiled code.
     let image_mut_ptr = loaded.mutable.iter().next().map(|w| w as *const PolyWord);
     let image_mut_len = loaded.mutable.used_words();
+    // 1.6 GB heap by default. Small enough that GC auto-fires at 80% =
+    // 1.3 GB and keeps peak RSS bounded. Bigger heaps (24 GB) postpone GC
+    // past the bootstrap's working set and OOM around stage 6.
+    // With --jit, use a smaller heap matching the jit_bootstrap_run
+    // test setup; the bigger heap exposed a JIT-related divergence
+    // that needs separate investigation.
+    // POLYML_HEAP_BYTES overrides the default for heavy workloads (e.g.
+    // the four-square / Isabelle proving drivers, which can saturate the
+    // 1.6 GB heap to a GC death-spiral); set it to 6-8 GB for those.
+    let heap_bytes = std::env::var("POLYML_HEAP_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1_600 * 1024 * 1024);
     let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
-        // 1.6 GB heap. Small enough that GC auto-fires at 80% = 1.3 GB
-        // and keeps peak RSS bounded. Bigger heaps (24 GB) postpone GC
-        // past the bootstrap's working set and OOM around stage 6.
-        // With --jit, use a smaller heap matching the jit_bootstrap_run
-        // test setup; the bigger heap exposed a JIT-related divergence
-        // that needs separate investigation.
-        .with_default_alloc_space_bytes(1_600 * 1024 * 1024)
+        .with_default_alloc_space_bytes(heap_bytes)
         .with_rts(rts);
     if let Some(p) = image_mut_ptr {
         interp = interp.with_image_mutable_root(p, image_mut_len);
