@@ -10,6 +10,7 @@
 pub mod export;
 pub mod gc;
 pub mod interpreter;
+pub mod interrupt;
 pub mod jit_bridge;
 pub mod length_word;
 pub mod loader;
@@ -18,6 +19,7 @@ pub mod rts;
 pub mod space;
 
 pub use interpreter::{InterpError, Interpreter, JitEntry, StepResult};
+pub use interrupt::{clear_interrupt, interrupt_pending, request_interrupt, take_interrupt};
 pub use jit_bridge::{
     JIT_INTERP, jit_dispatch_alloc, jit_dispatch_alloc_bytes, jit_dispatch_alloc_mut_closure,
     jit_dispatch_closure_alloc, jit_dispatch_closure_call, jit_dispatch_dynamic_call,

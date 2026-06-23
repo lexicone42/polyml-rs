@@ -207,8 +207,11 @@ and `isabelle_four_square.rs`.
   [`docs/tier-b-portable-images-design.md`](docs/tier-b-portable-images-design.md).
 - **Windows** — not yet validated (the RTS/filesystem layer is Unix-oriented). The
   endianness gap is **closed**: s390x (big-endian) runs byte-identically (above).
-- **Concurrency & interrupts** — the interpreter is single-threaded; Poly/ML's
-  thread/`Future` machinery loads lazily but isn't scheduled concurrently.
+- **Concurrency** — the interpreter is single-threaded; Poly/ML's thread/`Future`
+  machinery loads lazily but isn't scheduled concurrently (real threading needs a
+  safepoint GC that scans every thread's stack — a larger effort). **Interrupts
+  *are* done**: Ctrl-C (SIGINT) raises the SML `Interrupt` exception, which the
+  REPL / a handler catches — a runaway loop is interruptible instead of hard-killed.
 - **JIT as a big speedup** — it's correct and a *modest* (~2%) win; whole-region
   native compilation (the real road to native speed) is future work.
 - **Lagrange's four-square theorem** — the one open partial in the Isabelle tower

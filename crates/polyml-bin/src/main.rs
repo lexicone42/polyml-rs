@@ -17,6 +17,32 @@ use polyml_runtime::{
     length_word, load_image, loader::LoadedImage, patch_entry_points,
 };
 
+/// Install a SIGINT (Ctrl-C) handler that delivers an SML `Interrupt` exception
+/// to the running interpreter instead of letting the OS terminate the process.
+///
+/// The interpreter polls for it at a coarse cadence (see `polyml_runtime::
+/// interrupt`) and raises `Interrupt`, which unwinds to the nearest handler
+/// (e.g. the REPL prompt). A second, unconsumed Ctrl-C — the interpreter isn't
+/// at a poll point (e.g. stuck in a long RTS call) — force-exits so the user
+/// can always escape.
+fn install_interrupt_handler() {
+    extern "C" fn handle_sigint(_sig: libc::c_int) {
+        if polyml_runtime::request_interrupt() {
+            // Previous interrupt not yet consumed -> force quit (130 = 128 + SIGINT).
+            // `_exit` is async-signal-safe.
+            unsafe { libc::_exit(130) };
+        }
+    }
+    // SAFETY: `handle_sigint` is async-signal-safe (one relaxed atomic store, or
+    // `_exit`); installing a signal disposition is a normal libc call.
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            handle_sigint as *const () as libc::sighandler_t,
+        );
+    }
+}
+
 /// Reject an image whose root is not a runnable closure BEFORE any run path
 /// derefs its first word as a code pointer. An untrusted/corrupt image with a
 /// non-closure or mis-pointed root would otherwise wild-deref -> SEGV (found by
@@ -432,6 +458,10 @@ fn run_image(
 
     interp.test_seed_return_sentinel();
     interp.test_seed_top(root_closure_word);
+
+    // Ctrl-C now raises an SML `Interrupt` (caught by the REPL / a handler)
+    // instead of the OS killing the process mid-run.
+    install_interrupt_handler();
 
     println!("Executing (cap {max_steps} steps)…");
     let checkpoint_every: u64 = std::env::var("POLY_CHECKPOINT_EVERY")

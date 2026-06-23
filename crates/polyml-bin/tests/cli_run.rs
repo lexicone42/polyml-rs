@@ -426,3 +426,83 @@ fn bicimage_convert_and_run_roundtrips() {
     let _ = std::fs::remove_file(&bic);
     let _ = std::fs::remove_file(&txt);
 }
+
+/// Ctrl-C (SIGINT) during a running SML program raises the SML `Interrupt`
+/// exception (caught by a handler / the REPL) instead of the OS hard-killing the
+/// process. Drives the self-bootstrapped REPL image with an infinite loop that
+/// catches `Interrupt`, sends SIGINT once it's looping, and asserts the handler
+/// ran and the process exited cleanly. Skips if the polyexport image is absent.
+#[test]
+fn sigint_raises_sml_interrupt() {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let polyexport = workspace_root().join("vendor/polyml/polyexport");
+    if !polyexport.exists() {
+        return; // no self-bootstrapped image (fresh clone) — skip
+    }
+    let program = "val r = (print \"LOOPING\\n\"; \
+                   (let fun loop (i:int) = loop (i+1) in loop 0 end)) \
+                   handle Interrupt => 4242;\n";
+
+    let mut child = Command::new(poly_bin())
+        .arg("run")
+        .arg("--max-steps")
+        .arg("100000000000")
+        .arg(&polyexport)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn poly");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(program.as_bytes())
+        .unwrap(); // stdin closes on drop → REPL sees EOF after the loop is interrupted
+
+    // Pump stdout incrementally so we can see "LOOPING" before EOF.
+    let out = Arc::new(Mutex::new(String::new()));
+    let out2 = Arc::clone(&out);
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut chunk = [0u8; 256];
+        while let Ok(n) = stdout.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            out2.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&chunk[..n]));
+        }
+    });
+
+    // Once the loop is running, send SIGINT to exactly this child (no -f footgun).
+    let mut sent = false;
+    for _ in 0..1000 {
+        if out.lock().unwrap().contains("LOOPING") {
+            let _ = Command::new("kill")
+                .args(["-INT", &child.id().to_string()])
+                .status();
+            sent = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(sent, "loop never started (no LOOPING marker)");
+
+    let status = child.wait().expect("wait child");
+    reader.join().ok();
+    let text = out.lock().unwrap().clone();
+
+    assert!(
+        text.contains("4242"),
+        "SIGINT did not raise a catchable SML Interrupt; output:\n{text}"
+    );
+    assert!(
+        status.success(),
+        "process did not exit cleanly after Interrupt (status {status:?}); output:\n{text}"
+    );
+}

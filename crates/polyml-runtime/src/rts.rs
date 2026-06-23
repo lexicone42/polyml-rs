@@ -3652,6 +3652,13 @@ pub fn make_overflow_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
     make_pervasive_exn(ctx, 5, b"Overflow")
 }
 
+/// Build the pervasive `Interrupt` packet (`EXC_interrupt = 1`,
+/// `vendor/polyml/libpolyml/sys.h:26` / `INITIALISE_.ML:524`). Raised by the
+/// interpreter on an async SIGINT (see [`crate::interrupt`]).
+pub fn make_interrupt_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
+    make_pervasive_exn(ctx, 1, b"Interrupt")
+}
+
 /// Build the pervasive `Div` exception packet so `handle Div => ...` matches.
 /// Match identity is `ex_id == TAGGED(7)` (`EXC_divide`, sys.h:33). Mirrors
 /// `make_overflow_exception`. Used by the IntInf div/mod/quotRem RTS on a zero

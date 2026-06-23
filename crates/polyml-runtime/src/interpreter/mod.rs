@@ -1378,6 +1378,18 @@ impl Interpreter {
             if steps >= max_steps {
                 return (steps, Ok(StepResult::Continue));
             }
+            // Poll for an async interrupt (SIGINT / Ctrl-C) at a coarse cadence:
+            // one relaxed atomic load per 65536 steps, so the hot loop is
+            // unaffected (~ms-scale delivery latency). On a pending interrupt,
+            // raise the SML `Interrupt` exception, which unwinds to the nearest
+            // handler (e.g. the REPL top level) or halts the run if none.
+            if steps & 0xFFFF == 0 && crate::interrupt::take_interrupt() {
+                match self.raise_interrupt() {
+                    Ok(StepResult::Continue) => {}
+                    Ok(other) => return (steps, Ok(other)),
+                    Err(e) => return (steps, Err(e)),
+                }
+            }
             steps += 1;
             match self.step_impl::<INSTR>() {
                 Ok(StepResult::Continue) => {}
@@ -3985,6 +3997,25 @@ impl Interpreter {
                 rts: None,
             };
             crate::rts::make_overflow_exception(&mut ctx)
+        };
+        self.push(packet)?;
+        self.do_raise_ex()?;
+        Ok(StepResult::Continue)
+    }
+
+    /// Raise the SML `Interrupt` exception (`EXC_interrupt = 1`) — the response
+    /// to an async SIGINT delivered via [`crate::interrupt`]. Same shape as
+    /// [`Self::raise_overflow`]: build the pervasive packet, push it, unwind.
+    /// `do_raise_ex` returns `Err(UnhandledException)` if no handler is
+    /// installed, which halts the run cleanly (vs. the OS hard-killing us).
+    fn raise_interrupt(&mut self) -> Result<StepResult, InterpError> {
+        let packet = {
+            let mut ctx = crate::rts::RtsContext {
+                alloc_space: self.alloc_space.as_mut(),
+                raised_exception: None,
+                rts: None,
+            };
+            crate::rts::make_interrupt_exception(&mut ctx)
         };
         self.push(packet)?;
         self.do_raise_ex()?;
