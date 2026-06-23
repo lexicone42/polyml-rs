@@ -1380,7 +1380,11 @@ fn static_string_int_list(items: &'static [(&'static str, isize)]) -> usize {
             chars.push(0);
         }
         for chunk in chars.chunks_exact(std::mem::size_of::<usize>()) {
-            words.push(usize::from_le_bytes(chunk.try_into().unwrap()));
+            // NATIVE byte order: the string's bytes are read back byte-by-byte
+            // from memory (LOAD_ML_BYTE), so the in-memory layout must match the
+            // char order on THIS host. `from_ne_bytes` == `from_le_bytes` on a
+            // little-endian host (byte-identical) and is correct on big-endian.
+            words.push(usize::from_ne_bytes(chunk.try_into().unwrap()));
         }
         // Remember string base address (resolved at finalization).
         tuple_ptrs.push(str_ptr_idx); // index into `words`
@@ -2630,7 +2634,11 @@ fn poly_set_code_constant(
             0 | 2 => {
                 // Absolute PolyWord-sized constant (case 0) or
                 // uintptr_t-sized (case 2 — same on 64-bit).
-                let bytes = c_word.0.to_le_bytes();
+                // NATIVE byte order: this constant is read back as a native
+                // PolyWord (`read_unaligned`, mod.rs), so it must be stored in
+                // the host's word byte order. `to_ne_bytes` == `to_le_bytes` on
+                // little-endian (byte-identical) and is correct on big-endian.
+                let bytes = c_word.0.to_ne_bytes();
                 std::ptr::copy_nonoverlapping(
                     bytes.as_ptr(),
                     instr_addr,

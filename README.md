@@ -10,7 +10,8 @@ architecture, no recompilation).
 > in Rust, swap in Cranelift codegen, and chase portable heap images — built out
 > for real.
 
-**Status:** runs on **x86-64 Linux**, **arm64 macOS**, and **riscv64** (under qemu). The runtime faithfully
+**Status:** runs on **x86-64 Linux**, **arm64 macOS**, **riscv64**, and **s390x
+(big-endian)** — the last two under qemu. The runtime faithfully
 executes real Poly/ML: it boots the upstream bootstrap image, self-compiles the
 entire 7-stage compiler chain, and hosts a working SML REPL. Faithfulness is
 continuously checked against upstream Poly/ML (a differential oracle, byte-identical
@@ -23,10 +24,11 @@ demonstrated**: an image our runtime builds on x86-64 Linux executes on Apple
 Silicon (arm64 macOS) with a **byte-identical step count** — cross-architecture
 **and** cross-OS, on real hardware, no recompilation (runbook:
 [`docs/apple-silicon-cross-arch-demo.md`](docs/apple-silicon-cross-arch-demo.md)).
-The same x86-64-built image also runs **byte-identically on riscv64** (a third
-architecture, under qemu) — `1,110,805` steps → `Tagged(0)` on all three. That
-covers same-word-size arches (the ones people use — x86-64, arm64, riscv64, all
-64-bit little-endian). There's also a compact *binary* image format (`bicimage`, ~½ the size,
+The same x86-64-built image also runs **byte-identically on riscv64 and on s390x
+(big-endian)** under qemu — `1,110,805` steps → `Tagged(0)` on **all four**, across
+both endiannesses. So image portability holds across architecture *and* byte order
+(for same-word-size 64-bit targets — the cross-*word-size* case is characterized
+separately below). There's also a compact *binary* image format (`bicimage`, ~½ the size,
 loads + runs identically, endian-neutral on the wire). Crossing *word size*
 (64↔32) carries data but not word-size-specific compiled code (see [Roadmap](#roadmap)).
 
@@ -203,10 +205,8 @@ and `isabelle_four_square.rs`.
   guarantee across word sizes without recompilation"); cross-word-size carries
   *data*, not compiled code. Details + proof in
   [`docs/tier-b-portable-images-design.md`](docs/tier-b-portable-images-design.md).
-- **big-endian / Windows** — not yet validated. (x86-64 Linux, arm64 macOS, and
-  riscv64-under-qemu all run byte-identically; the code is written to be portable.)
-  Big-endian is the interesting gap — everything validated so far is little-endian,
-  so a big-endian target (s390x / ppc64) is the real endian-cleanliness test.
+- **Windows** — not yet validated (the RTS/filesystem layer is Unix-oriented). The
+  endianness gap is **closed**: s390x (big-endian) runs byte-identically (above).
 - **Concurrency & interrupts** — the interpreter is single-threaded; Poly/ML's
   thread/`Future` machinery loads lazily but isn't scheduled concurrently.
 - **JIT as a big speedup** — it's correct and a *modest* (~2%) win; whole-region
@@ -256,18 +256,17 @@ The original staged plan is in [`PLAN.md`](PLAN.md). In short:
 - **Done:** the bytecode interpreter, the RTS, the copying GC, pexport load/save,
   the **compact binary `bicimage` format** (endian-neutral, ~½ the text size,
   loads + runs identically), the experimental Cranelift JIT, an extensive
-  faithfulness harness, the HOL4 / Isabelle prover demos, and **cross-arch image
-  portability across three 64-bit LE architectures** — x86-64 Linux, arm64 macOS
-  (real hardware), and riscv64 (qemu) all run the same image byte-identically.
+  faithfulness harness, the HOL4 / Isabelle prover demos, and **cross-arch +
+  cross-endian image portability across four 64-bit architectures** — x86-64 Linux,
+  arm64 macOS (real hardware), riscv64 (qemu), and s390x big-endian (qemu) all run
+  the same image byte-identically.
 - **Characterized:** cross-*word-size* (64↔32) — the data/object-graph
   reconstructs (the loader boxes oversized ints), but 64-bit-compiled *code* can't
   run faithfully on 32-bit (its bytecode bakes in 64-bit word-size constants);
   this matches upstream's documented limitation. So cross-word-size carries data,
   not compiled code; a true 64↔32 execution story needs recompilation.
-- **Next:** big-endian (s390x / ppc64 — the endian-cleanliness test; needs the JIT
-  feature-gated out of interpreter-only cross builds), then the larger subsystems —
-  concurrency/interrupts, Windows, maturing the JIT into a genuine speedup — and
-  closing Lagrange's four-square theorem.
+- **Next:** the larger subsystems — concurrency/interrupts, Windows, maturing the
+  JIT into a genuine speedup — and closing Lagrange's four-square theorem.
 
 ---
 
