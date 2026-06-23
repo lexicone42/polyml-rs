@@ -6,9 +6,10 @@ experimental Cranelift JIT and a longer-term goal of **architecture-portable
 heap images** (save an image on one machine, load and run it on a different
 architecture, no recompilation).
 
-> Lineage: this is the "RuPaulyML" idea — fork Poly/ML, rewrite the C++ runtime
-> in Rust, swap in Cranelift codegen, and chase portable heap images — built out
-> for real.
+> Lineage & credit: the "RuPaulyML" idea — fork Poly/ML, rewrite the C++ runtime
+> in Rust, swap in Cranelift codegen, and chase portable heap images — comes from
+> [a tweet by @ember_arlynx](https://x.com/ember_arlynx/status/2055420264536498545).
+> This project is that idea, built out for real.
 
 **Status:** runs on **x86-64 Linux**, **arm64 macOS**, **riscv64**, and two
 **big-endian** arches (**s390x**, **ppc64**) — the non-x86 ones under qemu. The runtime faithfully
