@@ -33,6 +33,7 @@ use crate::length_word::{
 };
 use crate::poly_word::{MAX_TAGGED, MIN_TAGGED, PolyWord};
 use crate::space::{MemorySpace, SpaceKind};
+use std::collections::HashMap;
 
 /// The output of [`load_image`]: three populated spaces plus a pointer
 /// to the root object plus a directory of EntryPoint objects.
@@ -206,18 +207,73 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
     let host_bytes = size_of::<usize>();
     let image_bytes = image.word_size.bytes();
     if image_bytes != host_bytes {
-        return Err(LoadError::WordSizeMismatch {
-            image_bytes,
-            host_bytes,
-        });
+        // Experimental cross-word-size loading (task #120). The pexport format is
+        // word-neutral on the wire and we rebuild every object at the host word
+        // size, so a 64-bit image *can* in principle reconstruct on a 32-bit
+        // host — modulo tagged ints that overflow the smaller tag (boxed below)
+        // and any latent word-size assumption in the bytecode/interpreter. Gated
+        // behind an explicit opt-in; without it, reject (silent-corruption
+        // hazard) as before.
+        if std::env::var_os("POLYML_ALLOW_WORD_SIZE_MISMATCH").is_none() {
+            return Err(LoadError::WordSizeMismatch {
+                image_bytes,
+                host_bytes,
+            });
+        }
+        eprintln!(
+            "poly: WARNING cross-word-size load (image {image_bytes}-byte words, \
+             host {host_bytes}-byte) — experimental (POLYML_ALLOW_WORD_SIZE_MISMATCH)"
+        );
     }
 
     // ---- Pass 0: estimate capacities (so each space is sized once).
     let (imm_cap, mut_cap, code_cap) = estimate_capacities(image);
+
+    // Cross-word-size (task #120): a value that was a SHORT tagged int in a
+    // wider image may not fit the host tag and must be materialized as a boxed
+    // long-format integer. Collect the distinct offenders up front so the
+    // immutable space can be sized for them. On a same-or-wider host (incl.
+    // every 64-bit build) nothing is ever out of range, so this is empty/inert.
+    let mut oversized: Vec<i64> = Vec::new();
+    if image_bytes != host_bytes {
+        let mut seen = std::collections::HashSet::new();
+        for obj in &image.objects {
+            for_each_value(&obj.body, |v| {
+                if let Value::Tagged(n) = v {
+                    if !tagged_fits_host(n) && seen.insert(n) {
+                        oversized.push(n);
+                    }
+                }
+            });
+        }
+    }
+    let boxed_words: usize = oversized.iter().map(|&n| 1 + box_long_int_words(n)).sum();
+
     // Give each space a tiny safety margin (some objects may pad).
-    let mut immutable = MemorySpace::new(imm_cap.max(16) + 16, SpaceKind::Immutable);
+    let mut immutable = MemorySpace::new(imm_cap.max(16) + boxed_words + 16, SpaceKind::Immutable);
     let mut mutable = MemorySpace::new(mut_cap.max(16) + 16, SpaceKind::Mutable);
     let mut code = MemorySpace::new(code_cap.max(16) + 16, SpaceKind::Code);
+
+    // Build the boxed long ints (before the image objects) and record a
+    // value -> pointer map for `resolve_value`. Inert on a 64-bit host.
+    let mut boxed: HashMap<i64, *mut PolyWord> = HashMap::new();
+    for &n in &oversized {
+        let p = box_long_int(&mut immutable, n);
+        boxed.insert(n, p);
+    }
+    if !oversized.is_empty() {
+        // NOTE: if any oversized constant lives in a CODE object's constants,
+        // it's the *compiler's own* word-size-dependent bytecode (e.g. the
+        // 64-bit header mask 2^56-1 or the -2^62 tag bound) and that code will
+        // NOT execute faithfully on a smaller host — cross-word-size carries the
+        // data/object-graph, not word-size-specific compiled code (this matches
+        // upstream PolyML: no correctness guarantee across word sizes without
+        // recompilation). The boxing here makes the *data* reconstruct correctly.
+        eprintln!(
+            "poly: cross-word-size load boxed {} oversized tagged int(s)",
+            oversized.len()
+        );
+    }
 
     // ---- Pass 1: allocate a slot for each object.
     let mut pointers: Vec<*mut PolyWord> = vec![std::ptr::null_mut(); image.objects.len()];
@@ -245,7 +301,7 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
         unsafe {
             crate::space::set_length_word(obj_ptr, n_words, flags);
         }
-        write_body(obj_ptr, &obj.body, &pointers)?;
+        write_body(obj_ptr, &obj.body, &pointers, &boxed)?;
         // Track entry points so the runtime can patch them.
         if let ObjectBody::EntryPoint(name) = &obj.body {
             entry_points.push((name.clone(), obj_ptr));
@@ -288,16 +344,84 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
 
 /// Convert a parsed `Value` to a `PolyWord`, looking up `Ref` ids in
 /// the per-id pointer table.
-fn resolve_value(v: Value, pointers: &[*mut PolyWord]) -> Result<PolyWord, LoadError> {
+/// Does a tagged integer value from the image fit the *host* tag range?
+/// On a 64-bit host (MAX_TAGGED = 2^62-1) every image value fits, so the
+/// cross-word-size boxing path below is inert. On a 32-bit host the tag is
+/// ~±2^30 and a value from a 64-bit image may not fit.
+fn tagged_fits_host(n: i64) -> bool {
+    match isize::try_from(n) {
+        Ok(ni) => (MIN_TAGGED..=MAX_TAGGED).contains(&ni),
+        Err(_) => false,
+    }
+}
+
+/// Number of *data* words a boxed long-format integer of value `n` occupies
+/// (excludes the length-word slot). Mirrors `box_long_int`'s layout so the
+/// immutable space can be pre-sized.
+fn box_long_int_words(n: i64) -> usize {
+    let mag = n.unsigned_abs();
+    let nbytes = (8 - (mag.leading_zeros() as usize / 8)).max(1);
+    nbytes.div_ceil(size_of::<usize>()).max(1)
+}
+
+/// Materialize an integer that doesn't fit the host tag as a PolyML boxed
+/// long-format integer: an immutable `F_BYTE_OBJ` holding the magnitude as
+/// little-endian bytes, with `F_NEGATIVE_BIT` in the flags for a negative
+/// value. Used only on a cross-word-size load (task #120) where a value that
+/// was a short tagged int in a wider image must become a long boxed int here.
+/// Arbitrary-precision (`IntInf`) RTS ops dispatch on tagged-vs-boxed at run
+/// time, so a boxed value is handled correctly by the same code.
+fn box_long_int(space: &mut MemorySpace, n: i64) -> *mut PolyWord {
+    let neg = n < 0;
+    let mag = n.unsigned_abs();
+    let le = mag.to_le_bytes();
+    let nbytes = (8 - (mag.leading_zeros() as usize / 8)).max(1);
+    let data_words = nbytes.div_ceil(size_of::<usize>()).max(1);
+    let ptr = space.alloc(data_words);
+    write_bytes_packed(ptr, 0, &le[..nbytes]);
+    let mut flags = F_BYTE_OBJ;
+    if neg {
+        flags |= F_NEGATIVE_BIT;
+    }
+    // SAFETY: alloc reserved the length-word slot at ptr-1 and `data_words`
+    // body words at ptr.
+    unsafe { crate::space::set_length_word(ptr, data_words, flags) };
+    ptr
+}
+
+/// Visit every `Value` embedded in an object body (the ones that may carry a
+/// tagged integer needing boxing on a cross-word-size load).
+fn for_each_value(body: &ObjectBody, mut f: impl FnMut(Value)) {
+    match body {
+        ObjectBody::Ordinary(values) | ObjectBody::LegacyClosure { values } => {
+            values.iter().copied().for_each(&mut f);
+        }
+        ObjectBody::Closure { values, .. } => values.iter().copied().for_each(&mut f),
+        ObjectBody::Code { constants, .. } => constants.iter().copied().for_each(&mut f),
+        _ => {}
+    }
+}
+
+fn resolve_value(
+    v: Value,
+    pointers: &[*mut PolyWord],
+    boxed: &HashMap<i64, *mut PolyWord>,
+) -> Result<PolyWord, LoadError> {
     match v {
         Value::Tagged(n) => {
             // Range check against the *current target* word size.
-            let n_isize =
-                isize::try_from(n).map_err(|_| LoadError::TaggedOutOfRange { value: n })?;
-            if !(MIN_TAGGED..=MAX_TAGGED).contains(&n_isize) {
-                return Err(LoadError::TaggedOutOfRange { value: n });
+            if tagged_fits_host(n) {
+                #[allow(clippy::cast_possible_truncation)]
+                return Ok(PolyWord::tagged(n as isize));
             }
-            Ok(PolyWord::tagged(n_isize))
+            // Out of the host tag range — must be a boxed long int, pre-built
+            // for a cross-word-size load. If it isn't in the map (same-word-size
+            // load that somehow overflowed), that's a genuine error.
+            if let Some(&p) = boxed.get(&n) {
+                Ok(PolyWord::from_ptr(p))
+            } else {
+                Err(LoadError::TaggedOutOfRange { value: n })
+            }
         }
         Value::Ref(id) => {
             let p = *pointers
@@ -322,6 +446,7 @@ fn write_body(
     obj_ptr: *mut PolyWord,
     body: &ObjectBody,
     pointers: &[*mut PolyWord],
+    boxed: &HashMap<i64, *mut PolyWord>,
 ) -> Result<(), LoadError> {
     match body {
         // Ordinary tuples and legacy closures both just write their
@@ -330,7 +455,7 @@ fn write_body(
         // by the caller before we run.
         ObjectBody::Ordinary(values) | ObjectBody::LegacyClosure { values } => {
             for (i, v) in values.iter().copied().enumerate() {
-                let w = resolve_value(v, pointers)?;
+                let w = resolve_value(v, pointers, boxed)?;
                 // SAFETY: i < values.len() == body word count
                 unsafe { obj_ptr.add(i).write(w) };
             }
@@ -346,7 +471,7 @@ fn write_body(
             // SAFETY: closure has at least 1 word.
             unsafe { obj_ptr.add(0).write(PolyWord::from_ptr(code)) };
             for (i, v) in values.iter().copied().enumerate() {
-                let w = resolve_value(v, pointers)?;
+                let w = resolve_value(v, pointers, boxed)?;
                 // SAFETY: i+1 < 1 + values.len() == body word count
                 unsafe { obj_ptr.add(i + 1).write(w) };
             }
@@ -392,7 +517,7 @@ fn write_body(
 
             // constants at [code_words + 1 .. code_words + 1 + n_consts]
             for (i, v) in constants.iter().copied().enumerate() {
-                let w = resolve_value(v, pointers)?;
+                let w = resolve_value(v, pointers, boxed)?;
                 // SAFETY: code_words + 1 + i < total_words - 1
                 unsafe { obj_ptr.add(code_words + 1 + i).write(w) };
             }

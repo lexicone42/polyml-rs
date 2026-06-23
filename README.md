@@ -189,12 +189,16 @@ and `isabelle_four_square.rs`.
 
 ## What's not done yet
 
-- **Cross-*word-size* images (64↔32)** — the part of the portability goal still
-  open. Same-word-size cross-arch already works (x86-64 → arm64 is validated on
-  real hardware; see [Status](#polyml-rs)). What's missing is loading an image
-  across *word sizes*: today the loader rejects a mismatched-word-size image with
-  a clear `WordSizeMismatch` error rather than adapting it, and the tagged-int ↔
-  boxed-bignum re-representation across word sizes isn't implemented. Design in
+- **Cross-*word-size* images (64↔32)** — investigated and characterized (the
+  same-word-size cross-arch above is the achievable headline; this is the harder
+  case). The codebase now *builds and runs on 32-bit* (`i686`), and the loader
+  *reconstructs a 64-bit image's data graph* on a 32-bit heap (boxing tagged ints
+  that overflow the smaller tag). But **64-bit-compiled *code* can't run faithfully
+  on 32-bit** — the compiler's own bytecode bakes in 64-bit word-size constants
+  (the `2⁵⁶−1` header mask, the `−2⁶²` tag bound), so a 64-bit image diverges on a
+  32-bit host. This is upstream PolyML's documented limitation ("no correctness
+  guarantee across word sizes without recompilation"); cross-word-size carries
+  *data*, not compiled code. Details + proof in
   [`docs/tier-b-portable-images-design.md`](docs/tier-b-portable-images-design.md).
 - **A compact binary `bicimage` format** — the portable image today is the
   `pexport` *text* format (already arch/word-size/endianness-neutral on the wire,

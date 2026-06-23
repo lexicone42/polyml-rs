@@ -113,14 +113,40 @@ patterns are endian-agnostic. No work needed for the target arches.
    a `tools/` script, fenced like the other heavy demos. This *is* the tweet:
    "a heap image our Rust runtime built on x86_64, executing on aarch64."
 
-### Stretch (cross word size, 64↔32)
+### Stretch (cross word size, 64↔32) — INVESTIGATED 2026-06-23: a hard wall, characterized
 
-4. Size every object from the **image's** `word_size`, not the host's — convert
-   `body_word_count` & the code-layout math to take a `word_bytes` parameter.
-5. Handle the arbitrary-precision-integer tagged/long boundary on load (upstream
-   pexport.cpp:167-180 caveat) — detect a long-form value that fits the host's
-   tagged range (and vice-versa) and normalize. This is the subtle correctness
-   piece; defer until 64↔32 is actually wanted.
+We took the 64→32 swing all-in (task #120) and reached a **definitive, fundamental
+result**: the **data/object-graph reconstructs across word sizes, but 64-bit-compiled
+*code* cannot run faithfully on a 32-bit host.** This is upstream PolyML's own
+documented limitation (pexport.cpp:167-180, "no correctness guarantee across word
+sizes without recompilation") — now demonstrated concretely on our runtime.
+
+What we built + verified:
+- The whole workspace (incl. Cranelift/JIT) **compiles for `i686-unknown-linux-musl`**
+  (a static 32-bit binary that runs natively on x86_64 — no multilib). Only 4
+  host-width assumptions blocked it (2 tagged-Real32 sites, 2 object-header masks),
+  all fixed with byte-identical 64-bit behavior.
+- The loader **reconstructs a 64-bit image's object graph on a 32-bit heap**,
+  *boxing* tagged ints that overflow the smaller tag into long-format byte objects
+  (the M5 piece). `bootstrap64.txt` reconstructs (11 oversized ints boxed) and the
+  interpreter **runs 117K real bytecode steps**.
+- But it **diverges and exits non-zero**, because — proven — **8 of those 11
+  oversized constants live in CODE-object constants (the compiler's own bytecode)**
+  and are the 64-bit word-size magic numbers themselves: `2^56-1` (the 64-bit
+  object-header length mask) and `-2^62` (the 64-bit `MIN_TAGGED` tag bound). The
+  64-bit compiler manipulates object headers/tags with these constants; on a 32-bit
+  layout they're wrong. Even a *trivial* `fn () => ()` export fails the same way —
+  its image-init bytecode uses `-2^62`.
+
+Conclusion: **cross-word-size carries DATA, not word-size-specific compiled code.**
+A genuine 64↔32 *execution* story requires **recompilation** (a native 32-bit
+bootstrap), not image transport. The remaining achievable stretch is therefore a
+*data*-portability story (e.g. the binary `bicimage` format round-tripping a data
+graph 64↔32), not running a 64-bit compiler image on 32-bit.
+
+(Original M4/M5 plan, for reference: size objects from the image's `word_size`; box
+the arbint tagged/long boundary on load — the latter is implemented, behind the
+`POLYML_ALLOW_WORD_SIZE_MISMATCH` opt-in.)
 
 ## Risks / unknowns
 
@@ -150,9 +176,15 @@ patterns are endian-agnostic. No work needed for the target arches.
       steps → `Tagged(0)`, byte-identical to the x86_64 reference**, and `fact 10`
       → `3628800` ran through the self-bootstrapped `polyexport`. See the
       real-hardware section below; runbook in `apple-silicon-cross-arch-demo.md`.
-- [ ] M4 (stretch) — object sizing from image word size; 32-bit image loads on
-      64-bit host (round-trip test).
-- [ ] M5 (stretch) — arbint tagged/long normalization across word sizes.
+- [x] M4/M5 (stretch) — **INVESTIGATED + CHARACTERIZED 2026-06-23** (task #120):
+      32-bit build green (`i686-musl` static); loader reconstructs a 64-bit object
+      graph on 32-bit, boxing oversized tagged ints (M5 boxing implemented, behind
+      `POLYML_ALLOW_WORD_SIZE_MISMATCH`). RESULT: data reconstructs + 117K steps
+      run, but 64-bit-compiled CODE can't execute faithfully on 32-bit (the
+      compiler bytecode bakes in the 64-bit header mask `2^56-1` + tag bound
+      `-2^62`). See the Stretch section above — this is upstream's documented
+      cross-word-size limitation, proven. A 64↔32 *execution* story needs
+      recompilation; the achievable goal is 64↔32 *data* portability.
 
 ## Real-hardware path: Apple Silicon macOS — DONE (2026-06-23)
 
