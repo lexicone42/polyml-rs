@@ -10,8 +10,8 @@ architecture, no recompilation).
 > in Rust, swap in Cranelift codegen, and chase portable heap images — built out
 > for real.
 
-**Status:** runs on **x86-64 Linux**, **arm64 macOS**, **riscv64**, and **s390x
-(big-endian)** — the last two under qemu. The runtime faithfully
+**Status:** runs on **x86-64 Linux**, **arm64 macOS**, **riscv64**, and two
+**big-endian** arches (**s390x**, **ppc64**) — the non-x86 ones under qemu. The runtime faithfully
 executes real Poly/ML: it boots the upstream bootstrap image, self-compiles the
 entire 7-stage compiler chain, and hosts a working SML REPL. Faithfulness is
 continuously checked against upstream Poly/ML (a differential oracle, byte-identical
@@ -24,11 +24,11 @@ demonstrated**: an image our runtime builds on x86-64 Linux executes on Apple
 Silicon (arm64 macOS) with a **byte-identical step count** — cross-architecture
 **and** cross-OS, on real hardware, no recompilation (runbook:
 [`docs/apple-silicon-cross-arch-demo.md`](docs/apple-silicon-cross-arch-demo.md)).
-The same x86-64-built image also runs **byte-identically on riscv64 and on s390x
-(big-endian)** under qemu — `1,110,805` steps → `Tagged(0)` on **all four**, across
-both endiannesses. So image portability holds across architecture *and* byte order
-(for same-word-size 64-bit targets — the cross-*word-size* case is characterized
-separately below). There's also a compact *binary* image format (`bicimage`, ~½ the size,
+The same x86-64-built image also runs **byte-identically on riscv64 and on two
+big-endian arches (s390x, ppc64)** under qemu — `1,110,805` steps → `Tagged(0)` on
+**all five**, across both endiannesses. So image portability holds across
+architecture *and* byte order (for same-word-size 64-bit targets — the
+cross-*word-size* case is characterized separately below). There's also a compact *binary* image format (`bicimage`, ~½ the size,
 loads + runs identically, endian-neutral on the wire). Crossing *word size*
 (64↔32) carries data but not word-size-specific compiled code (see [Roadmap](#roadmap)).
 
@@ -257,9 +257,9 @@ The original staged plan is in [`PLAN.md`](PLAN.md). In short:
   the **compact binary `bicimage` format** (endian-neutral, ~½ the text size,
   loads + runs identically), the experimental Cranelift JIT, an extensive
   faithfulness harness, the HOL4 / Isabelle prover demos, and **cross-arch +
-  cross-endian image portability across four 64-bit architectures** — x86-64 Linux,
-  arm64 macOS (real hardware), riscv64 (qemu), and s390x big-endian (qemu) all run
-  the same image byte-identically.
+  cross-endian image portability across five 64-bit architectures** — x86-64 Linux,
+  arm64 macOS (real hardware), riscv64, s390x (big-endian) and ppc64 (big-endian),
+  the non-x86 ones under qemu, all running the same image byte-identically.
 - **Characterized:** cross-*word-size* (64↔32) — the data/object-graph
   reconstructs (the loader boxes oversized ints), but 64-bit-compiled *code* can't
   run faithfully on 32-bit (its bytecode bakes in 64-bit word-size constants);
