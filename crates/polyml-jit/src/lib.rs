@@ -900,7 +900,10 @@ unsafe fn check_closure_arity(addr: u64) -> Option<usize> {
     }
     // Read length word (1 word before code_addr).
     let lw = unsafe { (code_addr as *const usize).sub(1).read() };
-    let n_words = lw & 0x00ff_ffff_ffff_ffff;
+    // Object-header length = the word with its top flag byte cleared. On 64-bit
+    // that's the low 56 bits (0x00ff_ffff_ffff_ffff); `usize::MAX >> 8` is the
+    // same value there and the correct 32-bit layout (low 24 bits) too.
+    let n_words = lw & (usize::MAX >> 8);
     if n_words == 0 || n_words > (1 << 24) {
         return None;
     }

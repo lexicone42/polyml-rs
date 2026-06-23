@@ -3416,9 +3416,21 @@ impl Interpreter {
     fn unbox_float(w: PolyWord) -> f32 {
         // Right-shift moves the float bits to the low 32, sign-extended.
         // The reinterpret as f32 is then a no-op cast.
-        #[allow(clippy::cast_possible_truncation)]
-        let i = ((w.0 as isize) >> 32) as i32;
-        f32::from_bits(i as u32)
+        #[cfg(target_pointer_width = "64")]
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            let i = ((w.0 as isize) >> 32) as i32;
+            return f32::from_bits(i as u32);
+        }
+        // A 32-bit word cannot hold an f32 + tag bit, so upstream PolyML *boxes*
+        // Real32 on 32-bit hosts instead of tagging it (FLT_SHIFT=32 is 64-bit
+        // only). The boxed-Real32 path isn't ported yet — cross-word-size
+        // stretch (task #120).
+        #[cfg(not(target_pointer_width = "64"))]
+        {
+            let _ = w;
+            unimplemented!("boxed Real32 on 32-bit hosts not yet ported (task #120)")
+        }
     }
     fn box_float(f: f32) -> PolyWord {
         let bits = u64::from(f.to_bits());

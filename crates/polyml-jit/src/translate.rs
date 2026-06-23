@@ -2403,7 +2403,9 @@ fn closure_arity_from_addr(addr: u64) -> Option<usize> {
         };
         let lw_ptr = (code_obj as *const usize).sub(1);
         let lw = lw_ptr.read();
-        let n_words = lw & 0x00ff_ffff_ffff_ffff;
+        // Header length: clear the top flag byte. `usize::MAX >> 8` == the
+        // 64-bit 0x00ff_ffff_ffff_ffff mask, and the correct 32-bit layout.
+        let n_words = lw & (usize::MAX >> 8);
         if n_words == 0 || n_words > (1 << 24) {
             return None;
         }

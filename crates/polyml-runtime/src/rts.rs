@@ -2913,8 +2913,18 @@ fn read_real_word(x: PolyWord) -> f64 {
 /// right-shift by 32 (sign-extending), then reinterpret the low 32 bits as f32.
 #[allow(clippy::cast_possible_truncation)]
 fn read_f32_tagged(x: PolyWord) -> f32 {
-    let i = ((x.0 as isize) >> 32) as i32;
-    f32::from_bits(i as u32)
+    #[cfg(target_pointer_width = "64")]
+    {
+        let i = ((x.0 as isize) >> 32) as i32;
+        return f32::from_bits(i as u32);
+    }
+    // Real32 is boxed (not tagged) on 32-bit hosts — see `unbox_float`
+    // (interpreter/mod.rs). Boxed-Real32 path not yet ported (task #120).
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        let _ = x;
+        unimplemented!("boxed Real32 on 32-bit hosts not yet ported (task #120)")
+    }
 }
 
 /// Box an `f32` result of a Real32 RTS call as a boxed Real (1-word
