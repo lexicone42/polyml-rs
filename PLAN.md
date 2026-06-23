@@ -6,13 +6,16 @@
 
 > **STATUS UPDATE (2026-06).** This is the original plan; much of Stage 2 has
 > landed. **Done:** the bytecode interpreter (2.1), the real copying GC (2.3),
-> pexport load/save, and an experimental Cranelift JIT (2.2, a correctness
-> testbed — not yet a speedup). The x86-64 runtime is faithful enough to boot
+> pexport load/save, an experimental Cranelift JIT (2.2, now a slight ~2% speedup
+> after Phase 0; primarily a correctness testbed), **aarch64 (2.5) + macOS (2.6)**
+> — validated together on real Apple Silicon (an x86-64-Linux-built image runs
+> byte-identically on arm64-macOS), and thereby the **same-word-size cross-arch
+> portability demo** (the core of 2.7). The runtime is faithful enough to boot
 > upstream Poly/ML, self-compile the 7-stage chain, and host HOL4 + Isabelle
-> (validated by a ~1,300-case differential oracle). **Not yet:** concurrency
-> (2.4), aarch64 (2.5), macOS (2.6), and **the portable `bicimage` format (2.7)
-> — the headline goal**. See [`README.md`](README.md) for the current
-> capability summary and the near-term (Tier A/B) release path.
+> (validated by a ~1,300-case differential oracle). **Still open:** concurrency
+> (2.4), the compact *binary* `bicimage` format + cross-*word-size* loading
+> (64↔32, the rest of 2.7), and the JIT as a real speedup. See
+> [`README.md`](README.md) for the current capability summary.
 
 ---
 

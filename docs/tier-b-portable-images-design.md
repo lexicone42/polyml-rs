@@ -24,9 +24,12 @@ Two facts, both verified against the code below, collapse most of the work:
 The consequence: **x86_64 → aarch64 (both 64-bit little-endian) needs no format
 change at all.** The bytecode is identical, pointers are object IDs resolved at
 load, RTS calls are re-linked by name, and `size_of::<usize>()` is 8 on both
-hosts. What's missing is (a) *safety* — the loader silently trusts that the
-image's word size matches the host — and (b) an actual *demonstration* on a
-second architecture. That's the MVP.
+hosts. The MVP was (a) *safety* — a load-time word-size guard — and (b) an actual
+*demonstration* on a second architecture. **Both are now DONE** (2026-06-23): the
+`WordSizeMismatch` guard landed (M1), and the demo ran on real Apple Silicon —
+an x86_64-built image executed byte-identically on arm64 macOS (see "Real-hardware
+path" below). What remains is the *stretch*: a compact binary format and crossing
+**word size** (64↔32).
 
 The harder, genuinely-format-level work (cross **word size**, 64↔32) is a
 *stretch* goal and arguably out of scope for the tweet (the "arches" people care
@@ -79,7 +82,7 @@ patterns are endian-agnostic. No work needed for the target arches.
 
 | From → To | Status | Why |
 | --- | --- | --- |
-| x86_64 → aarch64 (64-bit LE) | **Works today, unsafe** | identical bytecode, object-ID pointers, by-name RTS; only missing a validation guard |
+| x86_64 → aarch64 (64-bit LE) | **VALIDATED** (2026-06-23, real Apple Silicon) | identical bytecode, object-ID pointers, by-name RTS; word-size guard landed (M1). Byte-identical step count + `fact 10` REPL on arm64 macOS — see "Real-hardware path" below |
 | x86_64 → x86_64 (different build) | Works | `patch_entry_points` relinks tokens by name (`[[rts-token-staleness]]` is the failure mode if names change) |
 | 64-bit ↔ 32-bit | Broken (stretch) | loader sizes objects from host `size_of::<usize>()`, not image word size; plus the arbint tagged/long boundary |
 | any → big-endian | Out of scope | runtime is LE-only by design |
@@ -138,41 +141,50 @@ patterns are endian-agnostic. No work needed for the target arches.
 - [x] M1 — `LoadError::WordSizeMismatch`: plumb header word size into the loader,
       validate, clear error on mismatch (+ unit test). **DONE** (commit 76da2ec):
       simple bootstrap still loads clean; `rejects_cross_word_size_image` passes.
-- [ ] M2 — aarch64 build green. *Prepped:* `cross` + docker + podman are
-      installed (no native aarch64 target / qemu needed — `cross` containerises
-      both). `poly` depends on `polyml-jit` unconditionally, so the build needs
-      Cranelift to cross-compile — expected fine (Cranelift is pure Rust with
-      runtime host-detection via `cranelift-native`). Fallback if it doesn't:
-      feature-gate the JIT out of `polyml-bin` for an interpreter-only build.
-      Run: `tools/cross-arch-demo.sh --build`. *Hold until Euler finishes to
-      avoid CPU contention with the proof fleet.*
-- [ ] M3 — x86_64-built image runs on aarch64 under qemu. **Harness written**
-      (`tools/cross-arch-demo.sh`): M3a runs the checked-in `bootstrap64.txt`
-      (proves load+exec on aarch64, always available); M3b runs `fact 10` →
-      `3628800` through the self-bootstrapped `polyexport` if present (the REPL
-      headline). Promote to an `#[ignore]` integration test once green.
+- [x] M2 — aarch64 build green. **DONE** via the real-hardware path: a native
+      `aarch64-apple-darwin` release build (`cargo build --release -p polyml-bin`,
+      ~57s) with Cranelift compiling fine (unused on the interpreter path). The
+      qemu/`cross` route stays prepped as a CI option but wasn't needed.
+- [x] M3 — x86_64-built image runs on aarch64. **DONE** (2026-06-23, real Apple
+      Silicon): the x86_64-Linux-built `bootstrap64.txt` executed in **1,110,805
+      steps → `Tagged(0)`, byte-identical to the x86_64 reference**, and `fact 10`
+      → `3628800` ran through the self-bootstrapped `polyexport`. See the
+      real-hardware section below; runbook in `apple-silicon-cross-arch-demo.md`.
 - [ ] M4 (stretch) — object sizing from image word size; 32-bit image loads on
       64-bit host (round-trip test).
 - [ ] M5 (stretch) — arbint tagged/long normalization across word sizes.
 
-## Real-hardware path: Apple Silicon macOS
+## Real-hardware path: Apple Silicon macOS — DONE (2026-06-23)
 
-The qemu/`cross` route (M2/M3) is the CI-friendly demo, but a native **Apple
-Silicon Mac** (arm64) is a stronger artifact: it exercises cross-arch **and**
-cross-OS at once (x86_64-Linux-built bytecode → arm64-macOS) on real hardware,
-no emulation. The macOS build is pre-vetted clean (2026-06-16): no Linux-isms
-(only `#[cfg(unix)]` getrusage, which macOS satisfies), and the JIT is opt-in
-behind `--jit` so a plain `poly run` never invokes Cranelift. Recipe:
-`cargo build --release -p polyml-bin` (target `aarch64-apple-darwin`, native),
-then `poly run bootstrap64.txt` (expect `Tagged(0)`) and `fact 10` through
-`polyexport` (→ `3628800`). Gated on getting the repo onto GitHub + transferring
-the (git-ignored) `vendor/` images. A test machine is available for this.
+The qemu/`cross` route (M2/M3) was the CI-friendly fallback, but the demo ran on
+a native **Apple Silicon Mac** (arm64) instead — a stronger artifact: cross-arch
+**and** cross-OS at once (x86_64-Linux-built bytecode → arm64-macOS) on real
+hardware, no emulation. The macOS build was pre-vetted clean (no Linux-isms; only
+`#[cfg(unix)]` getrusage, which macOS satisfies; JIT opt-in behind `--jit`) and
+built clean in ~57s as a native `aarch64-apple-darwin` binary (`file
+target/release/poly` → "Mach-O 64-bit executable arm64").
+
+**Measured results (real Apple Silicon, 2026-06-23):**
+
+- **Demo A** — the x86_64-built `bootstrap64.txt` loaded + executed in
+  **1,110,805 bytecode steps → `Tagged(0)`**, *byte-identical* to the x86_64
+  Linux step count for the same commit. The matching step count is the proof:
+  execution is deterministic and identical across arch+OS, not merely "it ran".
+- **Demo B** — `fun fact 0 = 1 | fact n = n * fact(n-1); fact 10;` through the
+  self-bootstrapped `polyexport` printed `val it = 3628800: int`. A full SML
+  system (basis + type inference + recursion + REPL), self-bootstrapped on
+  x86_64 Linux, running unchanged on Apple Silicon.
+- **Bonus** — `--jit` (Cranelift targeting arm64 natively) also ran clean to
+  `Tagged(0)` (3410/4436 translated, 823 installed). Not part of the portability
+  claim (the interpreter is), but confirms arm64 codegen works too.
+
+The runbook (`apple-silicon-cross-arch-demo.md`) reproduces this.
 
 ## Bottom line
 
-The "portable across arches" headline is **M1 + M2 + M3** — a validation guard
-plus an aarch64 build plus one demo — not a format port. Being an interpreter is
-what makes this cheap: we never have native code to relocate, so the only thing
-that crosses the arch boundary is bytecode + object-graph + names, all of which
-the format already carries portably. The cross-*word-size* work (M4/M5) is real
-format engineering and is correctly a stretch goal.
+The "portable across arches" headline — **M1 + M2 + M3** — is **DONE** for the
+arches people actually use (64-bit LE: x86_64, arm64). Being an interpreter is
+what made it cheap: we never have native code to relocate, so the only thing that
+crosses the arch boundary is bytecode + object-graph + names, all of which the
+format already carries portably. The remaining cross-*word-size* work (M4/M5) is
+real format engineering and is correctly a stretch goal.

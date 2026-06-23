@@ -21,13 +21,13 @@
 //!   sigma 8 = 15  (8 NOT perfect; 2*8 = 16 ≠ 15, neg(oeq 15 16) kernel-proved).
 //! A wrong sigma definition would compute wrong values.
 //!
-//! NOT proved: the target `euclid_perfect` (2^p-1 prime ⟹ 2^(p-1)(2^p-1)
-//! perfect). It is blocked on the divisor-set reindex `sigma_char` — collapsing
-//! the SPARSE sum `sumf (swt N) N` over the EXPONENTIAL range 0..N to the dense
-//! geometric sum over the 2(a+1) actual divisors. That needs a divisor-LIST
-//! representation + a support bijection (Route A); a confirmed multi-fleet
-//! follow-up (docs/euclid-perfect-progress-2026-06-21.md). Do NOT advertise the
-//! perfect-number theorem as proved.
+//! This file fences the σ machinery only. The target `euclid_perfect`
+//! (2^p-1 prime ⟹ 2^(p-1)(2^p-1) perfect) is NOT proved *here* — it needed the
+//! divisor-set reindex `sigma_char` (collapsing the SPARSE sum `sumf (swt N) N`
+//! over the EXPONENTIAL range 0..N to the dense geometric sum over the 2(a+1)
+//! actual divisors, via a divisor-LIST representation + a support bijection).
+//! That multi-fleet follow-up LANDED (task #117) — the perfect-number theorem is
+//! proved in `isabelle_euclid_perfect.rs`; see that test, not this one.
 //!
 //! Built on the binomial-theorem development (`isabelle_binom_thm.sml`, which
 //! carries sumf + the sum-algebra + pow + sub + prime2 + dvd + Euclid's lemma)

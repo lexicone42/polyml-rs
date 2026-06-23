@@ -1,5 +1,12 @@
 # Apple Silicon cross-arch demo — runbook (for a Claude on the Mac)
 
+> **STATUS: DONE — ran clean on real Apple Silicon (2026-06-23).** Demo A: the
+> x86_64-built `bootstrap64.txt` executed in **1,110,805 steps → `Tagged(0)`**,
+> byte-identical to the x86_64 reference. Demo B: `fact 10` → `3628800` through
+> the self-bootstrapped `polyexport`. Bonus: `--jit` (Cranelift→arm64) also clean
+> (`Tagged(0)`, 823 installed). The cross-arch + cross-OS portability claim holds
+> on real hardware. The runbook below reproduces it.
+
 **Audience:** a Claude Code instance running on the user's Apple Silicon (arm64)
 Mac. **Goal:** demonstrate the headline portability claim of polyml-rs — *a heap
 image our Rust runtime built on x86_64 Linux executes unchanged on arm64 macOS,
@@ -142,10 +149,13 @@ you want to confirm Cranelift codegen also works on arm64:
 ```sh
 ./target/release/poly run --jit vendor/polyml/bootstrap/bootstrap64.txt
 ```
-Expect the same `Tagged(0)`. (As of this writing the JIT is a correctness testbed,
-~5% slower than the interpreter — don't read anything into timing. If it SEGVs or
-diverges, that's an arm64-JIT finding worth reporting, but it does **not** affect
-the portability demo, which uses plain `poly run`.)
+Expect the same `Tagged(0)`. (On x86_64 the JIT is a slight (~2%) speedup after
+the Phase 0 work, but it's primarily a correctness testbed — don't read timing
+into a single arm64 run. The step count will be *lower* than the interpreter's:
+JIT'd functions run as native code and don't tick the bytecode-step counter, so a
+lower count with the same `Tagged(0)` is expected, not a divergence. If it SEGVs
+or diverges, that's an arm64-JIT finding worth reporting, but it does **not**
+affect the portability demo, which uses plain `poly run`.)
 
 ---
 

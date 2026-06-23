@@ -10,15 +10,22 @@ architecture, no recompilation).
 > in Rust, swap in Cranelift codegen, and chase portable heap images — built out
 > for real.
 
-**Status:** runs on **x86-64 Linux**. The runtime faithfully executes real
-Poly/ML: it boots the upstream bootstrap image, self-compiles the entire 7-stage
-compiler chain, and hosts a working SML REPL. Faithfulness is continuously
-checked against upstream Poly/ML (a differential oracle, byte-identical on
-~1,300+ cases) and stress-tested by running HOL4's full prover stack and a
+**Status:** runs on **x86-64 Linux** and **arm64 macOS**. The runtime faithfully
+executes real Poly/ML: it boots the upstream bootstrap image, self-compiles the
+entire 7-stage compiler chain, and hosts a working SML REPL. Faithfulness is
+continuously checked against upstream Poly/ML (a differential oracle, byte-identical
+on ~1,300+ cases) and stress-tested by running HOL4's full prover stack and a
 from-scratch Isabelle/Pure number-theory development that machine-checks dozens
-of landmark theorems by genuine LCF kernel inference. The headline *novelty*
-goal — architecture-portable images — is **not done yet**; see
-[Roadmap](#roadmap).
+of landmark theorems by genuine LCF kernel inference.
+
+The headline *novelty* goal — architecture-portable heap images — is **partly
+demonstrated**: an image our runtime builds on x86-64 Linux executes on Apple
+Silicon (arm64 macOS) with a **byte-identical step count** — cross-architecture
+**and** cross-OS, on real hardware, no recompilation (runbook:
+[`docs/apple-silicon-cross-arch-demo.md`](docs/apple-silicon-cross-arch-demo.md)).
+That covers same-word-size arches (the ones people use — x86-64, arm64, both
+64-bit). Still to come: a compact *binary* image format and crossing *word size*
+(64↔32); see [Roadmap](#roadmap).
 
 ---
 
@@ -182,16 +189,18 @@ and `isabelle_four_square.rs`.
 
 ## What's not done yet
 
-- **Architecture-portable images** (the headline *novelty* goal). The foundation
-  is in place — execution is via arch-independent bytecode — but the portable
-  `bicimage` format isn't implemented and we have only ever run on x86-64. The
-  cross-arch demo (save on x86-64, load on aarch64) is the next milestone; design
-  is in [`docs/tier-b-portable-images-design.md`](docs/tier-b-portable-images-design.md).
-  (The existing `pexport` text image already loads on a different machine of the
-  *same* arch.)
-- **A second architecture** (aarch64 / riscv64) — not yet targeted.
-- **macOS / Windows** — Linux only today (the code is written to be portable; a
-  cross-arch macOS test is planned).
+- **Cross-*word-size* images (64↔32)** — the part of the portability goal still
+  open. Same-word-size cross-arch already works (x86-64 → arm64 is validated on
+  real hardware; see [Status](#polyml-rs)). What's missing is loading an image
+  across *word sizes*: today the loader rejects a mismatched-word-size image with
+  a clear `WordSizeMismatch` error rather than adapting it, and the tagged-int ↔
+  boxed-bignum re-representation across word sizes isn't implemented. Design in
+  [`docs/tier-b-portable-images-design.md`](docs/tier-b-portable-images-design.md).
+- **A compact binary `bicimage` format** — the portable image today is the
+  `pexport` *text* format (already arch/word-size/endianness-neutral on the wire,
+  which is what crosses arch+OS); a binary format would be smaller and load faster.
+- **riscv64 / big-endian / Windows** — not yet targeted or tested (x86-64 Linux
+  and arm64 macOS are validated; the code is written to be portable).
 - **Concurrency & interrupts** — the interpreter is single-threaded; Poly/ML's
   thread/`Future` machinery loads lazily but isn't scheduled concurrently.
 - **JIT as a big speedup** — it's correct and a *modest* (~2%) win; whole-region
@@ -239,14 +248,17 @@ HOL4 / Isabelle / oracle demos.
 The original staged plan is in [`PLAN.md`](PLAN.md). In short:
 
 - **Done:** the bytecode interpreter, the RTS, the copying GC, pexport load/save,
-  the experimental Cranelift JIT, an extensive faithfulness harness, and the
-  HOL4 / Isabelle prover demos.
-- **Next (the dream): portable `bicimage` + a second architecture.** Implement an
-  image format that ships bytecode + a portable object graph (no native code,
-  explicit word-size/endianness/tagging), cross-compile `poly` to aarch64, and
-  demonstrate a cross-arch image load. This is what makes the project novel.
-- **Later:** concurrency/interrupts, macOS, riscv64, maturing the JIT into a
-  genuine speedup, and closing Lagrange's four-square theorem.
+  the experimental Cranelift JIT, an extensive faithfulness harness, the
+  HOL4 / Isabelle prover demos, and a **cross-arch + cross-OS image-portability
+  demo** (x86-64 Linux → arm64 macOS, byte-identical step count, real hardware).
+- **Next (the dream): cross-*word-size* images + a compact binary `bicimage`.**
+  Same-word-size cross-arch is done; the remaining novelty is loading an image
+  across word sizes (64↔32) — make the loader word-size-aware and re-represent
+  tagged ints ↔ boxed bignums at load — plus a binary on-the-wire format. A
+  32-bit build of `poly` (`i686`) loading a 64-bit-built image is the next
+  milestone (no exotic hardware needed).
+- **Later:** concurrency/interrupts, riscv64 / big-endian / Windows, maturing the
+  JIT into a genuine speedup, and closing Lagrange's four-square theorem.
 
 ---
 
