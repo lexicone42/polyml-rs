@@ -1,5 +1,10 @@
 (* ============================================================================
-   FULL (PNPP) DIVIDE LEAF, end-to-end on /tmp/l4_foursq_star.
+   FULL (PNPP) DIVIDE LEAF, end-to-end on /tmp/l4_foursq_star.  *** PROVEN ***
+   (2026-06-23: DIVPNPP_SMOKE hyps=7, prop = four_sq (mult p r),
+    Result Tagged(0), 229,913,715,532 bytecode steps on the warm star
+    checkpoint.  hyps = the 7 disclosed divide-leaf premises only
+    [hbodyP hsum hca hcbR hcc hcd hmPos].)
+
    A fully-proven divide leaf (after ++++ in divide_leaf_pppp_delta.sml,
    PPPN in divide_leaf_pppn_delta.sml, PPNP in divide_leaf_ppnp_delta.sml).
    Confirms the mixed-sign generalization with the single RIGHT coordinate at
