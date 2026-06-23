@@ -24,8 +24,9 @@ Silicon (arm64 macOS) with a **byte-identical step count** — cross-architectur
 **and** cross-OS, on real hardware, no recompilation (runbook:
 [`docs/apple-silicon-cross-arch-demo.md`](docs/apple-silicon-cross-arch-demo.md)).
 That covers same-word-size arches (the ones people use — x86-64, arm64, both
-64-bit). Still to come: a compact *binary* image format and crossing *word size*
-(64↔32); see [Roadmap](#roadmap).
+64-bit). There's also a compact *binary* image format (`bicimage`, ~½ the size,
+loads + runs identically, endian-neutral on the wire). Crossing *word size*
+(64↔32) carries data but not word-size-specific compiled code (see [Roadmap](#roadmap)).
 
 ---
 
@@ -200,11 +201,9 @@ and `isabelle_four_square.rs`.
   guarantee across word sizes without recompilation"); cross-word-size carries
   *data*, not compiled code. Details + proof in
   [`docs/tier-b-portable-images-design.md`](docs/tier-b-portable-images-design.md).
-- **A compact binary `bicimage` format** — the portable image today is the
-  `pexport` *text* format (already arch/word-size/endianness-neutral on the wire,
-  which is what crosses arch+OS); a binary format would be smaller and load faster.
 - **riscv64 / big-endian / Windows** — not yet targeted or tested (x86-64 Linux
-  and arm64 macOS are validated; the code is written to be portable).
+  and arm64 macOS are validated; the code is written to be portable; riscv64 is
+  64-bit LE so the same-word-size path should apply, modulo a `qemu`/hardware run).
 - **Concurrency & interrupts** — the interpreter is single-threaded; Poly/ML's
   thread/`Future` machinery loads lazily but isn't scheduled concurrently.
 - **JIT as a big speedup** — it's correct and a *modest* (~2%) win; whole-region
@@ -219,9 +218,9 @@ and `isabelle_four_square.rs`.
 | Crate | Role |
 |---|---|
 | [`polyml-runtime`](crates/polyml-runtime) | the bytecode interpreter, runtime system (RTS) calls, exceptions, and the copying GC — the Rust port of `vendor/polyml/libpolyml/` |
-| [`polyml-image`](crates/polyml-image)   | heap-image formats: the `pexport` reader/writer today, the portable `bicimage` format to come |
+| [`polyml-image`](crates/polyml-image)   | heap-image formats: the `pexport` text reader/writer and the compact binary `bicimage` format (endian-neutral, ~½ the size) |
 | [`polyml-jit`](crates/polyml-jit)       | the Cranelift-backed JIT (bytecode → Cranelift IR) |
-| [`polyml-bin`](crates/polyml-bin)       | the `poly` binary (`run` / `inspect` / `disasm` / `diff`) + the HOL4 / Isabelle proof tests |
+| [`polyml-bin`](crates/polyml-bin)       | the `poly` binary (`run` / `inspect` / `disasm` / `diff` / `bic`) + the HOL4 / Isabelle proof tests |
 
 Upstream Poly/ML is obtained read-only under `vendor/polyml/` (git-ignored; see
 [`docs/REPRODUCING.md`](docs/REPRODUCING.md)); the interpreter cross-references
@@ -252,17 +251,20 @@ HOL4 / Isabelle / oracle demos.
 The original staged plan is in [`PLAN.md`](PLAN.md). In short:
 
 - **Done:** the bytecode interpreter, the RTS, the copying GC, pexport load/save,
-  the experimental Cranelift JIT, an extensive faithfulness harness, the
-  HOL4 / Isabelle prover demos, and a **cross-arch + cross-OS image-portability
-  demo** (x86-64 Linux → arm64 macOS, byte-identical step count, real hardware).
-- **Next (the dream): cross-*word-size* images + a compact binary `bicimage`.**
-  Same-word-size cross-arch is done; the remaining novelty is loading an image
-  across word sizes (64↔32) — make the loader word-size-aware and re-represent
-  tagged ints ↔ boxed bignums at load — plus a binary on-the-wire format. A
-  32-bit build of `poly` (`i686`) loading a 64-bit-built image is the next
-  milestone (no exotic hardware needed).
-- **Later:** concurrency/interrupts, riscv64 / big-endian / Windows, maturing the
-  JIT into a genuine speedup, and closing Lagrange's four-square theorem.
+  the **compact binary `bicimage` format** (endian-neutral, ~½ the text size,
+  loads + runs identically), the experimental Cranelift JIT, an extensive
+  faithfulness harness, the HOL4 / Isabelle prover demos, and a **cross-arch +
+  cross-OS image-portability demo** (x86-64 Linux → arm64 macOS, byte-identical
+  step count, real hardware).
+- **Characterized:** cross-*word-size* (64↔32) — the data/object-graph
+  reconstructs (the loader boxes oversized ints), but 64-bit-compiled *code* can't
+  run faithfully on 32-bit (its bytecode bakes in 64-bit word-size constants);
+  this matches upstream's documented limitation. So cross-word-size carries data,
+  not compiled code; a true 64↔32 execution story needs recompilation.
+- **Next:** riscv64 (a third 64-bit LE arch — same-word-size path, needs a
+  `qemu`/hardware run), then the larger subsystems — concurrency/interrupts,
+  Windows, maturing the JIT into a genuine speedup — and closing Lagrange's
+  four-square theorem.
 
 ---
 

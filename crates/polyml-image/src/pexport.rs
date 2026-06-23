@@ -144,7 +144,7 @@ pub enum ObjectBody {
 /// Conversion to runtime heap layout (mmap, real PolyWord values with
 /// bottom-bit tagging) is a separate step in `polyml-runtime`; this
 /// type is intended for inspection and for the loader pipeline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
     pub root: ObjectId,
     pub arch: SourceArch,

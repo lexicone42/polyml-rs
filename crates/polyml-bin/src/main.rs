@@ -180,6 +180,18 @@ enum Cmd {
         #[arg(long)]
         closure: Option<String>,
     },
+    /// Convert a heap image to the compact binary `bicimage` format (or back
+    /// to pexport text). Input may be either format (auto-detected). The
+    /// binary form is smaller, faster to load, and endian-neutral on the wire.
+    Bic {
+        /// Path to the input image (pexport text or bicimage).
+        input: PathBuf,
+        /// Path to write the converted image to.
+        output: PathBuf,
+        /// Convert to pexport TEXT instead of binary bicimage.
+        #[arg(long)]
+        to_text: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -259,6 +271,50 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 )
             }
         }
+        Cmd::Bic {
+            input,
+            output,
+            to_text,
+        } => bic_command(input, output, *to_text).map(|()| ExitCode::SUCCESS),
+    }
+}
+
+/// Convert a heap image between the pexport text format and the binary bicimage
+/// format (input auto-detected).
+fn bic_command(
+    input: &PathBuf,
+    output: &PathBuf,
+    to_text: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(input)?;
+    let image = parse_image_auto(&bytes)?;
+    let out = if to_text {
+        let mut v = Vec::new();
+        image.write(&mut v)?;
+        v
+    } else {
+        image.to_bic_bytes()
+    };
+    std::fs::write(output, &out)?;
+    let fmt = if to_text { "pexport text" } else { "bicimage" };
+    println!(
+        "Wrote {} ({fmt}): {} bytes (from {} bytes, {} objects)",
+        output.display(),
+        out.len(),
+        bytes.len(),
+        image.objects.len()
+    );
+    Ok(())
+}
+
+/// Read image bytes and parse them, auto-detecting the binary bicimage format
+/// (by its magic prefix) vs the pexport text format. Both `poly run` and the
+/// inspect path accept either form.
+fn parse_image_auto(bytes: &[u8]) -> Result<Image, Box<dyn std::error::Error>> {
+    if polyml_image::is_bicimage(bytes) {
+        Ok(Image::read_bic(bytes)?)
+    } else {
+        Ok(Image::parse(bytes)?)
     }
 }
 
@@ -273,7 +329,7 @@ fn run_image(
     install_jit: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
-    let image = Image::parse(&bytes)?;
+    let image = parse_image_auto(&bytes)?;
     let mut loaded = load_image(&image)?;
     ensure_runnable(&loaded)?;
 

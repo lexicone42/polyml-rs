@@ -359,3 +359,70 @@ PolyML.print \"BASIS_LOAD_OK\";\n";
             .join("\n")
     );
 }
+
+/// The binary `bicimage` format: `poly bic` converts the pexport bootstrap to a
+/// (smaller) binary image, and `poly run` executes it byte-identically to the
+/// text form. Locks in the format + the auto-detecting `run` path. Skips on a
+/// fresh clone with no vendored image.
+#[test]
+fn bicimage_convert_and_run_roundtrips() {
+    let Some(image) = bootstrap_image() else {
+        return; // no vendor image — skip
+    };
+    let poly = poly_bin();
+    let dir = std::env::temp_dir();
+    let bic = dir.join("polyml_rs_test_bootstrap.bic");
+    let txt = dir.join("polyml_rs_test_bootstrap.roundtrip.txt");
+
+    // Convert pexport text -> bicimage.
+    let conv = Command::new(&poly)
+        .arg("bic")
+        .arg(&image)
+        .arg(&bic)
+        .output()
+        .expect("run poly bic");
+    assert!(conv.status.success(), "poly bic failed: {conv:?}");
+
+    // The binary form must be meaningfully smaller than the text form.
+    let text_len = std::fs::metadata(&image).unwrap().len();
+    let bic_len = std::fs::metadata(&bic).unwrap().len();
+    assert!(
+        bic_len < text_len,
+        "bicimage ({bic_len}) should be smaller than text ({text_len})"
+    );
+
+    // Running the .bic must match the text run: same step count + Tagged(0).
+    let run = Command::new(&poly)
+        .arg("run")
+        .arg(&bic)
+        .output()
+        .expect("run poly run <.bic>");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        out.contains("1110805") && out.contains("Tagged(0)"),
+        "bicimage run diverged from the text run:\n{out}"
+    );
+
+    // bic -> text round-trip must also run identically.
+    let back = Command::new(&poly)
+        .arg("bic")
+        .arg(&bic)
+        .arg(&txt)
+        .arg("--to-text")
+        .output()
+        .expect("run poly bic --to-text");
+    assert!(back.status.success(), "poly bic --to-text failed: {back:?}");
+    let run2 = Command::new(&poly)
+        .arg("run")
+        .arg(&txt)
+        .output()
+        .expect("run poly run <roundtrip.txt>");
+    let out2 = String::from_utf8_lossy(&run2.stdout);
+    assert!(
+        out2.contains("1110805") && out2.contains("Tagged(0)"),
+        "bic->text round-trip diverged:\n{out2}"
+    );
+
+    let _ = std::fs::remove_file(&bic);
+    let _ = std::fs::remove_file(&txt);
+}
