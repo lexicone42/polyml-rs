@@ -597,3 +597,299 @@ fn full_iff_modulo_only_if() {
         "compile error during proof:\n{out}"
     );
 }
+
+/// Build the MERGED full-iff driver (the seat-1 merge): the twosquare monolith
+/// (final context `ctxtGR`), the if-direction deltas, the RE-ROOTED spine
+/// FLT/binom/key_onlyif sub-tree (`seat1_flt_region_rerooted.sml`, extending
+/// `thyGR`), the only-if descent (`oi_arith` / `oi_descent` / `oi_casea_seat2`),
+/// the assembly (`seat1_iff_assembly.sml`), and the verifier axiom audit
+/// (`seat1_audit.sml`). This is byte-identical to the /tmp/tsf_iff_seat1.sml
+/// driver the verifier re-ran (22,620,992,236 steps, Tagged(0)), assembled
+/// entirely from the banked resume tree (no /tmp dependency).
+fn merged_full_iff_driver() -> String {
+    let monolith = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/isabelle_support/isabelle_twosquare.sml"),
+    )
+    .expect("read isabelle_twosquare.sml");
+    let mut s = monolith;
+    for f in [
+        "if_direction.sml",
+        "if_trichotomy.sml",
+        "if_perprime.sml",
+        "if_valuation.sml",
+        "if_full_direction.sml",
+        "seat1_flt_region_rerooted.sml",
+        "oi_arith.sml",
+        "oi_descent.sml",
+        "oi_casea_seat2.sml",
+        "seat1_iff_assembly.sml",
+        "seat1_audit.sml",
+    ] {
+        s.push('\n');
+        s.push_str(&std::fs::read_to_string(support(f)).unwrap_or_else(|_| panic!("read {f}")));
+    }
+    s.push('\n');
+    s
+}
+
+/// Build the UNCONDITIONAL full-iff driver: the `merged_full_iff_driver` chain
+/// (which closes the only-if half on the merged context `ctxtSub` and the
+/// CONDITIONAL modulo-bridge iff), then the BRIDGE SEAT (`bridge_seat2.sml`)
+/// that builds `mult_left_cancel` + `valuation_unique` and uses them to discharge
+/// the only-if object hypothesis (oiH), assembling the UNCONDITIONAL
+/// `twosquare_full`, then the independent VERIFIER add-on (`tsf_verify.sml`,
+/// runtime axiom audit of `twosquare_full` + 0-hyp/aconv recheck).
+fn merged_full_iff_unconditional_driver() -> String {
+    let mut s = merged_full_iff_driver();
+    for f in ["bridge_seat2.sml", "tsf_verify.sml"] {
+        s.push('\n');
+        s.push_str(&std::fs::read_to_string(support(f)).unwrap_or_else(|_| panic!("read {f}")));
+    }
+    s.push('\n');
+    s
+}
+
+/// THE FULL IFF — the MERGE SEAT (only-if PROVED on the merged context `ctxtGR`,
+/// the iff assembled MODULO the existential→universal valuation bridge).
+///
+/// This is the strongest banked artifact of the full-iff campaign and the SOLE
+/// FULL-IFF DRIVER for human review. It runs the documented hard splice in ONE
+/// process on the merged twosquare base:
+///
+///   * `twosquare` (the monolith) and the unconditional `if_direction`
+///     (0<n ⟹ hpBody n ⟹ sumsq n) on `ctxtGR`;
+///   * the spine FLT / binom / `key_onlyif` sub-tree RE-ROOTED onto `thyGR`
+///     (`ctxtSub` extends `thyGR`), giving `key_onlyif` and then `only_if` on the
+///     MERGED context:
+///       prime2 p ⟹ (∃k. p=4k+3) ⟹ (0<n ∧ sumsq n)
+///         ⟹ ∃v m. n=pᵛ·m ∧ ¬(p|m) ∧ ∃j. v=j+j     (per-prime EXISTENTIAL valuation)
+///   * the iff `twosquare_full_seat1_modulo_bridge`, assembled on `ctxtGR`:
+///       0<n ⟹ Imp(sumsq n)(hpBody n)
+///            ⟹ Conj(Imp(sumsq n)(hpBody n))(Imp(hpBody n)(sumsq n))
+///     0-hyp, aconv the (conditional) biconditional, second conjunct = the
+///     PROVED unconditional if_direction.
+///   * a runtime `Theory.all_axioms_of` axiom audit (`seat1_audit.sml`): ZERO
+///     conclusion-mentioning axioms in either the only_if or the iff theory;
+///     the only classical axiom is `ex_middle`.
+///
+/// HONEST SCOPE — NOT the unconditional biconditional. The proved iff takes the
+/// only-if half (`Imp (sumsq n) (hpBody n)`) as a SCOPED OBJECT HYPOTHESIS,
+/// because the genuinely-proved `only_if` is in the per-prime EXISTENTIAL
+/// even-valuation form, while `hpBody`'s inner clause is the UNIVERSAL
+/// `∀e. vpred p n e ⟹ even e`. Bridging existential→universal needs valuation
+/// UNIQUENESS (`vpred p n e₁ ⟹ vpred p n e₂ ⟹ e₁=e₂`), which in turn needs
+/// `mult_left_cancel` (cancel a positive p-power) — NOT in the monolith (only
+/// `add_left_cancel` is). That is the SINGLE remaining contained sub-development;
+/// the splice (only_if on `ctxtGR`) and the mkConj shape are DONE.
+///
+/// ~22.6B steps, Tagged(0). Markers: ONLY_IF_CLOSED, SEAT1_SUBTHY_OK,
+/// TSF_SEAT1_IFF_MODULO_BRIDGE_CLOSED, SEAT1_AUDIT_CLEAN.
+#[test]
+#[ignore = "needs /tmp/isabelle_pure (tools/build-isabelle-pure.sh); ~22.6B steps / ~12 min"]
+fn full_iff_merge_seat() {
+    let Some(image) = checkpoint() else {
+        eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
+        return;
+    };
+    let driver = merged_full_iff_driver();
+    let Some((out, _)) = run_image_env(&image, &driver, 990_000_000_000, ENV) else {
+        eprintln!("SKIP: poly could not spawn");
+        return;
+    };
+
+    // merged base + if-direction (the second iff conjunct, unconditional).
+    assert!(out.contains("TWOSQ_ALL_OK"), "merged base not OK:\n{out}");
+    assert!(
+        out.contains("IF_DIRECTION hyps=0 aconv=true") && out.contains("IF_DIRECTION_CLOSED"),
+        "if-direction (second conjunct) not closed 0-hyp/aconv:\n{out}"
+    );
+    // the FLT/key_onlyif sub-tree spliced onto thyGR + the only-if descent.
+    assert!(
+        out.contains("KEY_ONLYIF_OK") && out.contains("KEY hyps=0 aconv=true"),
+        "key_onlyif not proved on the merged context:\n{out}"
+    );
+    assert!(
+        out.contains("ONLY_IF hyps=0 aconv=true") && out.contains("ONLY_IF_CLOSED"),
+        "only_if not closed 0-hyp/aconv on the merged context:\n{out}"
+    );
+    // the merge backbone: only_if lives ABOVE thyGR (the splice succeeded).
+    assert!(
+        out.contains("SEAT1_SUBTHY_OK"),
+        "only_if is NOT above thyGR — the FLT splice did not compose:\n{out}"
+    );
+    assert!(
+        out.contains("SEAT1_CTXT_COMPAT_OK") && out.contains("SEAT1_ONLYIF_ON_SUB_OK"),
+        "merged-context compatibility checks failed:\n{out}"
+    );
+    // the conditional (modulo-bridge) biconditional, 0-hyp + aconv + probed.
+    assert!(
+        out.contains("TSF_SEAT1_IFF hyps=0 aconv=true"),
+        "modulo-bridge iff not 0-hyp/aconv:\n{out}"
+    );
+    assert!(
+        out.contains("PROBE_OK seat1 iff second conjunct is the if-direction (R==>L)"),
+        "soundness probe (second conjunct = if-direction) missing:\n{out}"
+    );
+    assert!(
+        out.contains("PROBE_OK seat1 iff keeps 0<n"),
+        "soundness probe (keeps 0<n) missing:\n{out}"
+    );
+    assert!(
+        out.contains("TSF_SEAT1_IFF_MODULO_BRIDGE_CLOSED"),
+        "modulo-bridge iff did not close:\n{out}"
+    );
+    // runtime axiom audit: ZERO conclusion-mentioning axioms in either theory.
+    assert!(
+        out.contains("SEAT1_AUDIT_CLEAN"),
+        "axiom audit not clean (a conclusion-mentioning axiom found):\n{out}"
+    );
+    assert!(
+        out.contains("SEAT1_AUDIT[only_if] suspicious_axioms=0")
+            && out.contains("SEAT1_AUDIT[modulo_bridge_iff] suspicious_axioms=0"),
+        "a suspicious axiom was found:\n{out}"
+    );
+    // not degenerate / exceptional.
+    assert!(
+        !out.contains("TSF_SEAT1_IFF_FAILED")
+            && !out.contains("ONLY_IF_FAILED")
+            && !out.contains("PROBE_FAIL")
+            && !out.contains("SEAT1_AUDIT_DIRTY"),
+        "a soundness probe fired / a lemma FAILED:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("Static Errors") && !out.contains(": error:"),
+        "compile error during proof:\n{out}"
+    );
+}
+
+/// THE FULL IFF — UNCONDITIONAL (Fermat's two-square characterization, both
+/// directions, no scoped hypothesis).
+///
+/// Runs the `merged_full_iff_driver` chain (which proves the only-if half
+/// `only_if` on the merged context and the CONDITIONAL modulo-bridge iff), then
+/// the BRIDGE SEAT (`bridge_seat2.sml`), which closes the documented final gap:
+///
+///   * `mult_left_cancel` : 0<p ⟹ p·a = p·b ⟹ a = b  (from scratch on
+///     `ctxtGR`, via le_total + left_distrib + add_left_cancel + a from-scratch
+///     `mult_eq_zero`; NO hard induction);
+///   * `valuation_unique` : prime2 p ⟹ 0<n ⟹ vpred p n e₁ ⟹ vpred p n e₂
+///     ⟹ e₁ = e₂  (uniqueness of the p-adic valuation, by `mult_left_cancel` +
+///     `pow_add`, ruling out a surplus p-factor against ¬p|m);
+///   * the BRIDGE `oiH_thm` : 0<n ⟹ Imp (sumsq n) (hpBody n) — a THEOREM:
+///     instantiate `only_if` (per-prime EXISTENTIAL even valuation ∃v) under
+///     hpBody's premises, then transfer `even v` to the UNIVERSAL inner `e` by
+///     `valuation_unique`; allI over e and p gives `hpBody n`;
+///   * the DISCHARGE: feed `oiH_thm` (now PROVED) + the unconditional
+///     `if_direction` to the same mkConj, giving the UNCONDITIONAL
+///       twosquare_full : 0<n ⟹ Conj (Imp (sumsq n) (hpBody n))
+///                                    (Imp (hpBody n) (sumsq n))
+///     where sumsq n == ∃a b. n = a²+b² and hpBody n == every prime p≡3(mod 4)
+///     divides n to an EVEN power. The only-if hypothesis is GONE.
+///
+/// Then the independent VERIFIER add-on (`tsf_verify.sml`) re-checks 0-hyp /
+/// aconv the full biconditional / unconditional, and runs a runtime
+/// `Theory.all_axioms_of` audit on `twosquare_full`'s theory (ZERO
+/// conclusion-mentioning axioms; only classical = ex_middle). 0 new
+/// axioms/consts/types over the merged base. ~22.7B steps, Tagged(0).
+///
+/// Markers: TWOSQUARE_FULL_OK, the three twosquare_full PROBE_OK lines,
+/// TSFV_RECHECK_OK, TSFV_AUDIT_CLEAN.
+#[test]
+#[ignore = "needs /tmp/isabelle_pure (tools/build-isabelle-pure.sh); ~22.7B steps / ~12 min"]
+fn full_iff_unconditional() {
+    let Some(image) = checkpoint() else {
+        eprintln!("SKIP: /tmp/isabelle_pure missing (tools/build-isabelle-pure.sh)");
+        return;
+    };
+    let driver = merged_full_iff_unconditional_driver();
+    let Some((out, _)) = run_image_env(&image, &driver, 990_000_000_000, ENV) else {
+        eprintln!("SKIP: poly could not spawn");
+        return;
+    };
+
+    // merged base + both halves coexist (only-if proved, if-direction proved).
+    assert!(out.contains("TWOSQ_ALL_OK"), "merged base not OK:\n{out}");
+    assert!(
+        out.contains("ONLY_IF hyps=0 aconv=true") && out.contains("ONLY_IF_CLOSED"),
+        "only_if not closed on the merged context:\n{out}"
+    );
+    assert!(
+        out.contains("IF_DIRECTION hyps=0 aconv=true") && out.contains("IF_DIRECTION_CLOSED"),
+        "if-direction not closed:\n{out}"
+    );
+    // the bridge sub-development.
+    assert!(
+        out.contains("MULT_LEFT_CANCEL hyps=0"),
+        "mult_left_cancel not 0-hyp:\n{out}"
+    );
+    assert!(
+        out.contains("VALUATION_UNIQUE hyps=0") && out.contains("VALUATION_UNIQUE aconv=true"),
+        "valuation_unique not 0-hyp / aconv:\n{out}"
+    );
+    assert!(
+        out.contains("PROBE_OK valuation_unique keeps prime2 p")
+            && out.contains("PROBE_OK valuation_unique concludes oeq e1 e2 (not e1 e1)"),
+        "valuation_unique soundness probes missing:\n{out}"
+    );
+    assert!(
+        out.contains("OIH_THM hyps=0") && out.contains("OIH_THM aconv=true"),
+        "the bridge oiH_thm not 0-hyp / aconv:\n{out}"
+    );
+    // THE DELIVERABLE: the UNCONDITIONAL full biconditional, 0-hyp + aconv.
+    assert!(
+        out.contains("TWOSQUARE_FULL hyps=0 aconv=true"),
+        "twosquare_full not 0-hyp / aconv the full biconditional:\n{out}"
+    );
+    // the only-if hypothesis (oiH) is GONE — the iff is unconditional.
+    assert!(
+        out.contains("PROBE_OK twosquare_full is UNCONDITIONAL (no Imp L R hypothesis)"),
+        "soundness probe (unconditional, oiH gone) missing:\n{out}"
+    );
+    assert!(
+        out.contains("PROBE_OK twosquare_full second conjunct is R==>L (genuine iff)"),
+        "soundness probe (second conjunct = if-direction) missing:\n{out}"
+    );
+    assert!(
+        out.contains("PROBE_OK twosquare_full keeps 0<n"),
+        "soundness probe (keeps 0<n) missing:\n{out}"
+    );
+    assert!(
+        out.contains("TWOSQUARE_FULL_OK"),
+        "the unconditional twosquare_full did not close:\n{out}"
+    );
+    // independent verifier recheck + runtime axiom audit on twosquare_full.
+    assert!(
+        out.contains("TSFV recheck hyps=0 aconv_intended=true"),
+        "verifier recheck (0-hyp / aconv) failed:\n{out}"
+    );
+    assert!(
+        out.contains("TSFV recheck UNCONDITIONAL (no Imp L R hypothesis)")
+            && out.contains("TSFV_RECHECK_OK"),
+        "verifier unconditional recheck failed:\n{out}"
+    );
+    assert!(
+        out.contains("TSFV_AUDIT suspicious_axioms=0") && out.contains("TSFV_AUDIT_CLEAN"),
+        "runtime axiom audit on twosquare_full not clean:\n{out}"
+    );
+    // not degenerate / exceptional.
+    assert!(
+        !out.contains("TWOSQUARE_FULL_FAILED")
+            && !out.contains("TSFV_RECHECK_FAIL")
+            && !out.contains("TSFV_AUDIT_DIRTY")
+            && !out.contains("PROBE_FAIL"),
+        "a soundness probe fired / a lemma FAILED:\n{out}"
+    );
+    assert!(
+        !out.contains("Exception-"),
+        "exception during proof:\n{out}"
+    );
+    assert!(
+        !out.contains("Static Errors") && !out.contains(": error:"),
+        "compile error during proof:\n{out}"
+    );
+}

@@ -1,3 +1,31 @@
+# Fermat's two-square theorem (FULL characterization) — PROVED, COMPLETE (2026-06-22)
+
+## 2026-06-22 UPDATE (merge fleet wf_8cdcec09-4f4 + bridge fleet wf_355aeea1-2fc) — FULL IFF CLOSED, UNCONDITIONAL
+
+The full unconditional two-square characterization is PROVED, hand-verified
+(isabelle_twosquare_full.rs::full_iff_unconditional, 1/1 pass ~203s):
+  `twosquare_full : ⊢ 0<n ⟹ (∃a b. n=a²+b²  ⟺  ∀p. prime2 p ⟹ p≡3mod4 ⟹ v_p(n) even)`
+i.e. **n is a sum of two squares IFF every prime ≡3 (mod 4) divides n to an even power** —
+the complete Fermat two-square characterization, 0-hyp by genuine LCF kernel inference.
+- MERGE (wf_8cdcec09-4f4): spliced the FLT/binom/key_onlyif sub-tree onto thyGR
+  (seat1_flt_region_rerooted.sml) so the banked only_if and the unconditional if_direction
+  COEXIST on compatible contexts; assembled the conditional iff (seat1_iff_assembly.sml).
+- BRIDGE (wf_355aeea1-2fc, both seats closed it): proved mult_left_cancel (le-witness +
+  left_distrib + add_left_cancel + mult_eq_zero, no induction) → valuation_unique
+  (vpred p n e is unique in e, via mult_left_cancel + pow_add + p∣p^≥1) → bridged only_if's
+  per-prime EXISTENTIAL even-valuation to hpBody's UNIVERSAL inner → discharged the only-if
+  object hypothesis (oiH) → mkConj with if_direction → the UNCONDITIONAL twosquare_full.
+  Files: bridge_seat2.sml + tsf_verify.sml.
+- VERIFIED: TWOSQUARE_FULL hyps=0 aconv=true; the oiH/SCG hypothesis is GONE (PROBE_OK
+  twosquare_full is UNCONDITIONAL); 0 new axioms/consts over the monolith baseline, only
+  classical = ex_middle; kernel accepts 5/9/2/13 as sums of two squares + rejects 3/7/21,
+  both directions, by genuine inference. Self-contained ~27.7K-line driver, run directly.
+
+The 2026-06-21/06-22 records below (only-if close, if-direction close, the context-merge) are
+kept for the campaign history.
+
+---
+
 # Fermat's two-square theorem (FULL characterization) — progress (2026-06-20, updated 2026-06-21, 2026-06-22)
 
 ## 2026-06-22 UPDATE (if-direction fleet wf_dfaa09fe-380) — IF-DIRECTION PROVED UNCONDITIONAL; both directions now done
