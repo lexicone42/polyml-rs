@@ -115,7 +115,7 @@ patterns are endian-agnostic. No work needed for the target arches.
 
 ### Stretch (cross word size, 64↔32) — INVESTIGATED 2026-06-23: a hard wall, characterized
 
-We took the 64→32 swing all-in (task #120) and reached a **definitive, fundamental
+We took the 64→32 swing all-in and reached a **definitive, fundamental
 result**: the **data/object-graph reconstructs across word sizes, but 64-bit-compiled
 *code* cannot run faithfully on a 32-bit host.** This is upstream PolyML's own
 documented limitation (pexport.cpp:167-180, "no correctness guarantee across word
@@ -165,7 +165,7 @@ the arbint tagged/long boundary on load — the latter is implemented, behind th
 ## Milestones
 
 - [x] M1 — `LoadError::WordSizeMismatch`: plumb header word size into the loader,
-      validate, clear error on mismatch (+ unit test). **DONE** (commit 76da2ec):
+      validate, clear error on mismatch (+ unit test). **DONE**:
       simple bootstrap still loads clean; `rejects_cross_word_size_image` passes.
 - [x] M2 — aarch64 build green. **DONE** via the real-hardware path: a native
       `aarch64-apple-darwin` release build (`cargo build --release -p polyml-bin`,
@@ -176,7 +176,7 @@ the arbint tagged/long boundary on load — the latter is implemented, behind th
       steps → `Tagged(0)`, byte-identical to the x86_64 reference**, and `fact 10`
       → `3628800` ran through the self-bootstrapped `polyexport`. See the
       real-hardware section below; runbook in `apple-silicon-cross-arch-demo.md`.
-- [x] M4/M5 (stretch) — **INVESTIGATED + CHARACTERIZED 2026-06-23** (task #120):
+- [x] M4/M5 (stretch) — **INVESTIGATED + CHARACTERIZED 2026-06-23**:
       32-bit build green (`i686-musl` static); loader reconstructs a 64-bit object
       graph on 32-bit, boxing oversized tagged ints (M5 boxing implemented, behind
       `POLYML_ALLOW_WORD_SIZE_MISMATCH`). RESULT: data reconstructs + 117K steps

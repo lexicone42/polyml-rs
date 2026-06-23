@@ -1,21 +1,16 @@
-# Apple Silicon cross-arch demo — runbook (for a Claude on the Mac)
+# Apple Silicon cross-arch demo — runbook
 
-> **STATUS: DONE — ran clean on real Apple Silicon (2026-06-23).** Demo A: the
-> x86_64-built `bootstrap64.txt` executed in **1,110,805 steps → `Tagged(0)`**,
-> byte-identical to the x86_64 reference. Demo B: `fact 10` → `3628800` through
-> the self-bootstrapped `polyexport`. Bonus: `--jit` (Cranelift→arm64) also clean
-> (`Tagged(0)`, 823 installed). The cross-arch + cross-OS portability claim holds
-> on real hardware. The runbook below reproduces it.
+> **Status: validated on real Apple Silicon.** A heap image built by polyml-rs on
+> x86-64 Linux executed on an arm64 Mac in **1,110,805 steps → `Tagged(0)`**,
+> byte-identical to the x86-64 reference; and `fact 10` → `3628800` ran through the
+> self-bootstrapped `polyexport` REPL image. (The opt-in `--jit` path, Cranelift
+> targeting arm64, also ran clean.) The steps below reproduce it.
 
-**Audience:** a Claude Code instance running on the user's Apple Silicon (arm64)
-Mac. **Goal:** demonstrate the headline portability claim of polyml-rs — *a heap
-image our Rust runtime built on x86_64 Linux executes unchanged on arm64 macOS,
-byte-for-byte identically.* This exercises **cross-architecture AND cross-OS at
-once**, on real hardware (no emulation).
-
-If you are that Mac Claude: read this whole file first, then work top to bottom.
-Report results in the format under "What to report back". The big repo `CLAUDE.md`
-has deep project context if you want it, but you do **not** need it for this task.
+**Goal:** demonstrate the headline portability claim of polyml-rs — *a heap image
+our Rust runtime builds on x86-64 Linux executes unchanged on arm64 macOS,
+byte-for-byte identically.* This exercises **cross-architecture and cross-OS at
+once**, on real hardware (no emulation). You need an Apple Silicon Mac; the build
+is native (no QEMU).
 
 ---
 

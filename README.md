@@ -92,7 +92,6 @@ dispatches via a JIT cache. It runs the full pipeline correctly (bootstrap, the
 **~2% faster than the tuned interpreter on the basis load** — a modest win; the
 JIT's primary value today is as a correctness testbed (a differential harness
 that runs each function in both JIT and interpreter and compares). See
-[`docs/jit-feasibility-2026-06-18.md`](docs/jit-feasibility-2026-06-18.md) and
 `CLAUDE.md` for the honest performance analysis.
 
 ---
@@ -109,16 +108,16 @@ evidence here is unusually strong — and it was earned by finding real bugs.
   seeded LCG fuzz drivers (~16K random arithmetic cases). The interpreter is
   faithful on all of them, and even reproduces a latent *upstream* stage-0
   compiler bug byte-for-byte (the strongest faithfulness statement available).
-  See [`docs/differential-oracle-2026-06-09.md`](docs/differential-oracle-2026-06-09.md).
 - **Poly/ML's own test corpus.** We run upstream's `Tests/` suite (212 Succeed +
   83 Fail programs) through both engines — this is how the `PolySubtractArbitrary`
   negation bug was caught and fixed (it lived in the RTS path the diff-corpus
-  missed). See [`docs/upstream-testsuite-findings-2026-06-17.md`](docs/upstream-testsuite-findings-2026-06-17.md).
+  missed).
 - **Hunted for soundness from every angle.** Arithmetic/structure/program fuzz,
   loader fuzz (found + fixed 2 memory-safety bugs on untrusted images), a GC
   soak, the interp-vs-JIT differential (1,201 fn×args cases, zero real JIT bugs),
-  and a full static audit of all 449 `unsafe` blocks. The findings (including the
-  honest open issues) are in `docs/`.
+  and a full static audit of all 449 `unsafe` blocks. The methods and findings
+  (including the honest open issues) are written up in
+  [`docs/correctness-and-safety.md`](docs/correctness-and-safety.md).
 
 These also double as the most demanding regression tests imaginable for the
 runtime.

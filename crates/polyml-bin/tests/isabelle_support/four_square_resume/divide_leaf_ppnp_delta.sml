@@ -1,0 +1,355 @@
+(* ============================================================================
+   FULL (PPNP) DIVIDE LEAF, end-to-end on /tmp/l4_foursq_star.
+   THE THIRD fully-proven divide leaf (after ++++ in divide_leaf_pppp_delta.sml
+   and PPPN in divide_leaf_pppn_delta.sml).  Confirms the mixed-sign
+   generalization with the RIGHT coordinate at position c (not d).
+
+   Pattern PPNP: a,b,d LEFT (cong m e a / f b / h d), c RIGHT (cong m (g+c) 0).
+   PPNP witnesses (LEFT-FOLDED, from /tmp/derive PPNP s=(1,1,-1,1),
+   residue names ap=e, bp=f, cp=g, dp=h):
+     wP = (a*e + b*f) + d*h        wQ = c*g
+     Px = (a*f + c*h) + g*d        Qx = e*b
+     Py = f*d                      Qy = (a*g + e*c) + b*h
+     Pz = a*h                      Qz = (e*d + b*g) + f*c
+
+   The RIGHT coordinate is c (residue g, flag cong m (g+c) 0); the correction
+   term is c^2 (= cc) instead of d^2.  Per-witness mid-values:
+     wP/wQ -> m*p   (correction trick: wP+c^2 ≡ m*p ≡ 0 ≡ wQ+c^2)
+     Px/Qx -> a*b   (Px reassoc a*f + (c*h+g*d); c*h+g*d ≡ 0 via (g+c)*d)
+     Py/Qy -> b*d   (Qy reassoc (a*g+e*c) + b*h; a*g+e*c ≡ 0 via a*(g+c))
+     Pz/Qz -> a*d   (Qz reassoc e*d + (b*g+f*c); b*g+f*c ≡ 0 via b*(g+c))
+
+   The star is built CHEAPLY via proveIdentityG starL_i starR_i (NO 13-min
+   proveStarFor, NO starV_i checkpoint).  The divide pipeline (sq_diff_dvd x4
+   -> assemble mn=SS -> dvd m s_i -> divide-by-m^2 via withQuot +
+   proveIdentityG + mult_left_cancel_r -> four_sq_witness) is identical to PPPN.
+
+   IMPORTANT divSum/SS shape: four_sq_witness needs the LEFT-PAIRED RHS
+   (sw^2+sx^2)+(sy^2+sz^2) (fourSqBody in _assembled_base.sml).
+
+   RE-RUN (warm star checkpoint, needs a BIG step budget -- the 4-pair
+   symmetric divide is heavy; 200e9 is NOT enough):
+     POLYML_HEAP_BYTES=8000000000 POLYML_GC_THRESHOLD=88 \
+       ./target/release/poly run --max-steps 1000000000000 /tmp/l4_foursq_star \
+       < divide_leaf_ppnp_delta.sml
+   Output: four_sq (mult p r), hyps = the 7 disclosed divide-leaf premises only.
+   ============================================================================ *)
+val () = restore_l4_context ();
+val () = out "DIVPN_BEGIN\n";
+fun sq x = mult x x;
+fun dbl t = add t t;
+
+(* ---- sq_diff_dvd : cong m P Q ==> EX s. (s^2+2PQ = P^2+Q^2) AND cong m s 0 ---- *)
+fun sqDiffDvdPred (mT,P,Q) =
+  let val sF = Free("s_sdd", natT)
+  in Term.lambda sF (mkConj (oeq (add (sq sF) (dbl (mult P Q))) (add (sq P)(sq Q)))
+                            (cong mT sF ZeroC)) end;
+fun sq_diff_dvd (mT, P, Q) hPQ =
+  let
+    val Cgoal = mkEx (sqDiffDvdPred (mT,P,Q))
+    val tot = le_total_d (Q, P)
+    val caseA =
+      let val hP = jT (le Q P); val h = Thm.assume (ctermGR hP)
+          val sT = subv P Q
+          val rec0 = sub_recover_g (P, Q) h
+          val idPoly = proveIdentityG (add (sq sT) (dbl (mult (add sT Q) Q))) (add (sq (add sT Q)) (sq Q))
+          val zF = Free("zsd",natT)
+          val rwPred = Term.lambda zF (oeq (add (sq sT) (dbl (mult zF Q))) (add (sq zF)(sq Q)))
+          val bodyEq = oeq_rw_g (rwPred, add sT Q, P) rec0 idPoly
+          val congSQ = oeq_rw_r (Term.lambda (Free("zc",natT)) (cong mT (Free("zc",natT)) Q), P, add sT Q) (oeqSym_r2 rec0) hPQ
+          val q0q = oeqSym_r2 (add0_d Q)
+          val congSQ0 = oeq_rw_r (Term.lambda (Free("zc2",natT)) (cong mT (add sT Q) (Free("zc2",natT))), Q, add ZeroC Q) q0q congSQ
+          val congS0 = cong_radd_cancel_r (mT, sT, ZeroC, Q) congSQ0
+          val body = conjI_r (oeq (add (sq sT)(dbl (mult P Q))) (add (sq P)(sq Q)), cong mT sT ZeroC) bodyEq congS0
+          val ex = exI_r (sqDiffDvdPred (mT,P,Q)) sT body
+      in Thm.implies_intr (ctermGR hP) ex end
+    val caseB =
+      let val hP = jT (le P Q); val h = Thm.assume (ctermGR hP)
+          val sT = subv Q P
+          val rec0 = sub_recover_g (Q, P) h
+          val idPoly = proveIdentityG (add (sq sT) (dbl (mult P (add sT P)))) (add (sq P) (sq (add sT P)))
+          val zF = Free("zsd",natT)
+          val rwPred = Term.lambda zF (oeq (add (sq sT) (dbl (mult P zF))) (add (sq P)(sq zF)))
+          val bodyEq = oeq_rw_g (rwPred, add sT P, Q) rec0 idPoly
+          val hQP = cong_sym_g (mT, P, Q) hPQ
+          val congSP = oeq_rw_r (Term.lambda (Free("zc",natT)) (cong mT (Free("zc",natT)) P), Q, add sT P) (oeqSym_r2 rec0) hQP
+          val p0p = oeqSym_r2 (add0_d P)
+          val congSP0 = oeq_rw_r (Term.lambda (Free("zc2",natT)) (cong mT (add sT P) (Free("zc2",natT))), P, add ZeroC P) p0p congSP
+          val congS0 = cong_radd_cancel_r (mT, sT, ZeroC, P) congSP0
+          val body = conjI_r (oeq (add (sq sT)(dbl (mult P Q))) (add (sq P)(sq Q)), cong mT sT ZeroC) bodyEq congS0
+          val ex = exI_r (sqDiffDvdPred (mT,P,Q)) sT body
+      in Thm.implies_intr (ctermGR hP) ex end
+  in disjE_r (le Q P, le P Q, Cgoal) tot caseA caseB end;
+val () = out "DIVPN_SQDIFF_OK\n";
+
+(* cong helper: cong_kmult (m,k,x',x) : from cong m x' x, get cong m (k*x')(k*x) *)
+fun cong_kmult (mT, k, xp, x) hflag = cong_mult_r (mT, k, k, xp, x) (cong_refl_g (mT, k)) hflag;
+
+(* ---- THE PPNP LEAF ---- *)
+fun divide_leaf_ppnp (mT,pT,rT, a,b,c,d, e,f,g,h)
+        hbodyP hsum hca hcb hccR hcd hmPos =
+  (* hca: cong m e a ; hcb: cong m f b ; hccR: cong m (g+c) 0 ; hcd: cong m h d *)
+  let
+    val mp = mult mT pT  val mr = mult mT rT
+    val sumA = add (add (sq a)(sq b))(add (sq c)(sq d))
+    val Mabcd = add (add (sq a)(sq b))(add (sq c)(sq d))
+    val Mefgh = add (add (sq e)(sq f))(add (sq g)(sq h))
+    val mn = mult Mabcd Mefgh
+    (* witnesses (LEFT-FOLDED) *)
+    val wP = add (add (mult a e)(mult b f))(mult d h)    val wQ = mult c g
+    val Px = add (add (mult a f)(mult c h))(mult g d)     val Qx = mult e b
+    val Py = mult f d                                     val Qy = add (add (mult a g)(mult e c))(mult b h)
+    val Pz = mult a h                                     val Qz = add (add (mult e d)(mult b g))(mult f c)
+    val Dcross = dbl (add (add (add (mult wP wQ) (mult Px Qx)) (mult Py Qy)) (mult Pz Qz))
+    val PPsum  = add (add (add (add (add (add (add (sq wP)(sq wQ))(sq Px))(sq Qx))(sq Py))(sq Qy))(sq Pz))(sq Qz)
+    val starL_i = add mn Dcross
+    val starR_i = PPsum
+    (* build the star via proveIdentityG (cheap) *)
+    val star_i = proveIdentityG starL_i starR_i
+    val () = if (Thm.prop_of star_i) aconv (jT (oeq starL_i starR_i)) then out "DIVPN_STAR_SHAPE_OK\n"
+             else raise Fail "star shape"
+
+    (* ============ THE FOUR DIVISIBILITY CONGRUENCES ============ *)
+    (* cong m wP wQ : wP=(a*e+b*f)+d*h (LEFT) ; wQ=c*g (RIGHT).
+       Route: cong m (wP + c^2)(wQ + c^2), cancel c^2.
+         wP + c^2 ≡ (a^2+b^2+d^2) + c^2 = m*p
+         wQ + c^2 = c*g + c*c = c*(g+c) ≡ c*0 = 0 ≡ m*p  (RIGHT flag) *)
+    val cc = sq c
+    val c_ae = cong_kmult (mT, a, e, a) hca   (* cong m (a*e)(a*a) *)
+    val c_bf = cong_kmult (mT, b, f, b) hcb
+    val c_dh = cong_kmult (mT, d, h, d) hcd
+    val c_wp1 = cong_add_g (mT, mult a e, sq a, mult b f, sq b) c_ae c_bf
+    val c_wp2 = cong_add_g (mT, add (mult a e)(mult b f), add (sq a)(sq b), mult d h, sq d) c_wp1 c_dh
+                (* cong m wP ((a^2+b^2)+d^2) *)
+    val c_wPcc = cong_add_g (mT, wP, add (add (sq a)(sq b))(sq d), cc, cc) c_wp2 (cong_refl_g (mT, cc))
+                 (* cong m (wP+c^2) (((a^2+b^2)+d^2)+c^2) *)
+    val reA = proveIdentityG (add (add (add (sq a)(sq b))(sq d)) cc) sumA  (* ((a^2+b^2)+d^2)+c^2 = sumA *)
+    val c_to_sumA = cong_trans_g (mT, add wP cc, add (add (add (sq a)(sq b))(sq d)) cc, sumA)
+                      c_wPcc (cong_of_oeq_r (mT, add (add (add (sq a)(sq b))(sq d)) cc, sumA) reA)
+    val c_wPcc_mp = oeq_rw_r (Term.lambda (Free("zq",natT)) (cong mT (add wP cc) (Free("zq",natT))), sumA, mp)
+                      (oeqSym_r2 hbodyP) c_to_sumA   (* cong m (wP+c^2)(m*p) *)
+    (* RHS: wQ + c^2 = c*g + c*c = c*(g+c) ; cong m (c*(g+c)) 0 from RIGHT flag *)
+    val c_cgc = cong_kmult (mT, c, add g c, ZeroC) hccR     (* cong m (c*(g+c))(c*0) *)
+    val c0 = mult0r_d c                                      (* c*0 = 0 *)
+    val c_cgc0 = cong_trans_g (mT, mult c (add g c), mult c ZeroC, ZeroC) c_cgc (cong_of_oeq_r (mT, mult c ZeroC, ZeroC) c0)
+                 (* cong m (c*(g+c)) 0 *)
+    val reQ = proveIdentityG (add wQ cc) (mult c (add g c))  (* c*g+c^2 = c*(g+c) *)
+    val c_wQcc0 = cong_trans_g (mT, add wQ cc, mult c (add g c), ZeroC) (cong_of_oeq_r (mT, add wQ cc, mult c (add g c)) reQ) c_cgc0  (* cong m (wQ+c^2) 0 *)
+    val c_mp0 = (let val z = add0_d mp in cong_introR_r (mT, mp, ZeroC, pT) (oeqSym_r2 z) end)
+    val c_wPcc0 = cong_trans_g (mT, add wP cc, mp, ZeroC) c_wPcc_mp c_mp0   (* cong m (wP+c^2) 0 *)
+    val c_both = cong_trans_g (mT, add wP cc, ZeroC, add wQ cc) c_wPcc0 (cong_sym_g (mT, add wQ cc, ZeroC) c_wQcc0)
+                 (* cong m (wP+c^2)(wQ+c^2) *)
+    val c_wPwQ = cong_radd_cancel_r (mT, wP, wQ, cc) c_both   (* cong m wP wQ *)
+    val () = out "DIVPN_CONG_W_OK\n";
+
+    (* cong m Px Qx : Px=(a*f+c*h)+g*d ; Qx=e*b.  Both ≡ a*b.
+       Px mod m: a*f≡a*b [f≡b], c*h≡c*d [h≡d], g*d: g RIGHT (g≡-c) -> g*d≡-c*d.
+         so c*h+g*d ≡ c*d - c*d = 0.  Px ≡ a*b.
+       Qx=e*b ≡ a*b [e≡a]. *)
+    val c_af = cong_kmult (mT, a, f, b) hcb            (* cong m (a*f)(a*b) *)
+    (* c*h + g*d ≡ 0 : c*h≡c*d [h≡d], and g*d+c*d = (g+c)*d = d*(g+c)≡0 *)
+    val c_ch = cong_mult_r (mT, c, c, h, d) (cong_refl_g (mT, c)) hcd   (* cong m (c*h)(c*d) *)
+    val c_chgd1 = cong_add_g (mT, mult c h, mult c d, mult g d, mult g d) c_ch (cong_refl_g (mT, mult g d))
+                  (* cong m (c*h+g*d)(c*d+g*d) *)
+    val c_dgc = cong_kmult (mT, d, add g c, ZeroC) hccR    (* cong m (d*(g+c))(d*0) *)
+    val d0 = mult0r_d d
+    val c_dgc0 = cong_trans_g (mT, mult d (add g c), mult d ZeroC, ZeroC) c_dgc (cong_of_oeq_r (mT, mult d ZeroC, ZeroC) d0)
+    val reGD = proveIdentityG (add (mult c d)(mult g d)) (mult d (add g c))  (* c*d+g*d = d*(g+c) *)
+    val c_cdgd0 = cong_trans_g (mT, add (mult c d)(mult g d), mult d (add g c), ZeroC) (cong_of_oeq_r (mT, add (mult c d)(mult g d), mult d (add g c)) reGD) c_dgc0
+                  (* cong m (c*d+g*d) 0 *)
+    val c_chgd0 = cong_trans_g (mT, add (mult c h)(mult g d), add (mult c d)(mult g d), ZeroC) c_chgd1 c_cdgd0
+                  (* cong m (c*h+g*d) 0 *)
+    (* Px = (a*f + c*h) + g*d.  reassoc to a*f + (c*h+g*d).  cong m Px (a*b+0)=a*b. *)
+    val rePx = proveIdentityG Px (add (mult a f) (add (mult c h)(mult g d)))
+    val c_Px_re = cong_of_oeq_r (mT, Px, add (mult a f)(add (mult c h)(mult g d))) rePx
+    val c_Pxsum = cong_add_g (mT, mult a f, mult a b, add (mult c h)(mult g d), ZeroC) c_af c_chgd0
+                  (* cong m (a*f+(c*h+g*d))(a*b+0) *)
+    val reAB0 = add0r_d (mult a b)   (* (a*b)+0 = a*b *)
+    val c_Px_ab = cong_trans_g (mT, Px, add (mult a f)(add (mult c h)(mult g d)), mult a b)
+                    c_Px_re (cong_trans_g (mT, add (mult a f)(add (mult c h)(mult g d)), add (mult a b) ZeroC, mult a b)
+                              c_Pxsum (cong_of_oeq_r (mT, add (mult a b) ZeroC, mult a b) reAB0))
+    val cQx_ab = cong_mult_r (mT, e, a, b, b) hca (cong_refl_g (mT, b))   (* cong m (e*b)(a*b) *)
+    val c_PxQx = cong_trans_g (mT, Px, mult a b, Qx) c_Px_ab (cong_sym_g (mT, Qx, mult a b) cQx_ab)
+    val () = out "DIVPN_CONG_X_OK\n";
+
+    (* cong m Py Qy : Py=f*d ; Qy=(a*g+e*c)+b*h.  Both ≡ b*d.
+       Py=f*d ≡ b*d [f≡b].
+       Qy mod m: a*g: g RIGHT -> a*g≡-a*c ; e*c≡a*c [e≡a] ; b*h≡b*d [h≡d].
+         a*g+e*c ≡ -a*c+a*c = 0.  Qy ≡ b*d. *)
+    val cPy_bd = cong_mult_r (mT, f, b, d, d) hcb (cong_refl_g (mT, d))   (* cong m (f*d)(b*d) *)
+    (* a*g + e*c ≡ 0 : a*g+a*c = a*(g+c)≡0, and e*c≡a*c [e≡a] *)
+    val c_ec = cong_mult_r (mT, e, a, c, c) hca (cong_refl_g (mT, c))     (* cong m (e*c)(a*c) *)
+    val c_agec1 = cong_add_g (mT, mult a g, mult a g, mult e c, mult a c) (cong_refl_g (mT, mult a g)) c_ec
+                  (* cong m (a*g+e*c)(a*g+a*c) *)
+    val reAG = proveIdentityG (add (mult a g)(mult a c)) (mult a (add g c))  (* a*g+a*c = a*(g+c) *)
+    val c_agc = cong_kmult (mT, a, add g c, ZeroC) hccR
+    val a0 = mult0r_d a
+    val c_agc0 = cong_trans_g (mT, mult a (add g c), mult a ZeroC, ZeroC) c_agc (cong_of_oeq_r (mT, mult a ZeroC, ZeroC) a0)
+    val c_agac0 = cong_trans_g (mT, add (mult a g)(mult a c), mult a (add g c), ZeroC) (cong_of_oeq_r (mT, add (mult a g)(mult a c), mult a (add g c)) reAG) c_agc0
+    val c_agec0 = cong_trans_g (mT, add (mult a g)(mult e c), add (mult a g)(mult a c), ZeroC) c_agec1 c_agac0
+                  (* cong m (a*g+e*c) 0 *)
+    val c_bh = cong_kmult (mT, b, h, d) hcd            (* cong m (b*h)(b*d) *)
+    (* Qy = (a*g + e*c) + b*h.  cong m Qy (0 + b*d).  *)
+    val c_Qysum = cong_add_g (mT, add (mult a g)(mult e c), ZeroC, mult b h, mult b d) c_agec0 c_bh
+                  (* cong m Qy (0 + b*d) *)
+    val re0BD = add0_d (mult b d)   (* 0 + b*d = b*d *)
+    val c_Qy_bd = cong_trans_g (mT, Qy, add ZeroC (mult b d), mult b d) c_Qysum (cong_of_oeq_r (mT, add ZeroC (mult b d), mult b d) re0BD)
+    val c_PyQy = cong_trans_g (mT, Py, mult b d, Qy) cPy_bd (cong_sym_g (mT, Qy, mult b d) c_Qy_bd)
+    val () = out "DIVPN_CONG_Y_OK\n";
+
+    (* cong m Pz Qz : Pz=a*h ; Qz=(e*d+b*g)+f*c.  Both ≡ a*d.
+       Pz=a*h ≡ a*d [h≡d].
+       Qz mod m: e*d≡a*d [e≡a] ; b*g: g RIGHT -> b*g≡-b*c ; f*c≡b*c [f≡b].
+         b*g+f*c ≡ -b*c+b*c = 0.  Qz ≡ a*d. *)
+    val cPz_ad = cong_kmult (mT, a, h, d) hcd            (* cong m (a*h)(a*d) *)
+    val c_ed = cong_mult_r (mT, e, a, d, d) hca (cong_refl_g (mT, d))     (* cong m (e*d)(a*d) *)
+    (* b*g + f*c ≡ 0 : b*g+b*c = b*(g+c)≡0, and f*c≡b*c [f≡b] *)
+    val c_fc = cong_mult_r (mT, f, b, c, c) hcb (cong_refl_g (mT, c))    (* cong m (f*c)(b*c) *)
+    val c_bgfc1 = cong_add_g (mT, mult b g, mult b g, mult f c, mult b c) (cong_refl_g (mT, mult b g)) c_fc
+                  (* cong m (b*g+f*c)(b*g+b*c) *)
+    val reBG = proveIdentityG (add (mult b g)(mult b c)) (mult b (add g c))  (* b*g+b*c = b*(g+c) *)
+    val c_bgc = cong_kmult (mT, b, add g c, ZeroC) hccR
+    val b0 = mult0r_d b
+    val c_bgc0 = cong_trans_g (mT, mult b (add g c), mult b ZeroC, ZeroC) c_bgc (cong_of_oeq_r (mT, mult b ZeroC, ZeroC) b0)
+    val c_bgbc0 = cong_trans_g (mT, add (mult b g)(mult b c), mult b (add g c), ZeroC) (cong_of_oeq_r (mT, add (mult b g)(mult b c), mult b (add g c)) reBG) c_bgc0
+    val c_bgfc0 = cong_trans_g (mT, add (mult b g)(mult f c), add (mult b g)(mult b c), ZeroC) c_bgfc1 c_bgbc0
+                  (* cong m (b*g+f*c) 0 *)
+    (* Qz = (e*d + b*g) + f*c.  reassoc to e*d + (b*g+f*c).  cong m Qz (a*d+0)=a*d. *)
+    val reQz = proveIdentityG Qz (add (mult e d) (add (mult b g)(mult f c)))
+    val c_Qz_re = cong_of_oeq_r (mT, Qz, add (mult e d)(add (mult b g)(mult f c))) reQz
+    val c_Qzsum = cong_add_g (mT, mult e d, mult a d, add (mult b g)(mult f c), ZeroC) c_ed c_bgfc0
+                  (* cong m (e*d+(b*g+f*c))(a*d+0) *)
+    val reAD0 = add0r_d (mult a d)   (* (a*d)+0 = a*d *)
+    val c_Qz_ad = cong_trans_g (mT, Qz, add (mult e d)(add (mult b g)(mult f c)), mult a d)
+                    c_Qz_re (cong_trans_g (mT, add (mult e d)(add (mult b g)(mult f c)), add (mult a d) ZeroC, mult a d)
+                              c_Qzsum (cong_of_oeq_r (mT, add (mult a d) ZeroC, mult a d) reAD0))
+    val c_PzQz = cong_trans_g (mT, Pz, mult a d, Qz) cPz_ad (cong_sym_g (mT, Qz, mult a d) c_Qz_ad)
+    val () = out "DIVPN_CONG_Z_OK\n";
+
+    (* ============ THE DIVIDE (4-pair symmetric) ============ *)
+    val goalC = four_sq (mult pT rT)
+    val exW = sq_diff_dvd (mT, wP, wQ) c_wPwQ
+    val exX = sq_diff_dvd (mT, Px, Qx) c_PxQx
+    val exY = sq_diff_dvd (mT, Py, Qy) c_PyQy
+    val exZ = sq_diff_dvd (mT, Pz, Qz) c_PzQz
+    fun elimSD (P,Q) ex nm k =
+      let val Pp = sqDiffDvdPred (mT,P,Q)
+          fun bd s (hbody:thm) =
+            let val hEq = conjunct1_r (oeq (add (sq s)(dbl (mult P Q))) (add (sq P)(sq Q)), cong mT s ZeroC) hbody
+                val hDv = conjunct2_r (oeq (add (sq s)(dbl (mult P Q))) (add (sq P)(sq Q)), cong mT s ZeroC) hbody
+            in k s hEq hDv end
+      in exE_r (Pp, goalC) ex nm natT bd end
+
+    val res =
+      elimSD (wP,wQ) exW "sw_d" (fn sw => fn hwEq => fn hwDv =>
+       elimSD (Px,Qx) exX "sx_d" (fn sx => fn hxEq => fn hxDv =>
+        elimSD (Py,Qy) exY "sy_d" (fn sy => fn hyEq => fn hyDv =>
+         elimSD (Pz,Qz) exZ "sz_d" (fn sz => fn hzEq => fn hzDv =>
+          let
+            (* L_i = s_i^2 + 2 P_i Q_i ; R_i = P_i^2 + Q_i^2 *)
+            val Lw = add (sq sw) (add (mult wP wQ)(mult wP wQ))   val Rw = add (sq wP)(sq wQ)
+            val Lx = add (sq sx) (add (mult Px Qx)(mult Px Qx))   val Rx = add (sq Px)(sq Qx)
+            val Ly = add (sq sy) (add (mult Py Qy)(mult Py Qy))   val Ry = add (sq Py)(sq Qy)
+            val Lz = add (sq sz) (add (mult Pz Qz)(mult Pz Qz))   val Rz = add (sq Pz)(sq Qz)
+            val sumL = add Lw (add Lx (add Ly Lz))
+            val cong_yz  = add_cong_l_g (Ly, Ry, Lz) hyEq
+            val cong_yz2 = oeqTrans_g (cong_yz, add_cong_r_g (Ry, Lz, Rz) hzEq)            (* (Ly+Lz)=(Ry+Rz) *)
+            val cong_x   = add_cong_l_g (Lx, Rx, add Ly Lz) hxEq
+            val cong_xyz = oeqTrans_g (cong_x, add_cong_r_g (Rx, add Ly Lz, add Ry Rz) cong_yz2) (* (Lx+(Ly+Lz))=(Rx+(Ry+Rz)) *)
+            val cong_w   = add_cong_l_g (Lw, Rw, add Lx (add Ly Lz)) hwEq
+            val hsumLR = oeqTrans_g (cong_w, add_cong_r_g (Rw, add Lx (add Ly Lz), add Rx (add Ry Rz)) cong_xyz)
+                         (* sumL = Rw + (Rx + (Ry + Rz)) *)
+            val SS = add (add (sq sw)(sq sx)) (add (sq sy)(sq sz))
+            val target = add SS Dcross
+            val rearr = proveAddIdentity noLeaf sumL target
+            val sumRshape = add Rw (add Rx (add Ry Rz))
+            val ppRel = proveAddIdentity noLeaf sumRshape PPsum    (* (Rw+(Rx+(Ry+Rz))) = PPsum *)
+            val tEqSumR = oeqTrans_g (oeqSym_g rearr, hsumLR)       (* target = sumRshape *)
+            val tEqPP   = oeqTrans_g (tEqSumR, ppRel)               (* target = PPsum *)
+            val starEqTarget = oeqTrans_g (star_i, oeqSym_g tEqPP)  (* (mn+Dcross) = (SS+Dcross) *)
+            val commL = addcomm_g (mn, Dcross)      (* mn+Dcross = Dcross+mn *)
+            val commR = addcomm_g (SS, Dcross)      (* SS+Dcross = Dcross+SS *)
+            val flip  = oeqTrans_g (oeqTrans_g (oeqSym_g commL, starEqTarget), commR)  (* Dcross+mn = Dcross+SS *)
+            val mnEqSS = alc_g (Dcross, mn, SS) flip   (* mn = SS *)
+            val () = out "DIVPN_ASSEMBLE_OK\n"
+
+            (* mn = (m*p)*(m*r) = m^2*(p*r) *)
+            val Mabcd_mp = oeqSym_r2 hbodyP
+            val Mefgh_mr = hsum
+            val mn_eq1 = mult_cong_l_g (Mabcd, mp, Mefgh) Mabcd_mp
+            val mn_eq2 = mult_cong_r_g (mp, Mefgh, mr) Mefgh_mr
+            val mn_mpmr = oeqTrans_g (mn_eq1, mn_eq2)
+            val mpmr_id = proveIdentityG (mult mp mr) (mult (mult mT mT) (mult pT rT))
+            val mn_msq = oeqTrans_g (mn_mpmr, mpmr_id)       (* mn = m^2*(p*r) *)
+
+            (* dvd m sw,sx,sy,sz *)
+            val dvW = dvd_of_cong_zero (mT, sw) hwDv
+            val dvX = dvd_of_cong_zero (mT, sx) hxDv
+            val dvY = dvd_of_cong_zero (mT, sy) hyDv
+            val dvZ = dvd_of_cong_zero (mT, sz) hzDv
+            val () = out "DIVPN_DVD_OK\n";
+
+            (* extract quotients and build divided sum, mirroring PPPP/PPPN *)
+            fun withQuot (xT, dvx) nm k2 =
+              let val Pq = Abs("q", natT, oeq xT (mult mT (Bound 0)))
+                  fun bd q (hq:thm) = k2 q hq
+              in exE_r (Pq, goalC) dvx nm natT bd end
+            val res2 =
+              withQuot (sw, dvW) "w0q" (fn w0 => fn hw0 =>
+              withQuot (sx, dvX) "sx0q" (fn sx0 => fn hsx0 =>
+              withQuot (sy, dvY) "sy0q" (fn sy0 => fn hsy0 =>
+              withQuot (sz, dvZ) "sz0q" (fn sz0 => fn hsz0 =>
+                let
+                  fun sqQuot (xT, x0, hx0) =
+                    let val c1 = mult_cong_l_g (xT, mult mT x0, xT) hx0
+                        val c2 = mult_cong_r_g (mult mT x0, xT, mult mT x0) hx0
+                        val xx = oeqTrans_g (c1, c2)
+                        val idP = proveIdentityG (mult (mult mT x0)(mult mT x0)) (mult (mult mT mT)(mult x0 x0))
+                    in oeqTrans_g (xx, idP) end
+                  val w2e  = sqQuot (sw, w0, hw0)     (* sw^2 = m^2*w0^2 *)
+                  val sx2e = sqQuot (sx, sx0, hsx0)
+                  val sy2e = sqQuot (sy, sy0, hsy0)
+                  val sz2e = sqQuot (sz, sz0, hsz0)
+                  val msq = mult mT mT
+                  val sWX = add_cong_l_g (sq sw, mult msq (sq w0), sq sx) w2e
+                  val sWX2 = oeqTrans_g (sWX, add_cong_r_g (mult msq (sq w0), sq sx, mult msq (sq sx0)) sx2e)
+                  val sYZ = add_cong_l_g (sq sy, mult msq (sq sy0), sq sz) sy2e
+                  val sYZ2 = oeqTrans_g (sYZ, add_cong_r_g (mult msq (sq sy0), sq sz, mult msq (sq sz0)) sz2e)
+                  val sAll = oeqTrans_g (add_cong_l_g (add (sq sw)(sq sx), add (mult msq (sq w0))(mult msq (sq sx0)), add (sq sy)(sq sz)) sWX2,
+                                         add_cong_r_g (add (mult msq (sq w0))(mult msq (sq sx0)), add (sq sy)(sq sz), add (mult msq (sq sy0))(mult msq (sq sz0))) sYZ2)
+                  val divSum = add (add (sq w0)(sq sx0)) (add (sq sy0)(sq sz0))
+                  val distShape = add (add (mult msq (sq w0))(mult msq (sq sx0))) (add (mult msq (sq sy0))(mult msq (sq sz0)))
+                  val factId = proveIdentityG distShape (mult msq divSum)
+                  val e1 = oeqTrans_r2 (oeqSym_r2 mn_msq, mnEqSS)    (* m^2*(p*r) = SS *)
+                  val e2 = oeqTrans_r2 (e1, sAll)                    (* m^2*(p*r) = distShape *)
+                  val e3 = oeqTrans_r2 (e2, factId)                  (* m^2*(p*r) = m^2*divSum *)
+                  val ltm0mm = mult_lt_mono_l mT hmPos (ZeroC, mT) hmPos
+                  val msqPos = oeq_rw_r (Term.lambda (Free("zmp",natT)) (lt (Free("zmp",natT)) (mult mT mT)),
+                                         mult mT ZeroC, ZeroC) (mult0r_d mT) ltm0mm
+                  val pr_eq = mult_left_cancel_r msq msqPos (mult pT rT, divSum) e3   (* p*r = divSum *)
+                  val fsBody = oeqTrans_r2 (pr_eq, oeqRefl_r2 divSum)
+                in four_sq_witness (mult pT rT, w0, sx0, sy0, sz0) fsBody end)))
+              )
+          in res2 end))))
+  in res end;
+val () = out "DIVPN_LEAF_DEFINED\n";
+
+(* smoke: run on Frees with assumed hyps (a,b,d LEFT, c RIGHT) *)
+val () =
+  let
+    val mF=Free("m_n",natT); val pF=Free("p_n",natT); val rF=Free("r_n",natT);
+    val aF=Free("a_n",natT); val bF=Free("b_n",natT); val cF=Free("c_n",natT); val dF=Free("d_n",natT);
+    val eF=Free("e_n",natT); val fF=Free("f_n",natT); val gF=Free("g_n",natT); val hF=Free("h_n",natT);
+    val hbodyP = Thm.assume (ctermGR (jT (oeq (mult mF pF) (add (add (sq aF)(sq bF))(add (sq cF)(sq dF))))));
+    val hsum   = Thm.assume (ctermGR (jT (oeq (add (add (sq eF)(sq fF))(add (sq gF)(sq hF))) (mult mF rF))));
+    val hca = Thm.assume (ctermGR (jT (cong mF eF aF)));
+    val hcb = Thm.assume (ctermGR (jT (cong mF fF bF)));
+    val hccR = Thm.assume (ctermGR (jT (cong mF (add gF cF) ZeroC)));
+    val hcd = Thm.assume (ctermGR (jT (cong mF hF dF)));
+    val hmPos = Thm.assume (ctermGR (jT (lt ZeroC mF)));
+    val r = divide_leaf_ppnp (mF,pF,rF, aF,bF,cF,dF, eF,fF,gF,hF) hbodyP hsum hca hcb hccR hcd hmPos
+  in out ("DIVPN_SMOKE hyps="^Int.toString(length(Thm.hyps_of r))
+          ^" prop="^Syntax.string_of_term ctxtGR (Thm.prop_of r)^"\n") end
+  handle e => out ("DIVPN_SMOKE FAIL "^exnMessage e^"\n");
+
+val () = out "DIVPN_ALL_DONE\n";
