@@ -243,9 +243,11 @@ How it works:
   Windows remain unimplemented.
 
 (The Isabelle number-theory tower is complete — Lagrange's four-square theorem,
-the last open partial, is proved; see `docs/four-square-progress-*.md`. Follow-up:
-promote the four-square FULL driver to a fenced `#[ignore]` test like the rest of
-the tower — its proof artifacts currently live in gitignored resume scratch.)
+the last open partial, is proved; see `docs/four-square-progress-*.md`. It is
+fenced + reproducible: `tools/build-l4-checkpoint.sh` builds the base checkpoint,
+then `cargo test -p polyml-bin --test isabelle_four_square four_square_full_theorem
+-- --ignored` re-proves it; proof artifacts + a README live in
+`crates/polyml-bin/tests/isabelle_support/four_square_resume/`.)
 
 ## Persistent checkpoints
 
