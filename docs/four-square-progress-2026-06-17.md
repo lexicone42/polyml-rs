@@ -1,11 +1,148 @@
-# Lagrange's four-square theorem — progress (2026-06-17, updated 2026-06-18, 2026-06-20, 2026-06-22, 2026-06-22b)
+# Lagrange's four-square theorem — progress (2026-06-17 … 2026-06-23d: PROVED)
 
 Staged ultracode campaign (wf_abb7c4f3-0ba, then wf_d352530c-63b, then
 wf_236bdf0c-5cd, then the 2026-06-22 DESCENT-step analysis, then the 2026-06-22b
 DIVIDE-leaf session) toward `⊢ ∀n. ∃a b c d. n = a²+b²+c²+d²` on the
-Isabelle/Pure interpreter. The full theorem is **NOT yet proved**; the graceful
-floor banked genuine 0-hyp results, with the remaining descent step cleanly
-scoped below.
+Isabelle/Pure interpreter.
+
+## 2026-06-23d — **LAGRANGE'S FOUR-SQUARE THEOREM IS PROVED** (chunk #1 = the back half)
+
+`⊢ ∀n. ∃a b c d. n = a²+b²+c²+d²` (`!!n. four_sq n`) — every natural is a sum of
+four squares — a **0-hyp** theorem by genuine LCF kernel inference on the
+self-bootstrapped Rust PolyML interpreter. Result Tagged(0), 98.3B bytecode
+steps, **0 add_axiom_global** (pure derivation over the conservative base; only
+classical assumption = the base's `ex_middle`). Verified: `lagrange_four_square
+hyps=0`, aconv `!!n. four_sq n` (MEGA_VALIDATE aconv=true zero_hyp=true).
+
+**INDEPENDENTLY RE-VERIFIED BY HAND** (the full driver re-run on a fresh
+invocation): all 9 leaves `hyps=0`, `DSTEP_VALIDATE aconv=true zero_hyp=true` (+ 3
+descent-step probes), `MEGA_VALIDATE aconv=true zero_hyp=true`,
+`MEGA_LAGRANGE_FOUR_SQUARE_PROVED`, `Result: Tagged(0)`; the printed prop is
+`!!n. ∃a b c d. n = a²+b²+c²+d²` (`lfs_aconv = true`, `lfs_0hyp = true`); the lone
+`add_axiom_global` in the driver is a comment (0 axiom-injecting calls). Genuine.
+
+THE BACK HALF (this session) = the **strict Euler descent step** assembled from
+the 9 banked divide leaves:
+- **descent_step** `!!p m. prime2 p ⟹ 1<m ⟹ m<p ⟹ four_sq(m·p) ⟹ ∃r. 0<r ∧ r<m
+  ∧ four_sq(r·p)` — 0-hyp, aconv intended, 3 soundness probes (DSTEP_ALL_OK).
+  Built by the **16→{8 a-LEFT + NNNN} disjE divide tree**: `sym_residue_signed`
+  gives each coord `cong m a' a` (LEFT) OR `cong m (a'+a) 0` (RIGHT); disjE on the
+  4 flags = 16 branches; 15 route to the 8 a-LEFT leaves by a **coordinate
+  permutation** bringing a LEFT coord to position 1 (identity for a-LEFT branches,
+  swaps for a-RIGHT), the RRRR branch routes to a **9th NNNN leaf**; each leaf
+  yields `four_sq(p·r)`, `fsq_commute` → `four_sq(r·p)`. Re-runs descent_residue's
+  SETUP internals so the per-coord sign-disjuncts/bounds are in scope; r<m strict
+  via r0_excl + r_le_m + rm_excl.
+- **iterate_discharge** (chunk #3, prior) ∘ descent_step → `!!n. four_sq n`, then
+  `forall_elim` → the headline. (`implies_elim iterate_discharge descent_step`.)
+
+THE TWO ENGINEERING UNLOCKS that made the back half land on a **31 GB** machine
+(prior sessions hit the wall here):
+1. **`Proofterm.proofs := 0`** before proving the leaves. The divide-by-m² builds
+   a huge proof TERM (the ~28 GB peak); dropping the audit trail (kernel STILL
+   checks every inference — soundness unaffected, the leaf thms are genuinely 0-hyp)
+   keeps RSS at the ~20 GB warm-checkpoint baseline. The 4-pair leaves death-spiral
+   at 2.5 GB heap WITH proofs but fit easily WITHOUT.
+2. **Single-process, NO intermediate checkpoint exports.** Banking each leaf into a
+   growing checkpoint OOMs — `PolyML.export` of a 4 GB+ image at post-divide RSS
+   exceeds 31 GB (tested 8/5/4/2.5 GB heaps, all OOM on export-after-divide; even
+   the LIGHT pppp leaf only just fit at 2.5 GB). The fix: prove all 9 leaves +
+   the descent_step assembly + the closure in ONE process (fullGC between leaves
+   reclaims each divide's transient back to the ~20 GB baseline at proofs=0).
+3. **The NNNN (all-RIGHT) leaf** needed `wP=0` DROPPED from its star/Dcross/PPsum
+   (proveIdentityG does NOT reduce `mult Zero x` — it leaves a `mult x Zero` term
+   that won't cancel → IDENTITY MISMATCH). w is handled as a single divisible value
+   `wQ` (cong m wQ 0 → dvd, sw:=wQ); the star drops the zero w-component.
+
+ARTIFACTS (banked to `four_square_resume/`): `descent_step_assembly_delta.sml`
+(the 16→9 disjE routing + the divide), `divide_leaf_nnnn_delta.sml` (the 9th leaf,
+wP-dropped), `lagrange_four_square_FULL_driver.sml` (the full one-process driver:
+9 leaves + descent_step + iterate_discharge + closure; run on /tmp/l4_foursq_star
+at POLYML_HEAP_BYTES=2500000000 with Proofterm.proofs:=0). The 8 a-LEFT divide
+leaves were already banked (`divide_leaf_{pppp..pnnn}_delta.sml`).
+
+(History below is kept; its "NOT yet proved" framing is superseded by this section.)
+
+## 2026-06-23c UPDATE (strict r<m) — chunk #2 PROVEN: the r=m exclusion
+
+The back-half chunk **#2 (strict r<m, the r=m exclusion) is DONE**, banked
+`strict_rltm_FINAL_delta.sml`, verified end-to-end on `/tmp/l4_foursq_star`
+(markers `STRICT_DESCENT_STRICT_OK` + `STRICT_ALL_DONE`, `Tagged(0)`, peak ~29.8 GB
+RSS — run ONE-AT-A-TIME). 0-hyp, aconv the intended, 3 soundness probes, **0
+`add_axiom_global`** (pure derivation; only `proveIdentityG`/`proveAddIdentity`
+polynomial-identity helpers, NOT axioms):
+
+    descent_strict :
+      prime2 p ==> 1<m ==> m<p ==> four_sq (m*p)
+         ==> EX r. (0<r) AND (r<m) AND four_sq (mult m r)
+
+= the banked `descent_residue` (0<r ∧ r≤m) with the bound UPGRADED to the STRICT
+`r<m`. (Subject stays `four_sq(m*r)` — the DIVIDE `m*r -> r*p` is the separate
+chunk #1; this chunk only strengthens the bound.)
+
+THE r=m EXCLUSION (`rm_excl`, the new piece), proved FULLY ADDITIVELY over ℕ (NO
+truncated subtraction, NO `m/2` literal, only ONE `proveIdentityG` = the tightness
+quad — every other step is cheap distrib/comm/assoc + cong-algebra):
+- **tightAll**: r=m + `sum=m*r` + bounds `2x'_i<=m` ⟹ `2x'_i = m` for all i (the
+  AM-equality is TIGHT: `Σ(2x'_i)² = 4·Σx'² = 4m² = quad(m²)`, each `(2x'_i)²≤m²`
+  forces each `(2x'_i)²=m²`, then `sq_eq_imp_eq`). ONE `proveIdentityG` (the quad
+  `LHS4 = quad sumLHS`) + cheap addcomm reorders for the other 3 coordinates;
+  base `le_radd_cancel` has an orientation bug on complex `z`, so `le_radd_cancel2`
+  (via `le_witness`) is used instead.
+- **factR**: `2x'_i=m` + signD ⟹ `cong m (a_i+x'_i) 0` (FACT R; both sign branches
+  collapse because `2x'_i=m` makes `a_i ≡ -x'_i ≡ x'_i (mod m)`).
+- **coord_cong_msq**: FACT R (`a_i+x'_i = m·v_i`) + tightness ⟹
+  `cong (m·m) (a_i²) (x'_i²)`, via the ℕ-identity `a² + m²·v = m²·v² + x'²` (Ni'),
+  built from distrib + `proveAddIdentity` on OPAQUE atoms — NO `proveIdentityG`.
+  KEY: the cross term `2 a x'` becomes `m²·v − 2x'²` (divisible by m²), which is
+  exactly why the `m | (Σa_i)` snag of the naive square route is sidestepped.
+- **assemble**: sum the four `cong(m²)(a_i²)(x'_i²)` ⟹ `cong(m²)(m·p)(m·m)` ⟹
+  `cong(m²)(m·p) 0` ⟹ `dvd m² (m·p)` ⟹ `dvd_msq_cancel` ⟹ `dvd m p` ⟹
+  `m_dvd_p_contra` (1<m<p prime) ⟹ oFalse. **r=m NEVER occurs for prime p.**
+
+`descent_strict` re-runs `descent_residue`'s SETUP internals (`elim_four_sq` +
+`signed_four_residue_sum` + `elim_signed_sum`) so the per-coordinate sign-disjuncts
++ bounds are in scope, then upgrades `r≤m` to `r<m` by `le_eq_or_lt_d` (r≤m ⟹ r=m ∨
+r<m) with the r=m disjunct closed by `rm_excl`.
+
+**REMAINING to close the full theorem: ONLY chunk #1 — the 16→8 disjE assembly
+tree** (route each signed-flag combination to its proven divide leaf, producing
+`four_sq(r·p)` for the chunk-#2-strictened r). With #1 done, `descent_strict` (#2)
+gives `four_sq(m·r)` with `r<m`, the divide gives `four_sq(r·p)` — together =
+`descent_step`, which `iterate_discharge` (#3, below) turns into `∀n. four_sq n`.
+
+## 2026-06-23b UPDATE (iterate+discharge) — the descent-step REDUCTION PROVEN
+
+The mechanical back-half chunk #3 (iterate + discharge) is **DONE**, as a clean
+0-hyp CONDITIONAL theorem on the warm `/tmp/l4_foursq_star` checkpoint
+(`iterate_discharge_delta.sml`, marker `L4_ITER_ALL_OK`, `Tagged(0)`,
+~281M steps, LOW RAM — no divide leaf re-run):
+
+    iterate_discharge :
+      (  !!p m. prime2 p ==> 1<m ==> m<p ==> four_sq(m*p)
+                 ==> Ex r. 0<r /\ r<m /\ four_sq(r*p)  )   [= descent_step]
+      ==> !!n. four_sq n
+
+So **assuming the strict Euler descent step, EVERY natural is a sum of four
+squares** — the whole theorem now reduces to the single descent step.
+`conditional_on` = the descent step (the only open premise; iterate_discharge is
+0-hyp, verified `Thm.hyps_of = 0`, aconv the intended, 4 soundness probes pass:
+not-unconditional, antecedent IS the descent step, needs the `four_sq(m*p)`
+premise, needs STRICT `r<m`). 0 `add_axiom_global` (pure derivation over the
+banked `primemult_thm` + `strong_induct` + `lagrange_assembly` + parity).
+
+Proof = strong induction on m of `Pdesc m := Imp(0<m)(Imp(m<p)(Imp(four_sq(m*p))(four_sq p)))`,
+descending `m*p -> r*p` (r<m) via the assumed descent_step to m=1 (`mult 1 p = p`),
+seeded by a parity split (even prime -> p=2 -> `four_sq 2`; odd prime ->
+`primemult_thm` gives `0<m'<p` with `four_sq(m'*p)` -> Pdesc m'), then discharge
+`lagrange_assembly`.  Base-merge note: `primemult_thm` lives on thyB (EXTENDS the
+thyGR where the rest live), so the odd-case primemult instantiation runs on
+ctxtB/ctermB; ctxtGR-built hyps compose up to thyB automatically.
+
+**REMAINING to close the full theorem: ONLY the descent step itself** (chunks #1
+disjE-assembly tree + #2 strict r<m — the divide leaves are all PROVEN).  Once a
+fleet proves `descent_step` 0-hyp, `Thm.implies_elim iterate_discharge descent_step`
+yields the unconditional `!!n. four_sq n`.
 
 ## 2026-06-23 UPDATE (divide-leaf fleet) — ALL 8 sign-leaves PROVEN + VERIFIED
 

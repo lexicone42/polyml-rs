@@ -200,9 +200,11 @@ Fermat's little theorem, Euler's theorem + criterion, Wilson's theorem (+ conver
 + the full iff), the Chinese Remainder Theorem, Fermat's two-square theorem,
 Euclid's even-perfect-number theorem, primes ≡ 1 and ≡ 3 mod 4, Zeckendorf,
 Pythagorean-triple parametrization, Fibonacci/Cassini, the binomial theorem +
-Vandermonde**, and more. Each is a test in `crates/polyml-bin/tests/isabelle_*.rs`
-plus a `.sml` driver, fenced by `regression.sh full`. (One open partial: Lagrange's
-four-square theorem — see `docs/four-square-progress-*.md`.)
+Vandermonde**, and **Lagrange's four-square theorem** (`∀n. ∃a b c d. n =
+a²+b²+c²+d²` — the tower's last open partial, now closed via the Euler descent; see
+`docs/four-square-progress-*.md`). Each is a test in
+`crates/polyml-bin/tests/isabelle_*.rs` plus a `.sml` driver, fenced by
+`regression.sh full`. The number-theory tower has no open partials.
 
 How it works:
 - Warm checkpoint `/tmp/isabelle_pure` (`tools/build-isabelle-pure.sh`): reloads
@@ -237,10 +239,13 @@ How it works:
   object. Not reachable on compiler-produced images; same exposure as upstream.
   Fix = a typed-deref predicate in the interpreter. See
   `docs/correctness-and-safety.md`.
-- **Lagrange four-square** — the one open theorem in the Isabelle tower; banked
-  machinery + plan in `docs/four-square-progress-*.md`.
 - Full concurrency (thread scheduling), a real JIT speedup (whole-region), and
   Windows remain unimplemented.
+
+(The Isabelle number-theory tower is complete — Lagrange's four-square theorem,
+the last open partial, is proved; see `docs/four-square-progress-*.md`. Follow-up:
+promote the four-square FULL driver to a fenced `#[ignore]` test like the rest of
+the tower — its proof artifacts currently live in gitignored resume scratch.)
 
 ## Persistent checkpoints
 

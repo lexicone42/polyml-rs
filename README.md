@@ -176,19 +176,17 @@ What is proved (each a fenced regression test under `crates/polyml-bin/tests/isa
 
 …and more (56 Isabelle proof tests in all).
 
-### One open theorem (stated honestly)
+### The tower is complete — including Lagrange's four-square theorem
 
-**Lagrange's four-square theorem** (`∀n. ∃a b c d. n = a²+b²+c²+d²`) is **NOT yet
-proved** — it is the only open partial in the tower, and it is genuinely
-research-grade. A lot is banked and the wall is now broken, not just mapped:
-Euler's four-square identity (multiplicativity), the multiplicative-closure
-reduction, the descent setup, and — the prior fleets' declared wall — the
-**Euler divide-by-m² is proven end-to-end for one of 8 sign-leaves**, with the
-clever-ℕ "signed conjugate star" path confirmed viable (no new abstraction
-needed). The remaining work (the other 7 sign-leaves + the descent iteration) is
-precisely scoped as ~2 focused proof runs. See
-[`docs/four-square-progress-2026-06-17.md`](docs/four-square-progress-2026-06-17.md)
-and `isabelle_four_square.rs`.
+The last open partial is closed: **Lagrange's four-square theorem**
+(`∀n. ∃a b c d. n = a²+b²+c²+d²` — every natural is a sum of four squares) is
+**proved**, a 0-hyp theorem by genuine LCF kernel inference. The classical Euler
+descent: the four-square identity (multiplicativity) + the 8 signed Euler
+divide-by-m² leaves assembled through a 16→9 disjE tree into the strict descent
+step, then strong induction down to every prime. So **every landmark theorem of
+elementary number theory listed above is machine-checked on the self-bootstrapped
+Rust runtime — no open partials.** Details:
+[`docs/four-square-progress-2026-06-17.md`](docs/four-square-progress-2026-06-17.md).
 
 ---
 
@@ -214,8 +212,6 @@ and `isabelle_four_square.rs`.
   REPL / a handler catches — a runaway loop is interruptible instead of hard-killed.
 - **JIT as a big speedup** — it's correct and a *modest* (~2%) win; whole-region
   native compilation (the real road to native speed) is future work.
-- **Lagrange's four-square theorem** — the one open partial in the Isabelle tower
-  (above).
 
 ---
 
@@ -268,8 +264,8 @@ The original staged plan is in [`PLAN.md`](PLAN.md). In short:
   run faithfully on 32-bit (its bytecode bakes in 64-bit word-size constants);
   this matches upstream's documented limitation. So cross-word-size carries data,
   not compiled code; a true 64↔32 execution story needs recompilation.
-- **Next:** the larger subsystems — concurrency/interrupts, Windows, maturing the
-  JIT into a genuine speedup — and closing Lagrange's four-square theorem.
+- **Next:** the larger subsystems — concurrency/interrupts, Windows, and maturing
+  the JIT into a genuine speedup. (The number-theory tower is complete.)
 
 ---
 
