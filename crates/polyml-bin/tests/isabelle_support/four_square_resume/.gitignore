@@ -1,5 +1,7 @@
-# Regenerable assembled base (cat base.sml + the 6 deltas, prefix-strip partC) — too large to track
-_assembled_base.sml
+# _assembled_base.sml IS tracked: tools/build-l4-checkpoint.sh exports the
+# /tmp/l4_foursq_star checkpoint from it (it's the live-context base = base.sml +
+# the part-A/B/C deltas). Keeping it verbatim avoids reconstruction risk.
+
 # Run logs
 *.log
 # Redundant alternate stage-AB partial (seat1 + seat3 deltas cover this)
