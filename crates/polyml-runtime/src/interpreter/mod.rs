@@ -394,6 +394,239 @@ pub struct JitEntry {
     pub sml_arity: usize,
 }
 
+/// The complete GC root-set of a *single* interpreter thread, captured
+/// for one collection cycle.
+///
+/// Today the interpreter is single-threaded, so the collector drives a
+/// registry of exactly ONE `ThreadRoots` (built from the live
+/// `Interpreter` via [`ThreadRoots::capture`]). The structure exists so
+/// that real multi-threading is a small diff: a 2nd thread becomes a
+/// 2nd `ThreadRoots` pushed onto the registry the collector iterates —
+/// the root-walk reads "for each thread-root-set in registry { ... }",
+/// not "the one `self`".
+///
+/// The capture is *self-contained*: it owns the forwardable
+/// `PolyWord` slots and the byte-offsets needed to rebuild the byte
+/// pointers, plus raw write-back pointers into the owning interpreter's
+/// fields. So forwarding ([`forward`](Self::forward)), the post-GC
+/// fixup ([`apply_fixups`](Self::apply_fixups)), and the below-`sp`
+/// scrub ([`scrub_below_sp`](Self::scrub_below_sp)) all operate purely
+/// off this struct — no `&mut Interpreter` borrow held across the
+/// collector, which is what lets a registry of many coexist later.
+///
+/// # Safety
+/// Every raw pointer here aliases live `Interpreter` state. A
+/// `ThreadRoots` is therefore only valid for the duration of the single
+/// `gc()` call that built it, and the owning interpreter must not be
+/// mutated through other paths while the capture is in use.
+struct ThreadRoots {
+    // ---- The live stack slice and its bounds (raw, for forward + scrub).
+    /// Base of the thread's stack storage.
+    stack_ptr: *mut PolyWord,
+    /// Stack-pointer: live slots are `[sp, stack_len)`; `[0, sp)` is the
+    /// free/garbage zone scrubbed after collection.
+    sp: usize,
+    /// Total stack length (one past the last slot).
+    stack_len: usize,
+
+    // ---- Forwardable PolyWord slots (mutated in place by `forward`).
+    /// `code_start`, stashed as a PolyWord pointer to the code object.
+    code_start_slot: PolyWord,
+    /// Body-start of each call frame's code segment.
+    frame_starts: Vec<PolyWord>,
+    /// Body-start of each handler frame's owning code segment.
+    handler_starts: Vec<PolyWord>,
+    /// The exception packet (TAGGED(0) when none).
+    exn_slot: PolyWord,
+    /// The cached `Thread.self()` object (TAGGED(0) when unallocated).
+    thread_obj_slot: PolyWord,
+
+    // ---- Byte-offsets captured pre-GC, used to rebuild byte pointers.
+    /// `pc - code_start`.
+    pc_off: isize,
+    /// `code_end - code_start`.
+    code_end_off: isize,
+    /// `frame.end - frame.start` for each frame.
+    frame_offsets: Vec<isize>,
+    /// `handler.end - handler.start` for each handler frame.
+    handler_offsets: Vec<isize>,
+
+    // ---- Write-back pointers into the owning interpreter's fields.
+    code_start_dst: *mut *const u8,
+    pc_dst: *mut *const u8,
+    code_end_dst: *mut *const u8,
+    frames_dst: *mut Vec<(*const u8, *const u8)>,
+    handlers_dst: *mut Vec<(usize, *const u8, *const u8)>,
+    exn_dst: *mut Option<PolyWord>,
+    thread_obj_dst: *mut Option<PolyWord>,
+    /// Whether `thread_object` was `Some` (only then do we write it back —
+    /// preserving the exact `if self.thread_object.is_some()` semantics).
+    thread_obj_present: bool,
+    /// Recent-call ring buffer to clear post-GC (not worth forwarding).
+    recent_call_targets_dst: *mut [usize; 16],
+}
+
+impl ThreadRoots {
+    /// Capture the root-set of one interpreter for the upcoming
+    /// collection. Mirrors exactly the per-thread roots the legacy
+    /// monolithic `gc()` enumerated for `self`.
+    ///
+    /// # Safety
+    /// The returned capture aliases `interp`'s fields by raw pointer; it
+    /// must be used only within the single `gc()` call and the
+    /// interpreter must not be otherwise mutated meanwhile.
+    fn capture(interp: &mut Interpreter) -> Self {
+        // Byte offsets we need to translate post-GC.
+        let pc_off = unsafe { interp.pc.offset_from(interp.code_start) };
+        let code_end_off = unsafe { interp.code_end.offset_from(interp.code_start) };
+        let frame_offsets: Vec<isize> = interp
+            .frames
+            .iter()
+            .map(|(s, e)| unsafe { e.offset_from(*s) })
+            .collect();
+        let frame_starts: Vec<PolyWord> = interp
+            .frames
+            .iter()
+            .map(|(s, _)| PolyWord::from_ptr(s.cast::<PolyWord>()))
+            .collect();
+        // Handler frames depth also saves code bounds that need
+        // forwarding so the handler can restore them on RAISE_EX.
+        let handler_offsets: Vec<isize> = interp
+            .handler_frames_depth
+            .iter()
+            .map(|(_, s, e)| unsafe { e.offset_from(*s) })
+            .collect();
+        let handler_starts: Vec<PolyWord> = interp
+            .handler_frames_depth
+            .iter()
+            .map(|(_, s, _)| PolyWord::from_ptr(s.cast::<PolyWord>()))
+            .collect();
+
+        Self {
+            stack_ptr: interp.stack.as_mut_ptr(),
+            sp: interp.sp,
+            stack_len: interp.stack.len(),
+            code_start_slot: PolyWord::from_ptr(interp.code_start.cast::<PolyWord>()),
+            frame_starts,
+            handler_starts,
+            exn_slot: interp.exception_packet.unwrap_or(PolyWord::ZERO),
+            thread_obj_slot: interp.thread_object.unwrap_or(PolyWord::ZERO),
+            pc_off,
+            code_end_off,
+            frame_offsets,
+            handler_offsets,
+            code_start_dst: std::ptr::addr_of_mut!(interp.code_start),
+            pc_dst: std::ptr::addr_of_mut!(interp.pc),
+            code_end_dst: std::ptr::addr_of_mut!(interp.code_end),
+            frames_dst: std::ptr::addr_of_mut!(interp.frames),
+            handlers_dst: std::ptr::addr_of_mut!(interp.handler_frames_depth),
+            exn_dst: std::ptr::addr_of_mut!(interp.exception_packet),
+            thread_obj_dst: std::ptr::addr_of_mut!(interp.thread_object),
+            thread_obj_present: interp.thread_object.is_some(),
+            recent_call_targets_dst: std::ptr::addr_of_mut!(interp.recent_call_targets),
+        }
+    }
+
+    /// Forward every root slot this thread owns via the collector.
+    /// (The SHARED roots — image mutable spaces, bootstrap-tail — are
+    /// forwarded once by the caller, NOT here, since they are not
+    /// per-thread.)
+    ///
+    /// # Safety
+    /// `self.stack_ptr` must be valid for `self.stack_len` slots and the
+    /// captured write-back pointers must still alias live interpreter
+    /// state.
+    unsafe fn forward(&mut self, c: &mut crate::gc::Collector<'_>) {
+        // 1. Stack slots from sp..end. (Below sp is "free".)
+        // Some of these are the handler save area which contains
+        // raw PC addresses — those are NOT PolyWords pointing to
+        // alloc objects, but the GC's is-in-from-space check
+        // filters non-pointers, so it's safe to visit them all.
+        for i in self.sp..self.stack_len {
+            let slot = unsafe { self.stack_ptr.add(i) };
+            // Stack slots may carry raw PC byte pointers whose
+            // LSB happens to be 1; we can't filter by tagged-bit
+            // alone, so use the byte-address variant.
+            unsafe { c.forward_stack_slot(slot) };
+        }
+        // 2. Exception packet (might be None / TAGGED(0)).
+        unsafe { c.forward(std::ptr::addr_of_mut!(self.exn_slot)) };
+        // 3. code_start (as a PolyWord pointer to the code object).
+        unsafe { c.forward(std::ptr::addr_of_mut!(self.code_start_slot)) };
+        for fs in self.frame_starts.iter_mut() {
+            unsafe { c.forward(fs as *mut _) };
+        }
+        for hs in self.handler_starts.iter_mut() {
+            unsafe { c.forward(hs as *mut _) };
+        }
+        // 4b. Cached Thread.self() object.
+        unsafe { c.forward(std::ptr::addr_of_mut!(self.thread_obj_slot)) };
+    }
+
+    /// Scrub the below-`sp` (free/garbage) region to a safe tagged
+    /// sentinel, closing the dangling-from-space-pointer window after
+    /// the collector freed from-space. (See the long comment at the
+    /// call site in `gc()` and `docs/gc-memory-soak-findings-2026-06-19.md`,
+    /// task #109.)
+    ///
+    /// # Safety
+    /// `self.stack_ptr` must be valid for at least `self.sp` slots.
+    unsafe fn scrub_below_sp(&mut self) {
+        for i in 0..self.sp {
+            unsafe { self.stack_ptr.add(i).write(PolyWord::tagged(0)) };
+        }
+    }
+
+    /// Write the forwarded slots back into the owning interpreter's
+    /// fields (code bounds, frames, handlers, exception packet, thread
+    /// object) and clear the recent-call ring buffer. Preserves the
+    /// exact semantics of the legacy inline fixup block.
+    ///
+    /// # Safety
+    /// The captured write-back pointers must still alias live
+    /// interpreter state (i.e. the interpreter has not been moved or
+    /// reallocated since `capture`).
+    unsafe fn apply_fixups(&self) {
+        // Exception packet.
+        unsafe {
+            *self.exn_dst = if self.exn_slot.0 == 0 || self.exn_slot.is_tagged() {
+                None
+            } else {
+                Some(self.exn_slot)
+            };
+        }
+        // Thread object: only write back if it was present (preserving
+        // the original `if self.thread_object.is_some()` guard).
+        if self.thread_obj_present {
+            unsafe { *self.thread_obj_dst = Some(self.thread_obj_slot) };
+        }
+        // Code bounds.
+        let new_code_start = self.code_start_slot.as_ptr::<PolyWord>().cast::<u8>();
+        unsafe {
+            *self.code_start_dst = new_code_start;
+            // SAFETY: offsets remain valid; new code object has the same length.
+            *self.pc_dst = new_code_start.offset(self.pc_off);
+            *self.code_end_dst = new_code_start.offset(self.code_end_off);
+        }
+        // Frames.
+        let frames = unsafe { &mut *self.frames_dst };
+        for (i, fs) in self.frame_starts.iter().enumerate() {
+            let new_start = fs.as_ptr::<PolyWord>().cast::<u8>();
+            frames[i].0 = new_start;
+            frames[i].1 = unsafe { new_start.offset(self.frame_offsets[i]) };
+        }
+        // Handler frames.
+        let handlers = unsafe { &mut *self.handlers_dst };
+        for (i, hs) in self.handler_starts.iter().enumerate() {
+            let new_start = hs.as_ptr::<PolyWord>().cast::<u8>();
+            handlers[i].1 = new_start;
+            handlers[i].2 = unsafe { new_start.offset(self.handler_offsets[i]) };
+        }
+        // Recent-call ring buffer: clear; not worth forwarding.
+        unsafe { (*self.recent_call_targets_dst).fill(0) };
+    }
+}
+
 impl Interpreter {
     /// Build an interpreter from an owned byte slice. PC starts at
     /// byte 0. The bytes are NOT a real PolyML code object — there's
@@ -649,6 +882,30 @@ impl Interpreter {
     /// configured image-mutable-root regions). Returns the new
     /// `used_words` count of the alloc space.
     pub fn gc(&mut self) -> Option<usize> {
+        // ---- Build the per-thread root-set REGISTRY.
+        //
+        // Today the interpreter is single-threaded, so the registry has
+        // exactly ONE entry — the root-set captured from `self`. The
+        // collector below drives this registry as an iterable ("for each
+        // thread-root-set in registry { forward / fixup }") so that a 2nd
+        // thread is a push to this Vec, not a rewrite of the root walk.
+        //
+        // `capture` returns a self-contained struct of raw pointers into
+        // `self`'s fields, so the `&mut self` borrow ends here; that is
+        // what lets the registry coexist with the `&mut alloc_space`
+        // borrow `collect` takes, and (eventually) many threads' captures.
+        // (`capture` and the shared-root reads below have no side effects,
+        // so doing them before the `?` early-return on a missing alloc
+        // space is behaviour-identical to the original "bail first".)
+        let mut registry: Vec<ThreadRoots> = vec![ThreadRoots::capture(self)];
+
+        // ---- SHARED roots (process-level, NOT per-thread): forwarded
+        //      once regardless of how many threads are in the registry.
+        // Bootstrap tail-call slot (PolyEndBootstrapMode arg).
+        let mut bootstrap_tail = crate::rts::peek_bootstrap_tail_call();
+        // Image mutable spaces (the global namespace + runtime refs).
+        let image_roots = self.image_mutable_roots.clone();
+
         let alloc = self.alloc_space.as_mut()?;
         // Capture from-space range so we can audit for residual
         // pointers after the swap. Anything in interpreter state
@@ -657,76 +914,19 @@ impl Interpreter {
         let from_range = alloc.as_ptr_range();
         let from_lo = from_range.start as usize;
         let from_hi = from_range.end as usize;
-        // Capture byte offsets we need to translate post-GC.
-        let pc_off = unsafe { self.pc.offset_from(self.code_start) };
-        let code_end_off = unsafe { self.code_end.offset_from(self.code_start) };
-        let frame_offsets: Vec<isize> = self
-            .frames
-            .iter()
-            .map(|(s, e)| unsafe { e.offset_from(*s) })
-            .collect();
-        // Stash code_start as a PolyWord pointer slot.
-        let mut code_start_slot = PolyWord::from_ptr(self.code_start.cast::<PolyWord>());
-        let mut frame_starts: Vec<PolyWord> = self
-            .frames
-            .iter()
-            .map(|(s, _)| PolyWord::from_ptr(s.cast::<PolyWord>()))
-            .collect();
-        // Handler frames depth also saves code bounds that need
-        // forwarding so the handler can restore them on RAISE_EX.
-        let handler_offsets: Vec<isize> = self
-            .handler_frames_depth
-            .iter()
-            .map(|(_, s, e)| unsafe { e.offset_from(*s) })
-            .collect();
-        let mut handler_starts: Vec<PolyWord> = self
-            .handler_frames_depth
-            .iter()
-            .map(|(_, s, _)| PolyWord::from_ptr(s.cast::<PolyWord>()))
-            .collect();
-        let mut exn_slot = self.exception_packet.unwrap_or(PolyWord::ZERO);
-        let mut bootstrap_tail = crate::rts::peek_bootstrap_tail_call();
-        // Cached Thread.self() object (if allocated) — a GC root: its body holds
-        // thread-local data (incl. the Isabelle generic context), and its
-        // identity must survive collection.
-        let mut thread_obj_slot = self.thread_object.unwrap_or(PolyWord::ZERO);
-
-        // Take ownership of the stack-slice we want the GC to forward
-        // by indexing into self.stack directly via raw pointer.
-        let stack_ptr = self.stack.as_mut_ptr();
-        let sp = self.sp;
-        let stack_len = self.stack.len();
-        let handler_sp = self.handler_sp;
-
-        let image_roots = self.image_mutable_roots.clone();
 
         let new_used = crate::gc::collect(alloc, |c| {
-            // 1. Stack slots from sp..end. (Below sp is "free".)
-            // Some of these are the handler save area which contains
-            // raw PC addresses — those are NOT PolyWords pointing to
-            // alloc objects, but the GC's is-in-from-space check
-            // filters non-pointers, so it's safe to visit them all.
-            for i in sp..stack_len {
-                let slot = unsafe { stack_ptr.add(i) };
-                // Stack slots may carry raw PC byte pointers whose
-                // LSB happens to be 1; we can't filter by tagged-bit
-                // alone, so use the byte-address variant.
-                unsafe { c.forward_stack_slot(slot) };
+            // ---- Per-thread roots: drive the registry as an iterable.
+            for roots in registry.iter_mut() {
+                // SAFETY: each capture aliases live interpreter state for
+                // the duration of this collect, and no other path mutates
+                // it meanwhile.
+                unsafe { roots.forward(c) };
             }
-            // 2. Exception packet (might be None / TAGGED(0)).
-            unsafe { c.forward(&mut exn_slot as *mut _) };
-            // 3. code_start (as a PolyWord pointer to the code object).
-            unsafe { c.forward(&mut code_start_slot as *mut _) };
-            for fs in frame_starts.iter_mut() {
-                unsafe { c.forward(fs as *mut _) };
-            }
-            for hs in handler_starts.iter_mut() {
-                unsafe { c.forward(hs as *mut _) };
-            }
+
+            // ---- Shared roots, forwarded ONCE.
             // 4. Bootstrap tail-call slot (PolyEndBootstrapMode arg).
             unsafe { c.forward(&mut bootstrap_tail as *mut _) };
-            // 4b. Cached Thread.self() object.
-            unsafe { c.forward(&mut thread_obj_slot as *mut _) };
             // 5. Image mutable spaces: walk object-by-object so we
             //    only forward body words (skipping length words),
             //    and dispatch by type (byte objects have no internal
@@ -794,11 +994,16 @@ impl Interpreter {
                     image_roots.iter().map(|(_, l)| l).sum::<usize>()
                 );
             }
-            // Suppress unused
-            let _ = handler_sp;
         });
 
-        // ---- Scrub the below-sp (free/garbage) region.
+        // ---- Per-thread post-GC fixup: drive the registry as an iterable.
+        //
+        // For each thread-root-set we (a) scrub its below-sp free region
+        // and (b) write its forwarded slots back into the owning
+        // interpreter. With one thread this is exactly the legacy inline
+        // block; a 2nd thread is just another iteration.
+        //
+        // ---- Scrub the below-sp (free/garbage) region (per thread).
         //
         // The collector forwards only the LIVE set [sp, len). Slots in
         // [0, sp) are the free/garbage zone (drop_n/RESET bump sp past
@@ -820,38 +1025,20 @@ impl Interpreter {
         // freed (replace_storage inside collect) and BEFORE any op or the
         // audit, closing the dangling-pointer window. See
         // docs/gc-memory-soak-findings-2026-06-19.md (task #109).
-        for i in 0..self.sp {
-            self.stack[i] = PolyWord::tagged(0);
+        for roots in registry.iter_mut() {
+            // SAFETY: captures still alias live interpreter state; the
+            // collect above has freed from-space, so scrub then fixup.
+            unsafe {
+                roots.scrub_below_sp();
+                roots.apply_fixups();
+            }
         }
+        drop(registry);
 
-        // Apply updates.
-        self.exception_packet = if exn_slot.0 == 0 || exn_slot.is_tagged() {
-            None
-        } else {
-            Some(exn_slot)
-        };
-        if self.thread_object.is_some() {
-            self.thread_object = Some(thread_obj_slot);
-        }
-        let new_code_start = code_start_slot.as_ptr::<PolyWord>().cast::<u8>();
-        self.code_start = new_code_start;
-        // SAFETY: offsets remain valid; new code object has the same length.
-        self.pc = unsafe { new_code_start.offset(pc_off) };
-        self.code_end = unsafe { new_code_start.offset(code_end_off) };
-        for (i, fs) in frame_starts.into_iter().enumerate() {
-            let new_start = fs.as_ptr::<PolyWord>().cast::<u8>();
-            self.frames[i].0 = new_start;
-            self.frames[i].1 = unsafe { new_start.offset(frame_offsets[i]) };
-        }
-        for (i, hs) in handler_starts.into_iter().enumerate() {
-            let new_start = hs.as_ptr::<PolyWord>().cast::<u8>();
-            self.handler_frames_depth[i].1 = new_start;
-            self.handler_frames_depth[i].2 = unsafe { new_start.offset(handler_offsets[i]) };
-        }
+        // Shared root write-back: bootstrap tail-call slot.
+        // (The per-thread recent-call ring buffer is cleared inside
+        // each root-set's `apply_fixups`.)
         crate::rts::set_bootstrap_tail_call(bootstrap_tail);
-
-        // Recent-call ring buffer: clear; not worth forwarding.
-        self.recent_call_targets.fill(0);
 
         // ---- Audit: any pointer still in old from-space is a missed root.
         // Opt-in via POLYML_GC_AUDIT=1 — full audit is O(used+stack)
