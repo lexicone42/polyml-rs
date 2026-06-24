@@ -850,10 +850,16 @@ pub unsafe extern "C" fn rts_trampoline(stub_word: i64, n_args: i64, args: *cons
 
     // Dispatch.
     let rts_ref = interp.rts_table_arc();
+    // Seed the per-thread bootstrap tail-call slot from the interpreter so
+    // a `PolyEndBootstrapMode` routed through JIT'd code records its pending
+    // tail call where the interpreter will read it (replaces the old
+    // process-global static the JIT path shared with the interpreter).
+    let seed_bootstrap_tail = interp.bootstrap_tail_call();
     let mut ctx = RtsContext {
         alloc_space: interp.jit_alloc_space_mut(),
         raised_exception: None,
         rts: Some(&rts_ref),
+        bootstrap_tail_call: seed_bootstrap_tail,
     };
     let result = match entry.func {
         RtsFn::Arity0(f) => f(&mut ctx),
@@ -870,6 +876,12 @@ pub unsafe extern "C" fn rts_trampoline(stub_word: i64, n_args: i64, args: *cons
             rts_args[4],
         ),
     };
+    // Write the (possibly updated) bootstrap tail-call slot back into the
+    // interpreter. Reading the slot is `ctx`'s last use, so its borrow of
+    // `interp` (via `jit_alloc_space_mut`) ends here and the write below is
+    // allowed.
+    let updated_bootstrap_tail = ctx.bootstrap_tail_call;
+    interp.set_bootstrap_tail_call(updated_bootstrap_tail);
     result.0 as i64
 }
 

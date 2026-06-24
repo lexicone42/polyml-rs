@@ -152,6 +152,19 @@ pub struct RtsContext<'a> {
     /// function like `PolyCreateEntryPointObject` can look up
     /// other RTS names to build runtime entry-point objects.
     pub rts: Option<&'a RtsTable>,
+    /// Per-thread bootstrap tail-call slot. This is PER-THREAD state
+    /// (the `PolyEndBootstrapMode` argument), NOT a process-global static
+    /// (it used to be one — see the per-thread hoist). The dispatch site
+    /// (`Interpreter::rts_call`) seeds it from the owning interpreter's
+    /// `bootstrap_tail_call` field before calling an RTS function and reads
+    /// it back into that field afterwards. `PolyEndBootstrapMode` writes the
+    /// `unit -> 'a` function closure here; when non-`ZERO` on RTS return the
+    /// interpreter tail-calls it. A second thread therefore cannot clobber
+    /// another thread's pending bootstrap tail call. Defaults to `ZERO`
+    /// (= "no pending tail call") at every construction site that is not the
+    /// real interpreter dispatch (tests / numeric helper contexts), matching
+    /// the old static's never-set behaviour on those paths.
+    pub bootstrap_tail_call: PolyWord,
 }
 
 // ---- RtsTable ---------------------------------------------------------
@@ -1267,31 +1280,6 @@ fn poly_export(
     PolyWord::tagged(0)
 }
 
-/// Slot read by the interpreter after every RTS return. When this
-/// holds a non-`ZERO` PolyWord, the interpreter treats the value as
-/// a `unit -> 'a` closure to tail-call (taking the place of whatever
-/// the RTS would have returned to).
-static BOOTSTRAP_TAIL_CALL: AtomicUsize = AtomicUsize::new(0);
-
-/// Used by [`crate::interpreter::Interpreter::take_tail_call`] to
-/// observe and clear the slot.
-#[must_use]
-pub fn take_bootstrap_tail_call() -> Option<PolyWord> {
-    let raw = BOOTSTRAP_TAIL_CALL.swap(0, Ordering::Relaxed);
-    if raw == 0 {
-        None
-    } else {
-        Some(PolyWord::from_bits(raw))
-    }
-}
-
-/// Read the bootstrap tail-call slot without clearing it. Used by
-/// the GC to forward the held PolyWord without consuming it.
-#[must_use]
-pub fn peek_bootstrap_tail_call() -> PolyWord {
-    PolyWord::from_bits(BOOTSTRAP_TAIL_CALL.load(Ordering::Relaxed))
-}
-
 /// Read `POLYML_GC_THRESHOLD` env var as a 1-99 percentage; returns
 /// `None` if unset / invalid. The interpreter's step loop triggers
 /// GC when alloc-space fullness >= this percentage.
@@ -1329,23 +1317,24 @@ pub fn gc_threshold_percent() -> Option<u8> {
     }
 }
 
-/// Overwrite the bootstrap tail-call slot. Used by the GC to write
-/// back the forwarded address after copying.
-pub fn set_bootstrap_tail_call(w: PolyWord) {
-    BOOTSTRAP_TAIL_CALL.store(w.0, Ordering::Relaxed);
-}
-
 /// `PolyEndBootstrapMode(threadId, function)` — record `function`
 /// to be invoked (with unit arg) as soon as we return from this RTS
 /// call. The SML caller passes `thirdStage : unit -> unit` and
 /// expects it to never return.
+///
+/// The pending closure is recorded in the PER-THREAD slot on the
+/// `RtsContext` (`bootstrap_tail_call`), which the dispatch site
+/// (`Interpreter::rts_call`) reads back into the owning interpreter's
+/// `bootstrap_tail_call` field after this call returns. It used to be a
+/// process-global static, which would let a second thread clobber another
+/// thread's pending tail call once real concurrency exists.
 #[allow(clippy::needless_pass_by_value)]
 fn poly_end_bootstrap_mode(
-    _ctx: &mut RtsContext<'_>,
+    ctx: &mut RtsContext<'_>,
     _tid: PolyWord,
     function: PolyWord,
 ) -> PolyWord {
-    BOOTSTRAP_TAIL_CALL.store(function.0, Ordering::Relaxed);
+    ctx.bootstrap_tail_call = function;
     PolyWord::tagged(0)
 }
 
@@ -1943,6 +1932,7 @@ fn arb_via_bigint(
         alloc_space: alloc,
         raised_exception: None,
         rts: None,
+        bootstrap_tail_call: PolyWord::ZERO,
     };
     bigint_to_poly_word(&mut ctx, &op(a, b))
 }
@@ -4013,6 +4003,7 @@ mod tests {
             alloc_space: None,
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         // SML's rtsCallFast1 means PolyIsBigEndian is invoked with a
         // dummy unit arg, even though the C function takes none.
@@ -4043,6 +4034,7 @@ mod tests {
             alloc_space: None,
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         }
     }
     fn t() -> PolyWord {
@@ -4316,6 +4308,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         // Build poly-string args for "" and "." in the same space.
         let empty_arg = alloc_poly_string(&mut ctx, b"");
@@ -4380,6 +4373,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         let big = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 70u32));
         let big1 = bigint_to_poly_word(&mut c, &((BigInt::from(1u8) << 70u32) + BigInt::from(1u8)));
@@ -4411,6 +4405,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         // (2^64 | 0xF) & 0xFF == 0xF   (boxed operand -> RTS path)
         let a = bigint_to_poly_word(
@@ -4448,6 +4443,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         // RTS result is a BOXED f64 (the live dispatch path reads as_ptr::<f64>()).
         let asf32 = |w: PolyWord| -> f32 {
@@ -4520,6 +4516,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         // errno 2 == ENOENT (errors.cpp errortable). Must return a BOXED string.
         let r = poly_process_env_error_name(&mut c, t(), PolyWord::tagged(2));
@@ -4597,6 +4594,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         let table = RtsTable::new();
         let call = |c: &mut RtsContext<'_>, name: &str| -> i128 {
@@ -4637,6 +4635,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         let big = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 80u32));
         assert!(big.is_data_ptr(), "2^80 must box");
@@ -4654,6 +4653,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         let p62 = BigInt::from(1u8) << 62u32;
         let boxed_p62 = bigint_to_poly_word(&mut c, &p62);
@@ -4696,6 +4696,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         // lcm(0,0) divides by zero (gcd=0) → upstream raises Div.
         let _ = poly_lcm_arbitrary(&mut c, t(), PolyWord::tagged(0), PolyWord::tagged(0));
@@ -4801,6 +4802,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         let r = poly_shift_left_arbitrary(&mut c, t(), PolyWord::tagged(1), PolyWord::tagged(70));
         assert!(r.is_data_ptr(), "1<<70 should be boxed");
@@ -4818,6 +4820,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         // -(2^64 + 7): magnitude needs >64 bits so it boxes; negative-flagged.
         let n = -(BigInt::from(1u128 << 64) + BigInt::from(7u8));
@@ -4869,6 +4872,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         let r = poly_multiply_arbitrary(
             &mut ctx,
@@ -4892,6 +4896,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         let a = PolyWord::tagged(-(1 << 31));
         let b = PolyWord::tagged(1 << 32);
@@ -4911,6 +4916,7 @@ mod tests {
             alloc_space: Some(&mut space),
             raised_exception: None,
             rts: None,
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         // 2^31 * 2^32 = 2^63 which exceeds MAX_TAGGED.
         let a = PolyWord::tagged(1 << 31);

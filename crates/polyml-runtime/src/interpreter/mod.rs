@@ -360,6 +360,15 @@ pub struct Interpreter {
     /// in this object) work — `Thread_Data`, and hence Isabelle's generic
     /// context, depend on it. Allocated lazily; forwarded by the GC as a root.
     thread_object: Option<PolyWord>,
+    /// Per-thread bootstrap tail-call slot (the `PolyEndBootstrapMode`
+    /// argument). When non-`ZERO`, the interpreter tail-calls it as a
+    /// `unit -> 'a` closure on RTS return (see `rts_call`). This used to be
+    /// a process-global static (`rts::BOOTSTRAP_TAIL_CALL`); it is now
+    /// per-thread so a second thread cannot clobber another thread's pending
+    /// tail call. The `poly_end_bootstrap_mode` RTS handler writes it via the
+    /// `RtsContext` (seeded from / read back into this field by `rts_call`),
+    /// and the GC forwards it as a per-thread root inside `ThreadRoots`.
+    bootstrap_tail_call: PolyWord,
     /// Optional execution-profile collector. `None` = disabled (the
     /// hot path pays only a branch). Enable with
     /// [`enable_diagnostics`](Self::enable_diagnostics).
@@ -440,6 +449,11 @@ struct ThreadRoots {
     exn_slot: PolyWord,
     /// The cached `Thread.self()` object (TAGGED(0) when unallocated).
     thread_obj_slot: PolyWord,
+    /// The bootstrap tail-call slot (the `PolyEndBootstrapMode` arg;
+    /// TAGGED(0) when none pending). PER-THREAD — it used to be forwarded
+    /// once as a process-shared root, but it is the per-thread interpreter's
+    /// `bootstrap_tail_call` field, so each thread forwards its own.
+    bootstrap_tail_slot: PolyWord,
 
     // ---- Byte-offsets captured pre-GC, used to rebuild byte pointers.
     /// `pc - code_start`.
@@ -459,6 +473,7 @@ struct ThreadRoots {
     handlers_dst: *mut Vec<(usize, *const u8, *const u8)>,
     exn_dst: *mut Option<PolyWord>,
     thread_obj_dst: *mut Option<PolyWord>,
+    bootstrap_tail_dst: *mut PolyWord,
     /// Whether `thread_object` was `Some` (only then do we write it back —
     /// preserving the exact `if self.thread_object.is_some()` semantics).
     thread_obj_present: bool,
@@ -511,6 +526,7 @@ impl ThreadRoots {
             handler_starts,
             exn_slot: interp.exception_packet.unwrap_or(PolyWord::ZERO),
             thread_obj_slot: interp.thread_object.unwrap_or(PolyWord::ZERO),
+            bootstrap_tail_slot: interp.bootstrap_tail_call,
             pc_off,
             code_end_off,
             frame_offsets,
@@ -522,6 +538,7 @@ impl ThreadRoots {
             handlers_dst: std::ptr::addr_of_mut!(interp.handler_frames_depth),
             exn_dst: std::ptr::addr_of_mut!(interp.exception_packet),
             thread_obj_dst: std::ptr::addr_of_mut!(interp.thread_object),
+            bootstrap_tail_dst: std::ptr::addr_of_mut!(interp.bootstrap_tail_call),
             thread_obj_present: interp.thread_object.is_some(),
             recent_call_targets_dst: std::ptr::addr_of_mut!(interp.recent_call_targets),
         }
@@ -561,6 +578,8 @@ impl ThreadRoots {
         }
         // 4b. Cached Thread.self() object.
         unsafe { c.forward(std::ptr::addr_of_mut!(self.thread_obj_slot)) };
+        // 4c. Bootstrap tail-call slot (PolyEndBootstrapMode arg). PER-THREAD.
+        unsafe { c.forward(std::ptr::addr_of_mut!(self.bootstrap_tail_slot)) };
     }
 
     /// Scrub the below-`sp` (free/garbage) region to a safe tagged
@@ -600,6 +619,9 @@ impl ThreadRoots {
         if self.thread_obj_present {
             unsafe { *self.thread_obj_dst = Some(self.thread_obj_slot) };
         }
+        // Bootstrap tail-call slot: always write back the forwarded value
+        // (mirrors the old unconditional `set_bootstrap_tail_call`).
+        unsafe { *self.bootstrap_tail_dst = self.bootstrap_tail_slot };
         // Code bounds.
         let new_code_start = self.code_start_slot.as_ptr::<PolyWord>().cast::<u8>();
         unsafe {
@@ -656,6 +678,7 @@ impl Interpreter {
             recent_call_idx: 0,
             image_mutable_roots: Vec::new(),
             thread_object: None,
+            bootstrap_tail_call: PolyWord::ZERO,
             rts: Arc::new(RtsTable::empty()),
             _owned_code: Some(code),
             diag: None,
@@ -701,6 +724,7 @@ impl Interpreter {
             recent_call_idx: 0,
             image_mutable_roots: Vec::new(),
             thread_object: None,
+            bootstrap_tail_call: PolyWord::ZERO,
             rts: Arc::new(RtsTable::empty()),
             _owned_code: None,
             diag: None,
@@ -786,6 +810,39 @@ impl Interpreter {
     #[must_use]
     pub fn rts_table_arc(&self) -> Arc<RtsTable> {
         self.rts.clone()
+    }
+
+    /// Read this thread's bootstrap tail-call slot (without clearing).
+    /// Used by the JIT RTS trampoline to seed an `RtsContext` so a
+    /// `PolyEndBootstrapMode` call routed through JIT'd code records its
+    /// pending tail call in the same per-thread slot the interpreter reads.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bootstrap_tail_call(&self) -> PolyWord {
+        self.bootstrap_tail_call
+    }
+
+    /// Write this thread's bootstrap tail-call slot. Counterpart of
+    /// [`bootstrap_tail_call`](Self::bootstrap_tail_call) for the JIT RTS
+    /// trampoline to write the slot back after dispatching an RTS function.
+    #[doc(hidden)]
+    pub fn set_bootstrap_tail_call(&mut self, w: PolyWord) {
+        self.bootstrap_tail_call = w;
+    }
+
+    /// Observe and clear this thread's bootstrap tail-call slot. Returns
+    /// `Some(closure)` if `PolyEndBootstrapMode` recorded a `unit -> 'a`
+    /// function to tail-call on RTS return, else `None`. Replaces the old
+    /// process-global `rts::take_bootstrap_tail_call`; the slot is now the
+    /// per-thread `self.bootstrap_tail_call` field.
+    fn take_bootstrap_tail_call(&mut self) -> Option<PolyWord> {
+        let w = self.bootstrap_tail_call;
+        if w.0 == 0 {
+            None
+        } else {
+            self.bootstrap_tail_call = PolyWord::ZERO;
+            Some(w)
+        }
     }
 
     /// Enable per-step execution-profile collection. After this call,
@@ -878,8 +935,8 @@ impl Interpreter {
 
     /// Run a copying GC over the alloc space, forwarding all roots
     /// (interpreter stack, exception packet, code segment, frames,
-    /// recent-call ring buffer, BOOTSTRAP_TAIL_CALL, and any
-    /// configured image-mutable-root regions). Returns the new
+    /// recent-call ring buffer, the per-thread bootstrap tail-call slot,
+    /// and any configured image-mutable-root regions). Returns the new
     /// `used_words` count of the alloc space.
     pub fn gc(&mut self) -> Option<usize> {
         // ---- Build the per-thread root-set REGISTRY.
@@ -901,8 +958,8 @@ impl Interpreter {
 
         // ---- SHARED roots (process-level, NOT per-thread): forwarded
         //      once regardless of how many threads are in the registry.
-        // Bootstrap tail-call slot (PolyEndBootstrapMode arg).
-        let mut bootstrap_tail = crate::rts::peek_bootstrap_tail_call();
+        // (The bootstrap tail-call slot is now PER-THREAD — captured +
+        // forwarded + fixed-up inside each `ThreadRoots`, not here.)
         // Image mutable spaces (the global namespace + runtime refs).
         let image_roots = self.image_mutable_roots.clone();
 
@@ -925,8 +982,7 @@ impl Interpreter {
             }
 
             // ---- Shared roots, forwarded ONCE.
-            // 4. Bootstrap tail-call slot (PolyEndBootstrapMode arg).
-            unsafe { c.forward(&mut bootstrap_tail as *mut _) };
+            // (The bootstrap tail-call slot moved to per-thread roots above.)
             // 5. Image mutable spaces: walk object-by-object so we
             //    only forward body words (skipping length words),
             //    and dispatch by type (byte objects have no internal
@@ -1035,10 +1091,9 @@ impl Interpreter {
         }
         drop(registry);
 
-        // Shared root write-back: bootstrap tail-call slot.
-        // (The per-thread recent-call ring buffer is cleared inside
-        // each root-set's `apply_fixups`.)
-        crate::rts::set_bootstrap_tail_call(bootstrap_tail);
+        // (The per-thread bootstrap tail-call slot and recent-call ring
+        // buffer are written back / cleared inside each root-set's
+        // `apply_fixups`. No shared root write-back remains.)
 
         // ---- Audit: any pointer still in old from-space is a missed root.
         // Opt-in via POLYML_GC_AUDIT=1 — full audit is O(used+stack)
@@ -1112,6 +1167,12 @@ impl Interpreter {
                 residual += 1;
                 samples.push(("exn_pkt", 0, w.0));
             }
+        }
+        // 5b. bootstrap tail-call slot (per-thread root). A residual here
+        //     means the per-thread forward/fixup missed it.
+        if in_old(self.bootstrap_tail_call.0) {
+            residual += 1;
+            samples.push(("bootstrap_tail", 0, self.bootstrap_tail_call.0));
         }
         // 6. Walk the NEW alloc-space body words and look for stale
         //    inbound pointers. This is the big one — missed children
@@ -3738,6 +3799,9 @@ impl Interpreter {
             alloc_space: self.alloc_space.as_mut(),
             raised_exception: None,
             rts: Some(&rts_ref),
+            // The typed-FP fast-call path never dispatches
+            // `PolyEndBootstrapMode`, so the slot stays ZERO (unused).
+            bootstrap_tail_call: PolyWord::ZERO,
         };
         let result_word = match (args.len(), entry_func) {
             (1, crate::rts::RtsFn::Arity1(f)) => f(&mut ctx, args[0]),
@@ -4077,6 +4141,7 @@ impl Interpreter {
                     alloc_space: self.alloc_space.as_mut(),
                     raised_exception: None,
                     rts: None,
+                    bootstrap_tail_call: PolyWord::ZERO,
                 };
                 let pkt = crate::rts::make_simple_exception_pub(
                     &mut ctx,
@@ -4116,6 +4181,11 @@ impl Interpreter {
             alloc_space: self.alloc_space.as_mut(),
             raised_exception: None,
             rts: Some(&rts_ref),
+            // Seed the per-thread bootstrap tail-call slot from this
+            // interpreter's field. `PolyEndBootstrapMode` writes it back
+            // via the context; we read it back below. (Replaces the old
+            // process-global static.)
+            bootstrap_tail_call: self.bootstrap_tail_call,
         };
         let result = match entry_func {
             RtsFn::Arity0(f) => f(&mut ctx),
@@ -4125,16 +4195,20 @@ impl Interpreter {
             RtsFn::Arity4(f) => f(&mut ctx, args[0], args[1], args[2], args[3]),
             RtsFn::Arity5(f) => f(&mut ctx, args[0], args[1], args[2], args[3], args[4]),
         };
+        // Read the per-thread bootstrap tail-call slot back into the
+        // interpreter field before we drop `ctx` (it borrows `self`).
+        let raised = ctx.raised_exception;
+        self.bootstrap_tail_call = ctx.bootstrap_tail_call;
         // If the RTS function asked to raise an exception, push the
         // packet onto the stack and unwind to the registered handler.
         // Matches upstream's CALL_FAST_RTS<N> dispatch:
         //   if (GetExceptionPacket().IsDataPtr()) goto RAISE_EXCEPTION;
-        if let Some(packet) = ctx.raised_exception {
+        if let Some(packet) = raised {
             self.push(packet)?;
             self.do_raise_ex()?;
             return Ok(StepResult::Continue);
         }
-        if let Some(fn_closure) = crate::rts::take_bootstrap_tail_call() {
+        if let Some(fn_closure) = self.take_bootstrap_tail_call() {
             self.push(PolyWord::tagged(0))?;
             self.do_call(fn_closure)?;
             return Ok(StepResult::Continue);
@@ -4182,6 +4256,7 @@ impl Interpreter {
                 alloc_space: self.alloc_space.as_mut(),
                 raised_exception: None,
                 rts: None,
+                bootstrap_tail_call: PolyWord::ZERO,
             };
             crate::rts::make_overflow_exception(&mut ctx)
         };
@@ -4201,6 +4276,7 @@ impl Interpreter {
                 alloc_space: self.alloc_space.as_mut(),
                 raised_exception: None,
                 rts: None,
+                bootstrap_tail_call: PolyWord::ZERO,
             };
             crate::rts::make_interrupt_exception(&mut ctx)
         };
