@@ -1,0 +1,13 @@
+# gauss_final.sml is the self-contained driver the isabelle_gauss test runs; it
+# EMBEDS the whole chain, so the per-stage campaign drivers below are superseded
+# scratch — kept locally for resume but not tracked.
+gauss_foundation.sml
+gauss_appendix.sml
+abs_inj.sml
+_abs_inj_delta.sml
+gauss_lemma.sml
+gauss_stageP.sml
+gauss_final_appendix.sml
+recon_plan.json
+qr_foundation_wf.js
+gauss_progress.json
