@@ -7,20 +7,27 @@ Isabelle/Pure interpreter. The full theorem is **NOT yet proved**; the graceful
 floor banked genuine 0-hyp results, with the remaining descent step cleanly
 scoped below.
 
-## 2026-06-23 UPDATE (divide-leaf fleet) — most of the sign-leaves now proven
+## 2026-06-23 UPDATE (divide-leaf fleet) — ALL 8 sign-leaves PROVEN + VERIFIED
 
 A multi-agent fleet ran the remaining divide sign-leaves on the warm
 `/tmp/l4_foursq_star` checkpoint, each parameterizing the proven `++++` template
-(N coordinates take the RIGHT congruence branch). State now:
+(N coordinates take the RIGHT congruence branch). **All 8 are now done:**
 
-- **VERIFIED (independently replayed by a separate agent — hyps=7, the genuine
-  `four_sq (p·r)` existential, 0 new axioms, `Tagged(0)`):** `PPPP` (prior),
-  `PPPN`, `PPNN`, `PNPP`, `PNPN` — **5 of 8**.
-- **Proven but pending independent verification:** `PPNP`, `PNNP`, `PNNN`. Their
-  deltas are complete and soundness-clean (self-contained, end-to-end, **no new
-  axioms**) and each author-agent recorded "proven", but they fell out of the
-  fleet's structured report, so they are being re-replayed by hand to confirm. If
-  they hold, **all 8 divide leaves are done.**
+- **VERIFIED** (hyps=7 — exactly the disclosed premises, the genuine `four_sq(p·r)`
+  existential `∃a b c d. p·r = a²+b²+c²+d²`, 0 new axioms, `Tagged(0)`):
+  `PPPP` (prior), `PPPN`, `PPNN`, `PNPP`, `PNPN` (fleet verify-agent re-replay) +
+  `PPNP`, `PNNP`, `PNNN` (hand-verified here — the full prop read directly: subject
+  `mult p_n r_n`, four `mult x x` squares; ~220e9 steps each). The latter three had
+  fallen out of the fleet's structured report (one agent's reporting failure) but
+  their deltas were complete and soundness-clean.
+
+**The per-sign-leaf Euler divide-by-m² — the part prior sessions called THE WALL —
+is complete.** What remains to close the theorem (one more fleet):
+1. The **16→8 disjE assembly tree** — route each of the 16 signed-flag
+   combinations to its leaf (8 distinct, via the global-negation symmetry).
+2. **Strict r<m** (the r=m exclusion; building blocks banked).
+3. **Iterate + discharge:** strong-induct on m to m=1 (`four_sq p` for every
+   prime) and discharge the already-proven `lagrange_assembly` ⟹ `∀n. four_sq n`.
 
 Operational notes from the fleet (for the next run): each leaf needs
 `POLYML_HEAP_BYTES=8000000000 POLYML_GC_THRESHOLD=88`; the 4-pair leaves peak
