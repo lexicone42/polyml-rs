@@ -216,10 +216,12 @@ Fermat's little theorem, Euler's theorem + criterion, Wilson's theorem (+ conver
 + the full iff), the Chinese Remainder Theorem, Fermat's two-square theorem,
 Euclid's even-perfect-number theorem, primes ≡ 1 and ≡ 3 mod 4, Zeckendorf,
 Pythagorean-triple parametrization, Fibonacci/Cassini, the binomial theorem +
-Vandermonde**, and **Lagrange's four-square theorem** (`∀n. ∃a b c d. n =
-a²+b²+c²+d²` — the tower's last open partial, now closed via the Euler descent; see
-`docs/four-square-progress-*.md`). Each is a test in
-`crates/polyml-bin/tests/isabelle_*.rs` plus a `.sml` driver, fenced by
+Vandermonde**, **Lagrange's four-square theorem** (`∀n. ∃a b c d. n =
+a²+b²+c²+d²` — closed via the Euler descent; see `docs/four-square-progress-*.md`),
+and — Gauss's golden theorem — the **QUADRATIC RECIPROCITY LAW** (`(p/q)(q/p) =
+(−1)^(((p−1)/2)((q−1)/2))`, via Gauss's lemma → the Eisenstein bridge → the
+lattice-point count; `tests/isabelle_support/qr_resume/`, 5 committed pieces). Each
+is a test in `crates/polyml-bin/tests/isabelle_*.rs` plus a `.sml` driver, fenced by
 `regression.sh full`. The number-theory tower has no open partials.
 
 How it works:
