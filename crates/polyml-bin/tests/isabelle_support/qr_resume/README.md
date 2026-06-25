@@ -45,9 +45,43 @@ The intermediate per-stage drivers from the campaign (the foundation base, the
 **superseded by `gauss_final.sml`** (which embeds all of them) and are kept only as
 local resume scratch — they are gitignored, not tracked.
 
+## F2 — the Eisenstein bridge (PARTIAL; per-k crux + half the parity bookkeeping)
+
+The next step from Gauss's *lemma* toward the *law* is **Eisenstein's bridge**: recast
+`a^((p−1)/2) ≡ (−1)^μ` into the floor-sum form `legendre(q,p) = (−1)^(Σ_{k=1..m} ⌊q·k/p⌋)`.
+Fleet F2 built the toolbox + the analytic crux on top of the F1 toolbox
+(`qr_f1_toolbox.sml`, which banks `gauss_lemma` + `parity`/`cnt`/`sumf`/`lar`/`rdiv`).
+
+Committed delta: **`qr_f2_appendix.sml`** (the F2 delta) — concatenate after
+`qr_f1_toolbox.sml` to get the self-contained driver `qr_f2.sml` (both gitignored as
+1MB scratch; rebuild with `cat qr_f1_toolbox.sml qr_f2_appendix.sml > qr_f2.sml`). Runs
+to `Tagged(0)` (~4.05e9 steps, 4 GB heap); 0 new axioms over F1.
+
+**Proved (all 0-hyp + aconv; markers in `qr_f2_progress.json`):**
+- `split_lemma` — the EXACT floor/remainder split `q·k = p·⌊q·k/p⌋ + (q·k mod p)`,
+  `(q·k mod p) < p` (`EIS_SPLIT_OK`).
+- `parity_mult_l` / `parity_odd_mult` / `parity_double` — parity of products
+  (`parity(ab) = parity((parity a)·b)`; odd·b parity = parity b; `parity(z+z)=0`).
+- **`floor_parity_link`** — THE per-k analytic crux: for odd `a`,`p`,
+  `parity(⌊a·k/p⌋) = parity(k + (a·k mod p))`, i.e. `⌊a·k/p⌋ ≡ k + (a·k mod p) (mod 2)`
+  (`FLOOR_PARITY_LINK_OK`).
+- `parity_sumf_cong` — pointwise parity agreement lifts through `sumf`.
+- **`floor_sum_kr_parity`** — HALF the Eisenstein parity bookkeeping:
+  `Σ_k ⌊q·k/p⌋ ≡ (Σ_k k) + (Σ_k q·k mod p) (mod 2)` (`FLOOR_SUM_KR_PARITY_OK`).
+
+**Blocker (the remaining half):** `μ ≡ Σ_k ⌊q·k/p⌋ (mod 2)` needs the OTHER equation
+`Σ_k (q·k mod p) ≡ (Σ_k k) + μ (mod 2)`, which follows from
+`Σ (q·k mod p) = Σ lar(q·k) + μ·p − 2·(Σ of flipped lar)` ONLY via the **sum-permutation
+invariance of `lar`** (`Σ_{k=1..m} lar(q·k) = Σ_{k=1..m} k`). The tower banks `lar_perm`
+only as a **product** invariant (`lprod` over the natlist) — there is **no list-sum
+(`lsumf`)** and **no sum-reindex/sum-permutation** lemma. Re-deriving `lar`'s permutation
+as a *sum* is fresh infrastructure (a parallel `lsumf` + `lsumf_perm_of_inj`) — a separate
+fleet. Once that parity equality lands, the Eisenstein *lemma* follows immediately from the
+already-proved `gauss_lemma` (`S = (−1)^μ`).
+
 ## Open: the full reciprocity *law*
 
 Gauss's *lemma* is the cornerstone; the reciprocity *law*
 `(p/q)(q/p) = (−1)^(((p−1)/2)((q−1)/2))` additionally needs **Eisenstein's
 lattice-point count** (`Σ_{k} ⌊q·k/p⌋ + Σ_{j} ⌊p·j/q⌋ = ((p−1)/2)((q−1)/2)`)
-combined with this lemma in the `(−1)^(Σ⌊⌋)` form. That is tracked as further work.
+combined with the Eisenstein bridge above. That is tracked as further work.

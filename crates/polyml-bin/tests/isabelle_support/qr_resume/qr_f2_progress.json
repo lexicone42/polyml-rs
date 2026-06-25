@@ -1,0 +1,35 @@
+{
+  "fleet": "F2 — Eisenstein bridge (Gauss's lemma -> floor-sum form)",
+  "date": "2026-06-25",
+  "base": "qr_f1_toolbox.sml (16,504 lines; runs to Tagged(0), TOOLBOX_ALL_OK; banks gauss_lemma + parity/cnt/sumf/lar/rdiv infra)",
+  "driver": "qr_f2.sml (self-contained, 17,321 lines; base + qr_f2_appendix.sml; runs to Tagged(0))",
+  "appendix": "qr_f2_appendix.sml (the F2 delta, ~1,000 lines)",
+  "run": {
+    "checkpoint": "/tmp/isabelle_pure",
+    "steps": "~4.05e9 bytecode steps",
+    "heap": "POLYML_HEAP_BYTES=4000000000",
+    "result": "Tagged(0) — clean return; 54 _OK markers; 0 FAIL; 0 Exception"
+  },
+  "proved": {
+    "parity_mult_l": "parity(mult a b) = parity(mult (parity a) b)  [induction on a; 0-hyp + aconv]  marker PARITY_MULT_L_OK",
+    "parity_odd_mult": "parity a = 1 ==> parity(mult a b) = parity b  [derived from parity_mult_l]",
+    "parity_double": "parity(add z z) = 0  [0-hyp + aconv]  marker PARITY_DOUBLE_OK",
+    "split_lemma": "0<p ==> (mult a k = p*(rdiv(a*k)p) + rmod(a*k)p)  AND  rmod(a*k)p < p  [the EXACT floor/remainder split; 0-hyp + aconv + soundness probe]  marker EIS_SPLIT_OK",
+    "lar_decomp_lo/hi": "2r<=p ==> lar=r ;  p<2r ==> lar=p-r  [lar branch relations on ctxtT; 0-hyp + aconv]",
+    "floor_parity_link": "[THE per-k analytic crux] 0<p, parity a=1, parity p=1 ==> parity(rdiv(a*k)p) = parity(add k (rmod(a*k)p)).  i.e. floor(a*k/p) == k + (a*k mod p) (mod 2).  marker FLOOR_PARITY_LINK_OK",
+    "parity_sumf_cong": "(!!k. parity(f k)=parity(g k)) ==> parity(sumf f n)=parity(sumf g n)  [induction on n; 0-hyp + aconv]  marker PARITY_SUMF_CONG_OK",
+    "floor_sum_kr_parity": "[HALF the Eisenstein parity bookkeeping] 0<p, parity q=1, parity p=1 ==> parity(sumf (\\k. rdiv(q*k)p) m) = parity(add (sumf (\\k. k) m) (sumf (\\k. rmod(q*k)p) m)).  i.e. sum floor == (sum k) + (sum (q*k mod p)) (mod 2).  0-hyp + aconv.  marker FLOOR_SUM_KR_PARITY_OK"
+  },
+  "eisensteinParityProved": false,
+  "eisensteinLemmaProved": false,
+  "blocker": "The SECOND half of Eisenstein's parity bookkeeping is blocked: to get mu == sum floor (mod 2) one needs  sum r == sum k + mu (mod 2), which follows from  sum r = sum lar + mu*p - 2*(sum of flipped lar)  ONLY via the SUM-permutation invariance of the least-absolute-residue map (sum_{k=1..m} lar(q*k) = sum_{k=1..m} k). The tower banks LAR_PERM only as a PRODUCT invariant (lprod over the natlist); there is NO list-SUM (lsumf) and NO sum-reindex/sum-permutation lemma anywhere. Re-deriving lar's permutation as a SUM is fresh infrastructure (a parallel lsumf + lsumf_perm_of_inj mirroring NATLIST_LIB + LPROD_PERM) — a separate fleet (the recon's flagged 'NO sum-reindex/SWAP' gap). The Eisenstein lemma (legendre = (-1)^(sum floor)) then follows immediately from the ALREADY-PROVED gauss_lemma (S = (-1)^mu) the moment that parity equality lands.",
+  "soundness": {
+    "axioms": "f2_ex_middle_present=true; f2_fabricated_axioms=[] (NOTHING smuggled: no eisenstein/legendre/reciprocity/lattice/floor_parity/muSum axiom); f2_recursion_axioms=[Pure.cnt_0,Pure.parity_0,Pure.cnt_Suc_f,Pure.cnt_Suc_t,Pure.parity_Suc] (the SAME 5 conservative-recursion axioms the F1 toolbox already declared; no NEW axiom in F2)",
+    "gates": "every banked lemma is 0-hyp (Thm.hyps_of=[] AND Thm.extra_shyps=[]) AND aconv the intended term; soundness probes confirm split_lemma keeps 0<p and gauss keeps ~(p|a)/oddness"
+  },
+  "gotchas": [
+    "STALE INSTANTIATOR TRAP: the early T-stage (line ~870-904) binds addassocT_at/addcommT_at CLOSED OVER an older ctxtT (a theory WITHOUT rdiv). The Eisenstein toolbox REBINDS ctxtT to thyT (with rdiv) at TOOLBOX_CTX_READY. Reusing the stale instantiators on rdiv-carrying terms raises 'Unknown constant Pure.rdiv'. Fix: rebuild fresh instantiators (addassoc_T2_at) bound to the CURRENT ctxtT.",
+    "INDEXING: sumf is inclusive 0..n with sumf f 0 = f 0; cnt counts 1..n. The k=0 floor term vanishes (rdiv 0 p = 0, RDIV_BASICS_OK) so sumf (floor) m matches sum_{k=1..m}. floor_parity_link holds even at k=0 (both sides 0).",
+    "floor_parity_link is range-free (needs only 0<p + oddness), so parity_sumf_cong's all-k agreement premise is dischargeable directly by forall_intr over the link."
+  ]
+}
