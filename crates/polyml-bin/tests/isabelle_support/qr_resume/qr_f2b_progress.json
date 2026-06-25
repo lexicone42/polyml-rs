@@ -1,0 +1,40 @@
+{
+  "fleet": "F2b — Eisenstein lemma CLOSE (list-SUM permutation infra + parity bridge)",
+  "date": "2026-06-25",
+  "base": "qr_f1_toolbox.sml ++ qr_f2_appendix.sml (17,321 lines; runs to Tagged(0), TOOLBOX_ALL_OK + QR_F2_ALL_OK)",
+  "driver": "qr_f2b.sml (self-contained, base + qr_f2b_appendix.sml; runs to Tagged(0))",
+  "appendix": "qr_f2b_appendix.sml (the F2b delta, ~1037 lines)",
+  "run": {
+    "checkpoint": "/tmp/isabelle_pure",
+    "steps": "4,889,313,309 bytecode steps",
+    "heap": "POLYML_HEAP_BYTES=4000000000",
+    "result": "Tagged(0) — clean return; ALL F2b markers OK; 0 FAIL; 0 Exception",
+    "markersAtEnd": "LSUMF_OK LSUMF_PERM_OK LAR_SUM_PERM_OK EIS_PARITY_HALF2_OK EIS_PARITY_OK EIS_LEMMA_STATUS_NOTE QR_F2B_ALL_OK EISENSTEIN_CLOSE_END"
+  },
+  "proved": {
+    "lsumf": "new const lsumf:natlist->nat on thyU=thyT+lsumf; lsumf_nil/lsumf_cons conservative recursion + lsumf_extract (lmem x L ==> lsumf L = add x (lsumf (lremove x L))); 0-hyp+aconv. marker LSUMF_OK",
+    "lsumf_perm_of_inj": "the SUM analogue of lprod_perm_of_inj — exact mirror (lprod->lsumf, mult->add, extract->lsumf_extract) of the banked product permutation; lnodup A,B + same-length + into-range + injective ==> lsumf(lmap g A)=lsumf B; 0-hyp+aconv+injectivity probe. marker LSUMF_PERM_OK",
+    "lar_sum_perm": "prime2 p ==> ~(dvd p a) ==> sub p 1 = m+m ==> lsumf(lmap (lar a p)(upto m)) = lsumf(upto m) — sum_{k=1..m} lar(a*k) = sum_{k=1..m} k; reuses lar_perm Into/Inj witnesses (ctxtGG) transferred up; 0-hyp+aconv+~dvd probe. marker LAR_SUM_PERM_OK",
+    "rmod_lar_cnt": "0<p ==> parity p=1 ==> parity(add (sumf rmodAbs n)(sumf larAbs n)) = parity(cnt flipPred n) — combined induction; per-k: 2r<=p no-flip lar=r r+lar=2r even, p<2r flip lar=p-r r+lar=p odd; 0-hyp+aconv",
+    "sumf_via_lsumf": "oeq (add (f 0)(lsumf(lmap f (upto n))))(sumf f n) — bridges sumf (0..n) and lsumf-of-upto (1..n); general; 0-hyp+aconv",
+    "sum_lar_eq_sum_id": "prime2 p ==> ~(dvd p q) ==> sub p 1 = m+m ==> sumf (lar q p) m = sumf (\\k.k) m — exact equality from lar_sum_perm + sumf_via_lsumf + lmap_id + lar0_zero; 0-hyp+aconv",
+    "eis_parity_half2": "[PH] 0<p ==> parity p=1 ==> prime2 p ==> ~(dvd p q) ==> sub p 1 = m+m ==> parity(sumf rmodAbs m) = parity(add (sumf idAbs m)(cnt flipPred m)) — sum rmod == sum k + mu (mod 2), mu = cnt flipPred m; 0-hyp+aconv+~dvd probe. marker EIS_PARITY_HALF2_OK",
+    "eisenstein_parity": "[EP] 0<p ==> parity q=1 ==> parity p=1 ==> prime2 p ==> ~(dvd p q) ==> sub p 1 = m+m ==> parity(cnt flipPred m) = parity(sumf floorAbs m) — mu == sum_{k=1..m} floor(q*k/p) (mod 2); combines F2's floor_sum_kr_parity + PH; the ARITHMETIC HEART of the Eisenstein lemma; 0-hyp+aconv+odd-q probe. marker EIS_PARITY_OK"
+  },
+  "lsumfBuilt": true,
+  "larSumPermProved": true,
+  "eisensteinParityProved": true,
+  "eisensteinLemmaProved": false,
+  "blocker": "EL (gauss sign = (-1)^(sum floor)) is NOT closed. The banked gauss_lemma delivers the sign S ONLY as an existential element of {1,p-1} (isSign p S), built MULTIPLICATIVELY per residue in prod_split_sign (Snew = mult sk St, sk=1 no-flip / p-1 flip). It NEVER materialises the flip COUNT mu = cnt flipPred m, so there is NO banked theorem S == (-1)^mu (mod p) / S == (p-1)^(cnt flipPred m) (mod p) to rewrite the Gauss sign into (-1)^(sum floor). Closing EL requires re-running the S2 induction tracking cnt (a fresh 'sign == (p-1)^cnt' lemma) — a separate fleet. eisenstein_parity (mu == sum floor mod 2) IS the strongest honest deliverable; the residual is purely the gauss-sign-to-count materialization.",
+  "soundness": {
+    "axioms": "f2b_axiom_count=84; f2b_ex_middle_present=true; f2b_fabricated_axioms=[] (NOTHING smuggled: no eisenstein/legendre/reciprocity/perm/lar_sum/sum_perm/muSum axiom)",
+    "new_consts": "ONLY lsumf, with EXACTLY two conservative recursion axioms [Pure.lsumf_nil, Pure.lsumf_cons]; no other new const, no new classical axiom (ex_middle the only one)",
+    "gates": "every banked F2b lemma is 0-hyp (Thm.hyps_of=[] AND Thm.extra_shyps=[]) mod its stated premises AND aconv the intended term; soundness probes confirm lsumf_perm_of_inj keeps injectivity, lar_sum_perm keeps ~(dvd p a), eis_parity_half2 keeps ~(dvd p q), eisenstein_parity keeps parity q=1"
+  },
+  "gotchas": [
+    "ETA TRAP: lar q p k eta-contracts (k is the last arg) so the sumf/cnt terms the proof produces are eta-normalised (lar q p); aconv in this Isabelle does NOT include eta, so Pabs MUST use the eta-contracted larAbsU = larC$q$p (NOT a lambda) to match the induction step. rmod(q*k)p and flipPred do NOT eta-contract (k is mid-term), so their abstractions stay as Abs.",
+    "k=0 base: at k=0 q*0=0 and we need rmod(q*0)p=0 (rmod0_U via div_mod_eq + add_eq_zero_left on the commuted sum) so the flip-pred is false at 0 and lar0=0 — else the le_or_lt flip branch at k=0 cannot be discharged.",
+    "INDEXING: sumf is inclusive 0..n; upto n = [1..n]; the bridge sumf_via_lsumf carries the f 0 head term (= 0 for rmod/lar/id) so sumf and lsumf-of-upto agree exactly for these functions.",
+    "GAUSS SIGN gap: gauss_lemma exposes S only via isSign (membership in {1,p-1}), NOT as (-1)^cnt — this is the EL blocker (see blocker above)."
+  ]
+}
