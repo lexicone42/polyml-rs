@@ -499,6 +499,14 @@ fn run_image(
         }
     };
 
+    // Concurrency (3f): if real threads are enabled and the root function
+    // forked children (e.g. the REPL's console thread, or the mutex demo's
+    // workers), wait for them to drain before the process exits — otherwise
+    // returning from `main` would kill the detached child OS threads. No-op
+    // when real threads are off (the default), so the single-threaded path
+    // is unchanged.
+    interp.wait_for_children();
+
     println!();
     println!("Executed {steps} bytecode step(s).");
     let exit_code: u8 = match &outcome {

@@ -183,6 +183,26 @@ fn arbint_trace_on() -> bool {
     }
 }
 
+/// Memoized read of `POLY_REAL_THREADS` (see [`arbint_trace_on`] for the
+/// cache discipline). When set, `Thread.fork`/`Mutex`/`ConditionVar`
+/// dispatch to the genuine OS-thread implementation (concurrency
+/// increment 3d-3f); when unset (the default) they fall through to the
+/// prior single-thread stubs, keeping every existing workload — the
+/// bootstrap, the self-bootstrapped REPL, HOL4, Isabelle — byte-identical.
+fn real_threads_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static F: AtomicU8 = AtomicU8::new(0);
+    match F.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::env::var("POLY_REAL_THREADS").is_ok();
+            F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
 /// Memoized read of `JIT_TRACE_RETURNS` (see [`arbint_trace_on`] for the
 /// cache discipline). `do_return` is one of the hottest paths, so reading
 /// the env var per-return (allocating a `String` + scanning the environ)
@@ -278,6 +298,8 @@ pub enum InterpError {
         op_arity: usize,
         fn_arity: usize,
     },
+    #[error("Thread.fork: OS thread spawn failed: {0}")]
+    ThreadSpawnFailed(String),
 }
 
 /// A bytecode interpreter operating on PolyML code objects.
@@ -311,16 +333,45 @@ pub struct Interpreter {
     /// Entries are (code_start, code_end) pushed on every CALL and
     /// popped on every RETURN.
     frames: Vec<(*const u8, *const u8)>,
-    /// Bump-allocation region for objects created at runtime
-    /// (closures, tuples, refs). `None` means the interpreter will
-    /// trap `InterpError::NoAllocator` on any allocation op.
-    alloc_space: Option<MemorySpace>,
-    /// Pre-computed GC threshold in words (= `alloc_space.capacity *
-    /// threshold_percent / 100`). 0 = "never auto-GC", set when
-    /// either `alloc_space` is None or `POLYML_GC_THRESHOLD` is
-    /// configured to a value outside (1..=99). On every step we
-    /// compare `alloc_space.used_words()` against this; cheaper than
-    /// the previous `used * 100 >= cap * thresh`.
+    /// The `Arc`-shared runtime: the heap (`MemorySpace`), the scheduler
+    /// (giant lock + thread registry), the GC trigger, and the
+    /// image-mutable roots. Concurrency increment 3b: the heap MOVED from
+    /// a per-`Interpreter` `alloc_space` field into `runtime.heap_mut()`,
+    /// accessed only by the current ML-memory lock-holder. This
+    /// `Interpreter` is now a per-thread *ThreadContext* over the shared
+    /// `Runtime`; a forked thread gets a fresh `Interpreter` cloning this
+    /// `Arc<Runtime>`.
+    runtime: Arc<crate::sched::Runtime>,
+    /// This thread's scheduler handle (in_ml / parked_roots / requests /
+    /// exited). Registered in `runtime.sched.registry` while running.
+    handle: Arc<crate::sched::ThreadHandle>,
+    /// Whether `handle` has been pushed into the scheduler registry. Set
+    /// on first `run_until`; idempotent across repeated calls.
+    registered: bool,
+    /// Whether this thread ALREADY holds the giant mutator lock when it
+    /// enters `run_until` — so `run_until` must NOT acquire (it would
+    /// deadlock or double-acquire) and must NOT release on exit. Set only
+    /// by the forked-child entry, which acquires the lock itself (to safely
+    /// retract its pre-published [`ForkRoots`] and read back the forwarded
+    /// closure) BEFORE seeding its stack and running. Defaults `false`, so
+    /// the single-threaded floor and the REPL driver are unaffected.
+    holds_lock_on_entry: bool,
+    /// A leaked `ThreadRoots` box published into `handle.parked_roots` on
+    /// the LAST `run_until` exit (B2: a quiescent-but-registered thread must
+    /// keep published roots so a peer's GC can forward its stack). Its
+    /// pointer is referenced by the published `SendRoots` for the WHOLE
+    /// quiescent window, so it must outlive that window — we keep ownership
+    /// here and free it only when the slot is next retracted (the next
+    /// acquire) or replaced (the next quiescent release). `None` when no
+    /// publication is outstanding. Per-thread, so the floor never sets it.
+    published_box: Option<*mut ThreadRoots>,
+    /// Pre-computed GC threshold in words (= `heap.capacity *
+    /// threshold_percent / 100`). 0 = "never auto-GC", set when either
+    /// there is no heap or `POLYML_GC_THRESHOLD` is configured to a value
+    /// outside (1..=99). Mirrored from `runtime.gc_trigger_words` so the
+    /// hot-path check is a plain field read. On every step we compare
+    /// `heap.used_words()` against this; cheaper than the previous
+    /// `used * 100 >= cap * thresh`.
     gc_trigger_words: usize,
     /// "Handler register" — index into `stack` where the most-recent
     /// exception-handler frame sits. `stack.len()` (past-the-end)
@@ -479,6 +530,17 @@ struct ThreadRoots {
     thread_obj_present: bool,
     /// Recent-call ring buffer to clear post-GC (not worth forwarding).
     recent_call_targets_dst: *mut [usize; 16],
+    /// True when this capture was taken from a QUIESCED interpreter (a
+    /// thread that left `run_until` with a TERMINAL result and emptied its
+    /// transient roots before publishing — see `quiesce_roots`). A quiesced
+    /// thread holds no live stack/frame/code roots, so the post-GC fixup
+    /// MUST NOT write back the (null) code-bounds / (empty) frame+handler /
+    /// (None) exn slots: between calls the OWNING thread's lock-free driver
+    /// code re-seeds exactly those fields, and a write-back would race it.
+    /// Only the identity roots (thread object, bootstrap tail) — which the
+    /// driver never touches — are written back when quiesced. Defaults
+    /// false (the normal resumable capture writes everything back).
+    quiesced: bool,
 }
 
 impl ThreadRoots {
@@ -491,9 +553,26 @@ impl ThreadRoots {
     /// must be used only within the single `gc()` call and the
     /// interpreter must not be otherwise mutated meanwhile.
     fn capture(interp: &mut Interpreter) -> Self {
-        // Byte offsets we need to translate post-GC.
-        let pc_off = unsafe { interp.pc.offset_from(interp.code_start) };
-        let code_end_off = unsafe { interp.code_end.offset_from(interp.code_start) };
+        // A null `code_start` marks a QUIESCED interpreter (left `run_until`
+        // with a terminal result; `quiesce_roots` nulled its transient
+        // roots). Its capture is root-free and its post-GC fixup must NOT
+        // write back the code-bounds / frames / handlers / exn (the owning
+        // thread's lock-free driver re-seeds those between calls — see the
+        // `quiesced` field). Computing `offset_from` with a null base is
+        // also avoided here (both null ⇒ 0, but we keep it explicit).
+        let quiesced = interp.code_start.is_null();
+        let (pc_off, code_end_off) = if quiesced {
+            (0, 0)
+        } else {
+            // SAFETY: code_start non-null ⇒ pc/code_end derive from the same
+            // code allocation.
+            unsafe {
+                (
+                    interp.pc.offset_from(interp.code_start),
+                    interp.code_end.offset_from(interp.code_start),
+                )
+            }
+        };
         let frame_offsets: Vec<isize> = interp
             .frames
             .iter()
@@ -541,6 +620,7 @@ impl ThreadRoots {
             bootstrap_tail_dst: std::ptr::addr_of_mut!(interp.bootstrap_tail_call),
             thread_obj_present: interp.thread_object.is_some(),
             recent_call_targets_dst: std::ptr::addr_of_mut!(interp.recent_call_targets),
+            quiesced,
         }
     }
 
@@ -591,6 +671,15 @@ impl ThreadRoots {
     /// # Safety
     /// `self.stack_ptr` must be valid for at least `self.sp` slots.
     unsafe fn scrub_below_sp(&mut self) {
+        // A QUIESCED capture (terminal `run_until` exit) holds an empty live
+        // set; there are no above-sp roots that could have left dangling
+        // from-space values below sp. Scrubbing would write the WHOLE stack
+        // (sp == len), racing the owning thread's lock-free driver which
+        // re-seeds that same stack between calls. Skip it — there is nothing
+        // dangling to scrub on a quiesced thread.
+        if self.quiesced {
+            return;
+        }
         for i in 0..self.sp {
             unsafe { self.stack_ptr.add(i).write(PolyWord::tagged(0)) };
         }
@@ -606,6 +695,42 @@ impl ThreadRoots {
     /// interpreter state (i.e. the interpreter has not been moved or
     /// reallocated since `capture`).
     unsafe fn apply_fixups(&self) {
+        // ---- A QUIESCED capture holds no live transient roots (empty
+        // stack, null code, no frames/handlers/exn). The owning thread is
+        // running lock-free DRIVER code between `run_until` calls; the
+        // collector must NOT reach into that thread's `self` AT ALL — not the
+        // transient roots (the driver re-seeds the stack/code/frames), and
+        // (LOW, round 2) not even the identity roots (thread object +
+        // bootstrap tail). Writing `*self.thread_obj_dst` / `*self.
+        // bootstrap_tail_dst` from the collector is a data race on the
+        // parked thread's `Interpreter` struct even if those particular
+        // fields are not concurrently read — it is a write the owning thread
+        // does not synchronise against. So for a quiesced capture we forward
+        // the identity roots IN PLACE in the published box (done by
+        // `forward`) but DEFER the write-back into `self` to the owning
+        // thread's NEXT acquire (which retracts the slot under the giant lock,
+        // then copies the forwarded identity values out of its stashed box —
+        // see `apply_quiesced_identity_writeback`). That write-back happens
+        // while the thread HOLDS the lock and the collector is done, so it is
+        // race-free by construction, not by trusting the driver.
+        if self.quiesced {
+            return;
+        }
+
+        // ---- Identity roots (resumable capture): the thread object +
+        // bootstrap tail-call slot are per-thread STATE. For a RESUMABLE
+        // capture the owning thread is blocked inside `run_until` (parked at
+        // a safepoint / blocking wait), so it is NOT mutating `self`; writing
+        // them back in place is race-free.
+        // Thread object: only write back if it was present (preserving
+        // the original `if self.thread_object.is_some()` guard).
+        if self.thread_obj_present {
+            unsafe { *self.thread_obj_dst = Some(self.thread_obj_slot) };
+        }
+        // Bootstrap tail-call slot: write back the forwarded value
+        // (mirrors the old unconditional `set_bootstrap_tail_call`).
+        unsafe { *self.bootstrap_tail_dst = self.bootstrap_tail_slot };
+
         // Exception packet.
         unsafe {
             *self.exn_dst = if self.exn_slot.0 == 0 || self.exn_slot.is_tagged() {
@@ -614,14 +739,6 @@ impl ThreadRoots {
                 Some(self.exn_slot)
             };
         }
-        // Thread object: only write back if it was present (preserving
-        // the original `if self.thread_object.is_some()` guard).
-        if self.thread_obj_present {
-            unsafe { *self.thread_obj_dst = Some(self.thread_obj_slot) };
-        }
-        // Bootstrap tail-call slot: always write back the forwarded value
-        // (mirrors the old unconditional `set_bootstrap_tail_call`).
-        unsafe { *self.bootstrap_tail_dst = self.bootstrap_tail_slot };
         // Code bounds.
         let new_code_start = self.code_start_slot.as_ptr::<PolyWord>().cast::<u8>();
         unsafe {
@@ -647,6 +764,196 @@ impl ThreadRoots {
         // Recent-call ring buffer: clear; not worth forwarding.
         unsafe { (*self.recent_call_targets_dst).fill(0) };
     }
+
+    /// Type-erased `forward` thunk stored in a [`crate::sched::SendRoots`]
+    /// so the collector can forward a PARKED thread's roots without `sched`
+    /// knowing the `ThreadRoots` layout.
+    ///
+    /// # Safety
+    /// `roots` is a `*mut ThreadRoots` (a boxed capture leaked by the
+    /// parking thread); `collector` is a `*mut crate::gc::Collector<'_>`.
+    /// Both alias live state owned by the (blocked) parking thread / the
+    /// active collector under the giant lock.
+    unsafe fn forward_thunk(roots: *mut (), collector: *mut ()) {
+        let roots = roots.cast::<ThreadRoots>();
+        let c = collector.cast::<crate::gc::Collector<'_>>();
+        // SAFETY: caller upholds the aliasing contract.
+        unsafe { (*roots).forward(&mut *c) };
+    }
+
+    /// Type-erased `fixup` thunk (scrub below-sp + write forwarded slots
+    /// back) for a parked thread's roots.
+    ///
+    /// # Safety
+    /// `roots` is a `*mut ThreadRoots`; see [`forward_thunk`].
+    unsafe fn fixup_thunk(roots: *mut ()) {
+        let roots = roots.cast::<ThreadRoots>();
+        // SAFETY: caller upholds the aliasing contract.
+        unsafe {
+            (*roots).scrub_below_sp();
+            (*roots).apply_fixups();
+        }
+    }
+
+    /// Audit THIS captured root-set's slots for residual from-space
+    /// pointers (cross-stack GC audit, B3). Scans the FULL stack
+    /// `[0, stack_len)` (below-sp is scrubbed to Tagged(0) by `fixup`, so a
+    /// residual there means the scrub/forward missed it) plus the code
+    /// bounds, frame/handler starts, exception packet, thread object, and
+    /// bootstrap-tail slot. Returns the count of residual pointers found.
+    ///
+    /// # Safety
+    /// `self.stack_ptr` must be valid for `stack_len` slots and the captured
+    /// slots must alias the (frozen, parked) thread's live state.
+    unsafe fn audit_residual(&self, from_lo: usize, from_hi: usize) -> usize {
+        let in_old = |addr: usize| addr >= from_lo && addr < from_hi;
+        let mut residual = 0usize;
+        // Full stack — below-sp included (scrubbed on a clean run). A
+        // QUIESCED capture has an empty live set and the owning thread's
+        // lock-free driver may be re-seeding this stack concurrently, so we
+        // do NOT read it (it roots nothing the GC must forward, and reading
+        // it would race the driver). The identity-root checks below still
+        // run.
+        if !self.quiesced {
+            for i in 0..self.stack_len {
+                let v = unsafe { (*self.stack_ptr.add(i)).0 };
+                if in_old(v) {
+                    residual += 1;
+                }
+            }
+        }
+        // Forwardable PolyWord slots (post-fixup these hold the to-space
+        // addresses; a from-space value means a missed forward).
+        for w in [
+            self.code_start_slot.0,
+            self.exn_slot.0,
+            self.thread_obj_slot.0,
+            self.bootstrap_tail_slot.0,
+        ] {
+            if in_old(w) {
+                residual += 1;
+            }
+        }
+        for fs in &self.frame_starts {
+            if in_old(fs.0) {
+                residual += 1;
+            }
+        }
+        for hs in &self.handler_starts {
+            if in_old(hs.0) {
+                residual += 1;
+            }
+        }
+        residual
+    }
+
+    /// Type-erased audit thunk (see [`crate::sched::SendRoots::audit`]).
+    ///
+    /// # Safety
+    /// `roots` is a `*mut ThreadRoots`; see [`forward_thunk`].
+    unsafe fn audit_thunk(roots: *mut (), from_lo: usize, from_hi: usize) -> usize {
+        let roots = roots.cast::<ThreadRoots>();
+        // SAFETY: caller upholds the aliasing contract.
+        unsafe { (*roots).audit_residual(from_lo, from_hi) }
+    }
+}
+
+/// The pre-acquire root-set of a freshly-forked child thread (B1).
+///
+/// Between the parent's `register_thread_published` and the child's first
+/// `acquire_ml_memory`, the child interpreter does not yet own a published
+/// [`ThreadRoots`] (its stack is still being seeded). During that window the
+/// ONLY live heap pointers the child holds are its starting closure
+/// (`function`) and its `ThreadObject` (`thread_obj`). This tiny root-set is
+/// published by the PARENT into the child handle's `parked_roots` slot
+/// BEFORE registration, so the invariant "registered AND not-running ⟹
+/// parked_roots is Some" holds from the instant of registration — there is
+/// no GC window in which the collector skips the child's live closure.
+///
+/// The collector forwards these two slots in place; on its first acquire the
+/// child reads the (possibly forwarded) values back out of this box and
+/// seeds its stack with them, then reclaims the box.
+struct ForkRoots {
+    function: PolyWord,
+    thread_obj: PolyWord,
+}
+
+impl ForkRoots {
+    /// Forward the two child-initial slots via the collector.
+    ///
+    /// # Safety
+    /// `roots` is a `*mut ForkRoots` (a leaked box owned by the forking
+    /// parent / child); `collector` is a `*mut crate::gc::Collector<'_>`.
+    unsafe fn forward_thunk(roots: *mut (), collector: *mut ()) {
+        let roots = roots.cast::<ForkRoots>();
+        let c = collector.cast::<crate::gc::Collector<'_>>();
+        // SAFETY: caller upholds the aliasing contract; both slots are
+        // ordinary forwardable PolyWords.
+        unsafe {
+            (*c).forward(std::ptr::addr_of_mut!((*roots).function));
+            (*c).forward(std::ptr::addr_of_mut!((*roots).thread_obj));
+        }
+    }
+
+    /// Fixup is a no-op: the slots are forwarded in place and the child
+    /// reads them back directly. There is no below-sp region to scrub (the
+    /// child has no live stack yet).
+    ///
+    /// # Safety
+    /// `roots` is a `*mut ForkRoots`.
+    unsafe fn fixup_thunk(_roots: *mut ()) {}
+
+    /// Audit the two child-initial slots for residual from-space pointers.
+    ///
+    /// # Safety
+    /// `roots` is a `*mut ForkRoots`.
+    unsafe fn audit_thunk(roots: *mut (), from_lo: usize, from_hi: usize) -> usize {
+        let roots = roots.cast::<ForkRoots>();
+        let in_old = |addr: usize| addr >= from_lo && addr < from_hi;
+        // SAFETY: caller upholds the aliasing contract.
+        let (f, t) = unsafe { ((*roots).function.0, (*roots).thread_obj.0) };
+        usize::from(in_old(f)) + usize::from(in_old(t))
+    }
+}
+
+impl Drop for Interpreter {
+    /// A `ThreadContext` leaving scope (its OS thread finished, or the host
+    /// interpreter is torn down) MUST remove itself from the scheduler
+    /// registry and drop any published roots — otherwise its `stack` `Box`
+    /// is freed while its handle is still registered with
+    /// `parked_roots == Some(stale capture)`, and the next peer's GC would
+    /// scrub/forward the FREED stack (a use-after-free). Deregistering and
+    /// clearing the slot under the scheduler lock makes "registered ⟹ the
+    /// owning ThreadContext is alive" structural. The child-fork path
+    /// already calls the appropriate exit (`exit_parked` / `exit_running`)
+    /// explicitly before the interpreter
+    /// drops; this Drop covers the test workers + the host interpreter +
+    /// any early-return / panic-unwind exit, so no registered handle ever
+    /// outlives its stack.
+    fn drop(&mut self) {
+        if self.registered {
+            // exit_parked/exit_running remove us from the registry AND set
+            // parked_roots = None under the scheduler lock, so a
+            // concurrent collector either sees us (before) with valid
+            // published roots (we are still alive here) or not at all
+            // (after). Pick the exit path by whether we currently HOLD the
+            // giant lock: a normal Drop runs after `run_until` released it
+            // (in_ml == false → parked exit, must NOT clobber a peer's
+            // `running`); a Drop while still holding it (e.g. a panic-unwind
+            // mid-run, or a test that acquired but never released) must
+            // clear `running` (running exit). This is the H2 discipline:
+            // `running` is cleared IFF this thread actually holds it.
+            if self.handle.in_ml.load(std::sync::atomic::Ordering::SeqCst) {
+                self.runtime.exit_running(&self.handle);
+            } else {
+                self.runtime.exit_parked(&self.handle);
+            }
+            self.registered = false;
+        }
+        // Free any box published on the last quiescent release (its slot was
+        // just cleared by exit_parked/exit_running, so it is unreferenced).
+        self.free_published_box();
+    }
 }
 
 impl Interpreter {
@@ -662,6 +969,8 @@ impl Interpreter {
         // SAFETY: `code` is non-empty in normal use; for empty input
         // start == end, which is a valid (immediately-EOF) state.
         let end: *const u8 = unsafe { start.add(code.len()) };
+        let rts = Arc::new(RtsTable::empty());
+        let runtime = crate::sched::Runtime::new(None, 0, Arc::clone(&rts));
         Self {
             stack: vec![PolyWord::ZERO; stack_capacity].into_boxed_slice(),
             sp: stack_capacity,
@@ -669,7 +978,11 @@ impl Interpreter {
             code_start: start,
             code_end: end,
             frames: Vec::new(),
-            alloc_space: None,
+            runtime,
+            handle: crate::sched::ThreadHandle::new(),
+            registered: false,
+            holds_lock_on_entry: false,
+            published_box: None,
             gc_trigger_words: 0,
             handler_sp: stack_capacity, // past-the-end = no handler
             handler_frames_depth: Vec::new(),
@@ -679,7 +992,7 @@ impl Interpreter {
             image_mutable_roots: Vec::new(),
             thread_object: None,
             bootstrap_tail_call: PolyWord::ZERO,
-            rts: Arc::new(RtsTable::empty()),
+            rts,
             _owned_code: Some(code),
             diag: None,
             jit_cache: JitCache::default(),
@@ -708,6 +1021,8 @@ impl Interpreter {
         // word-aligned data that compiled code shouldn't try to
         // execute, but it's harmless to allow PC there.
         let end: *const u8 = consts_start.cast::<u8>();
+        let rts = Arc::new(RtsTable::empty());
+        let runtime = crate::sched::Runtime::new(None, 0, Arc::clone(&rts));
         Self {
             stack: vec![PolyWord::ZERO; stack_capacity].into_boxed_slice(),
             sp: stack_capacity,
@@ -715,7 +1030,11 @@ impl Interpreter {
             code_start: start,
             code_end: end,
             frames: Vec::new(),
-            alloc_space: None,
+            runtime,
+            handle: crate::sched::ThreadHandle::new(),
+            registered: false,
+            holds_lock_on_entry: false,
+            published_box: None,
             gc_trigger_words: 0,
             handler_sp: stack_capacity,
             handler_frames_depth: Vec::new(),
@@ -725,11 +1044,97 @@ impl Interpreter {
             image_mutable_roots: Vec::new(),
             thread_object: None,
             bootstrap_tail_call: PolyWord::ZERO,
-            rts: Arc::new(RtsTable::empty()),
+            rts,
             _owned_code: None,
             diag: None,
             jit_cache: JitCache::default(),
         }
+    }
+
+    /// Build a per-thread `ThreadContext` for a FORKED thread (3d). Shares
+    /// the parent's `Arc<Runtime>` (heap, RTS, scheduler), takes the
+    /// pre-registered child `handle`, and seeds the child's cached
+    /// `Thread.self()` object so `Thread.setLocal`/`getLocal` work. The
+    /// child gets its OWN stack + JIT cache + bookkeeping; PC/code bounds
+    /// are set by the caller via `jit_set_code_segment_to_closure`.
+    fn for_child_thread(
+        runtime: Arc<crate::sched::Runtime>,
+        handle: Arc<crate::sched::ThreadHandle>,
+        thread_obj: PolyWord,
+    ) -> Self {
+        let stack_capacity = 1024 * 1024;
+        let rts = Arc::clone(&runtime.rts);
+        let gc_trigger_words = runtime.gc_trigger_words;
+        // Copy the shared image-mutable roots so the child's `gc()` (which
+        // reads `self.image_mutable_roots`) scans the same global-namespace
+        // regions the main thread does. They are the same heap regions
+        // (process-global), just mirrored into each thread's Vec.
+        let image_mutable_roots: Vec<(*const PolyWord, usize)> = runtime
+            .image_roots
+            .lock()
+            .unwrap()
+            .0
+            .iter()
+            .map(|(p, l)| (p.0, *l))
+            .collect();
+        Self {
+            stack: vec![PolyWord::ZERO; stack_capacity].into_boxed_slice(),
+            sp: stack_capacity,
+            pc: std::ptr::null(),
+            code_start: std::ptr::null(),
+            code_end: std::ptr::null(),
+            frames: Vec::new(),
+            runtime,
+            handle,
+            registered: false,
+            holds_lock_on_entry: false,
+            published_box: None,
+            gc_trigger_words,
+            handler_sp: stack_capacity,
+            handler_frames_depth: Vec::new(),
+            exception_packet: None,
+            recent_call_targets: [0; 16],
+            recent_call_idx: 0,
+            image_mutable_roots,
+            thread_object: Some(thread_obj),
+            bootstrap_tail_call: PolyWord::ZERO,
+            rts,
+            _owned_code: None,
+            diag: None,
+            jit_cache: JitCache::default(),
+        }
+    }
+
+    /// Test/diagnostic accessor: clone the shared `Arc<Runtime>` (heap +
+    /// scheduler) so a test can spawn a second `ThreadContext` over the
+    /// same runtime and exercise real cross-thread GC.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn runtime_arc(&self) -> Arc<crate::sched::Runtime> {
+        Arc::clone(&self.runtime)
+    }
+
+    /// Test/diagnostic constructor: build a fresh `ThreadContext` sharing
+    /// an existing `Arc<Runtime>` (the heap + scheduler), with a fresh
+    /// scheduler handle. PC/code bounds are unset; the caller seeds the
+    /// stack + sets the code segment (e.g. via
+    /// [`set_code_segment_to_code_obj`](Self::set_code_segment_to_code_obj))
+    /// then drives `run_until`. Used by the concurrency integration test to
+    /// run a real second mutator thread over a shared heap.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_shared_runtime_test(runtime: Arc<crate::sched::Runtime>) -> Self {
+        let handle = crate::sched::ThreadHandle::new();
+        // H1 (structural): do NOT bare-register here. A bare register leaves
+        // the handle in the registry as "registered, not-running,
+        // parked_roots == None" until the worker's first `run_until` acquire
+        // — exactly the generic-register TOCTOU window. Instead leave
+        // `registered == false`; the first `acquire_running` (inside the
+        // first `run_until`) registers-and-acquires atomically.
+        let mut me = Self::for_child_thread(runtime, handle, PolyWord::tagged(0));
+        me.thread_object = None;
+        me.registered = false;
+        me
     }
 
     /// Install a JIT'd version of a code object's bytecode. When
@@ -785,13 +1190,35 @@ impl Interpreter {
         self.stack.as_mut_ptr()
     }
 
-    /// Mutable accessor to this interpreter's `alloc_space` for the
-    /// JIT-bridge trampolines. Returns `None` if no alloc space has
-    /// been configured (the JIT-`TUPLE` etc. paths will then fail
-    /// gracefully rather than UB).
+    /// Mutable accessor to the shared heap for the JIT-bridge
+    /// trampolines. Returns `None` if no heap has been configured (the
+    /// JIT-`TUPLE` etc. paths will then fail gracefully rather than UB).
+    ///
+    /// # Concurrency
+    /// Sound because the caller (the JIT trampoline) runs synchronously
+    /// inside `run_until`, i.e. while this thread holds ML memory and is
+    /// the sole heap accessor (the giant-lock discipline).
     #[doc(hidden)]
     pub fn jit_alloc_space_mut(&mut self) -> Option<&mut MemorySpace> {
-        self.alloc_space.as_mut()
+        self.alloc_space_mut()
+    }
+
+    /// Mutable access to the shared heap. Only valid while this thread
+    /// holds ML memory (inside `run_until`'s acquire/release bracket) —
+    /// the giant lock is the heap's mutual exclusion, so this is the
+    /// sole live `&mut MemorySpace`.
+    #[inline]
+    fn alloc_space_mut(&mut self) -> Option<&mut MemorySpace> {
+        // SAFETY: the calling thread holds ML memory (in_ml == true)
+        // throughout interpretation, so no other thread aliases the heap.
+        unsafe { self.runtime.heap_mut().as_mut() }
+    }
+
+    /// Shared accessor to the heap (read-only path).
+    #[inline]
+    fn alloc_space_ref(&self) -> Option<&MemorySpace> {
+        // SAFETY: as above; we hand out a shared ref only.
+        unsafe { self.runtime.heap_mut().as_ref() }
     }
 
     /// Read-only accessor to this interpreter's RTS table. Used by the
@@ -863,26 +1290,42 @@ impl Interpreter {
         self.diag.take()
     }
 
-    /// Attach an RTS table. Builder pattern.
+    /// Attach an RTS table. Builder pattern. Propagates the table into
+    /// the shared `Runtime` (builders run single-threaded before any
+    /// fork, so the `Arc<Runtime>` has exactly one reference here).
     #[must_use]
     pub fn with_rts(mut self, rts: Arc<RtsTable>) -> Self {
-        self.rts = rts;
+        self.rts = Arc::clone(&rts);
+        // SAFETY-ADJACENT: single Arc ref at build time.
+        if let Some(rt) = Arc::get_mut(&mut self.runtime) {
+            rt.rts = rts;
+        }
         self
     }
 
     /// Attach an allocation space. The interpreter will bump-allocate
-    /// new objects (closures, tuples, refs) from this space. Sized
+    /// new objects (closures, tuples, refs) from the shared heap. Sized
     /// once at attach time — runtime growth is a future concern.
     ///
-    /// Builder pattern; returns the interpreter for chaining.
+    /// Builder pattern; returns the interpreter for chaining. The heap
+    /// is stored in the shared `Runtime` (increment 3b), accessed only
+    /// by the current ML-memory lock-holder.
     #[must_use]
     pub fn with_alloc_space(mut self, space: MemorySpace) -> Self {
         let cap = space.capacity_words();
-        self.alloc_space = Some(space);
         let thresh = usize::from(crate::rts::gc_threshold_percent().unwrap_or(80));
         // gc_trigger_words = cap * thresh / 100. Saturate at 0 if
         // cap is so large that the multiply would overflow.
         self.gc_trigger_words = cap.checked_mul(thresh).map_or(0, |x| x / 100);
+        // Store the heap + trigger in the shared Runtime (single Arc ref
+        // at build time).
+        if let Some(rt) = Arc::get_mut(&mut self.runtime) {
+            // SAFETY: single-threaded build time, no other heap accessor.
+            unsafe {
+                *rt.heap_mut() = Some(space);
+            }
+            rt.gc_trigger_words = self.gc_trigger_words;
+        }
         self
     }
 
@@ -930,14 +1373,489 @@ impl Interpreter {
     #[must_use]
     pub fn with_image_mutable_root(mut self, ptr: *const PolyWord, len_words: usize) -> Self {
         self.image_mutable_roots.push((ptr, len_words));
+        // Mirror into the shared Runtime so a forked thread's collector
+        // can scan the same shared image roots. (The main thread's gc()
+        // reads its own `image_mutable_roots`; both Vecs hold the same
+        // entries.)
+        self.runtime.add_image_root(ptr, len_words);
         self
+    }
+
+    /// Request a stop-the-world GC and run it as the collector (3c).
+    ///
+    /// Ports upstream's "any thread crossing the threshold requests a
+    /// collection, every other thread parks at its safepoint, the
+    /// requester collects" model. Sets `gc_requested`, waits until every
+    /// peer has parked (`threads_in_heap == 1`), then runs `self.gc()`
+    /// (which now also forwards every parked thread's published roots),
+    /// clears the flag, and wakes the parked mutators.
+    ///
+    /// Single-threaded: `threads_in_heap == 1` already (just us), so the
+    /// wait returns immediately and this is byte-identical to a direct
+    /// `self.gc()`.
+    fn request_gc_collect(&mut self) -> Option<usize> {
+        let runtime = Arc::clone(&self.runtime);
+        let handle = Arc::clone(&self.handle);
+        runtime.request_gc(&handle, || self.gc())
+    }
+
+    /// Park at a safepoint because a peer requested a GC (3c). Captures
+    /// this thread's roots, boxes them, publishes them under the handle's
+    /// `parked_roots` slot (the collector's only route to our stack), and
+    /// blocks until the collection finishes. On wake the published box is
+    /// reclaimed (the collector already wrote our forwarded slots back via
+    /// the `fixup` thunk while we were parked).
+    ///
+    /// The capture aliases `self`'s fields by raw pointer and stays valid
+    /// across the park because the box outlives the wait and `self` is not
+    /// mutated meanwhile (we are blocked).
+    fn safepoint_park(&mut self) {
+        let runtime = Arc::clone(&self.runtime);
+        let handle = Arc::clone(&self.handle);
+        let (raw, send) = self.make_send_roots();
+        // SAFETY: `send` aliases live `self` state; the box outlives the
+        // park, and `self` is not mutated while we are blocked. The
+        // publish-before-release ordering is enforced inside
+        // `Runtime::safepoint_park` (publish under the giant lock, THEN
+        // clear `running`), so the collector never aliases a running stack.
+        unsafe {
+            runtime.safepoint_park(&handle, send);
+            // Reclaim the box (collector already applied fixups in place).
+            drop(Box::from_raw(raw));
+        }
+    }
+
+    /// Cooperatively yield the giant lock at a safepoint so a waiting peer
+    /// can run (3f). Publishes roots across the yield. No-op fast path
+    /// when there is only one registered thread (the common case): we are
+    /// the sole runner, so yielding would just re-acquire ourselves.
+    fn cooperative_yield(&mut self) {
+        if self.runtime.registry_len() <= 1 {
+            return;
+        }
+        let runtime = Arc::clone(&self.runtime);
+        let handle = Arc::clone(&self.handle);
+        let (raw, send) = self.make_send_roots();
+        // SAFETY: as in `safepoint_park` — `send` aliases live `self`; the
+        // box outlives the yield window; `yield_ml_memory` publishes before
+        // releasing and retracts on re-acquire.
+        unsafe {
+            runtime.yield_ml_memory(&handle, send);
+            drop(Box::from_raw(raw));
+        }
+    }
+
+    /// Check + act on this thread's pending interrupt/kill request (3f),
+    /// set by `Thread.interrupt`/`Thread.kill` via the handle. INTERRUPT
+    /// raises the SML `Interrupt` exception; KILL ends the run by
+    /// returning a sentinel.
+    fn check_thread_requests(&mut self) -> Result<StepResult, InterpError> {
+        use crate::sched::request;
+        use std::sync::atomic::Ordering;
+        let req = self.handle.requests.swap(request::NONE, Ordering::SeqCst);
+        match req {
+            request::INTERRUPT => self.raise_interrupt(),
+            request::KILL => Ok(StepResult::Returned(PolyWord::tagged(0))),
+            _ => Ok(StepResult::Continue),
+        }
+    }
+
+    /// Concurrency RTS calls that need the full `ThreadContext` (3d/3e/3f).
+    /// Returns `Ok(Some(result))` if handled here, `Ok(None)` to fall
+    /// through to the generic single-thread stub. `args` excludes the
+    /// stub; for `rtsCallFullN` calls `args[0]` is the threadId.
+    fn try_thread_rts(
+        &mut self,
+        name: &str,
+        args: &[PolyWord],
+    ) -> Result<Option<StepResult>, InterpError> {
+        // Real OS-thread concurrency is OPT-IN via POLY_REAL_THREADS=1.
+        //
+        // Rationale (faithfulness): some images (notably the
+        // self-bootstrapped `polyexport` REPL) FORK an internal
+        // console/compiler thread on startup and only worked because our
+        // `fork` was a dormant no-op stub (so that thread never ran and the
+        // main thread did all the work). Making `fork` genuinely spawn an OS
+        // thread INVERTS that architecture and breaks those images. So real
+        // threading is gated: default = the prior single-thread stubs
+        // (byte-identical bootstrap/REPL/HOL4/Isabelle); set
+        // POLY_REAL_THREADS=1 to enable genuine fork/mutex/condvar (the
+        // 2-thread mutex demo sets it). When OFF, every branch below falls
+        // through (`Ok(None)`) to the generic single-thread stub.
+        if !real_threads_enabled() {
+            return Ok(None);
+        }
+        match name {
+            // ForkThread(threadId, function, attrs, stack): actually spawn
+            // an OS thread running `function` (a `unit -> unit` closure)
+            // over a fresh ThreadContext sharing this Arc<Runtime>.
+            "PolyThreadForkThread" => {
+                let function = args.get(1).copied().unwrap_or(PolyWord::tagged(0));
+                let thread_obj = self.fork_thread(function)?;
+                Ok(Some(self.push_continue(thread_obj)?))
+            }
+            // MutexBlock(threadId, mutex): the SML lock() couldn't acquire
+            // a contended mutex; block until SOME mutex-unlock event, then
+            // return (SML retries lock). Releasing ML memory (publishing
+            // roots) around the wait mirrors upstream WaitInfinite.
+            //
+            // SINGLE-THREADED fallback: if no peer is alive (registry has
+            // only us), there is no one to wake us — blocking would
+            // deadlock and the old stub just reset+returned. So fall
+            // through to the generic single-thread stub (which resets the
+            // mutex so the SML retry-loop terminates). This keeps the
+            // single-threaded REPL/bootstrap behaviour byte-identical.
+            "PolyThreadMutexBlock" => {
+                if self.runtime.registry_len() <= 1 {
+                    return Ok(None);
+                }
+                self.block_on_event();
+                Ok(Some(self.push_continue(PolyWord::tagged(0))?))
+            }
+            // MutexUnlock(threadId, mutex): a contended unlock — reset the
+            // mutex to unlocked and wake all blocked waiters.
+            "PolyThreadMutexUnlock" => {
+                if let Some(mutex) = args.get(1) {
+                    Self::reset_mutex_word(*mutex);
+                }
+                self.runtime.notify_block_event();
+                Ok(Some(self.push_continue(PolyWord::tagged(0))?))
+            }
+            // CondVarWait(threadId, mutex): block until a wake event. The
+            // SML wrapper already unlocked the external mutex and added
+            // itself to the wait list; we just park until woken.
+            //
+            // SINGLE-THREADED fallback as for MutexBlock: with no peer to
+            // wake us, defer to the generic noop stub (return immediately)
+            // — preserving the prior single-thread behaviour exactly.
+            "PolyThreadCondVarWait" => {
+                if self.runtime.registry_len() <= 1 {
+                    return Ok(None);
+                }
+                self.block_on_event();
+                Ok(Some(self.push_continue(PolyWord::tagged(0))?))
+            }
+            // CondVarWake(thread): wake blocked waiters; return true. We use
+            // a global broadcast (the SML side re-checks its wait list), so
+            // we always report success.
+            "PolyThreadCondVarWake" => {
+                self.runtime.notify_block_event();
+                Ok(Some(self.push_continue(PolyWord::tagged(1))?))
+            }
+            // KillSelf(threadId): the thread function finished (Thread.exit).
+            // End this thread's run loop by returning to its driver, which
+            // releases ML memory + marks the handle exited.
+            "PolyThreadKillSelf" => Ok(Some(StepResult::Returned(PolyWord::tagged(0)))),
+            // WaitForSignal(threadId): the basis SIGNAL THREAD (its sole
+            // caller) blocks here until a signal / weak-marker arrives. We do
+            // NOT route SML signals (SIGINT raises `Interrupt` via
+            // `crate::interrupt`, not this queue), so the signal thread has
+            // nothing to deliver — it must PARK, not spin. The old
+            // immediate-return stub turned `sigThread`'s
+            // `waitForSig(); …; sigThread()` into a BUSY-LOOP that, once real
+            // `fork` actually spawned the signal thread, pinned the giant lock
+            // and hung the REPL at startup (the documented "fork inverts the
+            // no-op stub architecture" hazard). Mark this handle a DAEMON (so
+            // `wait_for_children` does not block on it at exit — upstream
+            // abandons the signal thread when the root returns) and park
+            // forever; a spurious wake (some unrelated `block_wake` bump)
+            // simply re-parks. Reusing `block_on_event` means the parked
+            // signal thread keeps its place in the GC handshake (it publishes
+            // roots before releasing ML memory), so collection stays sound.
+            "PolyWaitForSignal" => {
+                self.handle
+                    .is_daemon
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                loop {
+                    self.block_on_event();
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Block this thread until a mutex-unlock / condvar-wake event, with
+    /// the giant lock RELEASED (and roots published) across the wait —
+    /// the structural enforcement of "a blocking path publishes roots
+    /// before releasing ML memory". Re-acquires the lock on wake.
+    fn block_on_event(&mut self) {
+        // Sample the event generation BEFORE releasing the lock, so a wake
+        // racing in the release→wait window is not lost.
+        let since = self.runtime.block_gen();
+        let runtime = Arc::clone(&self.runtime);
+        let handle = Arc::clone(&self.handle);
+        let (raw, send) = self.make_send_roots();
+        // SAFETY: `send` aliases live `self`; the box outlives the wait and
+        // `self` is not mutated while blocked. `release_ml_memory_publishing`
+        // publishes the roots under the giant lock BEFORE clearing
+        // `running`, so a collector that runs while we wait can scan our
+        // stack and never aliases a running stack.
+        unsafe {
+            runtime.release_ml_memory_publishing(&handle, send);
+        }
+        // Wait for an event (giant lock released — only the block condvar).
+        runtime.block_until_event(since);
+        // Re-acquire the giant lock (retracts our published roots).
+        runtime.reacquire_ml_memory(&handle);
+        // SAFETY: reacquire set parked_roots = None, so no live alias to
+        // the box remains; reclaim it.
+        unsafe {
+            drop(Box::from_raw(raw));
+        }
+    }
+
+    /// Fork a real OS thread running `function` (a `unit -> unit` closure)
+    /// over a fresh `ThreadContext` sharing this `Arc<Runtime>` (3d).
+    /// Mirrors `Processes::ForkThread` + `IntTaskData::InitStackFrame`
+    /// (processes.cpp:1501, interpreter.cpp:115): allocate the child's
+    /// ThreadObject, push ONLY the closure onto the child stack, set PC to
+    /// the closure's code body, and run. The SML `threadFunction` calls
+    /// `Thread.exit` (→ PolyThreadKillSelf) at the end, ending the run.
+    ///
+    /// Returns the child's ThreadObject (the SML `thread` value).
+    fn fork_thread(&mut self, function: PolyWord) -> Result<PolyWord, InterpError> {
+        if std::env::var("POLY_THREAD_TRACE").is_ok() {
+            eprintln!("[parent] fork_thread function={function:?}");
+        }
+        // Allocate the child's ThreadObject in the shared heap (we hold ML
+        // memory). 9-word mutable object per processes.h:83-95.
+        let thread_obj = self.alloc_thread_object_value()?;
+
+        // The child shares the Runtime; build its handle.
+        let runtime = Arc::clone(&self.runtime);
+        let child_handle = crate::sched::ThreadHandle::new();
+
+        // ---- Close the fork TOCTOU (B1): publish the child's INITIAL
+        // roots BEFORE registering, so the invariant "registered AND
+        // not-running ⟹ parked_roots is Some" holds from the instant the
+        // child becomes visible to the collector. The child's only live
+        // heap pointers before it acquires the lock are its starting
+        // closure (`function`) and its ThreadObject (`thread_obj`); we box
+        // them as a `ForkRoots` and publish that.
+        //
+        // We are the running mutator (we hold the giant lock), so no GC can
+        // fire between this publish and the spawn; and once the child is
+        // registered-with-Some, a GC fired by US (the parent) before the
+        // child runs WILL forward the child's closure via the ForkRoots
+        // (exercised by the TOCTOU stress test).
+        let fork_roots = Box::new(ForkRoots {
+            function,
+            thread_obj,
+        });
+        let fork_raw = Box::into_raw(fork_roots);
+        let fork_send = crate::sched::SendRoots {
+            ptr: fork_raw.cast::<()>(),
+            forward: ForkRoots::forward_thunk,
+            fixup: ForkRoots::fixup_thunk,
+            audit: ForkRoots::audit_thunk,
+        };
+        *child_handle.parked_roots.lock().unwrap() = Some(fork_send);
+        // SAFETY: parked_roots is Some (just published) and the child is not
+        // yet in_ml; the published ForkRoots aliases `function`/`thread_obj`
+        // which are GC-stable (forwarded in place) until the child retracts
+        // them on its first acquire.
+        unsafe { runtime.register_thread_published(&child_handle) };
+
+        // The raw ForkRoots box pointer crosses to the child; it reads back
+        // the (possibly forwarded) closure + thread object after it acquires
+        // the lock, then reclaims the box. Wrap as a usize so it is Send.
+        let fork_raw_bits = fork_raw as usize;
+        let child_handle_for_thread = Arc::clone(&child_handle);
+
+        // Spawn the OS thread. We are the running mutator (hold the giant
+        // lock); `runtime` was moved into the closure, so keep a clone for
+        // the failure path's cleanup.
+        let runtime_for_cleanup = Arc::clone(&self.runtime);
+        let spawn_result = std::thread::Builder::new()
+            .name("poly-sml-thread".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                Self::child_thread_main(
+                    runtime,
+                    child_handle_for_thread,
+                    fork_raw_bits as *mut ForkRoots,
+                );
+            });
+
+        if let Err(e) = spawn_result {
+            // LOW (spawn-failure deadlock): the child handle is ALREADY
+            // registered with published ForkRoots, but no OS thread will ever
+            // run/exit it. Left as-is it is a registered, not-running,
+            // parked-with-Some handle that never drains — so the next
+            // `request_gc` stop-the-world barrier (which waits for every
+            // registered peer to be parked) is *satisfied* by it, but
+            // `wait_for_children` would block forever (it never sets
+            // `exited`). Deregister it + drop its published ForkRoots + free
+            // the leaked box ourselves. We hold the giant lock (running), but
+            // the CHILD does not, so use the PARKED exit (it must not clear
+            // OUR `running`). Then reclaim the ForkRoots box (no published
+            // slot references it after exit_parked clears it).
+            runtime_for_cleanup.exit_parked(&child_handle);
+            child_handle
+                .exited
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            runtime_for_cleanup.notify_block_event();
+            // SAFETY: exit_parked set this handle's parked_roots = None, so no
+            // reader references the ForkRoots box; reclaim it.
+            unsafe { drop(Box::from_raw(fork_raw_bits as *mut ForkRoots)) };
+            if std::env::var("POLY_THREAD_TRACE").is_ok() {
+                eprintln!("[parent] fork_thread spawn FAILED: {e}; child deregistered");
+            }
+            return Err(InterpError::ThreadSpawnFailed(e.to_string()));
+        }
+
+        let _ = child_handle; // the parent drops its extra ref; registry + spawn hold it
+        Ok(thread_obj)
+    }
+
+    /// Entry point of a forked OS thread. Builds a fresh `ThreadContext`
+    /// over the shared `Runtime`, seeds the function closure, runs it to
+    /// completion (Thread.exit ends the loop), then releases ML memory and
+    /// marks the handle exited + wakes joiners.
+    fn child_thread_main(
+        runtime: Arc<crate::sched::Runtime>,
+        handle: Arc<crate::sched::ThreadHandle>,
+        fork_raw: *mut ForkRoots,
+    ) {
+        let trace = std::env::var("POLY_THREAD_TRACE").is_ok();
+        if trace {
+            eprintln!("[child] spawned, fork_raw={fork_raw:p}");
+        }
+        // Build a fresh ThreadContext. We do NOT seed its stack or set its
+        // thread_object yet — the closure + thread object are still under
+        // the parent-published `ForkRoots`, which a GC may forward in place
+        // before we acquire. We read the (possibly-forwarded) values back
+        // only AFTER acquiring the lock (see below), so the child never
+        // holds a stale copy (the B1 root-handoff).
+        let mut child =
+            Interpreter::for_child_thread(runtime.clone(), handle.clone(), PolyWord::ZERO);
+        child.thread_object = None;
+        // The parent already registered our handle (with published roots).
+        child.registered = true;
+
+        // ---- Acquire the giant lock FIRST, KEEPING the parent-published
+        // `ForkRoots` published while we wait (do NOT overwrite it with a
+        // fresh empty capture — the child has no seeded stack yet, so an
+        // empty capture would let a GC during the wait skip our closure →
+        // B1 UAF). The ForkRoots stays published until we win the lock, so
+        // a GC forwards our closure + thread object in place; the slot is
+        // retracted to None the instant we win.
+        runtime.acquire_ml_memory_keep_published(&handle);
+
+        // ---- Read the forwarded closure + thread object back out of the
+        // ForkRoots box (it was forwarded in place by any GC that fired
+        // while we queued), then reclaim the box. From here the closure is
+        // rooted by our own stack and the thread object by our own field,
+        // both covered by our `ThreadRoots`.
+        // SAFETY: we hold the giant lock; the slot is retracted; we are the
+        // sole owner of the box now.
+        let (function, thread_obj) = unsafe {
+            let fr = &*fork_raw;
+            (fr.function, fr.thread_obj)
+        };
+        // SAFETY: the box was leaked by the parent and is no longer
+        // referenced by any published slot (retracted on acquire).
+        unsafe { drop(Box::from_raw(fork_raw)) };
+
+        child.thread_object = Some(thread_obj);
+        // Seed the stack: push ONLY the (forwarded) closure (InitStackFrame).
+        // The function reads its environment from the closure (LOCAL_0); it
+        // calls Thread.exit at the end so it never RETURNs past this frame.
+        let _ = child.push(function);
+        // Set PC + code bounds to the closure's code body.
+        if child.jit_set_code_segment_to_closure(function).is_err() {
+            // Malformed function: we ARE the running mutator here (we just
+            // acquired the lock above and have NOT released it), so exit via
+            // the RUNNING path — it clears `running` (which we hold) while
+            // deregistering. Using the parked path here (the H2 hazard)
+            // would leave `running == true` forever → permanent deadlock for
+            // every peer waiting on the giant lock.
+            runtime.exit_running(&handle);
+            // We deregistered explicitly; clear the flag so `child`'s Drop
+            // does not re-enter the exit path (exit_* is idempotent, so the
+            // double call is benign, but leaving it invites a future reader to
+            // assume Drop is the sole deregister site).
+            child.registered = false;
+            handle
+                .exited
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            runtime.notify_block_event();
+            return;
+        }
+        // Run the thread body. We ALREADY hold the giant lock (acquired
+        // above), so run_until must not re-acquire — flag it. A large step
+        // cap; Thread.exit ends it sooner.
+        child.holds_lock_on_entry = true;
+        if trace {
+            eprintln!(
+                "[child] entering run_until, registry_len={}",
+                runtime.registry_len()
+            );
+        }
+        let (steps, _outcome) = child.run_until(u64::MAX);
+        if trace {
+            eprintln!("[child] run_until returned after {steps} steps: {_outcome:?}");
+        }
+        // run_until's exit published our (now-quiescent) roots via
+        // `release_ml_memory` and stashed the box in `child.published_box`.
+        // We are about to die: at this point run_until ALREADY RELEASED the
+        // giant lock, so we are NOT the running mutator — exit via the
+        // PARKED path, which deregisters + drops our published roots WITHOUT
+        // touching `running` (a peer may now hold it; the H2 fix). It also
+        // waits out any in-flight collection before deregistering. Then free
+        // the stashed box.
+        runtime.exit_parked(&handle);
+        // Deregistered explicitly; clear the flag so `child`'s Drop is a no-op
+        // on the registry (see the malformed-function path above).
+        child.registered = false;
+        child.free_published_box();
+        handle
+            .exited
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        runtime.notify_block_event();
+    }
+
+    /// Allocate a ThreadObject value (9-word mutable object) in the shared
+    /// heap. Same layout as `rts::alloc_thread_object_stub`.
+    fn alloc_thread_object_value(&mut self) -> Result<PolyWord, InterpError> {
+        use crate::length_word::F_MUTABLE_BIT;
+        let length = 9;
+        let p = self.allocate(length, F_MUTABLE_BIT)?;
+        // SAFETY: just allocated 9 words.
+        unsafe {
+            p.add(0).write(PolyWord::tagged(0)); // threadRef
+            p.add(1).write(PolyWord::tagged(2)); // flags = PFLAG_SYNCH
+            p.add(2).write(PolyWord::tagged(0)); // threadLocal
+            p.add(3).write(PolyWord::tagged(0)); // requestCopy
+            p.add(4).write(PolyWord::tagged(0)); // mlStackSize
+            for i in 5..length {
+                p.add(i).write(PolyWord::tagged(0)); // debuggerSlots
+            }
+        }
+        Ok(PolyWord::from_ptr(p.cast_const()))
+    }
+
+    /// Reset a mutex object's word 0 to TAGGED(0) (unlocked). Mirrors
+    /// `InterpreterReleaseMutex` (bytecode.cpp:2465). Defensive against a
+    /// non-pointer "mutex".
+    fn reset_mutex_word(mutex: PolyWord) {
+        if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
+            let p = mutex.as_ptr::<PolyWord>().cast_mut();
+            // SAFETY: pointer-aligned data ptr ⇒ valid mutex slot.
+            unsafe { p.write(PolyWord::tagged(0)) };
+        }
     }
 
     /// Run a copying GC over the alloc space, forwarding all roots
     /// (interpreter stack, exception packet, code segment, frames,
     /// recent-call ring buffer, the per-thread bootstrap tail-call slot,
-    /// and any configured image-mutable-root regions). Returns the new
-    /// `used_words` count of the alloc space.
+    /// every parked thread's published roots, and any configured
+    /// image-mutable-root regions). Returns the new `used_words` count of
+    /// the alloc space.
+    ///
+    /// Precondition (3c): the caller is the collector — it holds the
+    /// giant lock and every OTHER thread is parked with roots published.
+    /// Reached via [`request_gc_collect`](Self::request_gc_collect).
     pub fn gc(&mut self) -> Option<usize> {
         // ---- Build the per-thread root-set REGISTRY.
         //
@@ -956,6 +1874,39 @@ impl Interpreter {
         // space is behaviour-identical to the original "bail first".)
         let mut registry: Vec<ThreadRoots> = vec![ThreadRoots::capture(self)];
 
+        // ---- PARKED-THREAD roots (multi-threaded only).
+        //
+        // Every OTHER live thread is, by the time we run as the collector,
+        // parked at its safepoint or in a blocking RTS wait, having
+        // PUBLISHED its root-set into its `ThreadHandle::parked_roots`
+        // slot. That `Mutex<Option<SendRoots>>` is the ONLY route we have
+        // to another thread's stack — a `None` slot is unreachable, so we
+        // structurally only touch a thread we have confirmed parked.
+        //
+        // We forward those published roots via the type-erased
+        // `forward`/`fixup` thunks the parking thread stored, holding each
+        // handle's `parked_roots` lock for the duration (the parked thread
+        // is blocked and cannot retract it until the collection finishes).
+        //
+        // Single-threaded: the registry has just our own handle, whose
+        // slot is `None` (we are `in_ml`, not parked) — so this loop is
+        // empty and the GC is byte-identical to the legacy one.
+        let parked_handles = self.runtime.registry_snapshot();
+        let my_handle = Arc::as_ptr(&self.handle);
+        // Guards kept alive until after fixup (so a parked thread cannot
+        // wake and mutate its stack mid-collection).
+        let mut parked_guards: Vec<std::sync::MutexGuard<'_, Option<crate::sched::SendRoots>>> =
+            Vec::new();
+        for h in &parked_handles {
+            if Arc::as_ptr(h) == my_handle {
+                continue;
+            }
+            let guard = h.parked_roots.lock().unwrap();
+            if guard.is_some() {
+                parked_guards.push(guard);
+            }
+        }
+
         // ---- SHARED roots (process-level, NOT per-thread): forwarded
         //      once regardless of how many threads are in the registry.
         // (The bootstrap tail-call slot is now PER-THREAD — captured +
@@ -963,7 +1914,9 @@ impl Interpreter {
         // Image mutable spaces (the global namespace + runtime refs).
         let image_roots = self.image_mutable_roots.clone();
 
-        let alloc = self.alloc_space.as_mut()?;
+        // SAFETY: we are the collector holding the giant lock with every
+        // other thread parked, so we are the sole live heap accessor.
+        let alloc = unsafe { self.runtime.heap_mut() }.as_mut()?;
         // Capture from-space range so we can audit for residual
         // pointers after the swap. Anything in interpreter state
         // (or the new to-space) that still points into this range
@@ -979,6 +1932,23 @@ impl Interpreter {
                 // the duration of this collect, and no other path mutates
                 // it meanwhile.
                 unsafe { roots.forward(c) };
+            }
+
+            // ---- Parked OTHER threads' published roots. Each guard holds
+            // a `Some(SendRoots)`; we call its type-erased `forward` thunk
+            // with the collector. The parked thread is blocked and cannot
+            // retract its publication until we clear gc_requested.
+            for guard in &mut parked_guards {
+                if let Some(sr) = guard.as_mut() {
+                    // SAFETY: the parked thread published a root-set
+                    // aliasing its live (frozen) ThreadContext; it is
+                    // blocked, so we are the sole accessor. `forward` is
+                    // the `ThreadRoots::forward` thunk; `c` is the
+                    // collector.
+                    unsafe {
+                        (sr.forward)(sr.ptr, std::ptr::from_mut(c).cast::<()>());
+                    }
+                }
             }
 
             // ---- Shared roots, forwarded ONCE.
@@ -1091,6 +2061,22 @@ impl Interpreter {
         }
         drop(registry);
 
+        // ---- Parked OTHER threads' post-GC fixup. Same scrub + write-back
+        // as our own thread, via the type-erased `fixup` thunk. Still
+        // under each handle's `parked_roots` lock (the parked thread is
+        // blocked), so no race. Dropping the guards afterwards lets the
+        // threads wake once we clear gc_requested.
+        for guard in &mut parked_guards {
+            if let Some(sr) = guard.as_mut() {
+                // SAFETY: collect freed from-space; the parked thread is
+                // still blocked, so we are the sole accessor of its roots.
+                unsafe {
+                    (sr.fixup)(sr.ptr);
+                }
+            }
+        }
+        drop(parked_guards);
+
         // (The per-thread bootstrap tail-call slot and recent-call ring
         // buffer are written back / cleared inside each root-set's
         // `apply_fixups`. No shared root write-back remains.)
@@ -1177,7 +2163,7 @@ impl Interpreter {
         // 6. Walk the NEW alloc-space body words and look for stale
         //    inbound pointers. This is the big one — missed children
         //    of forwarded objects.
-        if let Some(space) = self.alloc_space.as_ref() {
+        if let Some(space) = self.alloc_space_ref() {
             let start = space.as_ptr_range().start;
             let used = space.used_words();
             // SAFETY: 0..used in-bounds.
@@ -1240,12 +2226,75 @@ impl Interpreter {
                 i += 1 + n;
             }
         }
+        // 8. CROSS-STACK audit (B3): scan EVERY OTHER registered thread's
+        //    PUBLISHED roots (+ flag any registered-but-unpublished peer).
+        //    Extracted into a helper to keep this function readable.
+        residual += self.audit_cross_stack_residual(from_lo, from_hi, &mut samples);
         if residual > 0 {
             eprintln!("  GC AUDIT: {residual} residual from-space pointers remain after collect:");
             for (where_, idx, addr) in samples {
                 eprintln!("    {where_}[{idx}] = 0x{addr:016x}");
             }
         }
+        // Record the residual into the Runtime so a test can ASSERT on it —
+        // the audit's teeth (a NEGATIVE control that reintroduces H1/H2 must
+        // see this go positive; a sound run keeps it 0).
+        self.runtime
+            .gc_audit_residual
+            .fetch_add(residual as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// CROSS-STACK audit (B3): scan EVERY OTHER registered thread's PUBLISHED
+    /// roots for residual from-space pointers, and flag any registered-but-
+    /// unpublished peer (the B1/B2 invariant violation — its live stack would
+    /// have been skipped). Returns the residual count to add. We re-snapshot +
+    /// re-lock each handle's slot; the parked threads are still blocked
+    /// (`gc_requested` is cleared only after `gc()` returns), so the slots are
+    /// frozen.
+    fn audit_cross_stack_residual(
+        &self,
+        from_lo: usize,
+        from_hi: usize,
+        samples: &mut Vec<(&'static str, usize, usize)>,
+    ) -> usize {
+        let me = Arc::as_ptr(&self.handle);
+        let mut residual = 0usize;
+        let mut unpublished_others = 0usize;
+        for h in &self.runtime.registry_snapshot() {
+            if Arc::as_ptr(h) == me {
+                continue;
+            }
+            let guard = h.parked_roots.lock().unwrap();
+            match guard.as_ref() {
+                Some(sr) => {
+                    // SAFETY: the parked thread is blocked; we are the sole
+                    // accessor of its published roots under this lock.
+                    let n = unsafe { (sr.audit)(sr.ptr, from_lo, from_hi) };
+                    if n > 0 {
+                        residual += n;
+                        if samples.len() < 5 {
+                            samples.push(("parked_thread_roots", 0, 0));
+                        }
+                    }
+                }
+                None => {
+                    // A registered, non-running peer with UNPUBLISHED roots is
+                    // itself a soundness violation (the B1/B2 invariant): the
+                    // collector would have skipped its live stack. Flag it
+                    // loudly even though we cannot scan what was skipped.
+                    unpublished_others += 1;
+                }
+            }
+        }
+        if unpublished_others > 0 {
+            eprintln!(
+                "  GC AUDIT: {unpublished_others} registered NON-running thread(s) had \
+                 parked_roots == None at collect time (B1/B2 invariant violated — \
+                 their live stacks were SKIPPED)"
+            );
+            residual += unpublished_others;
+        }
+        residual
     }
 
     // ---- Inspection -----------------------------------------------------
@@ -1342,6 +2391,195 @@ impl Interpreter {
         self.sp = self.stack.len();
         self.frames.clear();
         self.handler_sp = 0;
+    }
+
+    /// Test-only: acquire the giant mutator lock (become the running
+    /// thread), publishing roots while waiting. Pairs with
+    /// [`Self::test_release_running`]. Used by the fork-TOCTOU stress test
+    /// to drive the real `fork_thread` path from Rust.
+    #[doc(hidden)]
+    pub fn test_acquire_running(&mut self) {
+        // `acquire_running` registers-and-acquires atomically on its first
+        // call (H1), so there is no separate bare-register step.
+        self.acquire_running();
+    }
+
+    /// Test-only: release the giant mutator lock after a
+    /// [`Self::test_acquire_running`], publishing our (quiesced) roots so
+    /// the invariant holds. Quiesces first (terminal-style) so a child's GC
+    /// after we release cannot race a write-back into our `self`.
+    #[doc(hidden)]
+    pub fn test_release_running(&mut self) {
+        self.quiesce_roots();
+        let runtime = Arc::clone(&self.runtime);
+        let handle = Arc::clone(&self.handle);
+        let (raw, send) = self.make_send_roots();
+        // SAFETY: quiesced ⇒ root-free capture; box stashed to outlive the
+        // published-slot window, freed on the next acquire / Drop.
+        unsafe { runtime.release_ml_memory(&handle, send) };
+        self.stash_published_box(raw);
+    }
+
+    /// Test-only: build a minimal *runnable* closure in the SHARED heap that
+    /// the child-fork path can execute — a code object whose body is
+    /// `RETURN_B 0` (return immediately) plus a closure word pointing at it.
+    /// Because it lives in the collected heap, a GC fired before the child
+    /// runs WILL move it — exercising the B1 root-handoff (the child must
+    /// read the FORWARDED closure back out of its `ForkRoots`). Caller must
+    /// hold the giant lock. Returns the closure `PolyWord`.
+    ///
+    /// # Panics
+    /// If the runtime has no alloc space.
+    #[doc(hidden)]
+    pub fn test_build_runnable_closure(&mut self) -> PolyWord {
+        use crate::length_word::{F_CLOSURE_OBJ, F_CODE_OBJ};
+        // Code body: RETURN_B 0 (opcode 0x1f, imm 0). Plus a 2-word const
+        // tail (n_consts=0 + the const-base offset word) matching
+        // make_code_object's layout so const_segment_for_code is valid.
+        let code_bytes: [u8; 2] = [0x1f, 0x00];
+        let word = std::mem::size_of::<usize>();
+        let code_words = code_bytes.len().div_ceil(word);
+        let total_words = code_words + 2; // + n_consts word + const-base word
+        let code_obj = self
+            .allocate(total_words, F_CODE_OBJ)
+            .expect("alloc code obj");
+        // SAFETY: just allocated total_words; layout per make_code_object.
+        unsafe {
+            let dst = code_obj.cast::<u8>();
+            std::ptr::copy_nonoverlapping(code_bytes.as_ptr(), dst, code_bytes.len());
+            let pad = code_bytes.len().next_multiple_of(word) - code_bytes.len();
+            if pad > 0 {
+                std::ptr::write_bytes(dst.add(code_bytes.len()), 0, pad);
+            }
+            code_obj.add(code_words).write(PolyWord::from_bits(0)); // n_consts = 0
+            let const_addr_index = (code_words + 1) as isize;
+            let total_isize = total_words as isize;
+            let offset_bytes = (const_addr_index - total_isize) * (word as isize);
+            code_obj
+                .add(total_words - 1)
+                .write(PolyWord::from_bits(offset_bytes as usize));
+        }
+        // Closure: 1 word = the code-object pointer.
+        let closure = self.allocate(1, F_CLOSURE_OBJ).expect("alloc closure");
+        // SAFETY: 1-word closure; word[0] = code object pointer.
+        unsafe {
+            closure
+                .add(0)
+                .write(PolyWord::from_ptr(code_obj.cast_const()));
+        }
+        PolyWord::from_ptr(closure.cast_const())
+    }
+
+    /// Test-only: fork a real child OS thread running `function` via the
+    /// genuine [`Self::fork_thread`] path (publishes the child's ForkRoots,
+    /// registers it, spawns it). Caller must hold the giant lock. Returns
+    /// the child's ThreadObject.
+    ///
+    /// # Panics
+    /// If `fork_thread` fails (e.g. no alloc space).
+    #[doc(hidden)]
+    pub fn test_fork_child(&mut self, function: PolyWord) -> PolyWord {
+        self.fork_thread(function).expect("fork_thread")
+    }
+
+    /// Test-only: force a stop-the-world collection right now (the caller is
+    /// the running thread). With a freshly-forked child still registered but
+    /// not yet acquired, this exercises the B1 TOCTOU window: the collector's
+    /// stop-the-world barrier waits for the child to be confirmed parked
+    /// (its ForkRoots published), then forwards the child's closure.
+    #[doc(hidden)]
+    pub fn test_force_gc(&mut self) {
+        let _ = self.request_gc_collect();
+    }
+
+    /// NEGATIVE-CONTROL ONLY (proves the audit has teeth): collect DIRECTLY
+    /// via `gc()`, bypassing `request_gc`'s stop-the-world barrier. The
+    /// barrier is exactly what BLOCKS on a registered-but-unpublished peer
+    /// (the H1 hazard), so a faithful H1 reintroduction would DEADLOCK in
+    /// `request_gc` — not a useful negative control. By collecting directly
+    /// we let the collector run with an H1-violating registry present and
+    /// observe that the POLYML_GC_AUDIT cross-stack pass DETECTS it
+    /// (`gc_audit_residual` goes positive). Caller must be the running thread
+    /// (hold the giant lock). Returns the new used-words (or None).
+    #[doc(hidden)]
+    pub fn test_force_gc_no_barrier(&mut self) -> Option<usize> {
+        self.gc()
+    }
+
+    /// NEGATIVE-CONTROL ONLY: reintroduce the H1 unsound state by pushing a
+    /// dummy peer handle into the scheduler registry with `parked_roots ==
+    /// None` (a "registered, not-running, unpublished" thread — exactly what
+    /// the structural H1 fix forbids, since the production API no longer has
+    /// a bare `register_thread`). A subsequent direct collect
+    /// (`test_force_gc_no_barrier`) under POLYML_GC_AUDIT=1 must flag this as
+    /// an unpublished-peer residual. Returns the dummy handle so the test can
+    /// clean it up (deregister) afterwards. Caller holds the giant lock.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_register_unpublished_peer_unsound(&self) -> Arc<crate::sched::ThreadHandle> {
+        let dummy = crate::sched::ThreadHandle::new();
+        // Bare-register: push into the registry while parked_roots stays
+        // None. This is the H1 invariant violation, reproduced on purpose.
+        let mut inner = self.runtime.sched.inner.lock().unwrap();
+        inner.registry.push(Arc::clone(&dummy));
+        dummy
+    }
+
+    /// NEGATIVE-CONTROL cleanup: remove a dummy peer handle previously
+    /// pushed by [`Self::test_register_unpublished_peer_unsound`].
+    #[doc(hidden)]
+    pub fn test_deregister_peer(&self, handle: &Arc<crate::sched::ThreadHandle>) {
+        let mut inner = self.runtime.sched.inner.lock().unwrap();
+        inner.registry.retain(|h| !Arc::ptr_eq(h, handle));
+    }
+
+    /// Test-only getter: cumulative GC-audit residual count (see
+    /// [`crate::sched::Runtime::gc_audit_residual`]).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_gc_audit_residual(&self) -> u64 {
+        self.runtime
+            .gc_audit_residual
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Test-only getter: whether the giant lock is held (`running`). Used by
+    /// the H2 negative control.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_running(&self) -> bool {
+        self.runtime.running_for_test()
+    }
+
+    /// H2 NEGATIVE-CONTROL ONLY: stage a parked peer (registered + published,
+    /// root-free) and call `exit_parked` on it. The CALLER (host) must be the
+    /// running mutator (hold the giant lock). After this:
+    ///   * with the H2 FIX, `exit_parked` does NOT touch `running`, so the
+    ///     host still holds the lock (`test_running() == true`);
+    ///   * with the H2 BUG (clearing `running` unconditionally), the host's
+    ///     ownership is clobbered (`test_running() == false`) → a second
+    ///     mutator could run.
+    /// The test asserts `test_running()` stays true, proving the fix and that
+    /// reintroducing H2 would FAIL this assertion (teeth).
+    #[doc(hidden)]
+    pub fn test_exit_parked_peer_while_running(&mut self) {
+        // Stage a parked peer with a root-free dummy capture.
+        let peer = crate::sched::ThreadHandle::new();
+        let dummy: Box<ThreadRoots> = Box::new(ThreadRoots::capture(self));
+        let raw = Box::into_raw(dummy);
+        let send = crate::sched::SendRoots {
+            ptr: raw.cast::<()>(),
+            forward: ThreadRoots::forward_thunk,
+            fixup: ThreadRoots::fixup_thunk,
+            audit: ThreadRoots::audit_thunk,
+        };
+        // SAFETY: no GC runs against this dummy; thunks are never invoked.
+        unsafe { self.runtime.test_register_parked_dummy(&peer, send) };
+        // Now exit the parked peer (it is NOT the running thread — WE are).
+        self.runtime.exit_parked(&peer);
+        // The dummy box is now unreferenced (exit_parked cleared the slot).
+        // SAFETY: reclaim it.
+        unsafe { drop(Box::from_raw(raw)) };
     }
 
     /// Test/debug API: push a synthetic return-to-top sentinel onto
@@ -1608,12 +2846,343 @@ impl Interpreter {
     /// task #88: hoists the per-step global checks the CLI loop used to pay
     /// across the crate boundary on every opcode.)
     pub fn run_until(&mut self, max_steps: u64) -> (u64, Result<StepResult, InterpError>) {
+        // ---- Concurrency (3c): become THE running mutator for the
+        // duration of this run. Register this thread's handle (if not
+        // already), then acquire the giant lock — publishing our roots
+        // while we wait (so a GC firing on the running peer can scan us),
+        // retracting them the instant we win the lock. On the
+        // single-threaded floor there is no peer and no GC in flight, so
+        // acquire returns immediately and the step count is byte-identical.
+        let runtime = Arc::clone(&self.runtime);
+        let handle = Arc::clone(&self.handle);
+        // The forked-child entry acquires the lock itself (to retract its
+        // pre-published ForkRoots and read back the forwarded closure)
+        // before seeding its stack, so it enters here already holding the
+        // lock — acquiring again would deadlock. Consume the one-shot flag.
+        let entered_holding = self.holds_lock_on_entry;
+        self.holds_lock_on_entry = false;
+        if entered_holding {
+            // The child was registered (with published ForkRoots) by its
+            // PARENT before the spawn, so it is already in the registry with
+            // the invariant satisfied; nothing to register here. (Defensive:
+            // a child must arrive already registered.)
+            debug_assert!(
+                self.registered,
+                "a lock-holding (forked child) entry must already be registered"
+            );
+        } else {
+            // H1 (structural): the FIRST acquire registers-and-acquires
+            // atomically (no bare register, no None-while-registered window);
+            // subsequent acquires just publish + wait. `acquire_running`
+            // sets `self.registered` on its first call.
+            self.acquire_running();
+        }
+
         let instrumented = self.diag.is_some() || arbint_trace_on() || crate::rts::is_traced();
-        if instrumented {
+        let result = if instrumented {
             self.run_until_impl::<true>(max_steps)
         } else {
             self.run_until_impl::<false>(max_steps)
+        };
+
+        // ---- Release the giant lock on leaving the interpreter loop, but
+        // STAY REGISTERED with PUBLISHED roots (B2): there must be no
+        // release-while-registered that leaves parked_roots == None, or a
+        // peer's GC would skip our live stack. We must distinguish two
+        // exits, because between calls the OWNING thread may run lock-free
+        // driver code that mutates `self` (the REPL re-seeding, the test's
+        // chunk loop) — and the collector forwards a published capture by
+        // WRITING BACK into `self`, which would race that driver code:
+        //
+        //  * TERMINAL (Returned / Err): the bytecode frame is fully unwound;
+        //    nothing on this thread's stack is needed any more (the result
+        //    is returned BY VALUE). We QUIESCE — empty the live stack +
+        //    null the code/frame/handler/exn roots — so the published
+        //    capture is root-free. The collector then forwards/writes-back
+        //    nothing live, so a concurrent driver mutating `self` cannot
+        //    race a write-back, AND a peer GC has no live root to miss.
+        //
+        //  * RESUMABLE (Continue / hit max_steps): the caller will re-enter
+        //    `run_until` to CONTINUE this exact execution WITHOUT mutating
+        //    `self`. Here the live stack DOES root live heap, so we publish
+        //    the real capture; it is race-free because the caller does not
+        //    touch `self` before the next acquire retracts the slot.
+        let terminal = matches!(result, (_, Ok(StepResult::Returned(_)) | Err(_)));
+        if terminal {
+            self.quiesce_roots();
         }
+        let (raw, send) = self.make_send_roots();
+        // SAFETY: `send` aliases live `self`; for a TERMINAL exit the
+        // capture is root-free (quiesced); for a RESUMABLE exit `self` is
+        // not mutated by the caller before the next acquire retracts the
+        // slot. The leaked box must stay valid for the WHOLE quiescent
+        // window (the published `SendRoots` references it), so we stash it
+        // and free it on the next acquire / on thread exit — NOT here.
+        unsafe {
+            runtime.release_ml_memory(&handle, send);
+        }
+        self.stash_published_box(raw);
+        result
+    }
+
+    /// Empty this thread's live GC root state so a published capture taken
+    /// immediately afterwards is root-free (B2, the TERMINAL-exit path).
+    /// Called only when `run_until` is leaving with a TERMINAL result
+    /// (Returned / Err) — the bytecode frame is fully unwound and the result
+    /// is returned by value, so nothing here is needed for resumption. After
+    /// this, a concurrent peer GC forwarding our published capture writes
+    /// back nothing live, eliminating the data race with lock-free driver
+    /// code that re-seeds `self` between calls.
+    fn quiesce_roots(&mut self) {
+        self.sp = self.stack.len(); // live set [sp, len) is now empty
+        self.frames.clear();
+        self.handler_frames_depth.clear();
+        self.handler_sp = self.stack.len();
+        self.exception_packet = None;
+        self.pc = std::ptr::null();
+        self.code_start = std::ptr::null();
+        self.code_end = std::ptr::null();
+        self.recent_call_targets = [0; 16];
+        // NB: thread_object + bootstrap_tail_call are intentionally KEPT —
+        // they are per-thread identity/state, not transient frame roots, and
+        // are still forwarded (they are not mutated by lock-free driver
+        // code; the driver re-seeds the STACK + code, not these).
+    }
+
+    /// Wait until every OTHER registered thread has exited, so the process
+    /// does not terminate (killing detached child threads) while a forked
+    /// SML thread is still running (3f). With real threads OFF there are
+    /// never any children, so this returns immediately. The main thread
+    /// must NOT hold the giant lock while waiting (it isn't — `run_until`
+    /// released it), so children can run + drain.
+    pub fn wait_for_children(&self) {
+        if !real_threads_enabled() {
+            return;
+        }
+        loop {
+            // Count registered threads that are not us and not exited.
+            let snapshot = self.runtime.registry_snapshot();
+            let me = Arc::as_ptr(&self.handle);
+            let live_others = snapshot
+                .iter()
+                .filter(|h| {
+                    Arc::as_ptr(h) != me
+                        && !h.exited.load(std::sync::atomic::Ordering::SeqCst)
+                        // Daemon threads (the signal thread parked forever in
+                        // PolyWaitForSignal) never return; like upstream, the
+                        // process exits without waiting for them.
+                        && !h.is_daemon.load(std::sync::atomic::Ordering::SeqCst)
+                })
+                .count();
+            if live_others == 0 {
+                return;
+            }
+            // Wait for a child to exit (block_wake is bumped on exit) — or a
+            // bounded sleep as a backstop against missed wakeups.
+            let since = self.runtime.block_gen();
+            // Re-check after sampling to avoid a lost-wakeup race.
+            let snapshot = self.runtime.registry_snapshot();
+            let live_others = snapshot
+                .iter()
+                .filter(|h| {
+                    Arc::as_ptr(h) != me
+                        && !h.exited.load(std::sync::atomic::Ordering::SeqCst)
+                        // Daemon threads (the signal thread parked forever in
+                        // PolyWaitForSignal) never return; like upstream, the
+                        // process exits without waiting for them.
+                        && !h.is_daemon.load(std::sync::atomic::Ordering::SeqCst)
+                })
+                .count();
+            if live_others == 0 {
+                return;
+            }
+            self.runtime.block_until_event_timeout(since, 50);
+        }
+    }
+
+    /// Build a `SendRoots` for THIS thread (a boxed `ThreadRoots` capture
+    /// + its type-erased thunks). Returns the raw box pointer so the
+    /// caller can reclaim it after the publish window closes.
+    ///
+    /// # Safety
+    /// The returned `SendRoots` aliases live `self` state; it is valid
+    /// only while `self` is not mutated (i.e. while this thread is parked
+    /// / waiting for the giant lock). The caller MUST reclaim the box with
+    /// `Box::from_raw` once the slot is retracted.
+    fn make_send_roots(&mut self) -> (*mut ThreadRoots, crate::sched::SendRoots) {
+        let roots: Box<ThreadRoots> = Box::new(ThreadRoots::capture(self));
+        let raw = Box::into_raw(roots);
+        let send = crate::sched::SendRoots {
+            ptr: raw.cast::<()>(),
+            forward: ThreadRoots::forward_thunk,
+            fixup: ThreadRoots::fixup_thunk,
+            audit: ThreadRoots::audit_thunk,
+        };
+        (raw, send)
+    }
+
+    /// Stash the leaked `ThreadRoots` box published on a quiescent
+    /// `run_until` release (B2). Frees any previously-stashed box first
+    /// (only reachable after its slot was retracted by an intervening
+    /// acquire), then records the new one so it outlives the whole
+    /// quiescent window during which the published `SendRoots` references
+    /// it. The box is finally freed by the next [`Self::acquire_running`]
+    /// (after it retracts the slot) or by this method's free-prior step.
+    fn stash_published_box(&mut self, raw: *mut ThreadRoots) {
+        // INVARIANT: the preceding `acquire_running` (every `run_until`
+        // acquires before it releases) already retracted + freed the prior
+        // box AND applied its deferred identity write-back, so there must be
+        // no outstanding stash here. If one somehow remained, freeing it here
+        // (we do NOT hold the giant lock at this point — release just cleared
+        // `running`) would also SKIP its deferred identity write-back,
+        // leaving `self.thread_object` stale (from-space) for the fresh
+        // capture below. That must not happen — assert it.
+        debug_assert!(
+            self.published_box.is_none(),
+            "a stashed quiesced box outlived its acquire (deferred writeback skipped)"
+        );
+        if let Some(prev) = self.published_box.take() {
+            // Leak-guard only (unreachable per the invariant above).
+            unsafe { drop(Box::from_raw(prev)) };
+        }
+        self.published_box = Some(raw);
+    }
+
+    /// Whether the stashed published box (if any) was a QUIESCED capture.
+    /// Used by `acquire_running` to decide between the keep-published
+    /// re-acquire (quiesced: forwarded identity roots live only in the box)
+    /// and the fresh-capture acquire (no stash, or a resumable stash on the
+    /// single-threaded CLI loop).
+    fn stashed_box_is_quiesced(&self) -> bool {
+        // SAFETY: we own the stashed box; reading its `quiesced` flag is a
+        // plain field read.
+        self.published_box.is_some_and(|b| unsafe { (*b).quiesced })
+    }
+
+    /// Free the box stashed by the last quiescent release, if any. Called
+    /// right after an acquire retracts the published slot (so no reader
+    /// references it).
+    ///
+    /// (LOW, round 2) BEFORE freeing, apply the DEFERRED quiesced identity
+    /// write-back: a quiesced capture's `apply_fixups` deliberately does NOT
+    /// reach into the (lock-free, between-`run_until`) owning thread's `self`
+    /// — so the collector forwarded this thread's identity roots (thread
+    /// object + bootstrap tail) IN PLACE in this box but never wrote them
+    /// back. Now that WE hold the giant lock (the acquire that called us just
+    /// retracted the slot and the collector is done), copy the forwarded
+    /// identity values out of the box into `self` — race-free by construction
+    /// (we own `self` and the lock; no collector can be mid-forward). A
+    /// resumable box already wrote these back from the collector, but it is
+    /// harmless/idempotent to re-copy the same (forwarded) values.
+    fn free_published_box(&mut self) {
+        if let Some(prev) = self.published_box.take() {
+            // SAFETY: acquire set parked_roots = None before returning, so
+            // the collector can no longer reach this box; we are the sole
+            // owner now. Read the (forwarded) identity slots, then reclaim.
+            unsafe {
+                let b = &*prev;
+                if b.quiesced {
+                    if b.thread_obj_present {
+                        self.thread_object = Some(b.thread_obj_slot);
+                    }
+                    self.bootstrap_tail_call = b.bootstrap_tail_slot;
+                }
+                drop(Box::from_raw(prev));
+            }
+        }
+    }
+
+    /// Acquire the giant mutator lock, publishing our roots while we wait.
+    ///
+    /// H1 (structural): the FIRST acquire of a not-yet-registered thread
+    /// REGISTERS + publishes + acquires atomically under a single scheduler
+    /// lock acquisition ([`Runtime::register_and_acquire_ml_memory`]), so the
+    /// handle never appears in the registry as "registered, not-running,
+    /// `parked_roots == None`" — closing the generic register-path TOCTOU
+    /// (the analogue of the fork B1 window). Subsequent acquires (the REPL
+    /// driver re-entering `run_until`) take the plain publishing acquire.
+    fn acquire_running(&mut self) {
+        let runtime = Arc::clone(&self.runtime);
+        let handle = Arc::clone(&self.handle);
+        let trace = std::env::var("POLY_THREAD_TRACE").is_ok();
+        if trace {
+            eprintln!("[thread] acquire_running: waiting for giant lock");
+        }
+
+        // Re-acquire after a QUIESCED release keeps the already-published box
+        // as the slot (it holds the forwarded identity roots) — see
+        // `reacquire_kept_published`.
+        if self.registered && self.stashed_box_is_quiesced() {
+            self.reacquire_kept_published(&runtime, &handle);
+            if trace {
+                eprintln!("[thread] acquire_running: GOT giant lock (kept-published)");
+            }
+            return;
+        }
+
+        let (raw, send) = self.make_send_roots();
+        // SAFETY: `send` aliases live `self`; we are about to block in
+        // acquire (so `self` is frozen), and acquire retracts the slot
+        // (sets it None) before returning. We then reclaim the box.
+        unsafe {
+            if self.registered {
+                runtime.acquire_ml_memory(&handle, send);
+            } else {
+                // Register-and-acquire atomically: publish roots, push into
+                // the registry, then wait — all without releasing `inner`,
+                // so the invariant holds from the instant we are visible.
+                runtime.register_and_acquire_ml_memory(&handle, send);
+                self.registered = true;
+            }
+            drop(Box::from_raw(raw));
+        }
+        // The acquire just retracted the slot (set it None), so any box
+        // published on the PREVIOUS quiescent release is now unreferenced —
+        // free it (B2 lifetime management).
+        self.free_published_box();
+        if trace {
+            eprintln!("[thread] acquire_running: GOT giant lock");
+        }
+    }
+
+    /// Re-acquire after a QUIESCED `run_until` release (LOW, round 2).
+    ///
+    /// A terminal `run_until` exit published a QUIESCED capture box and
+    /// stashed it (`published_box`). Its `apply_fixups` deliberately does NOT
+    /// write the forwarded identity roots back into `self` (the lock-free
+    /// between-`run_until` driver owns `&mut self`, so a collector write into
+    /// `self` would be a data race / aliasing violation). So the forwarded
+    /// identity roots live ONLY in that box.
+    ///
+    /// Therefore we MUST NOT take a FRESH capture and publish it:
+    /// `self.thread_object` may be a STALE from-space pointer (a peer GC
+    /// forwarded the box but not `self`), so a fresh capture would publish a
+    /// dangling root and a GC during the acquire-wait would chase it → UAF.
+    /// Instead KEEP the already-published quiesced box as the slot (it holds
+    /// the current forwarded identity roots), wait, retract on win, and only
+    /// THEN — holding the giant lock, collector done — copy the forwarded
+    /// identity values out of the box into `self` (`free_published_box`). This
+    /// is the keep-published discipline, reused (the child fork path uses the
+    /// same primitive).
+    ///
+    /// (A RESUMABLE stash — `run_until` returned Continue / max_steps — is
+    /// NON-quiesced and is handled by the fresh-capture path in
+    /// `acquire_running`; it only occurs on the single-threaded CLI step-cap
+    /// loop, where no peer can fire a GC during the park, so `self` is never
+    /// stale and the fresh-capture path is sound + byte-identical.)
+    fn reacquire_kept_published(
+        &mut self,
+        runtime: &Arc<crate::sched::Runtime>,
+        handle: &Arc<crate::sched::ThreadHandle>,
+    ) {
+        debug_assert!(
+            handle.parked_roots.lock().unwrap().is_some(),
+            "a stashed published box must still be the published slot on re-acquire"
+        );
+        runtime.acquire_ml_memory_keep_published(handle);
+        // Retracted; now apply the box's forwarded identity write-back + free
+        // it (race-free: we hold the lock).
+        self.free_published_box();
     }
 
     #[inline]
@@ -1626,17 +3195,39 @@ impl Interpreter {
             if steps >= max_steps {
                 return (steps, Ok(StepResult::Continue));
             }
-            // Poll for an async interrupt (SIGINT / Ctrl-C) at a coarse cadence:
-            // one relaxed atomic load per 65536 steps, so the hot loop is
-            // unaffected (~ms-scale delivery latency). On a pending interrupt,
-            // raise the SML `Interrupt` exception, which unwinds to the nearest
-            // handler (e.g. the REPL top level) or halts the run if none.
-            if steps & 0xFFFF == 0 && crate::interrupt::take_interrupt() {
-                match self.raise_interrupt() {
+            // Coarse safepoint poll, one check per 65536 steps (so the hot
+            // loop is unaffected, ~ms-scale latency).
+            if steps & 0xFFFF == 0 {
+                // Safepoint (3c): if a peer thread requested a GC, park here
+                // — publishing this thread's roots so the collector can
+                // forward our stack — until the collection finishes.
+                // Single-threaded: `gc_requested` is never set by a peer (we
+                // ARE the only thread), so this never fires and the step
+                // count is unchanged.
+                if self.runtime.gc_requested_relaxed() {
+                    self.safepoint_park();
+                }
+                // Per-thread interrupt/kill request (3f) routed via the
+                // handle (Thread.interrupt / Thread.kill).
+                match self.check_thread_requests() {
                     Ok(StepResult::Continue) => {}
                     Ok(other) => return (steps, Ok(other)),
                     Err(e) => return (steps, Err(e)),
                 }
+                // Async SIGINT (Ctrl-C): raise the SML `Interrupt`
+                // exception, which unwinds to the nearest handler (e.g. the
+                // REPL top level) or halts the run if none.
+                if crate::interrupt::take_interrupt() {
+                    match self.raise_interrupt() {
+                        Ok(StepResult::Continue) => {}
+                        Ok(other) => return (steps, Ok(other)),
+                        Err(e) => return (steps, Err(e)),
+                    }
+                }
+                // Cooperative yield (3f): hand the giant lock to a waiting
+                // peer so threads interleave. No-op when single-threaded
+                // (registry_len <= 1), so the floor is unaffected.
+                self.cooperative_yield();
             }
             steps += 1;
             match self.step_impl::<INSTR>() {
@@ -1664,18 +3255,24 @@ impl Interpreter {
             return Ok(StepResult::Returned(PolyWord::tagged(code)));
         }
 
-        // Auto-GC: trigger when alloc_space.used reaches the
-        // pre-computed threshold. Trigger is 0 when no alloc_space or
-        // when POLYML_GC_THRESHOLD selects "disable GC" — either way
-        // `used >= 0` would always be true if used == 0, so we also
-        // guard on `gc_trigger_words > 0`.
+        // Auto-GC: trigger when heap.used reaches the pre-computed
+        // threshold. Trigger is 0 when no heap or when POLYML_GC_THRESHOLD
+        // selects "disable GC" — either way `used >= 0` would always be
+        // true if used == 0, so we also guard on `gc_trigger_words > 0`.
+        //
+        // Concurrency (3c): we become the COLLECTOR via
+        // `request_gc_collect`, which (single-threaded) sees
+        // threads_in_heap == 1 immediately and runs the collection inline
+        // — byte-identical to the old direct `self.gc()`. With multiple
+        // threads it sets gc_requested, waits for every peer to park at
+        // its safepoint, then collects every thread's roots.
         if self.gc_trigger_words > 0
-            && let Some(used) = self.alloc_space.as_ref().map(MemorySpace::used_words)
+            && let Some(used) = self.alloc_space_ref().map(MemorySpace::used_words)
             && used >= self.gc_trigger_words
         {
             let before = used;
             let stack_depth = self.stack_height();
-            let new_used = self.gc().unwrap_or(before);
+            let new_used = self.request_gc_collect().unwrap_or(before);
             if std::env::var("POLYML_GC_QUIET").is_err() {
                 eprintln!(
                     "  GC: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
@@ -3060,7 +4657,7 @@ impl Interpreter {
             EXTINSTR_SIGNED_TO_LONG_W => {
                 let x = self.pop()?;
                 let value = x.untag(); // isize, sign-preserving
-                let space = self.alloc_space.as_mut().ok_or(InterpError::NoAllocator)?;
+                let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
                 let p = space.alloc(1);
                 // SAFETY: just allocated 1 word.
                 unsafe {
@@ -3077,7 +4674,7 @@ impl Interpreter {
             EXTINSTR_UNSIGNED_TO_LONG_W => {
                 let x = self.pop()?;
                 let value = x.0 >> 1; // untagged unsigned (drop tag bit)
-                let space = self.alloc_space.as_mut().ok_or(InterpError::NoAllocator)?;
+                let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
                 let p = space.alloc(1);
                 // SAFETY: just allocated 1 word.
                 unsafe {
@@ -3479,7 +5076,7 @@ impl Interpreter {
     /// to the body's first slot.
     fn allocate(&mut self, n_words: usize, flags: u8) -> Result<*mut PolyWord, InterpError> {
         use crate::space;
-        let space = self.alloc_space.as_mut().ok_or(InterpError::NoAllocator)?;
+        let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
         let p = space.alloc(n_words);
         // SAFETY: alloc just returned the matching length-word slot
         unsafe {
@@ -3796,7 +5393,7 @@ impl Interpreter {
         let entry_func = entry.func;
         let rts_ref = self.rts.clone();
         let mut ctx = crate::rts::RtsContext {
-            alloc_space: self.alloc_space.as_mut(),
+            alloc_space: self.alloc_space_mut(),
             raised_exception: None,
             rts: Some(&rts_ref),
             // The typed-FP fast-call path never dispatches
@@ -3897,7 +5494,7 @@ impl Interpreter {
     }
 
     fn alloc_real(&mut self, v: f64) -> Result<PolyWord, InterpError> {
-        let space = self.alloc_space.as_mut().ok_or(InterpError::NoAllocator)?;
+        let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
         let p = space.alloc(1);
         // SAFETY: just allocated 1 word (= 8 bytes), enough for f64.
         unsafe {
@@ -3974,7 +5571,7 @@ impl Interpreter {
     }
 
     fn alloc_lg_word(&mut self, word: usize) -> Result<PolyWord, InterpError> {
-        let space = self.alloc_space.as_mut().ok_or(InterpError::NoAllocator)?;
+        let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
         let p = space.alloc(1);
         // SAFETY: just allocated 1 word.
         unsafe {
@@ -3997,7 +5594,7 @@ impl Interpreter {
                 return Ok(StepResult::Continue);
             }
         }
-        let result = crate::rts::arb_add_via_bigint(self.alloc_space.as_mut(), x, y);
+        let result = crate::rts::arb_add_via_bigint(self.alloc_space_mut(), x, y);
         self.stack[self.sp] = result;
         Ok(StepResult::Continue)
     }
@@ -4015,7 +5612,7 @@ impl Interpreter {
                 return Ok(StepResult::Continue);
             }
         }
-        let result = crate::rts::arb_sub_via_bigint(self.alloc_space.as_mut(), x, y);
+        let result = crate::rts::arb_sub_via_bigint(self.alloc_space_mut(), x, y);
         self.stack[self.sp] = result;
         Ok(StepResult::Continue)
     }
@@ -4036,7 +5633,7 @@ impl Interpreter {
         // Overflow or boxed args: defer to the bignum-aware RTS impl.
         // Critical for SML loops like LibrarySupport.maxShort that
         // use IS_TAGGED on the result to detect overflow.
-        let result = crate::rts::arb_mult_via_bigint(self.alloc_space.as_mut(), x, y);
+        let result = crate::rts::arb_mult_via_bigint(self.alloc_space_mut(), x, y);
         self.stack[self.sp] = result;
         Ok(StepResult::Continue)
     }
@@ -4138,7 +5735,7 @@ impl Interpreter {
                 };
                 let pretty = String::from_utf8_lossy(&name_bytes);
                 let mut ctx = crate::rts::RtsContext {
-                    alloc_space: self.alloc_space.as_mut(),
+                    alloc_space: self.alloc_space_mut(),
                     raised_exception: None,
                     rts: None,
                     bootstrap_tail_call: PolyWord::ZERO,
@@ -4176,16 +5773,29 @@ impl Interpreter {
             });
         }
         crate::rts::trace_call(entry_name, n_args);
+        // ---- Concurrency (3d/3e/3f): a handful of threading RTS calls
+        // need the full ThreadContext (the `Arc<Runtime>`, the giant
+        // lock), not just the `RtsContext` the generic dispatch hands a
+        // plain RTS fn. Special-case them here where we still hold
+        // `&mut self`. `Some(r)` = handled; `None` = fall through to the
+        // generic path (the existing single-thread stub).
+        if let Some(r) = self.try_thread_rts(entry_name, &args[..n_args])? {
+            return Ok(r);
+        }
         let rts_ref = self.rts.clone(); // Arc clone, cheap
+        // Read the per-thread tail-call slot into a local BEFORE the
+        // `alloc_space_mut()` borrow (which now borrows all of `self`,
+        // since the heap moved behind `runtime.heap_mut()`).
+        let seed_tail = self.bootstrap_tail_call;
         let mut ctx = RtsContext {
-            alloc_space: self.alloc_space.as_mut(),
+            alloc_space: self.alloc_space_mut(),
             raised_exception: None,
             rts: Some(&rts_ref),
             // Seed the per-thread bootstrap tail-call slot from this
             // interpreter's field. `PolyEndBootstrapMode` writes it back
             // via the context; we read it back below. (Replaces the old
             // process-global static.)
-            bootstrap_tail_call: self.bootstrap_tail_call,
+            bootstrap_tail_call: seed_tail,
         };
         let result = match entry_func {
             RtsFn::Arity0(f) => f(&mut ctx),
@@ -4253,7 +5863,7 @@ impl Interpreter {
     fn raise_overflow(&mut self) -> Result<StepResult, InterpError> {
         let packet = {
             let mut ctx = crate::rts::RtsContext {
-                alloc_space: self.alloc_space.as_mut(),
+                alloc_space: self.alloc_space_mut(),
                 raised_exception: None,
                 rts: None,
                 bootstrap_tail_call: PolyWord::ZERO,
@@ -4273,7 +5883,7 @@ impl Interpreter {
     fn raise_interrupt(&mut self) -> Result<StepResult, InterpError> {
         let packet = {
             let mut ctx = crate::rts::RtsContext {
-                alloc_space: self.alloc_space.as_mut(),
+                alloc_space: self.alloc_space_mut(),
                 raised_exception: None,
                 rts: None,
                 bootstrap_tail_call: PolyWord::ZERO,

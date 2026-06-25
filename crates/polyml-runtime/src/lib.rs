@@ -16,6 +16,7 @@ pub mod length_word;
 pub mod loader;
 pub mod poly_word;
 pub mod rts;
+pub mod sched;
 pub mod space;
 
 pub use interpreter::{InterpError, Interpreter, JitEntry, StepResult};

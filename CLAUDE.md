@@ -81,8 +81,24 @@ Stage1.sml`). Consequences:
   `POLYML_GC_THRESHOLD`; `POLYML_GC_QUIET=1` silences the per-cycle log;
   `POLYML_GC_AUDIT=1` checks for residual from-space pointers — slow, debug only).
 - **Interrupts:** SIGINT raises the SML `Interrupt` exception (`crate::interrupt`
-  + a coarse `run_until` poll). Full multi-threading is **not** done — it needs a
-  safepoint GC that scans every thread's stack.
+  + a coarse `run_until` poll).
+- **Real threads (`POLY_REAL_THREADS=1`, default OFF):** genuine `Thread.fork` /
+  `Thread.Mutex` / `ConditionVar` over OS threads sharing one heap, under a
+  **giant lock + safepoint stop-the-world GC** (`crates/polyml-runtime/src/sched.rs`,
+  port of upstream `processes.cpp`). This is **concurrency, not parallelism** —
+  exactly one mutator runs bytecode at a time (upstream's interpreter-mode model).
+  The 2-thread mutex demo runs end-to-end on the `polyexport` REPL
+  (`crates/polyml-bin/tests/concurrency_mutex_demo.rs`, `…/concurrency_support/mutex_demo.sml`
+  → counter = 200000); the runtime-level GC-handshake + fork-TOCTOU + H1/H2
+  soundness controls are `polyml-runtime/tests/concurrency_gc_handshake.rs`.
+  Default OFF keeps the bootstrap/REPL/HOL4/Isabelle paths **byte-identical**
+  single-threaded (`fork` is a dormant no-op stub). Keystone: the basis forks a
+  SIGNAL thread at startup that loops on `PolyWaitForSignal`; once `fork` really
+  spawns it, that thread MUST **park** (it is flagged a daemon + blocks in
+  `try_thread_rts`), else it busy-spins the giant lock and hangs the REPL. Still
+  missing for *full* concurrency: a thread scheduler/preemption beyond the
+  cooperative safepoint yield, and `Thread.Thread` attribute fidelity. Design:
+  `docs/concurrency-and-jit-roadmap.md`.
 
 ## Diagnostic tooling (use it before hand-tracing)
 
@@ -239,8 +255,10 @@ How it works:
   object. Not reachable on compiler-produced images; same exposure as upstream.
   Fix = a typed-deref predicate in the interpreter. See
   `docs/correctness-and-safety.md`.
-- Full concurrency (thread scheduling), a real JIT speedup (whole-region), and
-  Windows remain unimplemented.
+- Real OS threads exist behind `POLY_REAL_THREADS=1` (giant lock + safepoint GC,
+  see Architecture); a **preemptive scheduler** (beyond cooperative safepoint
+  yielding) and full `Thread` attribute fidelity are still open. A real JIT
+  speedup (whole-region) and Windows remain unimplemented.
 
 (The Isabelle number-theory tower is complete — Lagrange's four-square theorem,
 the last open partial, is proved; see `docs/four-square-progress-*.md`. It is
