@@ -1,0 +1,12 @@
+# bertrand_resume: most of this dir is multi-fleet scratch (gitignored).
+# Track ONLY the pieces needed to reproduce the full Bertrand proof + the README.
+*
+!.gitignore
+!README.md
+!bertrand_f7_full.sml
+!bertrand_w1_appendix.sml
+!w1_crude_appendix.sml
+!w1_pow_poly_appendix.sml
+!bertrand_ch_appendix.sml
+!bertrand_jewel_appendix.sml
+!bertrand_full_discharge_appendix.sml
