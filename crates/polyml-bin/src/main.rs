@@ -261,7 +261,17 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             // default interpreter path + the per-function --jit path are
             // left byte-identical when this flag is absent.
             if *whole_region || polyml_jit::region::whole_region_enabled() {
-                let clean = polyml_jit::region::run_whole_region_demo();
+                // S1-S2: the synthetic non-popping + native-exception
+                // convention demo (hand-built Cranelift IR).
+                let s12_clean = polyml_jit::region::run_whole_region_demo();
+                println!();
+                // S3: hand-assembled genuine-layout bytecode regions
+                // lowered by the memory-backed translator + run NATIVE
+                // through the do_call boundary, differential-clean vs the
+                // pure interpreter (proof-of-mechanism — the interp-side
+                // do_call wiring + real-heap extraction land in S3b).
+                let s3_clean = polyml_jit::boundary::run_real_region_demo();
+                let clean = s12_clean && s3_clean;
                 return Ok(if clean {
                     ExitCode::SUCCESS
                 } else {

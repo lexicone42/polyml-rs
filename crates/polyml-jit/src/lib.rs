@@ -13,7 +13,9 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+pub mod boundary;
 pub mod differential;
+pub mod memtrans;
 pub mod region;
 pub mod translate;
 
