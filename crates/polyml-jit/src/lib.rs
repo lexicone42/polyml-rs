@@ -14,6 +14,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod differential;
+pub mod region;
 pub mod translate;
 
 #[cfg(test)]
@@ -1341,6 +1342,12 @@ impl Jit {
         builder.symbol(
             "polyml_jit_dynamic_call",
             dynamic_call_trampoline as *const u8,
+        );
+        // Whole-region nativeness probe (region.rs). Lets a compiled
+        // region prove NATIVE execution via a per-entry counter bump.
+        builder.symbol(
+            "polyml_jit_region_native_tick",
+            region::region_native_tick as *const u8,
         );
         Ok(Self {
             module: JITModule::new(builder),

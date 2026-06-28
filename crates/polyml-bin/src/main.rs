@@ -122,6 +122,15 @@ enum Cmd {
         /// `MAX_JIT_DEPTH` cap on nested JIT dispatch).
         #[arg(long)]
         jit: bool,
+        /// WHOLE-REGION JIT (experimental): compile + run the
+        /// whole-region demo regions (the non-popping shared-stack
+        /// convention + native-frame exceptions) and print a
+        /// differential + nativeness report, instead of executing the
+        /// image. This path is GATED so the default interpreter run and
+        /// the per-function `--jit` path stay byte-identical. Equivalent
+        /// to setting `WHOLE_REGION_JIT=1`.
+        #[arg(long)]
+        whole_region: bool,
     },
     /// Disassemble a code object's bytecode into human-readable
     /// opcode mnemonics. Either specify `--idx N` to pick the Nth
@@ -244,16 +253,32 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             args,
             r#use,
             jit,
-        } => run_image(
-            image,
-            *max_steps,
-            *profile,
-            *trace_rts,
-            *disasm_hottest,
-            args.clone(),
-            r#use.clone(),
-            *jit,
-        ),
+            whole_region,
+        } => {
+            // WHOLE-REGION JIT (gated): when --whole-region (or
+            // WHOLE_REGION_JIT=1) is set, run the whole-region demo and
+            // return WITHOUT touching the default/--jit run path. The
+            // default interpreter path + the per-function --jit path are
+            // left byte-identical when this flag is absent.
+            if *whole_region || polyml_jit::region::whole_region_enabled() {
+                let clean = polyml_jit::region::run_whole_region_demo();
+                return Ok(if clean {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                });
+            }
+            run_image(
+                image,
+                *max_steps,
+                *profile,
+                *trace_rts,
+                *disasm_hottest,
+                args.clone(),
+                r#use.clone(),
+                *jit,
+            )
+        }
         Cmd::Disasm {
             image,
             idx,
