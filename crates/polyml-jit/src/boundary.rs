@@ -1869,12 +1869,304 @@ fn run_wired_arith(
     }
 }
 
+// =====================================================================
+// S4-PROPER RAISE-FIDELITY FENCE — a DYNAMIC-CALL region whose
+// trampolined callee RAISEs a REAL SML exception packet, proven to
+// surface byte-identically across the native frame (the right handler
+// catches the REAL packet, ex_id == 99, NOT the old Overflow mis-map).
+//
+// Shape (the regression this fences):
+//   interpreted CALLER (installs a catch-all handler; the handler reads
+//     the caught packet's ex_id via LDEXC + INDIRECT_0 and RETURNs it)
+//       -- CALL_CONST_ADDR -->
+//   dynraise(raiserClo, x) REGION (registered → runs NATIVE)
+//       -- CALL_CLOSURE on raiserClo (a DYNAMIC call) -->
+//   raiser(x) LEAF (interpreted via the region_interp_call trampoline)
+//       RAISE_EX a REAL 4-word packet (ex_id = TAGGED(99))
+//
+// When dynraise is REGISTERED, the call routes through the live do_call
+// hook → polyml_jit_region_dispatch → the native dynraise region → its
+// CALL_CLOSURE trampolines via region_interp_call into the interpreted
+// raiser → the unhandled raise surfaces as the REAL packet bits
+// (region_interp_call isolates the interp handler, so do_raise_ex returns
+// UnhandledException with self.exception_packet = the real packet) →
+// carried back raised=1 with ctx.exn_packet = the real packet → the
+// do_call hook's `other` arm re-raises it via push + do_raise_ex against
+// the caller's RESTORED handler. The handler reads ex_id == 99.
+//
+// THE REGRESSION: before S4-proper, region_interp_call mapped ANY callee
+// raise to the EXN_OVERFLOW sentinel (ex_id TAGGED(5)), so the handler
+// would have seen 5, not 99. The assert_ne!(.., 5) fences exactly that.
+// =====================================================================
+
+/// Build the RAISER leaf `raise Exn99` (arity 1, reached via CALL_CLOSURE).
+/// Its constant pool slot 0 holds a REAL 4-word exception packet whose
+/// field 0 (ex_id) is `TAGGED(99)` — DISTINCT from `EXC_overflow`'s
+/// `TAGGED(5)`. The body pushes that packet (CONST_ADDR8_8 → const idx 0)
+/// then RAISE_EXes it. Since the leaf installs no handler, the raise is
+/// UNHANDLED inside the leaf and propagates to the caller.
+#[cfg(test)]
+#[allow(clippy::vec_init_then_push)]
+fn build_raiser_leaf(space: &mut MemorySpace) -> BuiltCode {
+    // First build the REAL 4-word exception packet [ex_id, name, arg, loc]
+    // with ex_id = TAGGED(99). Layout matches make_pervasive_exn in rts.rs
+    // (a plain 4-word object, flags 0). It lives in `space` (the frozen
+    // Code space), so its pointer stays valid for the whole run.
+    let packet_word = {
+        let p = space.alloc(4);
+        // SAFETY: just allocated 4 words.
+        unsafe {
+            set_length_word(p, 4, 0);
+            p.write(PolyWord::tagged(99)); // ex_id = TAGGED(99) (the match key)
+            p.add(1).write(PolyWord::tagged(0)); // ex_name (unused here)
+            p.add(2).write(PolyWord::tagged(0)); // ex_arg = ()
+            p.add(3).write(PolyWord::tagged(0)); // ex_location = NONE
+        }
+        PolyWord::from_ptr(p.cast_const())
+    };
+
+    // Body: CONST_ADDR8_8 (idx 0) → push the packet; RAISE_EX.
+    let mut bc: Vec<u8> = Vec::new();
+    let cap_pc = bc.len(); // 0
+    bc.push(op::INSTR_CONST_ADDR8_8); // 0: read const pool slot 0
+    let cap_off_idx = bc.len(); // 1 (byte_off, patched)
+    bc.push(0x00); // 1: byte_off
+    bc.push(0x00); // 2: imm2 (idx = imm2 + 3 = 3 ⇒ first const word)
+    bc.push(op::INSTR_RAISE_EX); // 3: raise the packet on top
+
+    // CONST_ADDR8_8 reads const idx 3 at pc_after + byte_off + 3*8, where
+    // pc_after = cap_pc + 3 (opcode + 2 immediate bytes). The first const
+    // word is at object byte (code_words+1)*8. Pad with NO_OP until the
+    // byte_off lands in [0,255] (mirrors build_handler_caller's loop).
+    let word = std::mem::size_of::<usize>();
+    let cap_after = cap_pc + 3;
+    let idx = 3usize;
+    let byte_off;
+    loop {
+        let code_words = bc.len().div_ceil(word);
+        let first_const_byte = (code_words + 1) * word;
+        let bo = first_const_byte as i64 - cap_after as i64 - (idx * 8) as i64;
+        if (0..=255).contains(&bo) {
+            byte_off = bo as u8;
+            break;
+        }
+        bc.push(op::INSTR_NO_OP);
+        assert!(bc.len() < 4096, "raiser leaf pad runaway");
+    }
+    bc[cap_off_idx] = byte_off;
+
+    build_code_object(space, &bc, &[packet_word])
+}
+
+/// Build the DYNAMIC-CALL region `dynraise(raiserClo, x)` (arity 2). At
+/// entry LOCAL_0=clo, LOCAL_1=ret, LOCAL_2=x(top), LOCAL_3=raiserClo. The
+/// body pushes the arg x (LOCAL_2), then pushes the raiser closure
+/// (LOCAL_3, now LOCAL_4 after x is on top), then CALL_CLOSURE — a DYNAMIC
+/// call on a runtime closure VALUE, which trampolines into the interpreter
+/// (region_interp_call). The callee raises, so dynraise never reaches its
+/// RETURN; the propagated raise is the whole point. The trailing
+/// RETURN_B 2 is dead but keeps the region a well-formed function.
+#[cfg(test)]
+#[allow(clippy::vec_init_then_push)]
+fn build_dynraise_region(space: &mut MemorySpace) -> (BuiltCode, BuiltCode) {
+    let raiser = build_raiser_leaf(space);
+
+    let mut bc: Vec<u8> = Vec::new();
+    // push x (the arg for raiser): LOCAL_2 at entry          (sp -1)
+    bc.push(op::INSTR_LOCAL_2);
+    // push raiserClo (LOCAL_3 at entry; +1 after x on top ⇒ LOCAL_4) (sp -2)
+    bc.push(op::INSTR_LOCAL_4);
+    // CALL_CLOSURE: pop the closure, trampoline do_call(raiser, x).
+    bc.push(op::INSTR_CALL_CLOSURE);
+    // (dead after the raise) — collapse result+clo+ret+2 args.
+    bc.push(op::INSTR_RETURN_B);
+    bc.push(2); // arity 2
+
+    let root = build_code_object(space, &bc, &[]);
+    (root, raiser)
+}
+
+/// Build an interpreted CALLER (arity 0) that installs a CATCH-ALL handler,
+/// pushes (raiserClo, x), and CALL_CONST_ADDRs the dynraise region. The
+/// handler reads the CAUGHT packet's ex_id (LDEXC → INDIRECT_0 → field 0)
+/// and RETURNs it — so the value the caller returns IS the recovered ex_id
+/// (99 for the real packet, 5 for the old Overflow mis-map). `raiser_closure`
+/// is baked into the caller's const pool slot 0 (the deepest arg the
+/// dynraise region forwards to CALL_CLOSURE) and `x` as a u16 CONST.
+///
+/// Modeled on `build_handler_caller`, but: (a) the handler reads ex_id via
+/// INDIRECT_0 instead of returning a baked recovery; (b) the callee is
+/// arity 2 (raiserClo, x); (c) the callee closure (= the dynraise region)
+/// is supplied separately while the raiser closure lives in this caller's
+/// const pool so the bytecode can push it as the deepest arg.
+#[cfg(test)]
+#[allow(clippy::vec_init_then_push)]
+fn build_raise_handler_caller(
+    space: &mut MemorySpace,
+    dynraise_closure: PolyWord,
+    raiser_closure: PolyWord,
+    x: i64,
+) -> BuiltCode {
+    // const pool: [0] = dynraise closure (the CALL_CONST_ADDR target),
+    //             [1] = raiser closure (pushed as the deepest arg).
+    let mut bc: Vec<u8> = Vec::new();
+    bc.push(op::INSTR_PUSH_HANDLER); // 0: save old handler register
+    let set_pc = bc.len(); // 1
+    bc.push(op::INSTR_SET_HANDLER8); // 1: set up handler
+    let handler_off_idx = bc.len(); // 2 (patched)
+    bc.push(0x00); // 2: handler offset
+    // push raiserClo (deepest arg, LOCAL_3 of dynraise): const pool idx 1.
+    let cap_raiser_pc = bc.len();
+    bc.push(op::INSTR_CONST_ADDR8_8); // read const idx 1
+    let cap_raiser_off_idx = bc.len();
+    bc.push(0x00); // byte_off (patched)
+    bc.push(0x01); // imm2 = 1 ⇒ read_pc_const idx = imm2 + 3 = 4 = cp[1]
+    // read_pc_const(byte_off, idx) does (pc_after + byte_off).cast::<PolyWord>()
+    // [idx]; idx = imm2 + 3. idx 3 lands on cp[0] (the first const word, here
+    // the dynraise closure); idx 4 (imm2 = 1) lands on cp[1] = the raiser.
+    // push x (the arg for raiser): CONST_INT_W u16 immediate.
+    bc.push(op::INSTR_CONST_INT_W);
+    bc.extend_from_slice(&(x as u16).to_le_bytes());
+    // CALL_CONST_ADDR8_8 the dynraise region (const pool idx 0).
+    let call_pc = bc.len();
+    bc.push(op::INSTR_CALL_CONST_ADDR8_8);
+    let call_off_idx = bc.len();
+    bc.push(0x00); // byte_off (patched)
+    bc.push(0x00); // imm2 = 0 ⇒ idx = 0 + 3 = 3 (cp[0] = dynraise)
+    bc.push(op::INSTR_DELETE_HANDLER);
+    bc.push(op::INSTR_RETURN_B);
+    bc.push(0); // arity 0
+    let lhandler = bc.len();
+    bc.push(op::INSTR_LDEXC); // push the caught packet
+    bc.push(op::INSTR_INDIRECT_0); // read field 0 (ex_id) of the packet
+    bc.push(op::INSTR_RETURN_B); // return the ex_id
+    bc.push(0); // arity 0
+
+    // SET_HANDLER8 target: off = Lhandler - (set_pc + 2).
+    let set_after = set_pc + 2;
+    let hoff = lhandler as i64 - set_after as i64;
+    assert!((0..=255).contains(&hoff), "handler off {hoff} out of range");
+    bc[handler_off_idx] = hoff as u8;
+
+    // Patch the two const reads. Both read from the SAME const pool laid out
+    // AFTER the bytecode (cp[-1] = count, cp[0] = const 0, cp[1] = const 1).
+    // read_pc_const(byte_off, idx) reads (pc_after + byte_off).cast::<PolyWord>()
+    // [idx] with idx = imm2 + 3, so to land on const word `k` (cp[k]) with
+    // imm2 = k: addr = first_const_byte + k*8 must equal pc_after + byte_off +
+    // (k+3)*8 ⇒ byte_off = first_const_byte - pc_after - 24 (the `k` cancels).
+    // Pad with NO_OP until BOTH byte offsets land in [0,255].
+    let word = std::mem::size_of::<usize>();
+    let cap_raiser_after = cap_raiser_pc + 3; // opcode + 2 immediates (imm2 = 1 = k)
+    let call_after = call_pc + 3; // opcode + 2 immediates (imm2 = 0 = k)
+    let (raiser_bo, call_bo);
+    loop {
+        let code_words = bc.len().div_ceil(word);
+        let first_const_byte = (code_words + 1) * word;
+        let rbo = first_const_byte as i64 - cap_raiser_after as i64 - 24;
+        let cbo = first_const_byte as i64 - call_after as i64 - 24;
+        if (0..=255).contains(&rbo) && (0..=255).contains(&cbo) {
+            raiser_bo = rbo as u8;
+            call_bo = cbo as u8;
+            break;
+        }
+        bc.push(op::INSTR_NO_OP);
+        assert!(bc.len() < 4096, "raise caller pad runaway");
+    }
+    bc[cap_raiser_off_idx] = raiser_bo;
+    bc[call_off_idx] = call_bo;
+
+    build_code_object(space, &bc, &[dynraise_closure, raiser_closure])
+}
+
+/// Run the raise-fidelity harness: an interpreted caller installs a
+/// catch-all handler and CALL_CONST_ADDRs the dynraise region, whose
+/// CALL_CLOSURE trampolines into the interpreted raiser leaf that RAISEs a
+/// REAL packet (ex_id == 99). If `register_region` is true the dynraise
+/// region is compiled + registered → it runs NATIVE and the real exception
+/// crosses the native frame; otherwise the WHOLE graph is interpreted (the
+/// oracle). Returns the recovered value (the ex_id the handler read), the
+/// error (if any), and the native tick count.
+#[cfg(test)]
+fn run_wired_dyncall_raise(register_region: bool, x: i64) -> WiredOutcome {
+    let mut space = MemorySpace::new(8192, SpaceKind::Code);
+    let (dynraise, raiser) = build_dynraise_region(&mut space);
+    let caller = build_raise_handler_caller(&mut space, dynraise.closure, raiser.closure, x);
+    let caller_addr = caller.code_addr;
+    let dynraise_code_addr = dynraise.code_addr;
+
+    let mut interp = Interpreter::from_bytes(256, vec![]).with_alloc_space(space);
+
+    let mut _jit_keep: Option<Jit> = None;
+    reset_native_tick();
+    if register_region {
+        install_region_dispatch(polyml_jit_region_dispatch);
+        let mut jit = Jit::new().expect("jit");
+        // SAFETY: dynraise_code_addr is a live code object owned by interp;
+        // the heap is frozen for this run.
+        let region = unsafe { memtrans::build_region(&mut jit, dynraise_code_addr) }
+            .expect("dynraise region build");
+        // The dynraise region MUST be a dynamic-call region (it CALL_CLOSUREs
+        // the raiser) — this is the exact shape S4-proper made registrable.
+        assert!(
+            region.has_dynamic_call,
+            "dynraise must be a dynamic-call (CALL_CLOSURE) region"
+        );
+        jit.module.finalize_definitions().expect("finalize");
+        let ptr = jit.module.get_finalized_function(region.root);
+        interp.install_region(
+            dynraise_code_addr as usize,
+            RegionEntry {
+                region_fn: ptr as usize,
+                sml_arity: region.root_arity,
+            },
+        );
+        _jit_keep = Some(jit);
+    }
+
+    // Top-level entry: arity-0 caller. Frame = [closure, retPC=0].
+    interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+    interp.test_seed_top(caller.closure); // closure (LOCAL_0)
+    // SAFETY: caller_addr is a live code object now owned by interp.
+    unsafe { interp.set_code_segment_to_code_obj(caller_addr as usize) };
+
+    match interp.run() {
+        Ok(StepResult::Returned(w)) => WiredOutcome {
+            result: Some(PolyWord::from_bits(w.0).untag() as i64),
+            error: None,
+            native_ticks: native_tick_count(),
+        },
+        Ok(other) => WiredOutcome {
+            result: None,
+            error: Some(format!("{other:?}")),
+            native_ticks: native_tick_count(),
+        },
+        Err(e) => WiredOutcome {
+            result: None,
+            error: Some(match e {
+                InterpError::DivByZero => "DivByZero".to_string(),
+                InterpError::UnhandledException => "UnhandledException".to_string(),
+                other => format!("{other:?}"),
+            }),
+            native_ticks: native_tick_count(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Flake-guard: the native-tick counter (`native_tick_count` /
+    /// `reset_native_tick`) is a PROCESS-GLOBAL. Tests that read it (the new
+    /// raise-fidelity tests + any reset/read pair) must serialize on this
+    /// lock so a parallel test's `reset_native_tick` cannot zero the counter
+    /// mid-run, masking nativeness. (`.lock().unwrap_or_else(|e| e.into_inner())`
+    /// recovers from a poisoned lock so one panicking test does not cascade.)
+    static REGION_TICK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn sum3_region_value_is_correct() {
+        let _guard = REGION_TICK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // sum3(3,4,5) = add(3,4) + 5 = 12.
         let r = run_sum3_both_ways(3, 4, 5);
         assert_eq!(
@@ -1893,6 +2185,7 @@ mod tests {
 
     #[test]
     fn sum3_region_differential_clean() {
+        let _guard = REGION_TICK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // The native region must be byte-identical to the pure
         // interpreter across a grid of inputs AND prove native execution.
         let mut diverged = 0usize;
@@ -2995,6 +3288,88 @@ mod tests {
             // native_tick_count is process-global; assert >= 1 to avoid
             // racing parallel region tests (the differential is the proof).
             assert!(native.native_ticks >= 1, "quot region ran NATIVE");
+        }
+    }
+
+    // ----- S4-PROPER: dynamic-call REAL-RAISE fidelity (the fence) -----
+
+    /// A DYNAMIC-CALL region whose trampolined callee RAISEs a REAL SML
+    /// exception packet (ex_id == TAGGED(99)) must surface that REAL packet
+    /// byte-identically across the native frame — the caller's catch-all
+    /// handler recovers ex_id == 99, NOT 5 (the old EXN_OVERFLOW mis-map).
+    ///
+    /// Run BOTH ways through the WIRED interpreter do_call:
+    ///   - region NOT registered: the WHOLE graph is interpreted (the
+    ///     oracle — caller → dynraise → raiser all in the interpreter);
+    ///   - region REGISTERED: dynraise runs NATIVE, its CALL_CLOSURE
+    ///     trampolines into the interpreted raiser via region_interp_call,
+    ///     the real exception crosses the native frame, and the do_call
+    ///     hook's `other` arm re-raises the REAL packet against the caller's
+    ///     restored handler.
+    /// Both ways must recover the SAME value, and that value must be 99 (the
+    /// real packet's ex_id), error None, and the native run ran native.
+    #[test]
+    fn wired_dyncall_real_raise_propagates_byte_identical() {
+        let _guard = REGION_TICK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for x in [0i64, 1, 7, 42] {
+            // Oracle: whole graph interpreted (region NOT registered).
+            let oracle = run_wired_dyncall_raise(false, x);
+            // Native: dynraise registered → runs native, real raise crosses
+            // the native frame.
+            let native = run_wired_dyncall_raise(true, x);
+
+            assert_eq!(
+                oracle.error, None,
+                "oracle (interp) must catch the raise cleanly (x={x})"
+            );
+            assert_eq!(
+                native.error, None,
+                "native must catch the raise cleanly (x={x})"
+            );
+            assert_eq!(
+                native.result, oracle.result,
+                "native + oracle must recover the SAME ex_id (x={x})"
+            );
+            assert_eq!(
+                oracle.result,
+                Some(99),
+                "the handler must catch the REAL packet (ex_id == 99), x={x}"
+            );
+            assert_ne!(
+                native.result,
+                Some(5),
+                "REGRESSION FENCE: ex_id must NOT be 5 (the old Overflow \
+                 mis-map) — the REAL packet must cross the native frame, x={x}"
+            );
+            assert!(
+                native.native_ticks >= 1,
+                "the dynraise region must have run NATIVE (x={x})"
+            );
+        }
+    }
+
+    /// A no-raise DYNAMIC-CALL region (the callloop region, which CALL_CLOSUREs
+    /// a leaf each iteration) registered for LIVE dispatch must equal the
+    /// pure-interp oracle and run native. This pins that the S4-proper raise-
+    /// fidelity isolation did NOT regress the clean (non-raising) dynamic-call
+    /// path through the same trampoline + do_call hook.
+    #[test]
+    fn wired_dyncall_no_raise_stays_clean() {
+        let _guard = REGION_TICK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for n in [0isize, 1, 3, 8, 20] {
+            let r = run_callloop_both_ways(n);
+            assert_eq!(
+                r.interp_result, r.native_result,
+                "callloop(n={n}): native must equal the pure-interp oracle"
+            );
+            assert!(
+                !r.raised_interp && !r.raised_native,
+                "callloop(n={n}): the no-raise path must not raise either way"
+            );
+            assert!(
+                r.native_ticks >= 1,
+                "callloop(n={n}): the region must have run NATIVE"
+            );
         }
     }
 }

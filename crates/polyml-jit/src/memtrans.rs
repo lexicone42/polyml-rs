@@ -342,12 +342,12 @@ pub struct CompiledMemRegion {
     pub uses_stack_size: bool,
     /// True if any function in the region contains a DYNAMIC call
     /// (`CALL_LOCAL_B` / `CALL_CLOSURE`). The trampoline that re-enters the
-    /// interpreter for the callee is sound + measured (S4e de-risk: 3.3x),
-    /// but `region_interp_call` does not yet propagate a REAL exception
-    /// raised by the callee faithfully (it maps to Overflow). So a
-    /// dynamic-call region must NOT be registered for LIVE dispatch until
-    /// that raise fidelity lands (S4-proper). The mechanism + microbench
-    /// exercise the trampoline directly, not via live registration.
+    /// interpreter for the callee is sound + measured (S4e de-risk: 3.3x) and
+    /// `region_interp_call` now propagates a REAL callee exception faithfully
+    /// (S4-proper, commit 27f8cd9 — fenced by
+    /// `wired_dyncall_real_raise_propagates_byte_identical`), so dynamic-call
+    /// regions ARE registered for live dispatch. The flag is retained for
+    /// diagnostics (and `recursive` is still refused — see the guard).
     pub has_dynamic_call: bool,
 }
 
