@@ -220,6 +220,50 @@ pub unsafe extern "C" fn polyml_jit_region_interp_call(
     }
 }
 
+/// THE GC-SAFEPOINT SLOW-PATH C-ABI shim (S4c). A native region, at a
+/// JUMP_BACK back-edge whose inline poll found the alloc threshold
+/// crossed (`*ctx.gc_used_ptr >= ctx.gc_trigger`), has already STORED its
+/// current SSA `sp` into `ctx.live_sp` and now calls THIS function
+/// (imported as `polyml_jit_region_safepoint`) to run the collection.
+///
+/// It reconstructs the live `*mut Interpreter` from `ctx.interp_ptr` and
+/// invokes `interp.region_safepoint(ctx.live_sp)`, which publishes
+/// `interp.sp = live_sp` and runs the EXACT top-of-step GC collection.
+/// On return the region continues from the (now-forwarded) shared stack.
+///
+/// SOUNDNESS / NO ALIASING UB: identical discipline to
+/// [`polyml_jit_region_interp_call`] — the only live `&mut Interpreter`
+/// up the call stack is the outer `do_call` hook's `&mut self`, dormant
+/// for the whole region call, so the transient `&mut` reconstructed here
+/// never aliases a *used* one. It lives only for this call and is dropped
+/// before returning to native code. The block-boundary root argument
+/// (only `sp` crosses blocks; all heap data on the shared stack) is in
+/// `Interpreter::region_safepoint`.
+///
+/// # Safety
+/// `ctx` must be a valid `*mut ExnCtx` whose `interp_ptr` is the live
+/// interpreter the do_call hook stored (it is, by construction — the
+/// region only calls this with its own ctx).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn polyml_jit_region_safepoint(ctx: *mut ExnCtx) {
+    // SAFETY: ctx is a valid *mut ExnCtx (caller upholds).
+    let (interp_ptr, live_sp) = unsafe { ((*ctx).interp_ptr, (*ctx).live_sp) };
+    debug_assert!(
+        interp_ptr != 0,
+        "region_safepoint with null interp_ptr — the poll must never trip on a \
+         ctx whose gc_used_ptr/gc_trigger were left at the inert defaults"
+    );
+    if interp_ptr == 0 {
+        // Defensive: an unwired ctx should never trip the poll (the
+        // default gc_trigger is i64::MAX), but never deref a null interp.
+        return;
+    }
+    // SAFETY: the transient &mut lives only for this call; the outer
+    // &mut self is dormant (see the soundness note above).
+    let interp = unsafe { &mut *(interp_ptr as usize as *mut polyml_runtime::Interpreter) };
+    let _new_sp = interp.region_safepoint(live_sp);
+}
+
 /// Human-readable name for a region exception sentinel (so the
 /// boundary's raise mapping is auditable).
 #[must_use]
@@ -1294,11 +1338,16 @@ fn run_region_on_interp(
     }
     let sp_top_arg = interp.test_sp() as i64;
     let stack_base = interp.jit_stack_base_mut().cast::<i64>();
+    let gc_used_ptr = interp.region_gc_used_ptr();
+    let gc_trigger = interp.region_gc_trigger();
     let interp_ptr = (interp as *mut Interpreter) as i64;
     let mut ctx = ExnCtx {
         handler_sp: NO_HANDLER,
         exn_packet: 0,
         interp_ptr,
+        live_sp: sp_top_arg,
+        gc_used_ptr,
+        gc_trigger,
     };
     reset_native_tick();
     // SAFETY: stack_base is the interp's own stack Box (stable address);
@@ -1648,6 +1697,243 @@ mod tests {
     #[test]
     fn real_region_demo_clean() {
         assert!(run_real_region_demo(), "S3 real-region demo not clean");
+    }
+
+    /// THE S4c FORCED-GC-MID-REGION TEST (the load-bearing proof).
+    ///
+    /// Builds the hashfold loop region (which has a JUMP_BACK back-edge, so
+    /// the inline GC-safepoint poll is emitted), registers it for LIVE
+    /// dispatch on a real interpreter, then FORCES the alloc threshold to
+    /// be crossed by setting `gc_trigger_words` to 1 (the heap already
+    /// holds the live `buf` object, so `used >= 1`). On the FIRST back-edge
+    /// the inline poll trips → the slow-path `region_safepoint` publishes
+    /// sp + runs a full Cheney collection MID-REGION (forwarding the live
+    /// `buf` pointer that the loop keeps re-reading off the shared stack).
+    ///
+    /// Asserts:
+    ///   (a) the region returns the CORRECT result (stack-resident loop
+    ///       vars + the forwarded `buf` survived the collection): native ==
+    ///       a pure-interpreter oracle over the SAME buffer;
+    ///   (b) POLYML_GC_AUDIT reports 0 residual from-space pointers
+    ///       (`test_gc_audit_residual() == 0`);
+    ///   (c) the collection ACTUALLY FIRED (`test_gc_count()` went from 0
+    ///       to >= 1 across the region run).
+    ///
+    /// CRUCIAL: `buf` lives in the interpreter's ALLOC space (collected +
+    /// forwarded), while the code object lives in a separate, leaked Code
+    /// space (never collected) — so this isolates the exact claim that a
+    /// heap pointer carried on the shared stack survives a mid-region GC.
+    #[test]
+    fn forced_gc_mid_region_hashfold_is_sound() {
+        // SAFETY: this test toggles process-global env (POLYML_GC_AUDIT /
+        // POLYML_GC_QUIET) and the global region-dispatch callback; it is a
+        // single self-contained run.
+        // Make POLYML_GC_AUDIT=1 so the collector checks for residual
+        // from-space pointers, and silence the per-cycle GC log.
+        unsafe {
+            std::env::set_var("POLYML_GC_AUDIT", "1");
+            std::env::set_var("POLYML_GC_QUIET", "1");
+        }
+
+        // A buffer long enough that the loop iterates many times AFTER the
+        // first back-edge safepoint fires (so the post-GC forwarded reads
+        // are genuinely exercised).
+        let bytes: Vec<u8> = (0..64u32).map(|i| (i * 37 + 11) as u8).collect();
+        let len = bytes.len() as isize;
+
+        // ---- pure-interp ORACLE over the same buffer (ground truth) ----
+        let oracle = {
+            let mut space = MemorySpace::new(1 << 16, SpaceKind::Code);
+            let f = build_hashfold_region(&mut space);
+            let buf = build_byte_object(&mut space, &bytes);
+            let f_addr = f.code_addr;
+            let f_closure = f.closure;
+            let mut interp = Interpreter::from_bytes(256, vec![]).with_alloc_space(space);
+            interp.test_seed_top(buf);
+            interp.test_seed_top(PolyWord::tagged(len));
+            interp.test_seed_return_sentinel();
+            interp.test_seed_top(f_closure);
+            // SAFETY: f_addr is a live code object owned by `interp`.
+            unsafe { interp.set_code_segment_to_code_obj(f_addr as usize) };
+            let r = match interp.run() {
+                Ok(StepResult::Returned(w)) => w.0 as i64,
+                other => panic!("oracle interp: {other:?}"),
+            };
+            std::mem::forget(interp);
+            r
+        };
+
+        // ---- NATIVE region, LIVE dispatch, forced mid-region GC ----
+        // Code object in a LEAKED Code space (never collected/moved).
+        let code_space: &'static mut MemorySpace =
+            Box::leak(Box::new(MemorySpace::new(1 << 12, SpaceKind::Code)));
+        let f = build_hashfold_region(code_space);
+        let f_addr = f.code_addr;
+        let f_closure = f.closure;
+
+        // Interpreter with a small COLLECTED alloc space; buf lives HERE.
+        let heap = MemorySpace::new(8192, SpaceKind::Mutable);
+        let mut interp = Interpreter::from_bytes(4096, vec![]).with_alloc_space(heap);
+        let buf = {
+            let alloc = interp
+                .jit_alloc_space_mut()
+                .expect("interp has an alloc space");
+            super::build_byte_object(alloc, &bytes)
+        };
+
+        // Compile + register the region for LIVE do_call dispatch.
+        install_region_dispatch(polyml_jit_region_dispatch);
+        let mut jit = Jit::new().expect("jit");
+        // SAFETY: f_addr is a live code object in the leaked code space.
+        let region = unsafe { memtrans::build_region(&mut jit, f_addr) }.expect("region build");
+        assert!(!region.recursive && !region.has_dynamic_call);
+        jit.module.finalize_definitions().expect("finalize");
+        let ptr = jit.module.get_finalized_function(region.root);
+        interp.install_region(
+            f_addr as usize,
+            RegionEntry {
+                region_fn: ptr as usize,
+                sml_arity: region.root_arity,
+            },
+        );
+        let _jit_keep = jit; // hold the module alive across the run
+
+        // ARM THE SAFEPOINT: trigger at 1 word so the FIRST back-edge poll
+        // trips (the heap already holds `buf`, so used >= 1).
+        interp.test_set_gc_trigger_words(1);
+        let gc_before = interp.test_gc_count();
+        let audit_before = interp.test_gc_audit_residual();
+
+        // Dispatch the ROOT through the REAL do_call so the region hook
+        // fires (set_code_segment_to_code_obj bypasses do_call, so we MUST
+        // call do_call directly). At do_call entry the args are on top with
+        // sp at the top arg; the hook pushes retPC + closure internally and
+        // invokes the native region, leaving the single result at self.sp.
+        interp.test_seed_top(buf); // arg buf (deepest, LOCAL_3)
+        interp.test_seed_top(PolyWord::tagged(len)); // arg len (top, LOCAL_2)
+        reset_native_tick();
+        interp
+            .test_invoke_do_call(f_closure)
+            .expect("region do_call must succeed");
+        let native = interp.test_peek_top().0 as i64;
+        let ticks = native_tick_count();
+        let gc_after = interp.test_gc_count();
+        let audit_after = interp.test_gc_audit_residual();
+        // ADV-VERIFY: an INDEPENDENT Rust reference (neither the interp
+        // oracle nor the native path) of the exact tagged-word fold. The
+        // native result is a TAGGED word; the reference returns the
+        // untagged payload, so compare native == tag(ref) = 2*ref+1.
+        let independent_ref = hashfold_reference(&bytes, len as i64);
+        let independent_ref_tagged = (independent_ref << 1) | 1;
+
+        // Restore env for other tests.
+        unsafe {
+            std::env::remove_var("POLYML_GC_AUDIT");
+            std::env::remove_var("POLYML_GC_QUIET");
+        }
+        eprintln!(
+            "ADV-VERIFY: native={native} independent_ref(tagged)={independent_ref_tagged} \
+             (untagged ref={independent_ref})"
+        );
+        assert_eq!(
+            native, independent_ref_tagged,
+            "ADV-VERIFY: native result must equal the INDEPENDENT Rust fold reference"
+        );
+
+        // (c) the collection actually FIRED mid-region. This is the
+        // controllable forced-GC-at-the-back-edge: a REGISTERED region
+        // dispatched via do_call runs ENTIRELY native — the interpreter's
+        // own top-of-step GC check (mod.rs:3639) is NEVER reached — so the
+        // ONLY place a collection can fire is the region's back-edge
+        // safepoint. A non-zero gc_count therefore PROVES the safepoint
+        // slow path ran the collection mid-region.
+        eprintln!(
+            "forced-GC-mid-region: gc_count {gc_before} -> {gc_after} \
+             (collections during the native region run = {}), native_ticks={ticks}",
+            gc_after - gc_before
+        );
+        assert!(
+            gc_after > gc_before,
+            "GC must have fired mid-region via the back-edge safepoint: \
+             gc_count {gc_before} -> {gc_after}"
+        );
+        // The region ran NATIVE (the root entry ticked).
+        assert!(ticks >= 1, "region must have run NATIVE (ticks={ticks})");
+        // (a) the result is CORRECT (loop vars + forwarded buf survived).
+        assert_eq!(
+            native, oracle,
+            "native (with mid-region GC) must equal the pure-interp oracle"
+        );
+        // (b) POLYML_GC_AUDIT found ZERO residual from-space pointers.
+        assert_eq!(
+            audit_after, audit_before,
+            "POLYML_GC_AUDIT must report 0 NEW residual from-space pointers \
+             across the mid-region collection (before={audit_before} after={audit_after})"
+        );
+        assert_eq!(
+            audit_after, 0,
+            "cumulative GC-audit residual must be 0 (sound mid-region collection)"
+        );
+
+        std::mem::forget(interp);
+    }
+
+    /// ADVERSARIAL NON-VACUITY PROBE (skeptic's independent check): prove
+    /// that a single collection RELOCATES a live byte object AND that a
+    /// stack-resident slot pointing at it is FORWARDED to the new address.
+    /// If the GC never moved objects, the forced-GC-mid-region test would
+    /// be vacuous (the stack slot would still be valid by accident). This
+    /// uses ONLY the interpreter's own GC (no JIT), so it isolates the
+    /// "stack slot in [sp,len) is a forwarded GC root" claim the safepoint
+    /// design rests on.
+    #[test]
+    fn adv_collection_relocates_and_forwards_stack_slot() {
+        unsafe {
+            std::env::set_var("POLYML_GC_AUDIT", "1");
+            std::env::set_var("POLYML_GC_QUIET", "1");
+        }
+        let bytes: Vec<u8> = (0..40u32).map(|i| (i * 7 + 3) as u8).collect();
+        let heap = MemorySpace::new(8192, SpaceKind::Mutable);
+        let mut interp = Interpreter::from_bytes(64, vec![]).with_alloc_space(heap);
+        let buf = {
+            let alloc = interp.jit_alloc_space_mut().expect("alloc space");
+            super::build_byte_object(alloc, &bytes)
+        };
+        let addr_before = buf.0;
+        // Put buf on the shared stack (the GC root range [sp,len)).
+        interp.test_seed_top(buf);
+        // Force GC threshold low and collect once.
+        interp.test_set_gc_trigger_words(1);
+        let audit_before = interp.test_gc_audit_residual();
+        let _ = interp.test_force_gc_no_barrier();
+        let audit_after = interp.test_gc_audit_residual();
+        // Read the forwarded slot back off the stack.
+        let addr_after = interp.test_peek_top().0;
+        unsafe {
+            std::env::remove_var("POLYML_GC_AUDIT");
+            std::env::remove_var("POLYML_GC_QUIET");
+        }
+        eprintln!(
+            "ADV-RELOC: buf 0x{addr_before:016x} -> 0x{addr_after:016x} \
+             (moved={}), audit {audit_before}->{audit_after}",
+            addr_before != addr_after
+        );
+        assert_ne!(
+            addr_before, addr_after,
+            "a collection MUST relocate the live buf (else mid-region forwarding is vacuous)"
+        );
+        // The forwarded pointer must address a valid F_BYTE_OBJ whose
+        // bytes still match the original buffer (forwarding preserved the
+        // contents, not just the address).
+        let p = addr_after as *const u8;
+        for (k, &b) in bytes.iter().enumerate() {
+            // SAFETY: addr_after is the forwarded body ptr of an in-heap
+            // byte object of >= bytes.len() bytes.
+            let got = unsafe { *p.add(k) };
+            assert_eq!(got, b, "forwarded buf byte {k} corrupted: {got} != {b}");
+        }
+        assert_eq!(audit_after, 0, "audit must be clean after forwarding");
+        std::mem::forget(interp);
     }
 
     /// S4a: the #2-hash-shaped region (LOAD_ML_BYTE / WORD_MULT / WORD_ADD

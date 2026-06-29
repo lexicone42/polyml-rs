@@ -1533,6 +1533,13 @@ impl Jit {
             "polyml_jit_region_interp_call",
             boundary::polyml_jit_region_interp_call as *const u8,
         );
+        // Whole-region GC-SAFEPOINT slow path (S4c). A region's back-edge
+        // poll calls this ONLY when the alloc threshold is crossed, to
+        // publish sp + run the top-of-step collection mid-region.
+        builder.symbol(
+            "polyml_jit_region_safepoint",
+            boundary::polyml_jit_region_safepoint as *const u8,
+        );
         Ok(Self {
             module: JITModule::new(builder),
             next_id: 0,

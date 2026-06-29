@@ -171,8 +171,10 @@ type JitCache = std::collections::HashMap<usize, JitEntry, FxBuildHasher>;
 // =====================================================================
 
 /// Mirror of `polyml_jit::region::ExnCtx` (handler_sp @ 0, exn_packet @
-/// 8, interp_ptr @ 16). `#[repr(C)]` so the JIT loads/stores by fixed
-/// byte offset.
+/// 8, interp_ptr @ 16, live_sp @ 24, gc_used_ptr @ 32, gc_trigger @ 40).
+/// `#[repr(C)]` so the JIT loads/stores by fixed byte offset. The layout
+/// MUST stay identical to the JIT side — the do_call hook builds this and
+/// the region reinterprets the SAME memory.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ExnCtxC {
@@ -188,6 +190,20 @@ pub struct ExnCtxC {
     /// the region needs no dynamic-call re-entry (e.g. the static-only
     /// boundary demo). See the soundness argument in the JIT boundary.
     pub interp_ptr: i64,
+    /// THE GC-SAFEPOINT SP-PUBLISH SLOT (S4c). A region writes its current
+    /// SSA `sp` here before taking the slow-path `region_safepoint`, so
+    /// the helper can set `self.sp = live_sp` and the Cheney GC forwards
+    /// the live stack `[sp, len)` exactly. Offset 24.
+    pub live_sp: i64,
+    /// Address (raw bits of a `*const usize`) of the LIVE heap
+    /// words-allocated counter (`MemorySpace.used`) the region's inline
+    /// back-edge poll reads — the SAME counter the top-of-step GC check
+    /// reads. Offset 32.
+    pub gc_used_ptr: i64,
+    /// The GC trigger word count (`gc_trigger_words`) the region's poll
+    /// compares `*gc_used_ptr` against (`i64::MAX` when GC is disabled).
+    /// Offset 40.
+    pub gc_trigger: i64,
 }
 
 /// Mirror of `polyml_jit::region::RegionRet` — NOT a bare tuple (tuples
@@ -2681,6 +2697,29 @@ impl Interpreter {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Test-only getter: number of completed GC cycles (see
+    /// [`crate::sched::Runtime::gc_count`]). Used by the forced-GC-mid-
+    /// region test to assert the collection actually FIRED.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_gc_count(&self) -> u64 {
+        self.runtime
+            .gc_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Test-only setter: force the GC trigger word count to `words` (both
+    /// the per-interpreter mirror and the shared Runtime). Lets a test arm
+    /// the top-of-step / region-safepoint collection at a tiny watermark so
+    /// it fires deterministically mid-run. `words == 0` disables GC.
+    #[doc(hidden)]
+    pub fn test_set_gc_trigger_words(&mut self, words: usize) {
+        self.gc_trigger_words = words;
+        if let Some(rt) = Arc::get_mut(&mut self.runtime) {
+            rt.gc_trigger_words = words;
+        }
+    }
+
     /// Test-only getter: whether the giant lock is held (`running`). Used by
     /// the H2 negative control.
     #[doc(hidden)]
@@ -2873,6 +2912,88 @@ impl Interpreter {
                     raised: 1,
                 }
             }
+        }
+    }
+
+    /// THE GC-SAFEPOINT SLOW PATH (S4c). Called by a native region's
+    /// back-edge poll ONLY when the inline check found the alloc threshold
+    /// crossed (`*gc_used_ptr >= gc_trigger`). `live_sp` is the region's
+    /// current downward SSA `sp`, which the region published into its
+    /// `ExnCtx.live_sp` BEFORE calling here.
+    ///
+    /// It (1) publishes `self.sp = live_sp` so the GC's `[sp, len)` root
+    /// walk covers every value the native region has live on the SHARED
+    /// stack, then (2) runs the EXACT top-of-step collection logic
+    /// (mod.rs:3541 — `gc_trigger_words > 0 && used >= trigger` →
+    /// `request_gc_collect`). After it returns, objects may have MOVED;
+    /// the region resumes reading the (now-forwarded) shared stack.
+    ///
+    /// SOUNDNESS (the block-boundary argument): the region's translator
+    /// carries exactly ONE cross-block-live SSA value — the integer `sp`.
+    /// Every heap value is on the shared SML stack (the fixed `Box`, a GC
+    /// root scanned `[sp, len)`). The back-edge safepoint is at a BLOCK
+    /// BOUNDARY (the JUMP_BACK terminator), so no register holds a heap
+    /// pointer that could go stale: publishing `sp` and collecting
+    /// forwards every root, and the region resumes correctly. The
+    /// cache-ptr-across-alloc hazard is a within-block / S4d concern, not
+    /// this back-edge case.
+    ///
+    /// Returns the (unchanged) `live_sp` — the GC does not move the stack
+    /// Box, only the heap objects the stack slots POINT at (forwarded in
+    /// place), so `sp` is identical after the collection.
+    #[doc(hidden)]
+    pub fn region_safepoint(&mut self, live_sp: i64) -> i64 {
+        // Publish the region's live sp so the root walk covers [sp, len).
+        self.sp = live_sp as usize;
+        // EXACT top-of-step GC condition (mirror mod.rs:3541-3558).
+        if self.gc_trigger_words > 0
+            && let Some(used) = self.alloc_space_ref().map(MemorySpace::used_words)
+            && used >= self.gc_trigger_words
+        {
+            let before = used;
+            let stack_depth = self.stack_height();
+            let new_used = self.request_gc_collect().unwrap_or(before);
+            if std::env::var("POLYML_GC_QUIET").is_err() {
+                eprintln!(
+                    "  GC[region-safepoint]: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
+                    if before > 0 {
+                        (new_used * 100) / before
+                    } else {
+                        0
+                    }
+                );
+            }
+        }
+        // The stack Box is fixed; sp is unchanged by the collection.
+        self.sp as i64
+    }
+
+    /// Raw bits of a `*const usize` pointing at the LIVE heap
+    /// words-allocated counter (`MemorySpace.used`), or 0 if no heap is
+    /// attached. The do_call hook copies this into the region's
+    /// `ExnCtx.gc_used_ptr` so the inline back-edge poll reads the SAME
+    /// counter the top-of-step GC check reads (mod.rs:3542). The address
+    /// is stable while the heap lives (the heap is a fixed `Box` inside
+    /// the Runtime, and the poll runs only under the giant lock, on the
+    /// mutator thread, between this hook and the region's return).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn region_gc_used_ptr(&self) -> i64 {
+        self.alloc_space_ref()
+            .map_or(0, |s| std::ptr::addr_of!(s.used) as i64)
+    }
+
+    /// The GC trigger word count for the region's poll, as an `i64`:
+    /// `gc_trigger_words` when GC is enabled, else `i64::MAX` (so the poll
+    /// — `used >= trigger` — never trips, matching the interpreter's
+    /// `gc_trigger_words > 0` guard).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn region_gc_trigger(&self) -> i64 {
+        if self.gc_trigger_words > 0 {
+            self.gc_trigger_words as i64
+        } else {
+            i64::MAX
         }
     }
 
@@ -6350,10 +6471,21 @@ impl Interpreter {
                     // thread-local raw-pointer re-entry the per-function JIT
                     // fast path uses below.
                     let interp_ptr = (self as *mut Interpreter) as i64;
+                    // GC-safepoint poll wiring (S4c): hand the region the
+                    // address of the live words-allocated counter + the GC
+                    // trigger so its back-edge poll reads the SAME values
+                    // the top-of-step check uses. `live_sp` starts at the
+                    // call sp; the region overwrites it before any
+                    // safepoint slow-path call.
+                    let gc_used_ptr = self.region_gc_used_ptr();
+                    let gc_trigger = self.region_gc_trigger();
                     let mut ctx = ExnCtxC {
                         handler_sp: handler_sp_i64,
                         exn_packet: 0,
                         interp_ptr,
+                        live_sp: self.sp as i64,
+                        gc_used_ptr,
+                        gc_trigger,
                     };
                     let stack_base = self.stack.as_mut_ptr().cast::<i64>();
                     let sp_at_top_arg = self.sp as i64;
@@ -6815,6 +6947,21 @@ mod tests {
     use super::*;
     use crate::length_word::{F_CLOSURE_OBJ, F_CODE_OBJ};
     use crate::space::{MemorySpace, SpaceKind};
+
+    /// ABI LOCK (S4c): the runtime's ExnCtxC (the struct the do_call hook
+    /// builds) MUST have byte offsets identical to the JIT's ExnCtx (which
+    /// the region reinterprets the SAME memory as). A field drift here is
+    /// silent heap corruption under mid-region GC.
+    #[test]
+    fn exn_ctx_c_field_offsets_match_jit_side() {
+        assert_eq!(std::mem::offset_of!(ExnCtxC, handler_sp), 0);
+        assert_eq!(std::mem::offset_of!(ExnCtxC, exn_packet), 8);
+        assert_eq!(std::mem::offset_of!(ExnCtxC, interp_ptr), 16);
+        assert_eq!(std::mem::offset_of!(ExnCtxC, live_sp), 24);
+        assert_eq!(std::mem::offset_of!(ExnCtxC, gc_used_ptr), 32);
+        assert_eq!(std::mem::offset_of!(ExnCtxC, gc_trigger), 40);
+        assert_eq!(std::mem::size_of::<ExnCtxC>(), 48);
+    }
 
     // ---- ALU + control flow tests (carried over, adjusted for new API)
 

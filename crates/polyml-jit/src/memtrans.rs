@@ -603,12 +603,28 @@ fn tagged(b: &mut FunctionBuilder, n: i64) -> Value {
         .iconst(types::I64, n.wrapping_mul(2).wrapping_add(1))
 }
 
-// ctx field accessors (handler_sp @ 0, exn_packet @ 8).
+// ctx field accessors (handler_sp @ 0, exn_packet @ 8, interp_ptr @ 16,
+// live_sp @ 24, gc_used_ptr @ 32, gc_trigger @ 40 — see ExnCtx).
 fn load_handler_sp(b: &mut FunctionBuilder, ctx: Value) -> Value {
     b.ins().load(types::I64, MemFlags::trusted(), ctx, 0)
 }
 fn store_exn_packet(b: &mut FunctionBuilder, ctx: Value, v: Value) {
     b.ins().store(MemFlags::trusted(), v, ctx, 8);
+}
+/// Store the region's current SSA `sp` into `ctx.live_sp` (offset 24)
+/// before a safepoint slow-path call, so `region_safepoint` can publish
+/// it as `interp.sp` for the GC root walk.
+fn store_live_sp(b: &mut FunctionBuilder, ctx: Value, sp: Value) {
+    b.ins().store(MemFlags::trusted(), sp, ctx, 24);
+}
+/// Load `ctx.gc_used_ptr` (offset 32) — the address of the live heap
+/// words-allocated counter.
+fn load_gc_used_ptr(b: &mut FunctionBuilder, ctx: Value) -> Value {
+    b.ins().load(types::I64, MemFlags::trusted(), ctx, 32)
+}
+/// Load `ctx.gc_trigger` (offset 40) — the GC trigger word count.
+fn load_gc_trigger(b: &mut FunctionBuilder, ctx: Value) -> Value {
+    b.ins().load(types::I64, MemFlags::trusted(), ctx, 40)
 }
 
 // Tagged-int bounds for FixedInt overflow (mirror poly_word::MIN/MAX_TAGGED
@@ -645,6 +661,11 @@ struct FnState<'a> {
     /// (`polyml_jit_region_interp_call`), declared lazily when a
     /// CALL_LOCAL_B / CALL_CLOSURE is lowered. None until then.
     interp_call_ref: Option<cranelift::codegen::ir::FuncRef>,
+    /// FuncRef for the GC-safepoint slow path
+    /// (`polyml_jit_region_safepoint`), declared up front iff this
+    /// function contains a JUMP_BACK back-edge. None when the function has
+    /// no back-edge (a straight-line / forward-only function never polls).
+    safepoint_ref: Option<cranelift::codegen::ir::FuncRef>,
 }
 
 /// Define one region function: lower its bytecode against the shared
@@ -734,6 +755,40 @@ unsafe fn define_function(
         }
     };
 
+    // Pre-declare the GC-safepoint slow path iff this function contains a
+    // JUMP_BACK back-edge (a loop). A function with no back-edge can never
+    // loop, so it never needs a safepoint poll (its bounded straight-line
+    // /forward work allocates nothing in the core subset). Signature:
+    //   (ctx) -> ()
+    let safepoint_ref = {
+        let mut has_back_edge = false;
+        let mut pc = 0usize;
+        while pc < rc.bytecode.len() {
+            let b = rc.bytecode[pc];
+            let d = decode(&rc.bytecode, pc);
+            if d.total_len == 0 {
+                return Err(BailReason::Truncated(pc));
+            }
+            if b == op::INSTR_JUMP_BACK8 || b == op::INSTR_JUMP_BACK16 {
+                has_back_edge = true;
+                break;
+            }
+            pc += d.total_len;
+        }
+        if has_back_edge {
+            let mut tsig = jit.module.make_signature();
+            tsig.params.push(AbiParam::new(types::I64)); // ctx ptr
+            // no returns
+            let tid = jit
+                .module
+                .declare_function("polyml_jit_region_safepoint", Linkage::Import, &tsig)
+                .map_err(|e| BailReason::ModuleError(e.to_string()))?;
+            Some(jit.module.declare_func_in_func(tid, &mut ctx.func))
+        } else {
+            None
+        }
+    };
+
     // Compute all block boundaries (jump targets) up front.
     let blocks_offsets = compute_block_offsets(rc)?;
 
@@ -772,6 +827,7 @@ unsafe fn define_function(
             blocks,
             callee_refs,
             interp_call_ref,
+            safepoint_ref,
         };
 
         emit_all_blocks(&mut bldr, &mut st, base, sp0, cctx, entry)?;
@@ -1013,11 +1069,24 @@ fn emit_one(
         INSTR_RESET_R_3 => reset_r(bldr, base, sp, 3),
         INSTR_RESET_R_B => reset_r(bldr, base, sp, imm1 as i64),
 
-        // ---- jumps ----
-        INSTR_JUMP8 | INSTR_JUMP16 | INSTR_JUMP_BACK8 | INSTR_JUMP_BACK16 => {
+        // ---- forward / unconditional jumps (no safepoint) ----
+        INSTR_JUMP8 | INSTR_JUMP16 => {
             let t = jump_target(bc, pc, b, total).ok_or(BailReason::Truncated(pc))?;
             let blk = *st.blocks.get(&t).ok_or(BailReason::JumpMidInstruction(t))?;
             bldr.ins().jump(blk, &[BlockArg::from(sp)]);
+            *terminated = true;
+            sp
+        }
+        // ---- BACK-EDGE jumps (the loop latch) — emit the GC-SAFEPOINT
+        // POLL here (S4c). This is the ONE place a region can loop, so it
+        // is the only place a long-running native region needs to give the
+        // GC a chance to fire. The poll is an INLINE, predicted-not-taken
+        // check (3 loads + 1 cmp + 1 branch, NO call on the no-GC fast
+        // path); only when the alloc threshold is crossed does it take the
+        // slow-path `region_safepoint` helper. See `emit_back_edge_jump`.
+        INSTR_JUMP_BACK8 | INSTR_JUMP_BACK16 => {
+            let t = jump_target(bc, pc, b, total).ok_or(BailReason::Truncated(pc))?;
+            emit_back_edge_jump(bldr, st, cctx, t, sp)?;
             *terminated = true;
             sp
         }
@@ -1269,6 +1338,74 @@ fn reset_r(b: &mut FunctionBuilder, base: Value, sp: Value, n: i64) -> Value {
     let new_sp = b.ins().iadd_imm(sp, n);
     store_at(b, base, new_sp, top);
     new_sp
+}
+
+/// BACK-EDGE jump WITH the inline GC-safepoint poll (S4c). At a JUMP_BACK
+/// (the loop latch) emit:
+///
+///   used      = load *(ctx.gc_used_ptr)            ; 2 loads (ptr + deref)
+///   trigger   = load ctx.gc_trigger               ; 1 load
+///   over?     = used >=u trigger                   ; 1 cmp
+///   brif over -> slow_blk(sp)  else target_blk(sp); 1 predicted-not-taken
+///                                                    branch (NO call on
+///                                                    the no-GC fast path)
+///   slow_blk: ctx.live_sp = sp                     ; publish sp
+///             call region_safepoint(ctx)           ; collect mid-region
+///             jump target_blk(sp)                  ; resume the loop head
+///
+/// On the common (no-GC) path the region does NOTHING but the cheap
+/// compare + a not-taken branch, then jumps to the loop head — preserving
+/// the tight-loop speed. The slow path fires only when the words-allocated
+/// counter has crossed the trigger (the SAME condition the interpreter's
+/// top-of-step check uses).
+///
+/// If this function has no `safepoint_ref` (no back-edge was detected at
+/// declaration time — should be impossible here since we only reach this
+/// for a JUMP_BACK), fall back to a plain back-jump (correct, just
+/// un-polled) rather than emitting a dangling call.
+fn emit_back_edge_jump(
+    bldr: &mut FunctionBuilder,
+    st: &mut FnState,
+    ctx: Value,
+    target: usize,
+    sp: Value,
+) -> Result<(), BailReason> {
+    let target_blk = *st
+        .blocks
+        .get(&target)
+        .ok_or(BailReason::JumpMidInstruction(target))?;
+    let Some(safepoint) = st.safepoint_ref else {
+        // No declared safepoint trampoline (a JUMP_BACK with no back-edge
+        // flagged is a contradiction; be safe + just jump).
+        bldr.ins().jump(target_blk, &[BlockArg::from(sp)]);
+        return Ok(());
+    };
+
+    // INLINE POLL (predicted-not-taken). Load the live words-allocated
+    // counter via ctx.gc_used_ptr, compare to ctx.gc_trigger.
+    let used_ptr = load_gc_used_ptr(bldr, ctx);
+    let used = bldr
+        .ins()
+        .load(types::I64, MemFlags::trusted(), used_ptr, 0);
+    let trigger = load_gc_trigger(bldr, ctx);
+    // `used >= trigger` (unsigned — both are non-negative word counts).
+    let over = bldr
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, used, trigger);
+
+    let slow_blk = bldr.create_block();
+    // brif: the slow path is the cold side (placed second so the common
+    // fall-through is the not-taken edge).
+    bldr.ins()
+        .brif(over, slow_blk, &[], target_blk, &[BlockArg::from(sp)]);
+
+    // ---- slow path: publish sp, collect, resume the loop head ----
+    bldr.switch_to_block(slow_blk);
+    bldr.seal_block(slow_blk);
+    store_live_sp(bldr, ctx, sp);
+    bldr.ins().call(safepoint, &[ctx]);
+    bldr.ins().jump(target_blk, &[BlockArg::from(sp)]);
+    Ok(())
 }
 
 /// Conditional jump: pop the condition, branch to target or fallthrough.

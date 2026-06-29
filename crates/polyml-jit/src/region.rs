@@ -4,7 +4,7 @@
 // Codegen module: pervasive intentional i64<->index casts + builder-pattern
 // verbosity. The pedantic/nursery lints (cast_possible_truncation, use_self,
 // uninlined_format_args, …) are noise here; deny-level lints still apply.
-#![allow(clippy::pedantic, clippy::nursery)]
+#![allow(clippy::pedantic, clippy::nursery, clippy::doc_lazy_continuation)]
 //!
 //! ============================================================
 //! WHY THIS EXISTS (the coverage wall, see CLAUDE.md "JIT status")
@@ -153,10 +153,20 @@ pub fn whole_region_enabled() -> bool {
 /// `i64::MIN/2` is comfortably outside any real sp.
 pub const NO_HANDLER: i64 = i64::MIN / 2;
 
+/// A static zero cell the [`ExnCtx`] default `gc_used_ptr` points at, so
+/// the back-edge GC-safepoint poll is UNCONDITIONAL (no null gate on the
+/// fast path): with the default ctx it loads `0`, compares to the
+/// `i64::MAX` default `gc_trigger`, and the predicted-not-taken branch is
+/// never taken. The real do_call hook overwrites `gc_used_ptr` with the
+/// address of the live heap `used` counter + a real `gc_trigger`.
+static ZERO_USED: i64 = 0;
+
 /// The shared exception context threaded through every region function
 /// via the `ctx` parameter. Mirrors the interpreter's `handler_sp: usize`
-/// + `exception_packet: PolyWord`. `#[repr(C)]` so Cranelift can
-/// load/store by fixed byte offset (handler_sp @ 0, exn_packet @ 8).
+/// + `exception_packet: PolyWord`, and carries the GC-safepoint
+/// publish/poll fields (S4c). `#[repr(C)]` so Cranelift can load/store by
+/// fixed byte offset (handler_sp @ 0, exn_packet @ 8, interp_ptr @ 16,
+/// live_sp @ 24, gc_used_ptr @ 32, gc_trigger @ 40).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ExnCtx {
@@ -171,6 +181,26 @@ pub struct ExnCtx {
     /// re-enter `do_call` without a second aliasing `&mut Interpreter`.
     /// Layout-identical to `polyml_runtime::ExnCtxC` (interp_ptr @ 16).
     pub interp_ptr: i64,
+    /// THE GC-SAFEPOINT SP-PUBLISH SLOT (S4c). At a back-edge safepoint
+    /// the region STORES its current SSA `sp` here BEFORE taking the
+    /// slow-path `region_safepoint` helper, so the helper can set
+    /// `interp.sp = ctx.live_sp` and the Cheney GC forwards the live
+    /// stack `[sp, len)` exactly. Offset 24.
+    pub live_sp: i64,
+    /// Address (raw bits of a `*const i64`/`*const usize`) of the LIVE
+    /// heap words-allocated counter (`MemorySpace.used`) — the SAME value
+    /// the interpreter's top-of-step GC check reads (mod.rs:3542). The
+    /// inline back-edge poll loads `*gc_used_ptr` and compares it to
+    /// [`Self::gc_trigger`]. Defaults to `&ZERO_USED` so the default ctx
+    /// never trips the poll. Offset 32.
+    pub gc_used_ptr: i64,
+    /// The GC trigger word count (`gc_trigger_words`) — the SAME threshold
+    /// mod.rs:3543 compares against. The poll takes the slow path iff
+    /// `*gc_used_ptr >= gc_trigger`. Defaults to `i64::MAX` (never trip);
+    /// the do_call hook sets it to the live trigger, or leaves it at
+    /// `i64::MAX` when GC is disabled (trigger == 0), matching the
+    /// interpreter's `gc_trigger_words > 0` guard. Offset 40.
+    pub gc_trigger: i64,
 }
 
 impl Default for ExnCtx {
@@ -179,6 +209,12 @@ impl Default for ExnCtx {
             handler_sp: NO_HANDLER,
             exn_packet: 0,
             interp_ptr: 0,
+            live_sp: 0,
+            // The default ctx is GC-poll-INERT: a stable zero cell + an
+            // unreachable trigger, so the unconditional poll's branch is
+            // never taken (no null-gate needed on the fast path).
+            gc_used_ptr: std::ptr::addr_of!(ZERO_USED) as i64,
+            gc_trigger: i64::MAX,
         }
     }
 }
@@ -1060,6 +1096,22 @@ pub fn run_whole_region_demo() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ABI LOCK (S4c make-or-break): the JIT loads/stores ctx fields by
+    /// FIXED byte offset (the IR uses v2+24/+32/+40). If these offsets ever
+    /// drift from the do_call hook's ExnCtxC, the region reads garbage and
+    /// GC silently corrupts. Pin them here so a field reorder fails the
+    /// build, not at runtime.
+    #[test]
+    fn exn_ctx_field_offsets_are_stable() {
+        assert_eq!(std::mem::offset_of!(ExnCtx, handler_sp), 0);
+        assert_eq!(std::mem::offset_of!(ExnCtx, exn_packet), 8);
+        assert_eq!(std::mem::offset_of!(ExnCtx, interp_ptr), 16);
+        assert_eq!(std::mem::offset_of!(ExnCtx, live_sp), 24);
+        assert_eq!(std::mem::offset_of!(ExnCtx, gc_used_ptr), 32);
+        assert_eq!(std::mem::offset_of!(ExnCtx, gc_trigger), 40);
+        assert_eq!(std::mem::size_of::<ExnCtx>(), 48);
+    }
 
     #[test]
     fn demo_region_differential_matches_reference() {
