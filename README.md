@@ -210,8 +210,12 @@ Rust runtime — no open partials.** Details:
   safepoint GC that scans every thread's stack — a larger effort). **Interrupts
   *are* done**: Ctrl-C (SIGINT) raises the SML `Interrupt` exception, which the
   REPL / a handler catches — a runaway loop is interruptible instead of hard-killed.
-- **JIT as a big speedup** — it's correct and a *modest* (~2%) win; whole-region
-  native compilation (the real road to native speed) is future work.
+- **JIT as a big speedup** — it's correct and a *modest* (~2%) win. Whole-region
+  native compilation was built end-to-end and measured: **byte-identical across the
+  full 27.7-billion-step self-bootstrap (a deep soundness result) but a net
+  *slowdown* (~0.87×)** — the compiler's real hot path falls outside the compilable
+  subset, so the tight threaded interpreter wins. The JIT's honest value is a
+  correctness testbed, not speed.
 
 ---
 

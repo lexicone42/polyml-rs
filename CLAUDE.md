@@ -142,11 +142,28 @@ objects translate, ~823 install. After Phase-0 install/trampoline work it is
 hot-function COVERAGE: the top-called functions are blocked by CALL_CONST_ADDR /
 CALL_LOCAL_B, which model a non-popping call convention (args persist across the
 call, RETURN_N collapses them) that the per-call trampoline can't express — no
-install-gate can unlock them. **Whole-region compilation is the only road to real
-native speed**; a per-opcode install chase won't get there. Debug env:
-`JIT_DUMP_IR`, `JIT_TRACE_CALLS`, `JIT_ONLY_IDX=N`, `JIT_INSTALL_LIMIT/SKIP`,
-`JIT_TRACE_RETURNS`, `JIT_TRAMP_*`. The bisection harness lives in
-`install_all_jit_entries` (polyml-jit/src/lib.rs).
+install-gate can unlock them. Debug env: `JIT_DUMP_IR`, `JIT_TRACE_CALLS`,
+`JIT_ONLY_IDX=N`, `JIT_INSTALL_LIMIT/SKIP`, `JIT_TRACE_RETURNS`, `JIT_TRAMP_*`. The
+bisection harness lives in `install_all_jit_entries` (polyml-jit/src/lib.rs).
+
+**Whole-region JIT (`poly run --whole-region`, default OFF): BUILT + measured — sound
+but NOT a speedup.** The hypothesis was that whole-region compilation (a shared-stack
+non-popping convention that *can* express the calls the per-function JIT bails on)
+was "the only road to real native speed". It was built end-to-end (memory-backed
+translator → region fixpoint → live do_call boundary → GC-safepoints → GC-safe alloc
+→ dynamic-call trampoline with raise fidelity; `crates/polyml-jit/src/{memtrans,
+boundary,region}.rs`) and **measured on the canonical heavy workload (the full 7-stage
+self-bootstrap, 27.7B steps): BYTE-IDENTICAL flag-on vs flag-off (9.8M native
+dispatches — an exhaustive soundness proof) but 0.87× wall-clock — a ~15% SLOWDOWN.**
+Only ~2.8% of real-workload steps go native: the compiler's genuine hot path (parser/
+typechecker/optimizer) uses closures/exceptions outside the compilable subset and
+BAILS; only small leaf regions compile, and a per-call dispatch tax does the rest.
+The per-region microbench best-cases (21.8× pure-loop, 3.45× call-bound) were real but
+unrepresentative. **Verdict: the tight threaded interpreter wins on real workloads;
+whole-region's honest value is the same as `--jit`'s — a correctness testbed**, now
+validated at self-bootstrap scale. Flag-gated, default-off, default byte-identical;
+stopped at the S5 kill-switch (no productionize). Full write-up: the
+`whole-region-jit-feasibility` memory + the `jit/whole-region:` commit series.
 
 ## Portability
 
@@ -264,8 +281,10 @@ How it works:
   `docs/correctness-and-safety.md`.
 - Real OS threads exist behind `POLY_REAL_THREADS=1` (giant lock + safepoint GC,
   see Architecture); a **preemptive scheduler** (beyond cooperative safepoint
-  yielding) and full `Thread` attribute fidelity are still open. A real JIT
-  speedup (whole-region) and Windows remain unimplemented.
+  yielding) and full `Thread` attribute fidelity are still open. Whole-region JIT
+  was BUILT + measured (sound but a net slowdown — see Performance & JIT); a real
+  native *speedup* is now believed out of reach for this interpreter (the tight
+  threaded loop wins). Windows remains unimplemented.
 
 (The Isabelle number-theory tower is complete — Lagrange's four-square theorem,
 the last open partial, is proved; see `docs/four-square-progress-*.md`. It is
