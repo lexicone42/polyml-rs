@@ -264,6 +264,62 @@ pub unsafe extern "C" fn polyml_jit_region_safepoint(ctx: *mut ExnCtx) {
     let _new_sp = interp.region_safepoint(live_sp);
 }
 
+/// THE GC-SAFE ALLOC TRAMPOLINE C-ABI shim (S4d). A native region, at an
+/// allocation opcode (TUPLE / CLOSURE / ALLOC_* / STACK-resident object),
+/// has already STORED its current SSA `sp` into `ctx.live_sp` and now calls
+/// THIS function (imported as `polyml_jit_region_alloc`) to allocate
+/// `n_words` words with the object `flags`.
+///
+/// It reconstructs the live `*mut Interpreter` from `ctx.interp_ptr` and
+/// invokes `interp.region_alloc(ctx.live_sp, n_words, flags)`, which
+/// publishes `interp.sp = live_sp`, runs the top-of-step GC threshold
+/// check (collecting if the heap crossed the trigger — the ONLY way a
+/// region alloc gets a GC, since `interp.allocate` never collects), then
+/// bump-allocates and returns the new object's BODY pointer (bits). On a
+/// NoAllocator / post-GC exhaustion it returns 0.
+///
+/// CRITICAL CALLER DISCIPLINE (the make-or-break — enforced in
+/// `memtrans::emit_one`'s alloc lowerings, NOT here): a GC inside this call
+/// MOVES every heap object, so the region must re-read EVERY operand (field
+/// values, init value, base pointers) from the (forwarded) SHARED STACK
+/// *after* this returns, and must NEVER hold a stack-loaded heap pointer in
+/// a register across this call. The returned to-space pointer is valid only
+/// until the NEXT allocation.
+///
+/// SOUNDNESS / NO ALIASING UB: identical discipline to
+/// [`polyml_jit_region_safepoint`] — the only live `&mut Interpreter` up the
+/// call stack is the outer `do_call` hook's `&mut self`, dormant for the
+/// whole region call, so the transient `&mut` reconstructed here never
+/// aliases a *used* one. It lives only for this call and is dropped before
+/// returning to native code.
+///
+/// # Safety
+/// `ctx` must be a valid `*mut ExnCtx` whose `interp_ptr` is the live
+/// interpreter the do_call hook stored (it is, by construction — the region
+/// only calls this with its own ctx, after publishing `ctx.live_sp`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn polyml_jit_region_alloc(
+    ctx: *mut ExnCtx,
+    n_words: i64,
+    flags: i64,
+) -> i64 {
+    // SAFETY: ctx is a valid *mut ExnCtx (caller upholds).
+    let (interp_ptr, live_sp) = unsafe { ((*ctx).interp_ptr, (*ctx).live_sp) };
+    debug_assert!(
+        interp_ptr != 0,
+        "region_alloc with null interp_ptr — an alloc region MUST be dispatched \
+         on a live interp (ctx.interp_ptr set by the do_call hook / run_region_on_interp)"
+    );
+    if interp_ptr == 0 {
+        // Defensive: never deref a null interp. 0 => the region raises.
+        return 0;
+    }
+    // SAFETY: the transient &mut lives only for this call; the outer
+    // &mut self is dormant (see the soundness note above).
+    let interp = unsafe { &mut *(interp_ptr as usize as *mut polyml_runtime::Interpreter) };
+    interp.region_alloc(live_sp, n_words, flags)
+}
+
 /// Human-readable name for a region exception sentinel (so the
 /// boundary's raise mapping is auditable).
 #[must_use]
@@ -1244,6 +1300,106 @@ fn callloop_reference(n: i64) -> i64 {
     if n <= 0 { 0 } else { n * (n + 1) / 2 + n }
 }
 
+// =====================================================================
+// S4d — THE TUPLE-ALLOC LOOP REGION (the GC-safe alloc crucible).
+//
+// A genuine PolyML bytecode region whose loop ALLOCATES a fresh TUPLE_2
+// every iteration and immediately reads a field back, accumulating into a
+// sum — so a GC fired DURING an alloc (via region_alloc) must forward both
+// the just-built tuple (post-alloc re-read) and the stack-resident loop
+// vars (acc, i):
+//
+//   tuplesum(n) = sum_{i=1}^{n} snd( (i, i+1) )   (= sum_{i=1}^{n} (i+1))
+//                                                    (root, arity 1)
+//
+// Each iteration builds the pair (i, i+1) on the heap with TUPLE_2, reads
+// its field 1 (= i+1) with INDIRECT_1, adds it to the accumulator. The
+// per-iteration heap allocation is exactly the S4d hazard: with a tiny
+// heap + gc_trigger_words=1, a GC fires inside region_alloc mid-region, and
+// correctness requires (a) the operands the alloc consumed survived the
+// collection (post-alloc re-read off the forwarded stack), (b) the loop
+// vars survived. tuplesum(n) == callloop_reference(n) (same closed form).
+// =====================================================================
+
+/// Build the tuple-alloc loop root `tuplesum(n)`, arity 1.
+///
+/// Entry: LOCAL_0=clo, LOCAL_1=ret, LOCAL_2=n(top). Two persistent loop
+/// locals (acc, i) pushed on the shared stack:
+///   prologue: push acc=0, push i=1.  Loop sp L = sp0-2.
+///   From L:   i=LOCAL_0, acc=LOCAL_1, clo=LOCAL_2, ret=LOCAL_3, n=LOCAL_4.
+/// Test-at-top WHILE loop: exit when i > n.
+#[allow(clippy::vec_init_then_push)]
+fn build_tuplesum_region(space: &mut MemorySpace) -> BuiltCode {
+    let mut bc: Vec<u8> = Vec::new();
+    // ---- prologue: push acc=0, push i=1 ----
+    bc.push(op::INSTR_CONST_0); // acc=0  -> stack[sp0-1]
+    bc.push(op::INSTR_CONST_1); // i=1    -> stack[sp0-2] = L
+    // ---- Ltest: if i > n exit (fall to tail); else body ----
+    let ltest = bc.len();
+    bc.push(op::INSTR_LOCAL_0); // push i   (sp L-1)
+    bc.push(op::INSTR_LOCAL_5); // push n (LOCAL_4 from L; +1 after i ⇒ LOCAL_5) (sp L-2)
+    bc.push(op::INSTR_GREATER_SIGNED); // i > n ? (sp L-1)
+    bc.push(op::INSTR_JUMP8_TRUE);
+    let jt_off_idx = bc.len();
+    bc.push(0x00); // off (patched -> Lexit)
+    // ---- body: build (i, i+1), acc += snd; i += 1; JUMP_BACK to Ltest ----
+    // Build TUPLE_2 (i, i+1): push i (field 0, deeper), push i+1 (field 1,
+    // top). TUPLE_2 pops top->p[1], next->p[0] => p = (i, i+1).
+    bc.push(op::INSTR_LOCAL_0); // push i (field 0)               (sp L-1)
+    bc.push(op::INSTR_LOCAL_1); // push i again (LOCAL_0 from L; +1 ⇒ LOCAL_1) (sp L-2)
+    bc.push(op::INSTR_CONST_1); // push 1                         (sp L-3)
+    bc.push(op::INSTR_FIXED_ADD); // i+1 (field 1, top)           (sp L-2)
+    bc.push(op::INSTR_TUPLE_2); // alloc pair (i, i+1) -> ptr     (sp L-1)
+    bc.push(op::INSTR_INDIRECT_1); // field 1 (= i+1)             (sp L-1)
+    // acc = acc + (i+1). The (i+1) value is on top (L-1); push acc (acc =
+    // LOCAL_1 from L; +1 after the value on top ⇒ LOCAL_2).
+    bc.push(op::INSTR_LOCAL_2); // push acc                       (sp L-2)
+    bc.push(op::INSTR_FIXED_ADD); // (i+1) + acc                  (sp L-1)
+    bc.push(op::INSTR_SET_STACK_VAL_B); // store new acc into acc's slot
+    bc.push(2); //   idx=2: new_sp=L; L+2-1=L+1 = acc's slot      (sp L)
+    // i = i + 1.
+    bc.push(op::INSTR_LOCAL_0); // push i                         (sp L-1)
+    bc.push(op::INSTR_CONST_1); // push 1                         (sp L-2)
+    bc.push(op::INSTR_FIXED_ADD); // i + 1                        (sp L-1)
+    bc.push(op::INSTR_SET_STACK_VAL_B); // store i+1 into i's slot
+    bc.push(1); //   idx=1: new_sp=L; L+1-1=L = i's slot          (sp L)
+    // JUMP_BACK to Ltest.
+    let jback_pc = bc.len();
+    bc.push(op::INSTR_JUMP_BACK8);
+    let back_off = jback_pc as i64 - ltest as i64;
+    assert!(
+        (0..=255).contains(&back_off),
+        "tuplesum back-off {back_off} out of range"
+    );
+    bc.push(back_off as u8);
+    // ---- Lexit: result = acc; drop loop locals; RETURN_B 1 ----
+    let lexit = bc.len();
+    bc.push(op::INSTR_LOCAL_1); // push acc (LOCAL_1 from L)       (sp L-1)
+    bc.push(op::INSTR_RESET_R_2); // keep result, drop i+acc       (sp L+1)
+    bc.push(op::INSTR_RETURN_B); // collapse result+clo+ret+1 arg
+    bc.push(1); //   arity 1
+
+    // JUMP8_TRUE forward off: interp lands at after + off, after = opcode
+    // idx + 2. The opcode is at jt_off_idx - 1. Target = Lexit.
+    let jt_opcode_idx = jt_off_idx - 1;
+    let jt_after = jt_opcode_idx + 2;
+    let fwd_off = lexit as i64 - jt_after as i64;
+    assert!(
+        (0..=255).contains(&fwd_off),
+        "tuplesum jt fwd-off {fwd_off} out of range"
+    );
+    bc[jt_off_idx] = fwd_off as u8;
+
+    build_code_object(space, &bc, &[])
+}
+
+/// The Rust reference for tuplesum: sum_{i=1}^{n} (i+1) = n(n+1)/2 + n
+/// (the SAME closed form as callloop, by construction).
+#[cfg(test)]
+fn tuplesum_reference(n: i64) -> i64 {
+    if n <= 0 { 0 } else { n * (n + 1) / 2 + n }
+}
+
 /// Run the call-loop region BOTH ways for `n`. Pure interp via do_call vs
 /// native via the boundary WITH the region_interp_call trampoline per
 /// iteration, on a real heap. Returns the differential + native ticks.
@@ -1302,6 +1458,76 @@ pub fn run_callloop_both_ways(n: isize) -> RealRegionResult {
         region_fn,
         root_closure_bits,
         &[leaf_closure, PolyWord::tagged(n)],
+    );
+    std::mem::forget(interp);
+
+    RealRegionResult {
+        interp_result: interp_result.0,
+        native_result,
+        native_ticks: ticks,
+        raised_interp: interp_result.1,
+        raised_native,
+    }
+}
+
+/// Run the tuple-alloc loop region BOTH ways for `n`. Pure interp via
+/// do_call vs native via the boundary, on a real heap. The native path runs
+/// on a LIVE interp (so the GC-safe alloc trampoline has `ctx.interp_ptr`).
+/// Returns the differential + native ticks.
+pub fn run_tuplesum_both_ways(n: isize) -> RealRegionResult {
+    // ---- (1) PURE INTERP ----
+    let interp_result = {
+        let mut space = MemorySpace::new(1 << 16, SpaceKind::Code);
+        let root = build_tuplesum_region(&mut space);
+        let root_addr = root.code_addr;
+        let root_closure = root.closure;
+        // tuples allocate into a separate mutable space.
+        let heap = MemorySpace::new(1 << 16, SpaceKind::Mutable);
+        let mut interp = Interpreter::from_bytes(8192, vec![]).with_alloc_space(heap);
+        // The code object lives in `space`; the interp must be able to reach
+        // it. set_code_segment_to_code_obj points the PC at it directly.
+        std::mem::forget(space); // keep the code object alive for the run
+        interp.test_seed_top(PolyWord::tagged(n)); // arg n (top, LOCAL_2)
+        interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+        interp.test_seed_top(root_closure); // closure (LOCAL_0)
+        // SAFETY: root_addr is a live code object (leaked code space).
+        unsafe { interp.set_code_segment_to_code_obj(root_addr as usize) };
+        let r = match interp.run() {
+            Ok(StepResult::Returned(w)) => (w.0 as i64, false),
+            Ok(other) => panic!("interp did not return cleanly: {other:?}"),
+            Err(e) => panic!("interp error: {e:?}"),
+        };
+        std::mem::forget(interp);
+        r
+    };
+
+    // ---- (2) NATIVE region via the boundary, on a live interp ----
+    let mut code_space = MemorySpace::new(1 << 16, SpaceKind::Code);
+    let root = build_tuplesum_region(&mut code_space);
+    let root_addr = root.code_addr;
+    let root_closure_bits = root.closure.0 as i64;
+
+    let mut jit = Jit::new().expect("jit");
+    // SAFETY: root_addr is a live code object in code_space.
+    let region = match unsafe { memtrans::build_region(&mut jit, root_addr) } {
+        Ok(r) => r,
+        Err(e) => panic!("tuplesum region build bailed: {e}"),
+    };
+    jit.module.finalize_definitions().expect("finalize");
+    let ptr = jit.module.get_finalized_function(region.root);
+    // SAFETY: region root has the RegionFn ABI.
+    let region_fn: RegionFn = unsafe { std::mem::transmute::<*const u8, RegionFn>(ptr) };
+
+    // Live interp owns the alloc heap (tuples go here); the code object is in
+    // the leaked code_space.
+    std::mem::forget(code_space);
+    let heap = MemorySpace::new(1 << 16, SpaceKind::Mutable);
+    let mut interp = Interpreter::from_bytes(8192, vec![]).with_alloc_space(heap);
+    let (native_result, raised_native, ticks) = run_region_on_interp(
+        &mut interp,
+        region_fn,
+        root_closure_bits,
+        &[PolyWord::tagged(n)],
     );
     std::mem::forget(interp);
 
@@ -1932,6 +2158,265 @@ mod tests {
             let got = unsafe { *p.add(k) };
             assert_eq!(got, b, "forwarded buf byte {k} corrupted: {got} != {b}");
         }
+        assert_eq!(audit_after, 0, "audit must be clean after forwarding");
+        std::mem::forget(interp);
+    }
+
+    /// S4d: the tuple-alloc loop region must COMPILE (TUPLE_2 is now in the
+    /// subset, lowered via the GC-safe region_alloc trampoline) and be
+    /// byte-identical to the interpreter AND the Rust reference across n.
+    /// The native path runs on a live interp so the alloc trampoline has a
+    /// valid ctx.interp_ptr.
+    #[test]
+    fn tuplesum_region_differential_clean() {
+        let mut diverged = 0usize;
+        let mut cases = 0usize;
+        for n in [-2isize, 0, 1, 2, 3, 5, 8, 13, 20, 50, 100, 250] {
+            let r = run_tuplesum_both_ways(n);
+            cases += 1;
+            let interp = PolyWord::from_bits(r.interp_result as usize).untag() as i64;
+            let native = PolyWord::from_bits(r.native_result as usize).untag() as i64;
+            let want = tuplesum_reference(n as i64);
+            if interp != native || r.raised_interp != r.raised_native {
+                diverged += 1;
+                eprintln!("DIVERGE tuplesum({n}): interp={interp} native={native}");
+            }
+            assert_eq!(interp, want, "interp tuplesum({n}) must match reference");
+            assert_eq!(native, want, "native tuplesum({n}) must match reference");
+            assert!(r.native_ticks >= 1, "tuplesum({n}) region ran NATIVE");
+        }
+        assert_eq!(diverged, 0, "{diverged}/{cases} tuplesum cases diverged");
+    }
+
+    /// The tuple-alloc region must build (no UnsupportedOpcode), be a single
+    /// non-recursive leaf with no dynamic call, so live-dispatch registers
+    /// it. (TUPLE_2 is now in the subset via the GC-safe alloc trampoline.)
+    #[test]
+    fn tuplesum_region_is_registerable_leaf() {
+        let mut space = MemorySpace::new(4096, SpaceKind::Code);
+        let f = build_tuplesum_region(&mut space);
+        let mut jit = Jit::new().expect("jit");
+        // SAFETY: f.code_addr is a live code object in `space`.
+        let r = unsafe { memtrans::build_region(&mut jit, f.code_addr) }
+            .expect("tuplesum region must build Ok (TUPLE_2 lowered in S4d)");
+        assert!(!r.recursive, "tuplesum is a loop leaf, not recursive");
+        assert!(
+            !r.has_dynamic_call,
+            "tuplesum has no dynamic call (TUPLE_2 is a heap alloc, not a call)"
+        );
+        assert_eq!(r.funcs.len(), 1, "tuplesum is a single leaf function");
+    }
+
+    /// THE S4d FORCED-GC-DURING-ALLOC TEST (the load-bearing proof).
+    ///
+    /// Builds the tuple-alloc loop region (which allocates a fresh TUPLE_2
+    /// every iteration via the GC-safe region_alloc trampoline), registers
+    /// it for LIVE do_call dispatch on a real interpreter, then FORCES the
+    /// alloc threshold by setting `gc_trigger_words` to 1. On the FIRST
+    /// allocation the trampoline's threshold check trips → it publishes sp +
+    /// runs a full Cheney collection MID-ALLOC (forwarding the loop vars
+    /// (acc, i) on the shared stack AND the freshly-built tuples). The loop
+    /// runs many iterations AFTER the first GC, so the post-alloc forwarded
+    /// re-reads are genuinely exercised.
+    ///
+    /// Asserts:
+    ///   (a) the region returns the CORRECT result (loop vars + the just-
+    ///       allocated tuples survived): native == the pure-interp oracle ==
+    ///       the independent Rust reference;
+    ///   (b) POLYML_GC_AUDIT reports 0 residual from-space pointers;
+    ///   (c) a collection ACTUALLY FIRED during the region run (gc_count > 0);
+    ///   (d) NON-VACUITY: a probe-allocated object actually relocates + its
+    ///       stack slot is forwarded (adv_collection_relocates_and_forwards,
+    ///       below) — the GC really MOVES objects under this regime.
+    #[test]
+    fn forced_gc_during_alloc_tuplesum_is_sound() {
+        unsafe {
+            std::env::set_var("POLYML_GC_AUDIT", "1");
+            std::env::set_var("POLYML_GC_QUIET", "1");
+        }
+        let n: isize = 200; // many allocs (200 tuples) after the first GC.
+
+        // ---- pure-interp ORACLE (ground truth) ----
+        let oracle = {
+            let mut code = MemorySpace::new(1 << 12, SpaceKind::Code);
+            let f = build_tuplesum_region(&mut code);
+            let f_addr = f.code_addr;
+            let f_closure = f.closure;
+            std::mem::forget(code);
+            let heap = MemorySpace::new(1 << 16, SpaceKind::Mutable);
+            let mut interp = Interpreter::from_bytes(4096, vec![]).with_alloc_space(heap);
+            interp.test_seed_top(PolyWord::tagged(n));
+            interp.test_seed_return_sentinel();
+            interp.test_seed_top(f_closure);
+            // SAFETY: f_addr is a live code object (leaked code space).
+            unsafe { interp.set_code_segment_to_code_obj(f_addr as usize) };
+            let r = match interp.run() {
+                Ok(StepResult::Returned(w)) => w.0 as i64,
+                other => panic!("oracle interp: {other:?}"),
+            };
+            std::mem::forget(interp);
+            r
+        };
+
+        // ---- NATIVE region, LIVE dispatch, forced mid-ALLOC GC ----
+        // Code object in a LEAKED Code space (never collected/moved).
+        let code_space: &'static mut MemorySpace =
+            Box::leak(Box::new(MemorySpace::new(1 << 12, SpaceKind::Code)));
+        let f = build_tuplesum_region(code_space);
+        let f_addr = f.code_addr;
+        let f_closure = f.closure;
+
+        // Interpreter with a small COLLECTED alloc space; tuples live HERE.
+        let heap = MemorySpace::new(1 << 14, SpaceKind::Mutable);
+        let mut interp = Interpreter::from_bytes(4096, vec![]).with_alloc_space(heap);
+
+        // Compile + register the region for LIVE do_call dispatch.
+        install_region_dispatch(polyml_jit_region_dispatch);
+        let mut jit = Jit::new().expect("jit");
+        // SAFETY: f_addr is a live code object in the leaked code space.
+        let region = unsafe { memtrans::build_region(&mut jit, f_addr) }.expect("region build");
+        assert!(!region.recursive && !region.has_dynamic_call);
+        jit.module.finalize_definitions().expect("finalize");
+        let ptr = jit.module.get_finalized_function(region.root);
+        interp.install_region(
+            f_addr as usize,
+            RegionEntry {
+                region_fn: ptr as usize,
+                sml_arity: region.root_arity,
+            },
+        );
+        let _jit_keep = jit; // hold the module alive across the run
+
+        // ARM THE ALLOC GC: trigger at 1 word so the FIRST alloc's threshold
+        // check trips (the heap is empty initially, so used >= 1 only AFTER
+        // the first tuple; the trampoline re-checks before each alloc, so the
+        // SECOND alloc onward trips → a collection fires mid-region).
+        interp.test_set_gc_trigger_words(1);
+        let gc_before = interp.test_gc_count();
+        let audit_before = interp.test_gc_audit_residual();
+
+        // Dispatch the ROOT through the REAL do_call so the region hook fires
+        // (it sets ctx.interp_ptr + the gc fields the alloc trampoline reads).
+        interp.test_seed_top(PolyWord::tagged(n)); // arg n (top, LOCAL_2)
+        reset_native_tick();
+        interp
+            .test_invoke_do_call(f_closure)
+            .expect("region do_call must succeed");
+        let native = interp.test_peek_top().0 as i64;
+        let ticks = native_tick_count();
+        let gc_after = interp.test_gc_count();
+        let audit_after = interp.test_gc_audit_residual();
+        let independent_ref = tuplesum_reference(n as i64);
+        let independent_ref_tagged = (independent_ref << 1) | 1;
+
+        unsafe {
+            std::env::remove_var("POLYML_GC_AUDIT");
+            std::env::remove_var("POLYML_GC_QUIET");
+        }
+        eprintln!(
+            "ADV-VERIFY: native={native} independent_ref(tagged)={independent_ref_tagged} \
+             (untagged ref={independent_ref})"
+        );
+        eprintln!(
+            "forced-GC-during-alloc: gc_count {gc_before} -> {gc_after} \
+             (collections during the native region run = {}), native_ticks={ticks}",
+            gc_after - gc_before
+        );
+        assert_eq!(
+            native, independent_ref_tagged,
+            "ADV-VERIFY: native result must equal the INDEPENDENT Rust reference"
+        );
+        // (c) a collection actually FIRED. A REGISTERED region dispatched via
+        // do_call runs ENTIRELY native — the interpreter's own top-of-step GC
+        // check is NEVER reached — so the ONLY place a collection can fire is
+        // the region's alloc trampoline (the loop has no back-edge alloc-free
+        // safepoint that would also collect; and STACK_CONTAINER is absent).
+        // Non-zero gc_count therefore PROVES the alloc trampoline ran the
+        // collection mid-region.
+        assert!(
+            gc_after > gc_before,
+            "GC must have fired mid-region via the alloc trampoline: \
+             gc_count {gc_before} -> {gc_after}"
+        );
+        assert!(ticks >= 1, "region must have run NATIVE (ticks={ticks})");
+        // (a) the result is CORRECT (loop vars + the allocated tuples that
+        // were live across the collection survived + were forwarded).
+        assert_eq!(
+            native, oracle,
+            "native (with mid-alloc GC) must equal the pure-interp oracle"
+        );
+        // (b) POLYML_GC_AUDIT found ZERO residual from-space pointers.
+        assert_eq!(
+            audit_after, audit_before,
+            "POLYML_GC_AUDIT must report 0 NEW residual from-space pointers \
+             across the mid-alloc collection(s) (before={audit_before} after={audit_after})"
+        );
+        assert_eq!(
+            audit_after, 0,
+            "cumulative GC-audit residual must be 0 (sound mid-alloc collection)"
+        );
+
+        std::mem::forget(interp);
+    }
+
+    /// NON-VACUITY for the alloc path (the skeptic's check): prove that a
+    /// single collection RELOCATES a live TUPLE object AND that a stack-
+    /// resident slot pointing at it is FORWARDED to the new address. This is
+    /// the alloc-shaped analogue of `adv_collection_relocates_and_forwards_
+    /// stack_slot` (which used a byte object). If the GC never moved heap
+    /// objects under this regime, `forced_gc_during_alloc_tuplesum_is_sound`
+    /// would be vacuous. Uses ONLY the interpreter's own GC (no JIT).
+    #[test]
+    fn adv_alloc_collection_relocates_tuple_and_forwards_slot() {
+        unsafe {
+            std::env::set_var("POLYML_GC_AUDIT", "1");
+            std::env::set_var("POLYML_GC_QUIET", "1");
+        }
+        use polyml_runtime::PolyWord as PW;
+        let heap = MemorySpace::new(8192, SpaceKind::Mutable);
+        let mut interp = Interpreter::from_bytes(64, vec![]).with_alloc_space(heap);
+        // Allocate a 2-word tuple (7, 9) via region_alloc (the SAME trampoline
+        // path the region uses), with sp published. Seed it onto the stack.
+        // We drive region_alloc directly (no native code) to isolate the
+        // relocation claim.
+        interp.test_seed_top(PW::tagged(0)); // a dummy bottom so sp is valid
+        let live_sp = interp.test_sp() as i64;
+        let body = interp.region_alloc(live_sp, 2, 0);
+        assert_ne!(body, 0, "alloc must succeed");
+        // Fill fields (7, 9) and put the tuple ptr on the stack.
+        let p = body as *mut PW;
+        // SAFETY: just allocated 2 words.
+        unsafe {
+            p.add(0).write(PW::tagged(7));
+            p.add(1).write(PW::tagged(9));
+        }
+        interp.test_seed_top(PW::from_bits(body as usize));
+        let addr_before = body as usize;
+        // Force a collection.
+        interp.test_set_gc_trigger_words(1);
+        let audit_before = interp.test_gc_audit_residual();
+        let _ = interp.test_force_gc_no_barrier();
+        let audit_after = interp.test_gc_audit_residual();
+        // Read the forwarded tuple ptr back off the stack.
+        let addr_after = interp.test_peek_top().0;
+        unsafe {
+            std::env::remove_var("POLYML_GC_AUDIT");
+            std::env::remove_var("POLYML_GC_QUIET");
+        }
+        eprintln!(
+            "ADV-RELOC(tuple): 0x{addr_before:016x} -> 0x{addr_after:016x} (moved={}), \
+             audit {audit_before}->{audit_after}",
+            addr_before != addr_after
+        );
+        assert_ne!(
+            addr_before, addr_after,
+            "a collection MUST relocate the live tuple (else mid-alloc forwarding is vacuous)"
+        );
+        // The forwarded tuple must still hold (7, 9).
+        let fp = addr_after as *const PW;
+        // SAFETY: addr_after is the forwarded body ptr of the 2-word tuple.
+        let (f0, f1) = unsafe { ((*fp.add(0)).untag(), (*fp.add(1)).untag()) };
+        assert_eq!((f0, f1), (7, 9), "forwarded tuple fields corrupted");
         assert_eq!(audit_after, 0, "audit must be clean after forwarding");
         std::mem::forget(interp);
     }

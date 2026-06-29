@@ -1540,6 +1540,15 @@ impl Jit {
             "polyml_jit_region_safepoint",
             boundary::polyml_jit_region_safepoint as *const u8,
         );
+        // Whole-region GC-SAFE ALLOC trampoline (S4d). A region's alloc
+        // opcode (TUPLE / CLOSURE / ALLOC_* / stack container) calls this to
+        // publish live_sp + run the GC threshold check + bump-allocate (the
+        // interp allocator never collects, so a region alloc MUST route here
+        // to avoid a panic at heap-full).
+        builder.symbol(
+            "polyml_jit_region_alloc",
+            boundary::polyml_jit_region_alloc as *const u8,
+        );
         Ok(Self {
             module: JITModule::new(builder),
             next_id: 0,

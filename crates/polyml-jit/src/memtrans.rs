@@ -555,6 +555,31 @@ fn is_supported(b: u8) -> bool {
         | INSTR_CALL_CONST_ADDR8_8 | INSTR_CALL_CONST_ADDR16_8
         // DYNAMIC call (trampolines into the interpreter's do_call)
         | INSTR_CALL_LOCAL_B | INSTR_CALL_CLOSURE
+        // S4d — allocation opcodes (heap alloc via the GC-safe trampoline,
+        // EXCEPT STACK_CONTAINER_B which is a pure stack push, no heap alloc)
+        | INSTR_STACK_CONTAINER_B
+        | INSTR_TUPLE_2 | INSTR_TUPLE_3 | INSTR_TUPLE_4 | INSTR_TUPLE_B
+        | INSTR_CLOSURE_B
+        | INSTR_ALLOC_REF | INSTR_ALLOC_WORD_MEMORY | INSTR_ALLOC_BYTE_MEM
+    )
+}
+
+/// Is `b` an opcode that performs a HEAP allocation (and therefore must
+/// route through the GC-safe `region_alloc` trampoline)? STACK_CONTAINER_B
+/// is NOT here — it only pushes zero slots + a stack-relative container
+/// pointer onto the shared stack, no heap object is allocated.
+fn is_heap_alloc_opcode(b: u8) -> bool {
+    use op::*;
+    matches!(
+        b,
+        INSTR_TUPLE_2
+            | INSTR_TUPLE_3
+            | INSTR_TUPLE_4
+            | INSTR_TUPLE_B
+            | INSTR_CLOSURE_B
+            | INSTR_ALLOC_REF
+            | INSTR_ALLOC_WORD_MEMORY
+            | INSTR_ALLOC_BYTE_MEM
     )
 }
 
@@ -666,6 +691,11 @@ struct FnState<'a> {
     /// function contains a JUMP_BACK back-edge. None when the function has
     /// no back-edge (a straight-line / forward-only function never polls).
     safepoint_ref: Option<cranelift::codegen::ir::FuncRef>,
+    /// FuncRef for the GC-SAFE ALLOC trampoline
+    /// (`polyml_jit_region_alloc`), declared up front iff this function
+    /// contains an allocation opcode (TUPLE / CLOSURE / ALLOC_*). None
+    /// otherwise. Signature: `(ctx, n_words, flags) -> body_ptr`.
+    alloc_ref: Option<cranelift::codegen::ir::FuncRef>,
 }
 
 /// Define one region function: lower its bytecode against the shared
@@ -789,6 +819,41 @@ unsafe fn define_function(
         }
     };
 
+    // Pre-declare the GC-SAFE ALLOC trampoline iff this function contains a
+    // HEAP allocation opcode (TUPLE / CLOSURE / ALLOC_*). STACK_CONTAINER_B
+    // is a pure stack push (no heap alloc) so it does NOT require this.
+    // Signature: (ctx, n_words, flags) -> body_ptr.
+    let alloc_ref = {
+        let mut has_alloc = false;
+        let mut pc = 0usize;
+        while pc < rc.bytecode.len() {
+            let b = rc.bytecode[pc];
+            let d = decode(&rc.bytecode, pc);
+            if d.total_len == 0 {
+                return Err(BailReason::Truncated(pc));
+            }
+            if is_heap_alloc_opcode(b) {
+                has_alloc = true;
+                break;
+            }
+            pc += d.total_len;
+        }
+        if has_alloc {
+            let mut tsig = jit.module.make_signature();
+            tsig.params.push(AbiParam::new(types::I64)); // ctx ptr
+            tsig.params.push(AbiParam::new(types::I64)); // n_words
+            tsig.params.push(AbiParam::new(types::I64)); // flags
+            tsig.returns.push(AbiParam::new(types::I64)); // body ptr (bits)
+            let tid = jit
+                .module
+                .declare_function("polyml_jit_region_alloc", Linkage::Import, &tsig)
+                .map_err(|e| BailReason::ModuleError(e.to_string()))?;
+            Some(jit.module.declare_func_in_func(tid, &mut ctx.func))
+        } else {
+            None
+        }
+    };
+
     // Compute all block boundaries (jump targets) up front.
     let blocks_offsets = compute_block_offsets(rc)?;
 
@@ -828,6 +893,7 @@ unsafe fn define_function(
             callee_refs,
             interp_call_ref,
             safepoint_ref,
+            alloc_ref,
         };
 
         emit_all_blocks(&mut bldr, &mut st, base, sp0, cctx, entry)?;
@@ -1291,6 +1357,52 @@ fn emit_one(
                 imm1 as i64,
             )?
         }
+
+        // ---- S4d: stack container (NO heap alloc, do it FIRST) ----
+        // STACK_CONTAINER_B N (mod.rs:3849): push N tagged(0) words, then
+        // push a container-ref word = address of slot 0 (the most-recently
+        // pushed zero). Downward: after pushing N zeros sp1 = sp-N and the
+        // last zero (slot 0) is at stack[sp1]; the ref = base + sp1*8; then
+        // push the ref (sp2 = sp1-1). The ref is a REAL stack pointer (the
+        // interp stores `stack.as_ptr().add(sp)` after the N pushes), so we
+        // compute `addr_at(base, sp1)`. NO region_alloc — pure stack work,
+        // so NO cache-ptr hazard. (Mirrors the interp do_stack_container.)
+        INSTR_STACK_CONTAINER_B => {
+            let n = imm1 as i64;
+            // Push N tagged(0) words.
+            let zero = tagged(bldr, 0);
+            let sp1 = bldr.ins().iadd_imm(sp, -n);
+            // Zero the N slots [sp1, sp). Write each explicitly (N is a
+            // small compile-time constant from the immediate byte).
+            let mut k = 0i64;
+            while k < n {
+                let idx = bldr.ins().iadd_imm(sp1, k);
+                store_at(bldr, base, idx, zero);
+                k += 1;
+            }
+            // Container ref = &stack[sp1] = base + sp1*8.
+            let ref_ptr = addr_at(bldr, base, sp1);
+            // Push the ref word (its raw pointer bits) on top.
+            emit_push(bldr, base, sp1, ref_ptr)
+        }
+
+        // ---- S4d: HEAP allocation opcodes (via the GC-safe trampoline) ----
+        // Each lowering: (1) PUBLISH live_sp = current sp into ctx; (2) call
+        // region_alloc(ctx, n_words, flags) -> body_ptr (which may fire a
+        // GC, MOVING every heap object); (3) RE-READ every operand from the
+        // (forwarded) SHARED STACK *after* the alloc; (4) store the fields
+        // into the new object (no alloc between stores, so the to-space body
+        // ptr stays valid); (5) collapse sp + push the object pointer.
+        // NEVER hold a stack-loaded heap pointer in a register across the
+        // alloc — that is the within-block cache-ptr-across-alloc hazard.
+        INSTR_TUPLE_2 => emit_alloc_tuple(bldr, st, base, sp, cctx, 2)?,
+        INSTR_TUPLE_3 => emit_alloc_tuple(bldr, st, base, sp, cctx, 3)?,
+        INSTR_TUPLE_4 => emit_alloc_tuple(bldr, st, base, sp, cctx, 4)?,
+        INSTR_TUPLE_B => emit_alloc_tuple(bldr, st, base, sp, cctx, imm1 as i64)?,
+        INSTR_CLOSURE_B => emit_alloc_closure(bldr, st, base, sp, cctx, imm1 as i64)?,
+        INSTR_ALLOC_REF => emit_alloc_ref(bldr, st, base, sp, cctx)?,
+        INSTR_ALLOC_WORD_MEMORY => emit_alloc_word_memory(bldr, st, base, sp, cctx)?,
+        INSTR_ALLOC_BYTE_MEM => emit_alloc_byte_mem(bldr, st, base, sp, cctx)?,
 
         other => {
             return Err(BailReason::UnsupportedOpcode {
@@ -1947,6 +2059,248 @@ fn load_interp_ptr(b: &mut FunctionBuilder, ctx: Value) -> Value {
     b.ins().load(types::I64, MemFlags::trusted(), ctx, 16)
 }
 
+// =====================================================================
+// S4d — GC-SAFE HEAP ALLOCATION LOWERINGS.
+//
+// THE INVARIANT every lowering here upholds (the make-or-break): a GC can
+// fire INSIDE region_alloc, moving every heap object. So the lowering must:
+//   1. PUBLISH live_sp = the current sp into ctx (so the GC's [sp,len)
+//      root walk covers the operands the alloc consumes — they are on the
+//      shared stack at indices >= sp), via emit_region_alloc.
+//   2. call region_alloc(ctx, n_words, flags) -> body_ptr.
+//   3. RE-READ every operand (field/init values, base pointers) from the
+//      (now-forwarded) shared stack *AFTER* the alloc — NEVER hold a
+//      stack-loaded heap pointer in a register across the alloc.
+//   4. store the fields into the new object (no alloc between stores, so
+//      the just-returned to-space body ptr stays valid), then collapse sp
+//      and push the object pointer.
+// Each lowering does exactly ONE alloc, so step 4's stores never straddle
+// a second alloc (no spill-the-first-ptr complication arises here).
+// =====================================================================
+
+/// Emit the GC-safe alloc: PUBLISH `sp` into `ctx.live_sp`, call
+/// `region_alloc(ctx, n_words, flags) -> body_ptr`, and on a 0 (NoAllocator
+/// / post-GC exhaustion) RAISE StackOverflow (return new_sp=handler_sp,
+/// raised=1) rather than let the region deref null — mirroring the
+/// interpreter's hard panic-on-exhaustion as a TRAPPED error. Returns the
+/// body_ptr SSA value on the success path (the builder is left positioned in
+/// a fresh "ok" block that the caller continues filling).
+///
+/// `n_words` may be a compile-time constant or an SSA value (for runtime
+/// lengths like ALLOC_WORD_MEMORY); `flags` is likewise either.
+fn emit_region_alloc(
+    bldr: &mut FunctionBuilder,
+    st: &FnState,
+    ctx: Value,
+    sp: Value,
+    n_words: Value,
+    flags: Value,
+) -> Result<Value, BailReason> {
+    let aref = st.alloc_ref.ok_or(BailReason::UnresolvableCallee(0))?;
+    // (1) Publish the region's live sp BEFORE the alloc so a GC inside the
+    //     trampoline forwards [sp, len). The operands the alloc reads are at
+    //     indices >= sp (still on the shared stack), so they survive + are
+    //     forwarded.
+    store_live_sp(bldr, ctx, sp);
+    // (2) Call the trampoline.
+    let call = bldr.ins().call(aref, &[ctx, n_words, flags]);
+    let body_ptr = bldr.inst_results(call)[0];
+    // On 0 (exhaustion / no allocator) RAISE StackOverflow.
+    let zero = bldr.ins().iconst(types::I64, 0);
+    let failed = bldr.ins().icmp(IntCC::Equal, body_ptr, zero);
+    let raise_blk = bldr.create_block();
+    let ok_blk = bldr.create_block();
+    bldr.ins().brif(failed, raise_blk, &[], ok_blk, &[]);
+
+    bldr.switch_to_block(raise_blk);
+    bldr.seal_block(raise_blk);
+    emit_raise(bldr, ctx, EXN_STACKOVERFLOW);
+
+    bldr.switch_to_block(ok_blk);
+    bldr.seal_block(ok_blk);
+    Ok(body_ptr)
+}
+
+/// TUPLE_N (mod.rs do_tuple): alloc N ordinary words (flags 0), fill from
+/// the top N stack values, push the tuple ptr. The interp pops top->p[n-1],
+/// next->p[n-2], …, deepest->p[0]; i.e. `p[i] = stack[sp + (n-1-i)]`
+/// (pre-alloc sp). RE-READ all N field values from the FORWARDED stack
+/// AFTER the alloc, store into the new object, collapse: final sp =
+/// sp + n - 1, tuple ptr at stack[sp+n-1].
+fn emit_alloc_tuple(
+    bldr: &mut FunctionBuilder,
+    st: &FnState,
+    base: Value,
+    sp: Value,
+    ctx: Value,
+    n: i64,
+) -> Result<Value, BailReason> {
+    let n_words = bldr.ins().iconst(types::I64, n);
+    let flags = bldr.ins().iconst(types::I64, 0); // ordinary word object
+    let p = emit_region_alloc(bldr, st, ctx, sp, n_words, flags)?;
+    // RE-READ each field from the forwarded shared stack, store into p.
+    // p[i] = stack[sp + (n-1-i)].
+    for i in 0..n {
+        let v = emit_peek(bldr, base, sp, n - 1 - i); // stack[sp + (n-1-i)]
+        let dst = bldr.ins().iadd_imm(p, i * 8);
+        bldr.ins().store(MemFlags::trusted(), v, dst, 0);
+    }
+    // Collapse: N pops + 1 push => final sp = sp + n - 1; tuple ptr on top.
+    let new_sp = bldr.ins().iadd_imm(sp, n - 1);
+    store_at(bldr, base, new_sp, p);
+    Ok(new_sp)
+}
+
+/// CLOSURE_B N (mod.rs do_create_closure): length = N+1; alloc
+/// F_CLOSURE_OBJ. Entry top->down: capture[N-1]=top, …, capture[0], source
+/// closure (deepest). The interp pops top->p[N], …, ->p[1] (so
+/// `p[N-k+1] = stack[sp + (k-1)]`, i.e. `p[j] = stack[sp + (N-j)]` for j in
+/// 1..=N), then copies the source closure's word0 (code addr) into p[0].
+/// RE-READ the captures AND the source closure pointer from the FORWARDED
+/// stack AFTER the alloc; deref the (forwarded) source for its code addr.
+/// Collapse: N+1 pops + 1 push => final sp = sp + N; closure ptr on top.
+fn emit_alloc_closure(
+    bldr: &mut FunctionBuilder,
+    st: &FnState,
+    base: Value,
+    sp: Value,
+    ctx: Value,
+    n: i64,
+) -> Result<Value, BailReason> {
+    use polyml_runtime::length_word::F_CLOSURE_OBJ;
+    let length = n + 1;
+    let n_words = bldr.ins().iconst(types::I64, length);
+    let flags = bldr.ins().iconst(types::I64, i64::from(F_CLOSURE_OBJ));
+    let p = emit_region_alloc(bldr, st, ctx, sp, n_words, flags)?;
+    // RE-READ the N captures from the forwarded stack: p[j] = stack[sp + (N-j)]
+    // for j in 1..=N.
+    for j in 1..=n {
+        let v = emit_peek(bldr, base, sp, n - j); // stack[sp + (N - j)]
+        let dst = bldr.ins().iadd_imm(p, j * 8);
+        bldr.ins().store(MemFlags::trusted(), v, dst, 0);
+    }
+    // RE-READ the source closure pointer (deepest, at stack[sp + N]) AFTER
+    // the alloc — it is a heap pointer, so it must be re-read forwarded, NOT
+    // cached across the alloc. Deref its word0 (the code address) and store
+    // into p[0].
+    let src = emit_peek(bldr, base, sp, n); // stack[sp + N] = source closure
+    let code_addr = bldr.ins().load(types::I64, MemFlags::trusted(), src, 0);
+    bldr.ins().store(MemFlags::trusted(), code_addr, p, 0); // p[0] = code addr
+    // Collapse: N+1 pops + 1 push => final sp = sp + N; closure ptr on top.
+    let new_sp = bldr.ins().iadd_imm(sp, n);
+    store_at(bldr, base, new_sp, p);
+    Ok(new_sp)
+}
+
+/// ALLOC_REF (mod.rs do_alloc_ref): alloc 1 mutable word, init = the value
+/// currently on top, REPLACE the top with the cell ptr (net sp unchanged).
+/// RE-READ the init value from the forwarded top AFTER the alloc, store
+/// into p[0], replace the top slot with the ptr.
+fn emit_alloc_ref(
+    bldr: &mut FunctionBuilder,
+    st: &FnState,
+    base: Value,
+    sp: Value,
+    ctx: Value,
+) -> Result<Value, BailReason> {
+    use polyml_runtime::length_word::F_MUTABLE_BIT;
+    let n_words = bldr.ins().iconst(types::I64, 1);
+    let flags = bldr.ins().iconst(types::I64, i64::from(F_MUTABLE_BIT));
+    let p = emit_region_alloc(bldr, st, ctx, sp, n_words, flags)?;
+    // RE-READ the init value from the forwarded top (stack[sp]).
+    let init = load_at(bldr, base, sp);
+    bldr.ins().store(MemFlags::trusted(), init, p, 0); // p[0] = init
+    // Replace top with the cell ptr (net sp unchanged: peek + pop + push).
+    store_at(bldr, base, sp, p);
+    Ok(sp)
+}
+
+/// ALLOC_WORD_MEMORY (mod.rs:3821): stack top->down [init, flags, length].
+/// length = peek(2); init = pop; flags = pop; alloc(length, flags); fill
+/// p[0..length] = init; pop length; push p. RE-READ length/flags/init from
+/// the forwarded stack AFTER the alloc. Net: final sp = sp + 2, ptr at
+/// stack[sp+2].
+///
+/// `length` is a RUNTIME tagged int (the loop fill count). We bound it
+/// against a sane ceiling at run time is unnecessary — the trampoline's
+/// `allocate` itself bails (returns 0 -> StackOverflow raise) on a length
+/// that doesn't fit. The fill loop is emitted as a small Cranelift loop
+/// over the runtime length so an arbitrary-length region is supported.
+fn emit_alloc_word_memory(
+    bldr: &mut FunctionBuilder,
+    st: &FnState,
+    base: Value,
+    sp: Value,
+    ctx: Value,
+) -> Result<Value, BailReason> {
+    // length is a tagged int at stack[sp+2]; untag for the word count.
+    // We must read it BEFORE the alloc to pass n_words — but `length` is a
+    // tagged INT (not a heap pointer), so reading it pre-alloc and passing
+    // it by VALUE to region_alloc is safe (an integer cannot go stale). The
+    // FIELD operands (init) ARE re-read post-alloc.
+    let length_w = emit_peek(bldr, base, sp, 2); // tagged length (an int)
+    let length = emit_untag(bldr, length_w);
+    let flags_w = emit_peek(bldr, base, sp, 1); // tagged flags (an int)
+    let flags = emit_untag(bldr, flags_w);
+    let p = emit_region_alloc(bldr, st, ctx, sp, length, flags)?;
+    // RE-READ the init value from the forwarded stack (stack[sp] = top).
+    let init = load_at(bldr, base, sp);
+    // Fill p[0..length] = init via a counted Cranelift loop (length is a
+    // runtime value). No alloc inside the loop, so the to-space `p` + the
+    // re-read `init` stay valid.
+    let loop_hdr = bldr.create_block();
+    bldr.append_block_param(loop_hdr, types::I64); // i
+    let loop_body = bldr.create_block();
+    let loop_done = bldr.create_block();
+    let zero = bldr.ins().iconst(types::I64, 0);
+    bldr.ins().jump(loop_hdr, &[BlockArg::from(zero)]);
+
+    bldr.switch_to_block(loop_hdr);
+    let i = bldr.block_params(loop_hdr)[0];
+    let more = bldr.ins().icmp(IntCC::SignedLessThan, i, length);
+    bldr.ins().brif(more, loop_body, &[], loop_done, &[]);
+
+    bldr.switch_to_block(loop_body);
+    bldr.seal_block(loop_body);
+    let off = bldr.ins().imul_imm(i, 8);
+    let dst = bldr.ins().iadd(p, off);
+    bldr.ins().store(MemFlags::trusted(), init, dst, 0);
+    let i_next = bldr.ins().iadd_imm(i, 1);
+    bldr.ins().jump(loop_hdr, &[BlockArg::from(i_next)]);
+    bldr.seal_block(loop_hdr);
+
+    bldr.switch_to_block(loop_done);
+    bldr.seal_block(loop_done);
+    // Collapse: pop init + flags (sp += 2), replace length slot with ptr.
+    let new_sp = bldr.ins().iadd_imm(sp, 2);
+    store_at(bldr, base, new_sp, p);
+    Ok(new_sp)
+}
+
+/// ALLOC_BYTE_MEM (mod.rs:3809): stack top->down [flags, length]. flags =
+/// pop; length = peek(0); alloc(length, flags); pop; push p. Bytes are
+/// UNINITIALIZED (the caller fills via STORE_*). flags + length are tagged
+/// INTS (not heap pointers), so reading them pre-alloc + passing by value is
+/// safe. Net: final sp = sp + 1, ptr at stack[sp+1]. No fields to re-read.
+fn emit_alloc_byte_mem(
+    bldr: &mut FunctionBuilder,
+    st: &FnState,
+    base: Value,
+    sp: Value,
+    ctx: Value,
+) -> Result<Value, BailReason> {
+    let flags_w = load_at(bldr, base, sp); // top = tagged flags (an int)
+    let flags = emit_untag(bldr, flags_w);
+    let length_w = emit_peek(bldr, base, sp, 1); // tagged length (an int)
+    let length = emit_untag(bldr, length_w);
+    let p = emit_region_alloc(bldr, st, ctx, sp, length, flags)?;
+    // No field stores (bytes uninitialized). Collapse: pop flags (sp += 1),
+    // replace length slot with ptr.
+    let new_sp = bldr.ins().iadd_imm(sp, 1);
+    store_at(bldr, base, new_sp, p);
+    Ok(new_sp)
+}
+
 /// FAITHFUL STACK_SIZE16 (S4b): if `sp < needed`, raise StackOverflow
 /// (return new_sp = ctx.handler_sp, raised = 1, packet = EXN_STACKOVERFLOW).
 /// Else continue with sp unchanged. `needed` is the u16 immediate, in
@@ -2105,22 +2459,52 @@ mod tests {
                 "0x{b:02x} should be in the core subset (dynamic-call trampoline)"
             );
         }
-        // ...and STILL EXCLUDES the allocation opcodes (which bail the whole
-        // region to the interpreter). Excluding the alloc opcodes is what
-        // keeps the current floor GC-trivially-safe: a region cannot
-        // allocate, so GC cannot fire mid-region. (When the alloc opcodes
-        // are added, the shared-stack-as-GC-root design — the region runs on
-        // interp.stack, scanned [sp,len) — is what makes a GC-triggering
-        // region correct.)
+        // S4d: the ALLOCATION opcodes are NOW in the subset — they route a
+        // heap alloc through the GC-safe region_alloc trampoline (publish
+        // live_sp + GC threshold check + bump-allocate), with the post-alloc
+        // operand re-read discipline (the shared stack is the GC root range
+        // [sp,len), so a mid-alloc collection forwards every operand). The
+        // STACK_CONTAINER_B opcode is the cheap one (no heap alloc, pure
+        // stack push of N zeros + a stack-relative container pointer).
         for b in [
+            op::INSTR_STACK_CONTAINER_B,
+            op::INSTR_TUPLE_2,
+            op::INSTR_TUPLE_3,
+            op::INSTR_TUPLE_4,
             op::INSTR_TUPLE_B,
             op::INSTR_CLOSURE_B,
+            op::INSTR_ALLOC_REF,
             op::INSTR_ALLOC_WORD_MEMORY,
-            op::INSTR_STACK_CONTAINER_B,
+            op::INSTR_ALLOC_BYTE_MEM,
+        ] {
+            assert!(
+                is_supported(b),
+                "0x{b:02x} should be in the core subset (S4d alloc lowering)"
+            );
+        }
+        // STACK_CONTAINER_B does NOT route through region_alloc (no heap
+        // alloc); the heap-alloc opcodes DO.
+        assert!(!is_heap_alloc_opcode(op::INSTR_STACK_CONTAINER_B));
+        for b in [
+            op::INSTR_TUPLE_2,
+            op::INSTR_TUPLE_B,
+            op::INSTR_CLOSURE_B,
+            op::INSTR_ALLOC_REF,
+            op::INSTR_ALLOC_WORD_MEMORY,
+            op::INSTR_ALLOC_BYTE_MEM,
+        ] {
+            assert!(is_heap_alloc_opcode(b), "0x{b:02x} is a heap alloc");
+        }
+        // ...and STILL EXCLUDES the genuinely-unsupported opcodes (which bail
+        // the whole region to the interpreter).
+        for b in [
             op::INSTR_SET_HANDLER8,
             op::INSTR_CALL_FAST_RTS1,
             op::INSTR_TAIL_B_B,
             op::INSTR_ESCAPE,
+            op::INSTR_ALLOC_MUT_CLOSURE_B,
+            op::INSTR_MOVE_TO_CONTAINER_B,
+            op::INSTR_INDIRECT_CONTAINER_B,
         ] {
             assert!(
                 !is_supported(b),

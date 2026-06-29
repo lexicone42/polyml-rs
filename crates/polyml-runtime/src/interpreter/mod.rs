@@ -2968,6 +2968,75 @@ impl Interpreter {
         self.sp as i64
     }
 
+    /// THE GC-SAFE ALLOC TRAMPOLINE (S4d). Called by a native region at an
+    /// allocation opcode (TUPLE / CLOSURE / ALLOC_* / etc.) BEFORE it
+    /// bump-allocates, because the interpreter's `allocate` (mod.rs:5470)
+    /// NEVER triggers a GC — it bump-allocates and PANICS on exhaustion.
+    /// The ONLY GC in the interpreter is the top-of-step threshold check
+    /// (mod.rs:3662). So a region alloc must go through THIS trampoline,
+    /// which:
+    ///   (1) publishes `self.sp = live_sp` so a collection's `[sp, len)`
+    ///       root walk covers everything the region has live on the SHARED
+    ///       stack (the args/operands of the alloc + every loop var);
+    ///   (2) runs the EXACT top-of-step GC condition (collect iff
+    ///       `gc_trigger_words > 0 && used >= trigger`) — the SAME check the
+    ///       interpreter does before each step;
+    ///   (3) bump-allocates `n_words` with `flags` and returns the new
+    ///       object's BODY pointer (bits).
+    ///
+    /// After this returns, every heap object MAY have MOVED. The new-object
+    /// pointer it returns is a TO-SPACE pointer valid until the NEXT
+    /// allocation. THE CALLER'S DISCIPLINE (the make-or-break, enforced in
+    /// the memtrans lowering, NOT here): the region must re-read every
+    /// operand (field values, init value, base pointers) from the
+    /// (forwarded) SHARED STACK *after* this returns — it must NEVER hold a
+    /// stack-loaded heap pointer in a register across this call.
+    ///
+    /// SOUNDNESS / NO ALIASING UB: identical discipline to
+    /// `region_safepoint` / `region_interp_call` — the only live
+    /// `&mut Interpreter` up the call stack is the outer `do_call` hook's
+    /// `&mut self`, dormant for the whole region call, so the transient
+    /// `&mut` the C-ABI shim reconstructs here never aliases a *used* one.
+    ///
+    /// Returns the body pointer (bits) on success, or 0 on a NoAllocator /
+    /// post-GC exhaustion error (the region treats 0 as a hard failure: the
+    /// shim raises StackOverflow rather than let the region deref null —
+    /// matching the interpreter's panic-on-exhaustion as a trapped error).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn region_alloc(&mut self, live_sp: i64, n_words: i64, flags: i64) -> i64 {
+        // (1) Publish the region's live sp so a collection forwards [sp,len).
+        self.sp = live_sp as usize;
+        // (2) EXACT top-of-step GC condition (mirror mod.rs:3662-3679). The
+        //     region may have allocated since the last poll, so re-check.
+        if self.gc_trigger_words > 0
+            && let Some(used) = self.alloc_space_ref().map(MemorySpace::used_words)
+            && used >= self.gc_trigger_words
+        {
+            let before = used;
+            let stack_depth = self.stack_height();
+            let new_used = self.request_gc_collect().unwrap_or(before);
+            if std::env::var("POLYML_GC_QUIET").is_err() {
+                eprintln!(
+                    "  GC[region-alloc]: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
+                    if before > 0 {
+                        (new_used * 100) / before
+                    } else {
+                        0
+                    }
+                );
+            }
+        }
+        // (3) Bump-allocate post-GC. On exhaustion / no allocator return 0.
+        if n_words < 0 {
+            return 0;
+        }
+        match self.allocate(n_words as usize, flags as u8) {
+            Ok(p) => p as i64,
+            Err(_) => 0,
+        }
+    }
+
     /// Raw bits of a `*const usize` pointing at the LIVE heap
     /// words-allocated counter (`MemorySpace.used`), or 0 if no heap is
     /// attached. The do_call hook copies this into the region's
