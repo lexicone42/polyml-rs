@@ -149,6 +149,101 @@ pub type FxBuildHasher = std::hash::BuildHasherDefault<FxHasher>;
 /// Pointer-keyed JIT cache: code-object address (`usize`) → [`JitEntry`].
 type JitCache = std::collections::HashMap<usize, JitEntry, FxBuildHasher>;
 
+// =====================================================================
+// WHOLE-REGION JIT BOUNDARY (S3b) — the live do_call hook.
+//
+// The interpreter cannot reference `polyml-jit` (the dependency is
+// one-way: polyml-jit -> polyml-runtime). So the whole-region boundary
+// is wired through a per-Interpreter REGION REGISTRY of native region
+// roots, plus a single process-global DISPATCH callback the JIT installs
+// at startup. The runtime defines the C-ABI mirror types (ExnCtxC /
+// RegionRetC); the JIT registers a `region_dispatch` fn that performs
+// the frame handshake (push retPC + closure, native-call the region
+// root, interpret RegionRet) — i.e. `boundary::dispatch_region`.
+//
+// PROVABLY INERT WHEN OFF: with the flag off the JIT never installs the
+// dispatch fn (it stays null) AND never registers any root (the per-
+// Interpreter registry stays empty). The do_call hook is guarded on
+// `!self.region_registry.is_empty()` — exactly the cheap state-local
+// check the jit_cache fast path already uses — so the default
+// interpreter path and the --jit path are byte-identical. One
+// never-taken branch.
+// =====================================================================
+
+/// Mirror of `polyml_jit::region::ExnCtx` (handler_sp @ 0, exn_packet @
+/// 8). `#[repr(C)]` so the JIT loads/stores by fixed byte offset.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ExnCtxC {
+    /// Downward stack index of the current handler frame, or the JIT's
+    /// `NO_HANDLER` sentinel.
+    pub handler_sp: i64,
+    /// The raised value (tagged PolyWord bits / region exn sentinel).
+    pub exn_packet: i64,
+}
+
+/// Mirror of `polyml_jit::region::RegionRet` — NOT a bare tuple (tuples
+/// are not FFI-safe). `new_sp` is the post-collapse downward sp; `raised`
+/// is 0 (normal) or 1 (an exception is propagating).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RegionRetC {
+    pub new_sp: i64,
+    pub raised: i64,
+}
+
+/// The process-global dispatch callback installed by `polyml-jit` when
+/// the whole-region path is enabled. It performs the boundary frame
+/// handshake against a finalized native region root.
+///
+/// Args: (`region_fn_ptr`, `stack_base`, `sp_at_top_arg`, `closure_bits`,
+/// `ctx`). `region_fn_ptr` is the finalized native region root pointer
+/// (as a raw address); the dispatcher transmutes it to the region ABI.
+pub type RegionDispatchFn =
+    unsafe extern "C" fn(usize, *mut i64, i64, i64, *mut ExnCtxC) -> RegionRetC;
+
+/// The installed dispatch callback, or null (flag off → never installed →
+/// the do_call hook is never reached because the per-Interpreter registry
+/// is also empty).
+static REGION_DISPATCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Install the whole-region dispatch callback (called once by the JIT at
+/// startup when the flag is on). Idempotent.
+pub fn install_region_dispatch(f: RegionDispatchFn) {
+    REGION_DISPATCH.store(f as usize, std::sync::atomic::Ordering::Release);
+}
+
+/// A registered native region root: the finalized native entry pointer +
+/// its SML arity (the number of caller-pushed args, so the hook knows the
+/// `sp_at_top_arg` frame shape and how the RETURN_N collapse lands).
+#[derive(Clone, Copy, Debug)]
+pub struct RegionEntry {
+    /// Finalized native region-root function pointer (raw address).
+    pub region_fn: usize,
+    /// SML arity (caller-pushed arg count).
+    pub sml_arity: usize,
+}
+
+/// Pointer-keyed region registry: code-object address (`usize`) →
+/// [`RegionEntry`]. Empty by default (flag off) → the do_call hook is one
+/// never-taken branch.
+type RegionRegistry = std::collections::HashMap<usize, RegionEntry, FxBuildHasher>;
+
+/// "No handler in scope" sentinel for the region ExnCtx — MUST equal
+/// `polyml_jit::region::NO_HANDLER` (`i64::MIN / 2`). The interpreter's
+/// own "no handler" is `handler_sp == stack.len()`; the boundary maps
+/// between them.
+pub const REGION_NO_HANDLER: i64 = i64::MIN / 2;
+
+/// Region Overflow exn sentinel — MUST equal `polyml_jit::memtrans::
+/// EXN_OVERFLOW`. An even (untagged) value so it can never collide with a
+/// real tagged result.
+pub const REGION_EXN_OVERFLOW: i64 = 0x0001_0000_0000_0002;
+
+/// Region DivByZero exn sentinel — MUST equal `polyml_jit::memtrans::
+/// EXN_DIVZERO`.
+pub const REGION_EXN_DIVZERO: i64 = 0x0002_0000_0000_0002;
+
 /// Inline (stack-allocated) capacity of the per-call JIT args buffer in
 /// `do_call`. Covers `arity_init` up to this many slots (= SML arity up
 /// to `JIT_ARGS_INLINE - 2 = 14`), which is every real bootstrap
@@ -429,6 +524,14 @@ pub struct Interpreter {
     /// it dispatches to the JIT'd version instead of interpreting.
     /// Empty = transparent fallthrough; never affects unjitted code.
     jit_cache: JitCache,
+    /// Whole-region JIT registry (S3b): code-object address → native
+    /// region root. Empty by default (the flag is off → the JIT registers
+    /// nothing → the do_call hook is one never-taken branch). When the
+    /// flag is on the JIT registers each compiled region root here at
+    /// startup; do_call routes a call whose target is registered through
+    /// the global region-dispatch boundary instead of setting up an
+    /// interpreter frame. The default + --jit paths are byte-identical.
+    region_registry: RegionRegistry,
 }
 
 /// A cached JIT'd function with the metadata needed to invoke it
@@ -996,6 +1099,7 @@ impl Interpreter {
             _owned_code: Some(code),
             diag: None,
             jit_cache: JitCache::default(),
+            region_registry: RegionRegistry::default(),
         }
     }
 
@@ -1048,6 +1152,7 @@ impl Interpreter {
             _owned_code: None,
             diag: None,
             jit_cache: JitCache::default(),
+            region_registry: RegionRegistry::default(),
         }
     }
 
@@ -1102,6 +1207,7 @@ impl Interpreter {
             _owned_code: None,
             diag: None,
             jit_cache: JitCache::default(),
+            region_registry: RegionRegistry::default(),
         }
     }
 
@@ -1169,6 +1275,23 @@ impl Interpreter {
     /// and let JIT bugs hang the interp run).
     pub fn jit_cache_clear(&mut self) {
         self.jit_cache.clear();
+    }
+
+    /// Whole-region JIT (S3b): register a native region root for a code
+    /// object. After registration, a `do_call` whose target closure's
+    /// code object is `code_obj_ptr` is routed through the global region-
+    /// dispatch boundary instead of the interpreter frame setup. Only
+    /// called by `polyml-jit` when the `WHOLE_REGION_JIT` flag is on; the
+    /// registry is empty otherwise.
+    pub fn install_region(&mut self, code_obj_ptr: usize, entry: RegionEntry) {
+        self.region_registry.insert(code_obj_ptr, entry);
+    }
+
+    /// `true` iff any region root is registered (so the cheap do_call
+    /// guard can skip the lookup entirely when the flag is off).
+    #[must_use]
+    pub fn has_regions(&self) -> bool {
+        !self.region_registry.is_empty()
     }
 
     /// JIT bridge: current value of the SML stack pointer (sp).
@@ -6025,6 +6148,111 @@ impl Interpreter {
             }
             return Err(InterpError::NotAClosure(closure));
         }
+
+        // === WHOLE-REGION JIT BOUNDARY (S3b) ===
+        // If this closure's code object has a COMPILED native region
+        // root, route the call through the global region-dispatch
+        // boundary (boundary::dispatch_region) on the interpreter's REAL
+        // shared stack + a real ExnCtx mirroring the interp handler.
+        //
+        // INERT WHEN OFF: `self.region_registry` is empty (the JIT
+        // registers nothing unless WHOLE_REGION_JIT is on), so this is
+        // one never-taken branch — the default + --jit paths are
+        // byte-identical.
+        if !self.region_registry.is_empty() {
+            // Resolve the closure's code object exactly as the frame-
+            // setup path below does, then probe the registry.
+            let region_code_ptr = {
+                let closure_ptr = closure.as_ptr::<PolyWord>();
+                // SAFETY: closure is a verified data pointer (checked above).
+                let code_word = unsafe { *closure_ptr };
+                code_word.0
+            };
+            if let Some(entry) = self.region_registry.get(&region_code_ptr).copied() {
+                let dispatch_bits = REGION_DISPATCH.load(std::sync::atomic::Ordering::Acquire);
+                // The dispatch callback MUST be installed if a region is
+                // registered (the JIT installs both together); guard
+                // anyway so a missing callback falls through to the
+                // interpreter rather than calling a null pointer.
+                if dispatch_bits != 0 {
+                    // SAFETY: install_region_dispatch stored a valid
+                    // RegionDispatchFn pointer.
+                    let dispatch: RegionDispatchFn =
+                        unsafe { std::mem::transmute::<usize, RegionDispatchFn>(dispatch_bits) };
+                    // Mirror the interpreter's real handler state into the
+                    // region's ExnCtx. `handler_sp == stack.len()` (no
+                    // handler) maps to the JIT's NO_HANDLER sentinel so
+                    // the region's downward range tests are unambiguous.
+                    let handler_sp_i64 = if self.handler_sp >= self.stack.len() {
+                        REGION_NO_HANDLER
+                    } else {
+                        self.handler_sp as i64
+                    };
+                    let mut ctx = ExnCtxC {
+                        handler_sp: handler_sp_i64,
+                        exn_packet: 0,
+                    };
+                    let stack_base = self.stack.as_mut_ptr().cast::<i64>();
+                    let sp_at_top_arg = self.sp as i64;
+                    let closure_bits = closure.0 as i64;
+                    // SAFETY: stack_base covers all sp indices the region
+                    // touches (the region's frame grows DOWN from sp,
+                    // within the same Box); region_fn is a finalized root
+                    // with the region ABI; ctx is a valid *mut ExnCtxC.
+                    let ret = unsafe {
+                        dispatch(
+                            entry.region_fn,
+                            stack_base,
+                            sp_at_top_arg,
+                            closure_bits,
+                            &mut ctx,
+                        )
+                    };
+                    if ret.raised == 0 {
+                        // Normal return: the single result is on top at
+                        // stack[new_sp]; the frame collapsed exactly like
+                        // do_return (result + closure + retPC + N args).
+                        self.sp = ret.new_sp as usize;
+                        return Ok(());
+                    }
+                    // raised == 1: an exception escaped the region to the
+                    // interpreter. Map the region's exn sentinel onto the
+                    // interpreter's REAL raise machinery so the packet +
+                    // unwind + handler dispatch (or hard halt) are
+                    // byte-identical to a fully-interpreted run. Reset sp
+                    // to the pre-call frame top (the region left it mid-
+                    // flight) before re-entering the interp raise.
+                    self.sp = sp_at_top_arg as usize;
+                    match ctx.exn_packet {
+                        REGION_EXN_DIVZERO => {
+                            // FixedInt quot/rem by zero is a HARD error in
+                            // the interpreter (InterpError::DivByZero, not
+                            // a catchable SML Div) — mirror exactly.
+                            return Err(InterpError::DivByZero);
+                        }
+                        REGION_EXN_OVERFLOW => {
+                            // FixedInt overflow raises the catchable
+                            // pervasive Overflow, exactly as fixed_add/
+                            // sub/mult do via raise_overflow().
+                            self.raise_overflow()?;
+                            return Ok(());
+                        }
+                        other => {
+                            // A genuine raised tagged value crossing the
+                            // boundary (a real RAISE inside a region). The
+                            // core opcode subset has no RAISE, so this is
+                            // unreachable today; handle it conservatively
+                            // by routing the value through do_raise_ex.
+                            let pkt = PolyWord::from_bits(other as usize);
+                            self.push(pkt)?;
+                            self.do_raise_ex()?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
         // JIT fast path: if a JIT'd version of this closure's code
         // object is installed, dispatch to it directly without
         // setting up an interpreter frame. The JIT'd function reads

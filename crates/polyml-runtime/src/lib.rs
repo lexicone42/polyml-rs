@@ -19,7 +19,10 @@ pub mod rts;
 pub mod sched;
 pub mod space;
 
-pub use interpreter::{InterpError, Interpreter, JitEntry, StepResult};
+pub use interpreter::{
+    ExnCtxC, InterpError, Interpreter, JitEntry, RegionDispatchFn, RegionEntry, RegionRetC,
+    StepResult, install_region_dispatch,
+};
 pub use interrupt::{clear_interrupt, interrupt_pending, request_interrupt, take_interrupt};
 pub use jit_bridge::{
     JIT_INTERP, jit_dispatch_alloc, jit_dispatch_alloc_bytes, jit_dispatch_alloc_mut_closure,

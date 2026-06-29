@@ -111,6 +111,51 @@ pub unsafe fn dispatch_region(
     }
 }
 
+/// C-ABI dispatch shim the interpreter's `do_call` hook invokes (via the
+/// process-global `REGION_DISPATCH` pointer installed by
+/// [`crate::install_whole_region`]). It performs the boundary frame
+/// handshake against a finalized native region root identified by its raw
+/// address `region_fn_ptr`.
+///
+/// The interpreter passes `polyml_runtime::ExnCtxC` (layout-identical to
+/// [`ExnCtx`]) and expects `polyml_runtime::RegionRetC` back. On a normal
+/// return `raised == 0` and `new_sp` points at the single result on top;
+/// on an escape `raised == 1`, `ctx.exn_packet` holds the region's exn
+/// sentinel and the interpreter maps it onto its real raise machinery.
+///
+/// # Safety
+/// `region_fn_ptr` must be a finalized region root with the [`RegionFn`]
+/// ABI; `stack_base` must cover all sp indices the region touches; `ctx`
+/// must be a valid `*mut polyml_runtime::ExnCtxC`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn polyml_jit_region_dispatch(
+    region_fn_ptr: usize,
+    stack_base: *mut i64,
+    sp_at_top_arg: i64,
+    closure_bits: i64,
+    ctx: *mut polyml_runtime::ExnCtxC,
+) -> polyml_runtime::RegionRetC {
+    // SAFETY: caller-upheld region/stack/ctx validity.
+    unsafe {
+        let region_fn: RegionFn = std::mem::transmute::<usize, RegionFn>(region_fn_ptr);
+        // The runtime ExnCtxC and the JIT ExnCtx are layout-identical
+        // (#[repr(C)] { i64 handler_sp; i64 exn_packet; }); reinterpret
+        // the pointer so the region reads/writes the SAME memory the
+        // interpreter mirrors its handler state into.
+        let ctx_jit = ctx.cast::<ExnCtx>();
+        let outcome = dispatch_region(region_fn, stack_base, sp_at_top_arg, closure_bits, ctx_jit);
+        match outcome {
+            BoundaryOutcome::Returned { new_sp } => {
+                polyml_runtime::RegionRetC { new_sp, raised: 0 }
+            }
+            BoundaryOutcome::Raised { handler_sp, .. } => polyml_runtime::RegionRetC {
+                new_sp: handler_sp,
+                raised: 1,
+            },
+        }
+    }
+}
+
 /// Human-readable name for a region exception sentinel (so the
 /// boundary's raise mapping is auditable).
 #[must_use]
@@ -802,6 +847,232 @@ pub fn run_real_region_demo() -> bool {
     clean
 }
 
+// =====================================================================
+// GAP 3 — the Overflow / DivByZero / raised==1 boundary paths driven
+// END-TO-END through the WIRED interpreter do_call, on REAL genuine-
+// layout regions, flag-on (region registered → native) vs flag-off
+// (pure interp), proven byte-identical INCLUDING the exception value +
+// that the right handler catches it.
+//
+// Shape: an interpreted CALLER code object installs a handler, pushes
+// two args, and CALL_CONST_ADDRs a CALLEE region that performs a single
+// FixedInt op (which may Overflow / DivByZero). When the callee is
+// REGISTERED, the interpreter's do_call routes it through
+// polyml_jit_region_dispatch → the region runs NATIVE, raises across the
+// native frame, and the do_call hook drives the interpreter's REAL raise
+// machinery (raise_overflow / InterpError::DivByZero), unwinding to the
+// caller's handler. When the callee is NOT registered it runs in the
+// interpreter. Both must be byte-identical.
+// =====================================================================
+
+#[cfg(test)]
+use polyml_runtime::{InterpError, RegionEntry, install_region_dispatch};
+
+/// Which single FixedInt op the callee region performs on (a, b).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum CalleeOp {
+    /// a * b — can Overflow.
+    Mul,
+    /// a div b — can DivByZero (b == 0).
+    Quot,
+}
+
+/// Build a CALLEE region (arity 2) that computes one FixedInt op on its
+/// two args and RETURNs. Genuine PolyML bytecode. At entry LOCAL_2=b(top),
+/// LOCAL_3=a. We push a (LOCAL_3), then b (now LOCAL_3 after the first
+/// push), apply the op, RETURN_B 2 — exactly the `add` shape in
+/// build_sum3_region but with the chosen op.
+#[cfg(test)]
+fn build_arith_callee(space: &mut MemorySpace, opk: CalleeOp) -> BuiltCode {
+    let opcode = match opk {
+        CalleeOp::Mul => op::INSTR_FIXED_MULT,
+        CalleeOp::Quot => op::INSTR_FIXED_QUOT,
+    };
+    let bc = vec![
+        op::INSTR_LOCAL_3, // push a
+        op::INSTR_LOCAL_3, // push b
+        opcode,            // a OP b
+        op::INSTR_RETURN_B,
+        2,
+    ];
+    build_code_object(space, &bc, &[])
+}
+
+/// Build an interpreted CALLER (arity 0) that:
+///   SET_HANDLER8 -> Lhandler
+///   push a (CONST), push b (CONST)
+///   CALL_CONST_ADDR8_8 callee     ; -> result (or raises)
+///   DELETE_HANDLER                ; pop handler frame, keep result
+///   RETURN_B 0
+/// Lhandler:
+///   LDEXC                         ; push the exception packet
+///   RESET_R_1? -> instead: drop packet, push recovery, RETURN
+///   CONST recovery; RETURN_B 0
+///
+/// `a`, `b` are baked as CONST_INT_W immediates (so the values are part
+/// of the genuine bytecode). `recovery` is the value the handler returns.
+/// The callee closure is in the caller's constant pool (index 0).
+#[cfg(test)]
+#[allow(clippy::vec_init_then_push)]
+fn build_handler_caller(
+    space: &mut MemorySpace,
+    callee_closure: PolyWord,
+    a: i64,
+    b: i64,
+    recovery: i64,
+) -> BuiltCode {
+    // We assemble the body, tracking offsets to patch the SET_HANDLER
+    // target + the CALL_CONST_ADDR const read. The handler frame is the
+    // upstream PUSH_HANDLER (save old hr) + SET_HANDLER8 (push handler pc,
+    // hr = sp) two-word frame (bytecode.cpp:338-352).
+    let mut bc: Vec<u8> = Vec::new();
+    bc.push(op::INSTR_PUSH_HANDLER); // 0: push old handler register
+    let set_pc = bc.len(); // 1
+    bc.push(op::INSTR_SET_HANDLER8); // 1: set up handler
+    let handler_off_idx = bc.len(); // 2 (patched)
+    bc.push(0x00); // 2: handler offset (entry = pc_after + off)
+    // push a (CONST_INT_W is a u16 immediate, sufficient for small test
+    // values; for negative/large we still use it modulo the test range).
+    bc.push(op::INSTR_CONST_INT_W); // 3
+    bc.extend_from_slice(&(a as u16).to_le_bytes()); // 4,5
+    bc.push(op::INSTR_CONST_INT_W); // 6
+    bc.extend_from_slice(&(b as u16).to_le_bytes()); // 7,8
+    let call_pc = bc.len(); // 9
+    bc.push(op::INSTR_CALL_CONST_ADDR8_8); // 9
+    let call_off_idx = bc.len(); // 10 (byte_off, patched)
+    bc.push(0x00); // 10
+    bc.push(0x00); // 11 (imm2 -> idx = 3)
+    bc.push(op::INSTR_DELETE_HANDLER); // 12
+    bc.push(op::INSTR_RETURN_B); // 13
+    bc.push(0); // 14: arity 0
+    let lhandler = bc.len(); // 15
+    bc.push(op::INSTR_LDEXC); // 15: push exn packet
+    bc.push(op::INSTR_RESET_1); // 16: drop the packet
+    bc.push(op::INSTR_CONST_INT_W); // 17: push recovery
+    bc.extend_from_slice(&(recovery as u16).to_le_bytes()); // 18,19
+    bc.push(op::INSTR_RETURN_B); // 20
+    bc.push(0); // 21: arity 0
+
+    // SET_HANDLER8 target: interp does `entry = pc.add(off)` where pc is
+    // AFTER the offset byte. SET_HANDLER8 is at set_pc; its offset byte is
+    // at set_pc+1, so pc-after = set_pc+2. So off = Lhandler - (set_pc+2).
+    let set_after = set_pc + 2;
+    let hoff = lhandler as i64 - set_after as i64;
+    assert!((0..=255).contains(&hoff), "handler off {hoff} out of range");
+    bc[handler_off_idx] = hoff as u8;
+
+    // CALL_CONST_ADDR8_8 reads const idx 3 at pc_after_call + byte_off +
+    // 3*8, pc_after_call = call_pc + 3. First const word is at object byte
+    // (code_words+1)*8. Pad with NO_OP after the final RETURN until
+    // byte_off lands in [0,255].
+    let word = std::mem::size_of::<usize>();
+    let call_after = call_pc + 3;
+    let idx = 3usize;
+    let byte_off;
+    loop {
+        let code_words = bc.len().div_ceil(word);
+        let first_const_byte = (code_words + 1) * word;
+        let bo = first_const_byte as i64 - call_after as i64 - (idx * 8) as i64;
+        if (0..=255).contains(&bo) {
+            byte_off = bo as u8;
+            break;
+        }
+        bc.push(op::INSTR_NO_OP);
+        assert!(bc.len() < 4096, "caller pad runaway");
+    }
+    bc[call_off_idx] = byte_off;
+
+    build_code_object(space, &bc, &[callee_closure])
+}
+
+/// Outcome of running a wired caller+callee: the returned value (untagged)
+/// or an error string, plus whether the callee ran NATIVE.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct WiredOutcome {
+    /// Untagged result, or None if the run errored.
+    result: Option<i64>,
+    /// Error (e.g. "DivByZero") if the run did not return cleanly.
+    error: Option<String>,
+    /// Native region-root entries during this run (0 = pure interp).
+    native_ticks: u64,
+}
+
+/// Run a caller that calls an arith callee through the interpreter's REAL
+/// do_call. If `register_region` is true, the callee is compiled to a
+/// native region + registered → the call dispatches NATIVE through the
+/// wired do_call boundary. Otherwise the callee runs in the interpreter.
+#[cfg(test)]
+fn run_wired_arith(
+    opk: CalleeOp,
+    a: i64,
+    b: i64,
+    recovery: i64,
+    register_region: bool,
+) -> WiredOutcome {
+    let mut space = MemorySpace::new(8192, SpaceKind::Code);
+    let callee = build_arith_callee(&mut space, opk);
+    let caller = build_handler_caller(&mut space, callee.closure, a, b, recovery);
+    let caller_addr = caller.code_addr;
+    let callee_code_addr = callee.code_addr;
+
+    let mut interp = Interpreter::from_bytes(256, vec![]).with_alloc_space(space);
+
+    // Optionally compile + register the callee as a native region, wired
+    // through the runtime's global dispatch callback. `_jit_keep` holds
+    // the module alive for the whole run (the region's native code is
+    // referenced by the registry); it drops after `interp.run()`.
+    let mut _jit_keep: Option<Jit> = None;
+    reset_native_tick();
+    if register_region {
+        install_region_dispatch(polyml_jit_region_dispatch);
+        let mut jit = Jit::new().expect("jit");
+        // SAFETY: callee_code_addr is a live code object now owned by
+        // `interp` (its alloc space); the heap is frozen for this run.
+        let region =
+            unsafe { memtrans::build_region(&mut jit, callee_code_addr) }.expect("region build");
+        jit.module.finalize_definitions().expect("finalize");
+        let ptr = jit.module.get_finalized_function(region.root);
+        interp.install_region(
+            callee_code_addr as usize,
+            RegionEntry {
+                region_fn: ptr as usize,
+                sml_arity: region.root_arity,
+            },
+        );
+        _jit_keep = Some(jit);
+    }
+
+    // Top-level entry: arity-0 caller. Frame = [closure, retPC=0].
+    interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+    interp.test_seed_top(caller.closure); // closure (LOCAL_0)
+    // SAFETY: caller_addr is a live code object now owned by `interp`.
+    unsafe { interp.set_code_segment_to_code_obj(caller_addr as usize) };
+
+    match interp.run() {
+        Ok(StepResult::Returned(w)) => WiredOutcome {
+            result: Some(PolyWord::from_bits(w.0).untag() as i64),
+            error: None,
+            native_ticks: native_tick_count(),
+        },
+        Ok(other) => WiredOutcome {
+            result: None,
+            error: Some(format!("{other:?}")),
+            native_ticks: native_tick_count(),
+        },
+        Err(e) => WiredOutcome {
+            result: None,
+            error: Some(match e {
+                InterpError::DivByZero => "DivByZero".to_string(),
+                InterpError::UnhandledException => "UnhandledException".to_string(),
+                other => format!("{other:?}"),
+            }),
+            native_ticks: native_tick_count(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,5 +1173,276 @@ mod tests {
             );
         }
         assert_eq!(diverged, 0, "{diverged} sumto cases diverged");
+    }
+
+    /// The live-dispatch SAFETY GUARD: `build_region` must flag a recursive
+    /// region as `recursive` (so `scan_region_candidates` /
+    /// `install_whole_region` refuse to register it — unbounded shared-stack
+    /// growth with the no-op'd STACK_SIZE16 would otherwise OOB-write the
+    /// stack Box). The self-recursive `sumto` region must be flagged; an
+    /// acyclic multi-function region (`sum3` root + its `add` callee) must
+    /// NOT be.
+    #[test]
+    fn region_safety_flags_recursion() {
+        let mut sumto_space = MemorySpace::new(8192, SpaceKind::Code);
+        let f = build_sumto_region(&mut sumto_space);
+        let mut jit = Jit::new().expect("jit");
+        // SAFETY: f.code_addr is a live code object in sumto_space.
+        let r = unsafe { memtrans::build_region(&mut jit, f.code_addr) }.expect("sumto builds");
+        assert!(
+            r.recursive,
+            "self-recursive sumto must be flagged recursive (the registration guard)"
+        );
+
+        let mut sum3_space = MemorySpace::new(8192, SpaceKind::Code);
+        let (root, _callee) = build_sum3_region(&mut sum3_space);
+        let mut jit2 = Jit::new().expect("jit");
+        // SAFETY: root.code_addr is a live code object in sum3_space.
+        let r2 = unsafe { memtrans::build_region(&mut jit2, root.code_addr) }.expect("sum3 builds");
+        assert!(
+            !r2.recursive,
+            "acyclic sum3 (root + add callee) must NOT be flagged recursive"
+        );
+        assert!(r2.funcs.len() >= 2, "sum3 region spans root + callee");
+    }
+
+    // ----- GAP 3: Overflow / DivByZero / raised==1 on REAL wired regions -----
+
+    /// Normal (no-raise) wired path: a*b in range, caller returns it. The
+    /// callee region runs NATIVE (tick==1) and the value is byte-identical
+    /// to the pure-interp run.
+    #[test]
+    fn wired_mul_normal_differential_clean() {
+        // NOTE: native_tick_count is a PROCESS-GLOBAL counter, so exact
+        // tick assertions race with other parallel region tests. The
+        // soundness proof is the result/error DIFFERENTIAL; nativeness is
+        // asserted as >= 1 (the wired call did enter the native region).
+        for (a, b) in [(3i64, 4i64), (7, 8), (0, 99), (12, 12), (1, 1)] {
+            let interp = run_wired_arith(CalleeOp::Mul, a, b, 777, false);
+            let native = run_wired_arith(CalleeOp::Mul, a, b, 777, true);
+            assert_eq!(
+                interp.result,
+                Some(a * b),
+                "pure interp {a}*{b} should be {}",
+                a * b
+            );
+            assert_eq!(
+                native.result, interp.result,
+                "wired native {a}*{b} must match interp"
+            );
+            assert_eq!(interp.error, native.error, "error mismatch {a}*{b}");
+            assert!(
+                native.native_ticks >= 1,
+                "wired path must run the region NATIVE"
+            );
+        }
+    }
+
+    /// OVERFLOW path: a*b overflows the tagged range → the region raises
+    /// Overflow across the native frame → the do_call hook drives
+    /// raise_overflow → the caller's handler catches it and returns the
+    /// recovery value. Byte-identical to the pure-interp run, AND the
+    /// region ran native.
+    #[test]
+    fn wired_mul_overflow_caught_by_handler() {
+        // The operands (2^31 * 2^31 = 2^62) overflow the 62-bit tagged
+        // range; the region raises Overflow across the native frame, the
+        // do_call hook drives raise_overflow, and the caller's handler
+        // catches it and returns the recovery value (12345). Operands are
+        // seeded via a heap tuple (not u16 CONST immediates) so a genuine
+        // FixedInt overflow is reachable.
+        let r = run_wired_overflow_large(true);
+        let i = run_wired_overflow_large(false);
+        assert_eq!(
+            i.result,
+            Some(12345),
+            "interp: handler must catch Overflow + return recovery 12345"
+        );
+        assert_eq!(
+            r.result, i.result,
+            "wired overflow recovery must match interp"
+        );
+        assert_eq!(r.error, i.error, "error mismatch");
+        // native_tick_count is process-global; the wired path having
+        // >= 1 entries proves the region ran NATIVE (the result/error
+        // differential is the soundness proof).
+        assert!(r.native_ticks >= 1, "wired overflow region must run NATIVE");
+    }
+
+    /// DIVBYZERO path: a div 0 → the region raises DivByZero → the do_call
+    /// hook returns Err(InterpError::DivByZero), a HARD error exactly like
+    /// the pure interpreter (NOT a catchable SML Div). Byte-identical.
+    #[test]
+    fn wired_div_by_zero_hard_error() {
+        let interp = run_wired_arith(CalleeOp::Quot, 10, 0, 777, false);
+        let native = run_wired_arith(CalleeOp::Quot, 10, 0, 777, true);
+        assert_eq!(
+            interp.error.as_deref(),
+            Some("DivByZero"),
+            "pure interp div-by-zero must be a hard DivByZero error"
+        );
+        assert_eq!(
+            native.error, interp.error,
+            "wired div-by-zero must be byte-identical hard error"
+        );
+        assert_eq!(interp.result, None);
+        assert_eq!(native.result, None);
+        // The region DID run native before raising (tick bumped at entry).
+        assert!(native.native_ticks >= 1, "div-by-zero region ran NATIVE");
+    }
+
+    /// Normal quot (no zero divisor): byte-identical + native.
+    #[test]
+    fn wired_quot_normal_differential_clean() {
+        for (a, b) in [(20i64, 4i64), (7, 2), (100, 9), (0, 5)] {
+            let interp = run_wired_arith(CalleeOp::Quot, a, b, 777, false);
+            let native = run_wired_arith(CalleeOp::Quot, a, b, 777, true);
+            assert_eq!(interp.result, Some(a / b), "interp {a} div {b}");
+            assert_eq!(native.result, interp.result, "wired {a} div {b}");
+            // native_tick_count is process-global; assert >= 1 to avoid
+            // racing parallel region tests (the differential is the proof).
+            assert!(native.native_ticks >= 1, "quot region ran NATIVE");
+        }
+    }
+}
+
+// =====================================================================
+// Large-operand OVERFLOW harness (operands seeded on the stack, not as
+// u16 CONST immediates, so a genuine FixedInt overflow is reachable). A
+// caller installs a handler, the callee region multiplies two large
+// caller-pushed args, overflows, the raise unwinds across the native
+// frame to the caller's handler. Driven flag-on vs flag-off.
+// =====================================================================
+
+/// Build a caller (arity 0) that pushes two LARGE args (as CONST_ADDR
+/// would be needed for >u16; instead we seed them via a boxed constant in
+/// the constant pool and read with INDIRECT). Simpler: read the two
+/// operands from the constant pool tuple at const idx 1 (fields 0,1),
+/// install a handler, CALL_CONST_ADDR the callee, return result; handler
+/// returns 424242.
+#[cfg(test)]
+#[allow(clippy::vec_init_then_push)]
+fn build_overflow_caller(space: &mut MemorySpace, callee_closure: PolyWord) -> BuiltCode {
+    // Arity 2: the two LARGE operands are the caller's own args (seeded on
+    // the stack), so a genuine FixedInt overflow is reachable (CONST_INT_W
+    // only carries a u16). Entry: LOCAL_0=clo, LOCAL_1=ret, LOCAL_2=b,
+    // LOCAL_3=a. The handler frame (PUSH_HANDLER + SET_HANDLER8) pushes 2
+    // words, so after it a is LOCAL_5, b is LOCAL_4.
+    let mut bc: Vec<u8> = Vec::new();
+    bc.push(op::INSTR_PUSH_HANDLER); // 0: save old handler register
+    let set_pc = bc.len(); // 1
+    bc.push(op::INSTR_SET_HANDLER8); // 1
+    let handler_off_idx = bc.len(); // 2
+    bc.push(0x00); // 2: handler off (patched)
+    bc.push(op::INSTR_LOCAL_5); // 3: push a (LOCAL_5 after +2 handler depth)
+    bc.push(op::INSTR_LOCAL_5); // 4: push b (LOCAL_5 again after a pushed)
+    let call_pc = bc.len(); // 5
+    bc.push(op::INSTR_CALL_CONST_ADDR8_8); // 5
+    let call_off_idx = bc.len(); // 6
+    bc.push(0x00); // 6: byte_off (patched) -> const idx 0 (callee)
+    bc.push(0x00); // 7: imm2 (idx = 3)
+    bc.push(op::INSTR_DELETE_HANDLER); // 8
+    bc.push(op::INSTR_RETURN_B); // 9
+    bc.push(2); // 10: arity 2
+    let lhandler = bc.len(); // 11
+    bc.push(op::INSTR_LDEXC); // 11
+    bc.push(op::INSTR_RESET_1); // 12: drop packet
+    bc.push(op::INSTR_CONST_INT_W); // 13
+    bc.extend_from_slice(&12345u16.to_le_bytes()); // 14,15: recovery value
+    bc.push(op::INSTR_RETURN_B); // 16
+    bc.push(2); // 17: arity 2
+
+    // SET_HANDLER8 target: off = Lhandler - (set_pc + 2).
+    let set_after = set_pc + 2;
+    let hoff = lhandler as i64 - set_after as i64;
+    assert!((0..=255).contains(&hoff), "handler off {hoff} out of range");
+    bc[handler_off_idx] = hoff as u8;
+
+    // CALL_CONST_ADDR8_8 reads const idx 3 (= callee closure at pool slot
+    // 0) at pc_after_call + byte_off + 3*8. Pad with NO_OP until in range.
+    let word = std::mem::size_of::<usize>();
+    let call_after = call_pc + 3;
+    let idx = 3usize;
+    let byte_off;
+    loop {
+        let code_words = bc.len().div_ceil(word);
+        let first_const_byte = (code_words + 1) * word;
+        let bo = first_const_byte as i64 - call_after as i64 - (idx * 8) as i64;
+        if (0..=255).contains(&bo) {
+            byte_off = bo as u8;
+            break;
+        }
+        bc.push(op::INSTR_NO_OP);
+        assert!(bc.len() < 4096, "overflow caller pad runaway");
+    }
+    bc[call_off_idx] = byte_off;
+
+    build_code_object(space, &bc, &[callee_closure])
+}
+
+/// Run the large-operand overflow harness flag-on (region native) or
+/// flag-off (pure interp). The callee multiplies two large operands that
+/// overflow the 62-bit tagged range; the caller catches Overflow and
+/// returns 12345.
+#[cfg(test)]
+fn run_wired_overflow_large(register_region: bool) -> WiredOutcome {
+    let mut space = MemorySpace::new(8192, SpaceKind::Code);
+    // Operands a=b=2^31 ⇒ product 2^62 which is OUT of range
+    // (MAX_TAGGED = 2^62-1) ⇒ FIXED_MULT raises Overflow.
+    let a = 1i64 << 31;
+    let b = 1i64 << 31;
+    let callee = build_arith_callee(&mut space, CalleeOp::Mul);
+    let caller = build_overflow_caller(&mut space, callee.closure);
+    let caller_addr = caller.code_addr;
+    let callee_code_addr = callee.code_addr;
+
+    let mut interp = Interpreter::from_bytes(256, vec![]).with_alloc_space(space);
+    let mut _jit_keep: Option<Jit> = None;
+    reset_native_tick();
+    if register_region {
+        install_region_dispatch(polyml_jit_region_dispatch);
+        let mut jit = Jit::new().expect("jit");
+        // SAFETY: callee_code_addr is a live code object owned by interp.
+        let region =
+            unsafe { memtrans::build_region(&mut jit, callee_code_addr) }.expect("region build");
+        jit.module.finalize_definitions().expect("finalize");
+        let ptr = jit.module.get_finalized_function(region.root);
+        interp.install_region(
+            callee_code_addr as usize,
+            RegionEntry {
+                region_fn: ptr as usize,
+                sml_arity: region.root_arity,
+            },
+        );
+        _jit_keep = Some(jit);
+    }
+    // Arity-2 caller: frame = [closure, retPC=0, b, a] (a deepest).
+    interp.test_seed_top(PolyWord::tagged(a as isize)); // arg a (LOCAL_3)
+    interp.test_seed_top(PolyWord::tagged(b as isize)); // arg b (LOCAL_2)
+    interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+    interp.test_seed_top(caller.closure); // closure (LOCAL_0)
+    // SAFETY: caller_addr is a live code object owned by interp.
+    unsafe { interp.set_code_segment_to_code_obj(caller_addr as usize) };
+
+    match interp.run() {
+        Ok(StepResult::Returned(w)) => WiredOutcome {
+            result: Some(PolyWord::from_bits(w.0).untag() as i64),
+            error: None,
+            native_ticks: native_tick_count(),
+        },
+        Ok(other) => WiredOutcome {
+            result: None,
+            error: Some(format!("{other:?}")),
+            native_ticks: native_tick_count(),
+        },
+        Err(e) => WiredOutcome {
+            result: None,
+            error: Some(match e {
+                InterpError::DivByZero => "DivByZero".to_string(),
+                InterpError::UnhandledException => "UnhandledException".to_string(),
+                other => format!("{other:?}"),
+            }),
+            native_ticks: native_tick_count(),
+        },
     }
 }

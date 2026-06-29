@@ -255,21 +255,14 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             jit,
             whole_region,
         } => {
-            // WHOLE-REGION JIT (gated): when --whole-region (or
-            // WHOLE_REGION_JIT=1) is set, run the whole-region demo and
-            // return WITHOUT touching the default/--jit run path. The
-            // default interpreter path + the per-function --jit path are
-            // left byte-identical when this flag is absent.
-            if *whole_region || polyml_jit::region::whole_region_enabled() {
-                // S1-S2: the synthetic non-popping + native-exception
-                // convention demo (hand-built Cranelift IR).
+            // WHOLE-REGION JIT DEMO (proof-of-mechanism): when
+            // WHOLE_REGION_DEMO=1 is set, run ONLY the synthetic +
+            // hand-assembled region demos and return WITHOUT touching the
+            // real run path. This is the S1-S3 mechanism check, not the
+            // S3b milestone.
+            if std::env::var("WHOLE_REGION_DEMO").is_ok() {
                 let s12_clean = polyml_jit::region::run_whole_region_demo();
                 println!();
-                // S3: hand-assembled genuine-layout bytecode regions
-                // lowered by the memory-backed translator + run NATIVE
-                // through the do_call boundary, differential-clean vs the
-                // pure interpreter (proof-of-mechanism — the interp-side
-                // do_call wiring + real-heap extraction land in S3b).
                 let s3_clean = polyml_jit::boundary::run_real_region_demo();
                 let clean = s12_clean && s3_clean;
                 return Ok(if clean {
@@ -278,6 +271,12 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     ExitCode::from(1)
                 });
             }
+            // S3b: --whole-region (or WHOLE_REGION_JIT=1) wires the live
+            // do_call boundary — a REAL heap region runs NATIVE during the
+            // actual poly run. When the flag is ABSENT the runtime region
+            // registry stays empty and the do_call hook is one never-taken
+            // branch (the default + --jit paths are byte-identical).
+            let whole_region_on = *whole_region || polyml_jit::region::whole_region_enabled();
             run_image(
                 image,
                 *max_steps,
@@ -287,6 +286,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 args.clone(),
                 r#use.clone(),
                 *jit,
+                whole_region_on,
             )
         }
         Cmd::Disasm {
@@ -379,6 +379,7 @@ fn parse_image_auto(bytes: &[u8]) -> Result<Image, Box<dyn std::error::Error>> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_image(
     path: &PathBuf,
     max_steps: u64,
@@ -388,6 +389,7 @@ fn run_image(
     extra_args: Vec<String>,
     use_file: Option<PathBuf>,
     install_jit: bool,
+    whole_region: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let image = parse_image_auto(&bytes)?;
@@ -491,6 +493,52 @@ fn run_image(
         Box::leak(Box::new(jit));
     }
 
+    // === WHOLE-REGION JIT (S3b): wire the live do_call boundary ===
+    // Scan the loaded heap for a region whose static CALL_CONST_ADDR
+    // subgraph fits the core opcode subset, compile + finalize + register
+    // it so a real `poly run` dispatches it NATIVE through do_call. When
+    // the flag is OFF this is skipped entirely → the region registry stays
+    // empty → the do_call hook is a never-taken branch (byte-identical).
+    if whole_region {
+        // SAFETY: image is loaded; heap is frozen (no GC has run yet).
+        let candidates = unsafe { polyml_jit::scan_region_candidates(&loaded) };
+        println!(
+            "  WHOLE-REGION: {} real heap code object(s) fit the core subset",
+            candidates.len()
+        );
+        // Optional scan-only mode: report the candidates + exit (no run).
+        if std::env::var("WHOLE_REGION_SCAN").is_ok() {
+            for (i, c) in candidates.iter().take(20).enumerate() {
+                let hex: Vec<String> = c.bytecode.iter().map(|b| format!("{b:02x}")).collect();
+                println!(
+                    "    cand[{i}] root=0x{:016x} arity={} n_funcs={} bc_len={}",
+                    c.root_addr,
+                    c.arity,
+                    c.n_funcs,
+                    c.bytecode.len()
+                );
+                println!("      bc: {}", hex.join(" "));
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        // Optionally restrict to a single root (provenance forensics).
+        let roots: Vec<u64> = if let Ok(s) = std::env::var("WHOLE_REGION_ROOT") {
+            // Hex address of a specific code object to register.
+            match u64::from_str_radix(s.trim_start_matches("0x"), 16) {
+                Ok(a) => vec![a],
+                Err(_) => candidates.iter().map(|c| c.root_addr).collect(),
+            }
+        } else {
+            candidates.iter().map(|c| c.root_addr).collect()
+        };
+        // SAFETY: each root is a live code-object body pointer.
+        let registered = unsafe { polyml_jit::install_whole_region(&mut interp, &roots) };
+        println!("  WHOLE-REGION: {registered} region root(s) registered + wired into do_call");
+        // Reset the nativeness tick so the post-run count reflects ONLY
+        // this run's native region entries.
+        polyml_jit::region::reset_native_tick();
+    }
+
     interp.test_seed_return_sentinel();
     interp.test_seed_top(root_closure_word);
 
@@ -543,6 +591,17 @@ fn run_image(
     interp.wait_for_children();
 
     println!();
+    if whole_region {
+        // NATIVENESS PROOF: every native region-root entry bumps this
+        // counter (the region root's first IR is a call to
+        // region_native_tick). A non-zero count after a real run proves a
+        // REAL heap code object executed NATIVE through the wired do_call
+        // boundary — not an interpreter fallback.
+        println!(
+            "  WHOLE-REGION: native region-root entries this run = {} (>0 = ran native)",
+            polyml_jit::region::native_tick_count()
+        );
+    }
     println!("Executed {steps} bytecode step(s).");
     let exit_code: u8 = match &outcome {
         Ok(StepResult::Returned(v)) => {

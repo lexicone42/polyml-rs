@@ -287,6 +287,22 @@ pub struct CompiledMemRegion {
     pub root_arity: usize,
     /// All compiled functions: code-obj address -> (FuncId, arity).
     pub funcs: HashMap<u64, (FuncId, usize)>,
+    /// True if the static CALL_CONST_ADDR call graph contains a cycle
+    /// (self- or mutual recursion). Such a region grows the shared
+    /// downward stack per native-recursion level. The convention handles
+    /// it (see the `sumto` test), but until `STACK_SIZE16` is lowered to a
+    /// real stack-limit check (today it is a no-op — S4), a recursive
+    /// region must NOT be registered for live dispatch: unbounded growth
+    /// would write past the stack Box with no `StackOverflow` raise.
+    pub recursive: bool,
+    /// True if any function in the region carries an `INSTR_STACK_SIZE16`
+    /// prologue. The interpreter checks `sp < needed` there and raises
+    /// `StackOverflow`; our translator currently treats it as a no-op, so
+    /// a `STACK_SIZE16`-bearing region could over-push without that raise.
+    /// Such a region must NOT be registered for live dispatch until the
+    /// check is lowered faithfully (S4). Leaf regions (which declare no
+    /// stack need) are unaffected.
+    pub uses_stack_size: bool,
 }
 
 /// Build the region fixpoint from a root code-object address. Scans the
@@ -301,6 +317,11 @@ pub unsafe fn build_region(jit: &mut Jit, root_addr: u64) -> Result<CompiledMemR
     //    CALL_CONST_ADDR callees), resolving + pre-flighting each.
     let mut resolved: BTreeMap<u64, ResolvedCode> = BTreeMap::new();
     let mut worklist = vec![root_addr];
+    // Call-graph edges (caller -> callee) + the stack-size flag, used after
+    // discovery to compute the live-dispatch safety facts (recursion /
+    // STACK_SIZE16) without bailing — see `CompiledMemRegion`.
+    let mut edges: Vec<(u64, u64)> = Vec::new();
+    let mut uses_stack_size = false;
     while let Some(addr) = worklist.pop() {
         if resolved.contains_key(&addr) {
             continue;
@@ -327,16 +348,25 @@ pub unsafe fn build_region(jit: &mut Jit, root_addr: u64) -> Result<CompiledMemR
                     at: pc,
                 });
             }
+            if b == op::INSTR_STACK_SIZE16 {
+                uses_stack_size = true;
+            }
             if is_cca(b) {
                 // SAFETY: compile-time.
                 let callee = unsafe { cca_target_code_addr(&rc, pc, b) }
                     .ok_or(BailReason::UnresolvableCallee(pc))?;
+                edges.push((addr, callee));
                 worklist.push(callee);
             }
             pc += d.total_len;
         }
         resolved.insert(addr, rc);
     }
+
+    // Detect a cycle in the CALL_CONST_ADDR call graph (self- or mutual
+    // recursion) via Kahn's algorithm: a graph is acyclic iff a topological
+    // order covers every node. Nodes are the resolved code-object addresses.
+    let recursive = call_graph_has_cycle(&resolved, &edges);
 
     // 2. Declare every function (so CCA forward references resolve).
     let mut ids: HashMap<u64, (FuncId, usize)> = HashMap::new();
@@ -363,7 +393,43 @@ pub unsafe fn build_region(jit: &mut Jit, root_addr: u64) -> Result<CompiledMemR
         root,
         root_arity,
         funcs: ids,
+        recursive,
+        uses_stack_size,
     })
+}
+
+/// True iff the directed call graph (nodes = `resolved` keys, edges =
+/// caller->callee) contains a cycle. Kahn's algorithm: repeatedly remove a
+/// node with in-degree 0; if any node remains, there is a cycle. Self-edges
+/// (a function calling itself) make that node never reach in-degree 0, so
+/// they are caught too.
+fn call_graph_has_cycle(resolved: &BTreeMap<u64, ResolvedCode>, edges: &[(u64, u64)]) -> bool {
+    let mut indeg: HashMap<u64, usize> = resolved.keys().map(|&a| (a, 0usize)).collect();
+    for &(_from, to) in edges {
+        if let Some(d) = indeg.get_mut(&to) {
+            *d += 1;
+        }
+    }
+    let mut queue: Vec<u64> = indeg
+        .iter()
+        .filter(|&(_, &d)| d == 0)
+        .map(|(&a, _)| a)
+        .collect();
+    let mut removed = 0usize;
+    while let Some(n) = queue.pop() {
+        removed += 1;
+        for &(from, to) in edges {
+            if from == n {
+                if let Some(d) = indeg.get_mut(&to) {
+                    *d -= 1;
+                    if *d == 0 {
+                        queue.push(to);
+                    }
+                }
+            }
+        }
+    }
+    removed != resolved.len()
 }
 
 /// The region-function signature: `(base, sp, ctx) -> (new_sp, raised)`.

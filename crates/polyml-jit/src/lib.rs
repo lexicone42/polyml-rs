@@ -790,6 +790,170 @@ pub fn install_all_jit_entries(
     (total, jit_ok, installed)
 }
 
+/// A scanned region candidate: a real heap code object whose entire
+/// static CALL_CONST_ADDR subgraph fits the whole-region core opcode
+/// subset (so [`memtrans::build_region`] succeeds).
+#[derive(Clone, Debug)]
+pub struct RegionCandidate {
+    /// Code-object body address of the region root.
+    pub root_addr: u64,
+    /// The root's SML arity.
+    pub arity: usize,
+    /// Number of code objects in the region (root + static callees).
+    pub n_funcs: usize,
+    /// The root's bytecode-only bytes (for provenance forensics).
+    pub bytecode: Vec<u8>,
+}
+
+/// SCAN the loaded image's code objects for whole-region candidates: any
+/// code object whose static call-subgraph fits the core opcode subset.
+/// Returns every fitting root (build succeeds on a throwaway probe Jit),
+/// sorted smallest-region-first. This is the GAP-1 real-heap-extraction
+/// probe — it reports honestly which real regions exist.
+///
+/// # Safety
+/// The image must be loaded and its code spaces populated; the heap is
+/// frozen (no GC since load).
+#[must_use]
+pub unsafe fn scan_region_candidates(loaded: &polyml_runtime::LoadedImage) -> Vec<RegionCandidate> {
+    use polyml_runtime::{MemorySpace, PolyWord, length_word};
+
+    fn walk_code_objects<F: FnMut(*const PolyWord)>(space: &MemorySpace, mut f: F) {
+        let mut i = 0usize;
+        let used = space.used_words();
+        let Some(base) = space.iter().next().map(|w| w as *const PolyWord) else {
+            return;
+        };
+        while i < used {
+            let lw = unsafe { *base.add(i) };
+            let n = length_word::length_of(lw);
+            if n == 0 || i + 1 + n > used {
+                break;
+            }
+            let body = unsafe { base.add(i + 1) };
+            if length_word::is_code_object(lw) {
+                f(body);
+            }
+            i += 1 + n;
+        }
+    }
+
+    let mut out: Vec<RegionCandidate> = Vec::new();
+    for space in [&loaded.immutable, &loaded.mutable, &loaded.code] {
+        walk_code_objects(space, |code_obj_ptr| {
+            let root_addr = code_obj_ptr as u64;
+            // Probe with a fresh throwaway Jit (NOT finalized — we only
+            // care whether build_region succeeds).
+            let Ok(mut probe) = Jit::new() else {
+                return;
+            };
+            // SAFETY: root_addr is a live code object in the frozen heap.
+            if let Ok(region) = unsafe { memtrans::build_region(&mut probe, root_addr) } {
+                // Live-dispatch safety gate: a recursive region (unbounded
+                // shared-stack growth) or one carrying a STACK_SIZE16
+                // prologue (the no-op'd stack-limit check) could over-push
+                // the stack Box with no StackOverflow raise. Such regions
+                // compile fine (the convention is sound — see the sumto
+                // test) but MUST NOT be registered for live dispatch until
+                // STACK_SIZE16 is lowered faithfully (S4). Exclude them
+                // from the candidate set.
+                if region.recursive || region.uses_stack_size {
+                    return;
+                }
+                // SAFETY: root_addr is live; resolve its bytecode for the
+                // provenance report.
+                let bytecode = unsafe { memtrans::resolve_code(root_addr) }
+                    .map(|rc| rc.bytecode)
+                    .unwrap_or_default();
+                out.push(RegionCandidate {
+                    root_addr,
+                    arity: region.root_arity,
+                    n_funcs: region.funcs.len(),
+                    bytecode,
+                });
+            }
+        });
+    }
+    out.sort_by_key(|c| (c.n_funcs, c.arity, c.root_addr));
+    out
+}
+
+/// WHOLE-REGION JIT wiring (S3b): install the do_call dispatch callback
+/// into the runtime, then compile + finalize + register the supplied
+/// region roots so a live `poly run` dispatches them NATIVE through the
+/// interpreter's do_call boundary.
+///
+/// `roots` are code-object body addresses (e.g. from
+/// [`scan_region_candidates`], or a tailored in-subset code object
+/// extracted from the heap). Each is compiled into ONE leaked `Jit`
+/// module (so the finalized native code outlives this call), finalized,
+/// and registered with `interp.install_region`. Returns the number of
+/// roots successfully registered.
+///
+/// # Safety
+/// Each root is a live code-object body pointer in the frozen heap.
+pub unsafe fn install_whole_region(
+    interp: &mut polyml_runtime::Interpreter,
+    roots: &[u64],
+) -> usize {
+    // 1. Install the dispatch callback (idempotent). This is the ONLY
+    //    place the runtime learns how to reach boundary::dispatch_region.
+    polyml_runtime::install_region_dispatch(boundary::polyml_jit_region_dispatch);
+
+    if roots.is_empty() {
+        return 0;
+    }
+
+    // 2. Compile every root into ONE shared, leaked Jit module so all the
+    //    finalized native code stays mapped for the whole process. (A
+    //    region's inter-function native calls resolve within its own
+    //    module; distinct roots can share one module since their FuncIds
+    //    are unique.)
+    let mut jit = match Jit::new() {
+        Ok(j) => j,
+        Err(_) => return 0,
+    };
+    let mut built: Vec<(u64, usize, cranelift_module::FuncId)> = Vec::new();
+    for &root_addr in roots {
+        // SAFETY: root_addr is a live code object in the frozen heap.
+        if let Ok(region) = unsafe { memtrans::build_region(&mut jit, root_addr) } {
+            // Defense in depth: never register a recursive or
+            // STACK_SIZE16-bearing region for live dispatch (the
+            // unbounded-growth / no-op'd-stack-check hazard). Candidates
+            // from `scan_region_candidates` are already filtered; this
+            // guards any caller that passes raw roots.
+            if region.recursive || region.uses_stack_size {
+                continue;
+            }
+            built.push((root_addr, region.root_arity, region.root));
+        }
+    }
+    if built.is_empty() {
+        return 0;
+    }
+    // Finalize ONCE — after this no further definitions in this module.
+    if jit.module.finalize_definitions().is_err() {
+        return 0;
+    }
+    // 3. Resolve each root's finalized native pointer + register it.
+    let mut registered = 0usize;
+    for (root_addr, arity, func_id) in built {
+        let ptr = jit.module.get_finalized_function(func_id);
+        interp.install_region(
+            root_addr as usize,
+            polyml_runtime::RegionEntry {
+                region_fn: ptr as usize,
+                sml_arity: arity,
+            },
+        );
+        registered += 1;
+    }
+    // Leak the Jit so its executable memory outlives this scope (the
+    // interpreter holds raw native pointers into it).
+    Box::leak(Box::new(jit));
+    registered
+}
+
 /// Trampoline that JIT'd code calls to dispatch `CALL_FAST_RTS<N>`.
 /// Signature must match what `translate.rs` declares for the extern
 /// symbol — `(stub: i64, n_args: i64, args: *const i64) -> i64`.
