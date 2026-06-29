@@ -1447,6 +1447,139 @@ mod tests {
         assert_eq!(r.funcs.len(), 1, "hashfold is a single leaf function");
     }
 
+    /// EARLY S5 SPEED READ (the whole-region kill-switch). Microbenchmark the
+    /// #2-shaped hashfold region NATIVE (via the do_call boundary) vs the REAL
+    /// interpreter, isolating the per-loop-iteration execution cost with the
+    /// two-point (len=N minus len=0) subtraction so setup/entry/exit cancel.
+    /// Region #2 is the BEST CASE: no alloc, no dynamic-call trampoline tax. If
+    /// native cannot clear ~1.2x here, region #1 (burdened with both) never
+    /// will -> stop before building S4c/d/e. Run:
+    ///   cargo test --release -p polyml-jit s5_hashfold -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn s5_hashfold_microbench() {
+        use std::time::Instant;
+        const N: usize = 50_000; // inner-loop iterations per call
+        const ITERS: usize = 60; // timed repetitions
+
+        let big: Vec<u8> = (0..N).map(|i| (i * 31 + 7) as u8).collect();
+        let empty: Vec<u8> = Vec::new();
+
+        // ---- NATIVE: compile + finalize ONCE; both byte objects in one space.
+        let mut nspace = MemorySpace::new(1 << 16, SpaceKind::Code);
+        let f = build_hashfold_region(&mut nspace);
+        let f_closure_bits = f.closure.0 as i64;
+        let buf_big = build_byte_object(&mut nspace, &big);
+        let buf_empty = build_byte_object(&mut nspace, &empty);
+        let mut jit = Jit::new().expect("jit");
+        // SAFETY: f.code_addr is a live code object in nspace.
+        let region = unsafe { memtrans::build_region(&mut jit, f.code_addr) }.expect("build");
+        jit.module.finalize_definitions().expect("finalize");
+        let ptr = jit.module.get_finalized_function(region.root);
+        // SAFETY: region root has the RegionFn ABI.
+        let region_fn: RegionFn = unsafe { std::mem::transmute::<*const u8, RegionFn>(ptr) };
+
+        let native_once = |buf: PolyWord, len: i64| -> i64 {
+            let cap = 256usize;
+            let mut stack = vec![0i64; cap];
+            stack[cap - 1] = buf.0 as i64;
+            stack[cap - 2] = PolyWord::tagged(len as isize).0 as i64;
+            let mut ctx = ExnCtx::default();
+            // SAFETY: stack covers all indices; region_fn finalized; ctx valid.
+            match unsafe {
+                dispatch_region(
+                    region_fn,
+                    stack.as_mut_ptr(),
+                    (cap - 2) as i64,
+                    f_closure_bits,
+                    &mut ctx,
+                )
+            } {
+                BoundaryOutcome::Returned { new_sp } => stack[new_sp as usize],
+                BoundaryOutcome::Raised { .. } => panic!("native raised"),
+            }
+        };
+        let time_native = |buf: PolyWord, len: i64| -> f64 {
+            native_once(buf, len); // warmup
+            let t = Instant::now();
+            for _ in 0..ITERS {
+                std::hint::black_box(native_once(buf, len));
+            }
+            t.elapsed().as_secs_f64() / ITERS as f64
+        };
+
+        // ---- INTERP: fresh setup per call (subtraction cancels it).
+        let interp_once = |bytes: &[u8]| -> i64 {
+            let mut space = MemorySpace::new(1 << 16, SpaceKind::Code);
+            let f = build_hashfold_region(&mut space);
+            let buf = build_byte_object(&mut space, bytes);
+            let f_closure = f.closure;
+            let f_addr = f.code_addr;
+            let mut interp = Interpreter::from_bytes(256, vec![]).with_alloc_space(space);
+            interp.test_seed_top(buf);
+            interp.test_seed_top(PolyWord::tagged(bytes.len() as isize));
+            interp.test_seed_return_sentinel();
+            interp.test_seed_top(f_closure);
+            // SAFETY: f_addr is a live code object now owned by interp.
+            unsafe { interp.set_code_segment_to_code_obj(f_addr as usize) };
+            let r = match interp.run() {
+                Ok(StepResult::Returned(w)) => w.0 as i64,
+                other => panic!("interp: {other:?}"),
+            };
+            std::mem::forget(interp);
+            r
+        };
+        let time_interp = |bytes: &[u8]| -> f64 {
+            interp_once(bytes); // warmup
+            let t = Instant::now();
+            for _ in 0..ITERS {
+                std::hint::black_box(interp_once(bytes));
+            }
+            t.elapsed().as_secs_f64() / ITERS as f64
+        };
+
+        // Correctness guard: native == interp (THE whole-region soundness
+        // criterion — both paths execute the same bytecode over the same
+        // buffer, so the speedup ratio times faithful work). The Rust
+        // hashfold_reference is validated only on small fuzz buffers
+        // (hashfold_region_differential_clean) and wraps differently at large
+        // N, so it is not used here.
+        let nr = native_once(buf_big, N as i64);
+        let ir = interp_once(&big);
+        assert_eq!(nr, ir, "native vs interp result mismatch");
+
+        let nt_big = time_native(buf_big, N as i64);
+        let nt_empty = time_native(buf_empty, 0);
+        let it_big = time_interp(&big);
+        let it_empty = time_interp(&empty);
+
+        let nexec = nt_big - nt_empty; // per-call loop cost, native
+        let iexec = it_big - it_empty; // per-call loop cost, interp
+        let speedup = iexec / nexec;
+        let ns_per_iter_native = nexec * 1e9 / N as f64;
+        let ns_per_iter_interp = iexec * 1e9 / N as f64;
+
+        eprintln!("==== S5 EARLY READ: region #2 (hashfold) native vs interp ====");
+        eprintln!("  N={N} loop iters/call, {ITERS} timed reps");
+        eprintln!(
+            "  native: total {:.1}us, loop {:.1}us ({:.3} ns/iter)",
+            nt_big * 1e6,
+            nexec * 1e6,
+            ns_per_iter_native
+        );
+        eprintln!(
+            "  interp: total {:.1}us, loop {:.1}us ({:.3} ns/iter)",
+            it_big * 1e6,
+            iexec * 1e6,
+            ns_per_iter_interp
+        );
+        eprintln!("  >>> SPEEDUP (interp/native, loop-isolated) = {speedup:.3}x");
+        eprintln!(
+            "  KILL-SWITCH: {} (>=1.2x continue S4c/d/e; <1.2x STOP)",
+            if speedup >= 1.2 { "PASS" } else { "FAIL" }
+        );
+    }
+
     #[test]
     fn sumto_recursive_value_is_correct() {
         // sumto(10) = 0+1+..+10 = 55.
