@@ -2826,6 +2826,26 @@ impl Interpreter {
         let saved_end = self.code_end;
         let saved_frames_depth = self.frames.len();
         let saved_handler = self.handler_sp;
+        let saved_handler_frames_depth = self.handler_frames_depth.len();
+
+        // RAISE FIDELITY (S4-proper): ISOLATE the interpreter's handler for
+        // the callee run. The native region (the caller) installs handlers
+        // via the ExnCtx checked-return model — `self.handler_sp` does NOT
+        // describe the region's handler, and an OUTER interpreted caller's
+        // handler must NOT be unwound to from INSIDE this nested run (its
+        // handler frame lives above sp_at_top_arg, and do_raise_ex's collapse
+        // arithmetic assumes a continuous interp frame chain this re-entry
+        // breaks). So we set handler_sp to the "no handler" sentinel
+        // (`stack.len()`) for the callee. If the callee handles its OWN raise
+        // internally (its own SET_HANDLER), it returns `Returned` normally.
+        // If the callee raises and does NOT handle it, do_raise_ex / RAISE_EX
+        // finds no handler and returns `Err(UnhandledException)` with
+        // `self.exception_packet` set to the REAL packet — which we carry
+        // back across the boundary (raised=1, the REAL packet bits) so the
+        // do_call hook re-raises the REAL exception through the interpreter's
+        // own (restored) handler machinery, byte-identical to a fully
+        // interpreted callee.
+        self.handler_sp = self.stack.len();
 
         // Point sp at the top callee arg (the region pushed the args onto
         // the shared stack already). Then build the callee entry frame the
@@ -2868,12 +2888,19 @@ impl Interpreter {
         // interp). The recursion is bounded by the bytecode's own depth.
         let run_result = self.run();
 
-        // Restore the saved interpreter state regardless of outcome.
+        // Restore the saved interpreter state regardless of outcome. The
+        // handler register + the handler-frames side stack are restored to
+        // exactly what they were before the isolated callee run (the callee
+        // is REQUIRED to balance its own SET_HANDLER / DELETE_HANDLER, but a
+        // raise that escapes the callee leaves a residual handler frame; the
+        // truncate cleans it).
         self.pc = saved_pc;
         self.code_start = saved_start;
         self.code_end = saved_end;
         self.frames.truncate(saved_frames_depth);
         self.handler_sp = saved_handler;
+        self.handler_frames_depth
+            .truncate(saved_handler_frames_depth);
 
         match run_result {
             Ok(StepResult::Returned(result)) => {
@@ -2893,19 +2920,62 @@ impl Interpreter {
                     raised: 0,
                 }
             }
+            Err(InterpError::UnhandledException) => {
+                // RAISE FIDELITY (the gap this method closes): the callee
+                // RAISED a real SML exception it did not handle. Because we
+                // isolated the interp handler (handler_sp = stack.len()),
+                // do_raise_ex / RAISE_EX returned UnhandledException with the
+                // REAL packet recorded in `self.exception_packet`. Carry the
+                // REAL packet bits back so the do_call hook re-raises it as
+                // ITSELF through the interpreter's own (now-restored) handler
+                // machinery — byte-identical to a fully interpreted callee
+                // whose exception unwinds to the caller's handler. The
+                // pervasive Overflow exception ALSO arrives here (raise_overflow
+                // → do_raise_ex → no handler), so a real Overflow from a
+                // trampolined callee propagates as its OWN packet too, NOT the
+                // EXN_OVERFLOW sentinel — still byte-exact, since the hook's
+                // do_raise_ex path drives the same machinery raise_overflow
+                // would. `self.sp` was reset to the handler register by
+                // do_raise_ex (== stack.len(), no handler), but the do_call
+                // hook resets sp to its pre-call frame top before re-raising,
+                // so new_sp here is informational only.
+                let pkt = self
+                    .exception_packet
+                    .map_or(REGION_EXN_OVERFLOW, |w| w.0 as i64);
+                *exn_packet_out = pkt;
+                RegionRetC {
+                    new_sp: self.sp as i64,
+                    raised: 1,
+                }
+            }
+            Err(InterpError::DivByZero) => {
+                // FixedInt quot/rem by zero is a HARD interpreter error
+                // (InterpError::DivByZero), NOT a catchable SML packet — it
+                // never reaches do_raise_ex. Keep the hard sentinel so the
+                // do_call hook re-surfaces Err(DivByZero), exactly as a
+                // fully interpreted callee would.
+                *exn_packet_out = REGION_EXN_DIVZERO;
+                RegionRetC {
+                    new_sp: self.sp as i64,
+                    raised: 1,
+                }
+            }
+            Err(InterpError::StackOverflow) => {
+                // A genuine stack-overflow in the callee — HARD error, keep
+                // the sentinel (the hook re-surfaces Err(StackOverflow)).
+                *exn_packet_out = REGION_EXN_STACKOVERFLOW;
+                RegionRetC {
+                    new_sp: self.sp as i64,
+                    raised: 1,
+                }
+            }
             Ok(_) | Err(_) => {
-                // The callee did not return cleanly (an unsupported opcode
-                // would never appear in a registered region; an error path
-                // — e.g. a real DivByZero/Overflow inside the interpreted
-                // callee — surfaces here). Map it onto a region raise so the
-                // boundary drives the interpreter's real raise machinery.
-                // We conservatively route via the Overflow sentinel so the
-                // hook re-raises through raise_overflow (the only catchable
-                // path); a DivByZero callee already returned Err and the
-                // outer hook will see it via the normal interp error path
-                // when this region's raised==1 propagates. The minimal
-                // trampoline's prototype callee is pure arithmetic, so this
-                // arm is defensive.
+                // The callee did not return cleanly and did not raise a
+                // recognised exception (an unsupported opcode / NotAClosure /
+                // NoAllocator — unreachable for a verified registered region's
+                // callee). Surface defensively via the Overflow sentinel so
+                // the hook drives a catchable raise rather than reading
+                // garbage.
                 *exn_packet_out = REGION_EXN_OVERFLOW;
                 RegionRetC {
                     new_sp: self.sp as i64,
@@ -6609,11 +6679,21 @@ impl Interpreter {
                             return Err(InterpError::StackOverflow);
                         }
                         other => {
-                            // A genuine raised tagged value crossing the
-                            // boundary (a real RAISE inside a region). The
-                            // core opcode subset has no RAISE, so this is
-                            // unreachable today; handle it conservatively
-                            // by routing the value through do_raise_ex.
+                            // A REAL exception packet crossing the boundary.
+                            // This is now LIVE: a dynamic-call region whose
+                            // trampolined callee RAISEs a real (non-sentinel)
+                            // SML exception arrives here with `other` = the
+                            // REAL packet bits (carried faithfully by
+                            // region_interp_call). Route it through the
+                            // interpreter's OWN raise machinery: push the
+                            // packet on top and do_raise_ex, so the packet +
+                            // unwind + handler dispatch (or the hard
+                            // UnhandledException halt) are byte-identical to a
+                            // fully-interpreted callee whose exception
+                            // propagates to the caller's handler. (A real
+                            // pervasive Overflow ALSO arrives here as its own
+                            // packet, which do_raise_ex drives identically to
+                            // raise_overflow's path.)
                             let pkt = PolyWord::from_bits(other as usize);
                             self.push(pkt)?;
                             self.do_raise_ex()?;

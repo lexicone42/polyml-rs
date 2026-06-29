@@ -851,24 +851,27 @@ pub unsafe fn scan_region_candidates(loaded: &polyml_runtime::LoadedImage) -> Ve
             if let Ok(region) = unsafe { memtrans::build_region(&mut probe, root_addr) } {
                 // Live-dispatch safety gate. S4b lowers STACK_SIZE16
                 // faithfully, so a STACK_SIZE16-bearing region is now SAFE to
-                // admit (over-push traps at the prologue). But two classes
-                // stay REFUSED for live dispatch:
-                //  - recursive: a static CALL_CONST_ADDR self/mutual cycle
+                // admit (over-push traps at the prologue). S4-proper closed
+                // the dynamic-call raise-fidelity gap (region_interp_call now
+                // propagates a REAL callee exception as its OWN packet through
+                // do_raise_ex), so has_dynamic_call regions are ADMITTED for
+                // live dispatch — the trampoline recurses via the interp's own
+                // do_call, bounded by the interp's STACK_SIZE checks (the SAME
+                // exposure the interpreter already has).
+                //
+                // ONE class stays REFUSED:
+                //  - recursive: a STATIC CALL_CONST_ADDR self/mutual cycle
                 //    lowers to a native Cranelift self-`call` -> OS-thread
                 //    stack growth (SIGSEGV at depth, NOT a controlled
                 //    StackOverflow) + unchecked per-level pushes -> OOB write
                 //    below the stack Box. The SML STACK_SIZE16 check does not
-                //    bound the NATIVE recursion. (S4-proper: a native depth
-                //    guard.)
-                //  - has_dynamic_call: the CALL_LOCAL_B/CALL_CLOSURE
-                //    trampoline is sound + measured (3.3x), but
-                //    region_interp_call does not yet propagate a REAL
-                //    exception from the callee faithfully (maps to Overflow).
-                //    Live admission waits on that raise fidelity (S4-proper).
-                // The trampoline mechanism + microbench exercise dynamic
-                // calls directly (not via this live path), so the measurement
-                // stands.
-                if region.recursive || region.has_dynamic_call {
+                //    bound the NATIVE recursion. (A genuinely NEW hazard the
+                //    interp does not have; a native recursion-depth guard is
+                //    out of scope here, deferred.) NOTE: dynamic-call
+                //    "recursion" is FINE — it recurses through the interp
+                //    trampoline, not a native self-call, so it is bounded
+                //    exactly as the interpreter is.
+                if region.recursive {
                     return;
                 }
                 // SAFETY: root_addr is live; resolve its bytecode for the
@@ -928,12 +931,14 @@ pub unsafe fn install_whole_region(
     for &root_addr in roots {
         // SAFETY: root_addr is a live code object in the frozen heap.
         if let Ok(region) = unsafe { memtrans::build_region(&mut jit, root_addr) } {
-            // Defense in depth: STACK_SIZE16-bearing regions are now safe
-            // (faithful trap), but recursive regions (native self-`call` ->
-            // OS-stack SIGSEGV + unchecked over-push) and dynamic-call regions
-            // (trampoline raise-fidelity gap) stay OUT of live dispatch until
-            // S4-proper. Mirrors scan_region_candidates.
-            if region.recursive || region.has_dynamic_call {
+            // Defense in depth: STACK_SIZE16-bearing regions are safe
+            // (faithful trap) and dynamic-call regions are now ADMITTED
+            // (S4-proper closed the raise-fidelity gap — region_interp_call
+            // propagates a REAL callee exception faithfully). Only RECURSIVE
+            // regions (a STATIC self/mutual cycle -> native self-`call` ->
+            // OS-stack SIGSEGV + unchecked over-push, a NEW hazard the interp
+            // lacks) stay OUT of live dispatch. Mirrors scan_region_candidates.
+            if region.recursive {
                 continue;
             }
             built.push((root_addr, region.root_arity, region.root));
