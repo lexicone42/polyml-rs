@@ -174,7 +174,7 @@ pub fn exn_sentinel_name(packet: i64) -> &'static str {
 // =====================================================================
 
 use polyml_runtime::interpreter::opcodes as op;
-use polyml_runtime::length_word::{F_CLOSURE_OBJ, F_CODE_OBJ};
+use polyml_runtime::length_word::{F_BYTE_OBJ, F_CLOSURE_OBJ, F_CODE_OBJ};
 use polyml_runtime::space::{MemorySpace, SpaceKind, set_length_word};
 use polyml_runtime::{Interpreter, PolyWord, StepResult};
 
@@ -605,6 +605,234 @@ fn build_sumto_region(space: &mut MemorySpace) -> BuiltCode {
         code_obj.add(cp_index).write(built.closure);
     }
     built
+}
+
+// =====================================================================
+// S4a — the #2-HASH-SHAPED region (a byte-string hash fold). Genuine
+// PolyML bytecode exercising the NEW Tier-1 leaf opcodes: LOAD_ML_BYTE,
+// WORD_MULT, WORD_ADD, SET_STACK_VAL_B (the loop vars), JUMP_NEQ_LOCAL
+// (the loop-exit decision), and WORD_MOD (the final fold). Pure leaf: NO
+// alloc, NO dynamic call, NO handler. The byte buffer is passed as an arg
+// (allocated as an F_BYTE_OBJ in the same heap).
+// =====================================================================
+
+/// Allocate a byte object holding `bytes` (padded to a word boundary with
+/// zeros). Returns its body pointer as a PolyWord. The object is a real
+/// F_BYTE_OBJ so the interpreter / region read it via LOAD_ML_BYTE exactly
+/// as compiled SML would.
+fn build_byte_object(space: &mut MemorySpace, bytes: &[u8]) -> PolyWord {
+    let word = std::mem::size_of::<usize>();
+    let n_words = bytes.len().div_ceil(word).max(1);
+    let obj = space.alloc(n_words);
+    // SAFETY: just allocated n_words; we write within [0, n_words*word).
+    unsafe {
+        let dst = obj.cast::<u8>();
+        std::ptr::write_bytes(dst, 0, n_words * word);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+        set_length_word(obj, n_words, F_BYTE_OBJ);
+    }
+    PolyWord::from_ptr(obj.cast_const())
+}
+
+/// The Rust reference for the hand-built region: the EXACT fold the
+/// bytecode computes, so the differential also pins the absolute value
+/// (not just interp==native). `hash(buf, len)` folds i = len down to 1,
+/// accumulating `h = h*31 + buf[i-1]` (wrapping into the tagged range as
+/// WORD_* arithmetic does), then returns `h mod M`.
+const HASHFOLD_MULT: i64 = 31;
+const HASHFOLD_MOD: i64 = 97;
+
+#[cfg(test)]
+fn hashfold_reference(buf: &[u8], len: i64) -> i64 {
+    // Model the EXACT tagged-word arithmetic the bytecode performs (the
+    // interp's WORD_* closures: mod.rs:4418-4451 — operate on the raw
+    // `usize` tagged-word bits with `>>1` / `<<1|1` and wrapping). A naive
+    // i64 fold would diverge once `h` overflows (long buffers), because the
+    // `>>1 ... <<1` payload model wraps differently from full-width i64. We
+    // carry `h` as a tagged word and replay each op bit-for-bit.
+    let tag = |n: usize| (n << 1) | 1; // PolyWord::tagged for non-neg payloads
+    let mut h: usize = tag(0);
+    let mut i = len;
+    while i != 0 {
+        let byte = tag(buf[(i - 1) as usize] as usize);
+        // WORD_MULT: ((h>>1) * (31>>1... )) — x is the multiplier word.
+        let mul = tag(HASHFOLD_MULT as usize);
+        let prod = (((h >> 1).wrapping_mul(mul >> 1)) << 1) | 1; // h*31 (tagged)
+        // WORD_ADD: y.wrapping_add(x).wrapping_sub(tagged(0)).
+        h = prod.wrapping_add(byte).wrapping_sub(tag(0));
+        i -= 1;
+    }
+    // WORD_MOD: (h>>1) % (97>>1...) re-tagged; return the untagged payload.
+    let m = tag(HASHFOLD_MOD as usize);
+    let modr = (((h >> 1) % (m >> 1)) << 1) | 1;
+    (modr >> 1) as i64
+}
+
+/// Build the #2-hash-shaped region: `hash(buf, len)` (arity 2). Entry
+/// frame: LOCAL_0=closure, LOCAL_1=retPC, LOCAL_2=len(top), LOCAL_3=buf.
+///
+/// Two persistent loop locals (h, i) are pushed onto the shared stack and
+/// updated in place via SET_STACK_VAL_B; the loop counts i down from len
+/// to 0 and exits via a JUMP_NEQ_LOCAL (want=0) decision; the body folds
+/// `h = h*31 + buf[i-1]` with LOAD_ML_BYTE / WORD_MULT / WORD_ADD; the
+/// tail computes `h mod 97` with WORD_MOD and RETURN_B 2.
+///
+/// The branch geometry + depth bookkeeping is DESIGN; the both-ways
+/// differential (interp do_call oracle vs native boundary) + the Rust
+/// reference are the PROOF.
+#[allow(clippy::vec_init_then_push)]
+fn build_hashfold_region(space: &mut MemorySpace) -> BuiltCode {
+    // sp tracking (see the module comment for the downward stack model):
+    // entry sp0 = closure. After pushing h0 then i0 the loop sp L = sp0-2,
+    // where (from L): i=LOCAL_0, h=LOCAL_1, clo=LOCAL_2, ret=LOCAL_3,
+    // len=LOCAL_4, buf=LOCAL_5.
+    // This is a WHILE loop (test-at-top), NOT a do-while: the i!=0 test
+    // guards the body so `buf[i-1]` is only read for i>=1 (the len==0 case
+    // takes the exit immediately, never touching buf[-1]).
+    let mut bc: Vec<u8> = Vec::new();
+    // ---- prologue: push h=0, push i=len ----
+    bc.push(op::INSTR_CONST_0); // h0 = 0  -> stack[sp0-1]
+    bc.push(op::INSTR_LOCAL_3); // push len (LOCAL_3 from sp0-1) -> i0 stack[sp0-2]
+    // ---- Ltest: if i != 0 jump fwd to Lbody; else fall through to tail ----
+    let ltest = bc.len(); // L = sp0-2 here (from L: i=LOCAL_0, h=LOCAL_1, ...)
+    bc.push(op::INSTR_JUMP_NEQ_LOCAL); // depth=0 (i=LOCAL_0), want=0
+    bc.push(0); //   depth
+    bc.push(0); //   want = 0
+    let neq_off_idx = bc.len();
+    bc.push(0x00); //   off (patched -> forward to Lbody)
+    // ---- tail (fall-through, i==0): result = h mod 97; clean locals; ret.
+    bc.push(op::INSTR_LOCAL_1); // push h (LOCAL_1 from sp L)      (sp L-1)
+    bc.push(op::INSTR_CONST_INT_B); // push 97
+    bc.push(HASHFOLD_MOD as u8); //   (=97)           (sp L-2)
+    bc.push(op::INSTR_WORD_MOD); // h mod 97          (sp L-1)
+    bc.push(op::INSTR_RESET_R_2); // drop i,h locals; keep result   (sp L+1)
+    bc.push(op::INSTR_RETURN_B); // collapse result+clo+ret+2 args
+    bc.push(2); //   arity 2
+    // ---- Lbody: h = h*31 + buf[i-1]; i = i-1; JUMP_BACK to Ltest ----
+    let lbody = bc.len();
+    bc.push(op::INSTR_LOCAL_1); // push h            (sp L-1)
+    bc.push(op::INSTR_CONST_INT_B); // push 31
+    bc.push(HASHFOLD_MULT as u8); //   (=31)         (sp L-2)
+    bc.push(op::INSTR_WORD_MULT); // h*31            (sp L-1)
+    bc.push(op::INSTR_LOCAL_6); // push buf (LOCAL_6 from sp L-1)  (sp L-2)
+    bc.push(op::INSTR_LOCAL_2); // push i  (LOCAL_2 from sp L-2)   (sp L-3)
+    bc.push(op::INSTR_CONST_1); // push 1            (sp L-4)
+    bc.push(op::INSTR_WORD_SUB); // i-1 (= idx)       (sp L-3)
+    bc.push(op::INSTR_LOAD_ML_BYTE); // buf[idx]      (sp L-2)
+    bc.push(op::INSTR_WORD_ADD); // h*31 + buf[idx]   (sp L-1)
+    bc.push(op::INSTR_SET_STACK_VAL_B); // store h_new into h's slot (stack[L+1])
+    bc.push(2); //   idx=2 (new_sp=L; L+2-1=L+1)      (sp L)
+    // ---- i = i - 1 ----
+    bc.push(op::INSTR_LOCAL_0); // push i (LOCAL_0 from sp L)      (sp L-1)
+    bc.push(op::INSTR_CONST_1); // push 1            (sp L-2)
+    bc.push(op::INSTR_WORD_SUB); // i-1               (sp L-1)
+    bc.push(op::INSTR_SET_STACK_VAL_B); // store i-1 into i's slot (stack[L])
+    bc.push(1); //   idx=1 (new_sp=L; L+1-1=L)        (sp L)
+    // ---- JUMP_BACK to Ltest ----
+    let jback_pc = bc.len();
+    bc.push(op::INSTR_JUMP_BACK8);
+    // JUMP_BACK8 (mod.rs / jump_target): the interp lands at pc - off where
+    // pc is the JUMP_BACK opcode offset. So off = jback_pc - ltest.
+    let back_off = jback_pc as i64 - ltest as i64;
+    assert!(
+        (0..=255).contains(&back_off),
+        "hashfold back-off {back_off} out of range"
+    );
+    bc.push(back_off as u8);
+
+    // JUMP_NEQ_LOCAL forward off: interp lands at after + off, after = the
+    // pc past the 3 immediates = (neq opcode idx) + 4. The neq opcode is at
+    // neq_off_idx - 3. Target = Lbody.
+    let neq_opcode_idx = neq_off_idx - 3;
+    let neq_after = neq_opcode_idx + 4;
+    let fwd_off = lbody as i64 - neq_after as i64;
+    assert!(
+        (0..=255).contains(&fwd_off),
+        "hashfold neq fwd-off {fwd_off} out of range"
+    );
+    bc[neq_off_idx] = fwd_off as u8;
+
+    build_code_object(space, &bc, &[])
+}
+
+/// Run the hand-built #2-hash-shaped region BOTH ways for `(buf, len)`.
+/// Pure interp via do_call vs native via the boundary, on a real byte
+/// object in the heap. Returns the differential + the native tick count.
+pub fn run_hashfold_both_ways(bytes: &[u8]) -> RealRegionResult {
+    let len = bytes.len() as isize;
+
+    // ---- (1) PURE INTERP ----
+    let interp_result = {
+        let mut space = MemorySpace::new(4096, SpaceKind::Code);
+        let f = build_hashfold_region(&mut space);
+        let buf = build_byte_object(&mut space, bytes);
+        let f_addr = f.code_addr;
+        let f_closure = f.closure;
+        let mut interp = Interpreter::from_bytes(256, vec![]).with_alloc_space(space);
+        interp.test_seed_top(buf); // arg buf (deepest, LOCAL_3)
+        interp.test_seed_top(PolyWord::tagged(len)); // arg len (top, LOCAL_2)
+        interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+        interp.test_seed_top(f_closure); // closure (LOCAL_0)
+        // SAFETY: f_addr is a live code object now owned by `interp`.
+        unsafe { interp.set_code_segment_to_code_obj(f_addr as usize) };
+        let r = match interp.run() {
+            Ok(StepResult::Returned(w)) => (w.0 as i64, false),
+            Ok(other) => panic!("interp did not return cleanly: {other:?}"),
+            Err(e) => panic!("interp error: {e:?}"),
+        };
+        std::mem::forget(interp);
+        r
+    };
+
+    // ---- (2) NATIVE region via the boundary ----
+    let mut native_space = MemorySpace::new(4096, SpaceKind::Code);
+    let f = build_hashfold_region(&mut native_space);
+    let buf = build_byte_object(&mut native_space, bytes);
+    let f_addr = f.code_addr;
+    let f_closure_bits = f.closure.0 as i64;
+
+    let mut jit = Jit::new().expect("jit");
+    // SAFETY: f_addr is a live code object in native_space.
+    let region = match unsafe { memtrans::build_region(&mut jit, f_addr) } {
+        Ok(r) => r,
+        Err(e) => panic!("hashfold region build bailed: {e}"),
+    };
+    jit.module.finalize_definitions().expect("finalize");
+    let ptr = jit.module.get_finalized_function(region.root);
+    // SAFETY: region root has the RegionFn ABI.
+    let region_fn: RegionFn = unsafe { std::mem::transmute::<*const u8, RegionFn>(ptr) };
+
+    let cap = 256usize;
+    let mut stack = vec![0i64; cap];
+    stack[cap - 1] = buf.0 as i64; // arg buf (deepest, LOCAL_3)
+    stack[cap - 2] = PolyWord::tagged(len).0 as i64; // arg len (top, LOCAL_2)
+    let sp_top_arg = (cap - 2) as i64;
+    let mut ctx = ExnCtx::default();
+    reset_native_tick();
+    // SAFETY: stack covers all indices; region_fn finalized; ctx valid.
+    let outcome = unsafe {
+        dispatch_region(
+            region_fn,
+            stack.as_mut_ptr(),
+            sp_top_arg,
+            f_closure_bits,
+            &mut ctx,
+        )
+    };
+    let ticks = native_tick_count();
+    let (native_result, raised_native) = match outcome {
+        BoundaryOutcome::Returned { new_sp } => (stack[new_sp as usize], false),
+        BoundaryOutcome::Raised { .. } => (0, true),
+    };
+    drop(native_space);
+
+    RealRegionResult {
+        interp_result: interp_result.0,
+        native_result,
+        native_ticks: ticks,
+        raised_interp: interp_result.1,
+        raised_native,
+    }
 }
 
 /// Run the sum3 region BOTH ways and report the differential. `a, b, c`
@@ -1127,6 +1355,96 @@ mod tests {
     #[test]
     fn real_region_demo_clean() {
         assert!(run_real_region_demo(), "S3 real-region demo not clean");
+    }
+
+    /// S4a: the #2-hash-shaped region (LOAD_ML_BYTE / WORD_MULT / WORD_ADD
+    /// loop with SET_STACK_VAL_B loop vars + a JUMP_NEQ_LOCAL exit ->
+    /// WORD_MOD). It must (a) COMPILE (the new Tier-1 leaf opcodes), (b)
+    /// run NATIVE (tick == 1: a single leaf entry, no recursion), and (c)
+    /// be byte-identical to the pure interpreter AND to the Rust reference
+    /// across a fuzz range of byte buffers.
+    #[test]
+    fn hashfold_region_differential_clean() {
+        // A spread of buffers: empty (i==0 base case taken immediately),
+        // single byte, ascending, descending, all-equal, zeros, and a
+        // pseudo-random LCG sweep over lengths 0..=40.
+        let mut buffers: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0],
+            vec![255],
+            vec![1, 2, 3, 4, 5],
+            vec![5, 4, 3, 2, 1],
+            vec![7; 16],
+            vec![0; 12],
+            b"Poly/ML hash fold!".to_vec(),
+        ];
+        // Seeded LCG fuzz: lengths 0..=40, bytes from a deterministic PRNG.
+        let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+        for len in 0..=40usize {
+            let mut v = Vec::with_capacity(len);
+            for _ in 0..len {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                v.push((s >> 33) as u8);
+            }
+            buffers.push(v);
+        }
+
+        let mut diverged = 0usize;
+        let mut non_native = 0usize;
+        let mut cases = 0usize;
+        for buf in &buffers {
+            let r = run_hashfold_both_ways(buf);
+            cases += 1;
+            let want = hashfold_reference(buf, buf.len() as i64);
+            let interp = PolyWord::from_bits(r.interp_result as usize).untag() as i64;
+            let native = PolyWord::from_bits(r.native_result as usize).untag() as i64;
+            if interp != native || r.raised_interp != r.raised_native {
+                diverged += 1;
+                eprintln!(
+                    "DIVERGE hashfold(len={}): interp={interp} native={native}",
+                    buf.len()
+                );
+            }
+            assert_eq!(
+                interp,
+                want,
+                "interp hashfold(len={}) must match the Rust reference",
+                buf.len()
+            );
+            assert_eq!(
+                native,
+                want,
+                "native hashfold(len={}) must match the Rust reference",
+                buf.len()
+            );
+            // A pure non-recursive leaf: exactly ONE native root entry.
+            if r.native_ticks != 1 {
+                non_native += 1;
+            }
+        }
+        assert_eq!(diverged, 0, "{diverged}/{cases} hashfold cases diverged");
+        assert_eq!(
+            non_native, 0,
+            "{non_native}/{cases} hashfold cases were non-native"
+        );
+    }
+
+    /// The #2-hash region must NOT be flagged recursive or stack-size-using
+    /// (it is a pure self-contained loop leaf with no CALL_CONST_ADDR and
+    /// no STACK_SIZE16), so the live-dispatch scan WILL register it.
+    #[test]
+    fn hashfold_region_is_registerable_leaf() {
+        let mut space = MemorySpace::new(4096, SpaceKind::Code);
+        let f = build_hashfold_region(&mut space);
+        let mut jit = Jit::new().expect("jit");
+        // SAFETY: f.code_addr is a live code object in `space`.
+        let r = unsafe { memtrans::build_region(&mut jit, f.code_addr) }
+            .expect("hashfold region must build Ok (it was UnsupportedOpcode before S4a)");
+        assert!(!r.recursive, "hashfold is a loop leaf, not recursive");
+        assert!(!r.uses_stack_size, "hashfold declares no STACK_SIZE16");
+        assert_eq!(r.funcs.len(), 1, "hashfold is a single leaf function");
     }
 
     #[test]

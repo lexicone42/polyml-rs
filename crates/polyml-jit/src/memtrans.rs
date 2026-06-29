@@ -265,6 +265,46 @@ fn is_cca(b: u8) -> bool {
         || b == op::INSTR_CALL_CONST_ADDR16_8
 }
 
+/// Decode CONST_ADDR* immediate operands -> (byte_off, const_idx). Mirrors
+/// the interpreter's `read_pc_const(byte_off, idx)` argument selection
+/// (mod.rs:4195-4216): CONST_ADDR8_0 -> idx 3, CONST_ADDR8_1 -> idx 4,
+/// CONST_ADDR8_8 / CONST_ADDR16_8 -> idx = imm2 + 3. `pc` points at the
+/// opcode. The const word's absolute body byte offset is then
+/// `(pc + total_len) + byte_off + idx*8` (the same read_at formula
+/// `cca_target_code_addr` uses, since the const pool follows the bytecode
+/// in the same frozen object).
+fn const_addr_operands(bc: &[u8], pc: usize, opcode: u8) -> Option<(usize, usize)> {
+    let at = |i: usize| bc.get(i).copied();
+    match opcode {
+        op::INSTR_CONST_ADDR8_0 => Some((at(pc + 1)? as usize, 3)),
+        op::INSTR_CONST_ADDR8_1 => Some((at(pc + 1)? as usize, 4)),
+        op::INSTR_CONST_ADDR8_8 => Some((at(pc + 1)? as usize, at(pc + 2)? as usize + 3)),
+        op::INSTR_CONST_ADDR16_8 => {
+            let off = u16::from_le_bytes([at(pc + 1)?, at(pc + 2)?]) as usize;
+            Some((off, at(pc + 3)? as usize + 3))
+        }
+        _ => None,
+    }
+}
+
+/// Read the raw const-pool word a CONST_ADDR* pushes, at compile time
+/// (the heap is frozen). Returns the exact bits the interpreter would
+/// push via `read_pc_const`. The read lands in the resolved object's
+/// constant pool (after the bytecode), so it is bounded by `full_body`.
+fn const_addr_word_bits(rc: &ResolvedCode, pc: usize, opcode: u8) -> Option<i64> {
+    let (byte_off, idx) = const_addr_operands(&rc.bytecode, pc, opcode)?;
+    let d = decode(&rc.bytecode, pc);
+    if d.total_len == 0 {
+        return None;
+    }
+    let after = pc + d.total_len;
+    let read_at = after + byte_off + idx * 8;
+    if read_at + 8 > rc.full_body.len() {
+        return None;
+    }
+    Some(u64::from_le_bytes(rc.full_body[read_at..read_at + 8].try_into().ok()?) as i64)
+}
+
 // ---------------------------------------------------------------------
 // REGION FIXPOINT -- root + static CALL_CONST_ADDR callees, recursed to a
 // fixpoint, all compiled into ONE JITModule.
@@ -470,6 +510,18 @@ fn is_supported(b: u8) -> bool {
         // jumps
         | INSTR_JUMP8 | INSTR_JUMP16 | INSTR_JUMP_BACK8 | INSTR_JUMP_BACK16
         | INSTR_JUMP8_FALSE | INSTR_JUMP16_FALSE | INSTR_JUMP8_TRUE | INSTR_JUMP16_TRUE
+        // fused compare-jump family (3-immediate: depth, want, off) + 2-imm tagged
+        | INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND | INSTR_JUMP_TAGGED_LOCAL
+        // stack-slot store + tag-test-local
+        | INSTR_SET_STACK_VAL_B | INSTR_IS_TAGGED_LOCAL_B
+        // heap load/store (pure-leaf field access against a base on the stack)
+        | INSTR_LOAD_ML_WORD | INSTR_LOAD_ML_BYTE | INSTR_LOAD_UNTAGGED
+        | INSTR_STORE_ML_WORD | INSTR_STORE_UNTAGGED
+        // cell introspection
+        | INSTR_CELL_LENGTH | INSTR_CELL_FLAGS
+        // PC-relative constant push (resolved at compile time, heap frozen)
+        | INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1
+        | INSTR_CONST_ADDR8_8 | INSTR_CONST_ADDR16_8
         // fixed (tagged) arithmetic
         | INSTR_FIXED_ADD | INSTR_FIXED_SUB | INSTR_FIXED_MULT
         | INSTR_FIXED_QUOT | INSTR_FIXED_REM
@@ -745,6 +797,22 @@ fn jump_target(bc: &[u8], pc: usize, b: u8, total: usize) -> Option<usize> {
             let off = u16::from_le_bytes([*bc.get(pc + 1)?, *bc.get(pc + 2)?]) as usize;
             pc.checked_sub(off)
         }
+        // Fused compare-jump (3 immediates: depth, want, off). The interp
+        // (mod.rs:4097-4123) fetches depth+want+off then, on mismatch,
+        // `pc_offset_signed(off)`. After fetching all immediates pc == after
+        // (= pc + total, total = 4), so the taken branch lands at after+off.
+        // `off` is the THIRD immediate byte (bc[pc+3]).
+        INSTR_JUMP_NEQ_LOCAL | INSTR_JUMP_NEQ_LOCAL_IND => {
+            let off = *bc.get(pc + 3)? as usize;
+            Some(after + off)
+        }
+        // JUMP_TAGGED_LOCAL (2 immediates: depth, off). On the tagged-test
+        // taken branch (mod.rs:4126-4133) it `pc_offset_signed(off)`; off is
+        // the SECOND immediate byte (bc[pc+2]); target = after + off.
+        INSTR_JUMP_TAGGED_LOCAL => {
+            let off = *bc.get(pc + 2)? as usize;
+            Some(after + off)
+        }
         _ => None,
     }
 }
@@ -900,6 +968,83 @@ fn emit_one(
             )?;
             *terminated = true;
             sp
+        }
+
+        // ---- fused compare-jump family (peek + tag/compare + brif) ----
+        // No stack effect; conditional branch to (after+off) else fallthrough.
+        INSTR_JUMP_NEQ_LOCAL => {
+            neq_local_jump(bldr, st, base, sp, bc, pc, after, /*indirect=*/ false)?;
+            *terminated = true;
+            sp
+        }
+        INSTR_JUMP_NEQ_LOCAL_IND => {
+            neq_local_jump(bldr, st, base, sp, bc, pc, after, /*indirect=*/ true)?;
+            *terminated = true;
+            sp
+        }
+        INSTR_JUMP_TAGGED_LOCAL => {
+            tagged_local_jump(bldr, st, base, sp, bc, pc, after)?;
+            *terminated = true;
+            sp
+        }
+
+        // ---- stack-slot store (mod.rs:4138) ----
+        // idx=imm1; v=pop_top; new_sp=sp+1 (the pop); stack[new_sp+idx-1]=v.
+        // The interp computes the target AFTER the pop (sp already advanced).
+        INSTR_SET_STACK_VAL_B => {
+            // Slots are 1-based; the interp computes `idx.checked_sub(1)` and
+            // returns StackUnderflow on idx==0 (which the compiler never
+            // emits — mod.rs:4138 trusts the bytecode). We share that trusted-
+            // bytecode invariant: on the impossible idx==0 the store lands at
+            // new_sp-1 (a stray in-bounds slot), never out of bounds.
+            let v = load_at(bldr, base, sp); // top before pop
+            let new_sp = bldr.ins().iadd_imm(sp, 1); // the pop
+            // target = new_sp + (idx - 1)
+            let target = bldr.ins().iadd_imm(new_sp, imm1 as i64 - 1);
+            store_at(bldr, base, target, v);
+            new_sp
+        }
+
+        // ---- tag-test local (mod.rs:4085): peek depth, push tagged((v&1)!=0).
+        INSTR_IS_TAGGED_LOCAL_B => {
+            let v = emit_peek(bldr, base, sp, imm1 as i64);
+            let one_bit = bldr.ins().band_imm(v, 1);
+            let zero = bldr.ins().iconst(types::I64, 0);
+            let is_t = bldr.ins().icmp(IntCC::NotEqual, one_bit, zero);
+            let t1 = tagged(bldr, 1);
+            let t0 = tagged(bldr, 0);
+            let r = bldr.ins().select(is_t, t1, t0);
+            emit_push(bldr, base, sp, r)
+        }
+
+        // ---- heap load (mod.rs:3696-3779) ----
+        // idx = untag(pop top); base = peek(0) (the new top after pop);
+        // load base[idx]; replace the top with the loaded value. Net sp = sp.
+        INSTR_LOAD_ML_WORD => load_ml(bldr, base, sp, LoadKind::Word),
+        INSTR_LOAD_ML_BYTE => load_ml(bldr, base, sp, LoadKind::Byte),
+        INSTR_LOAD_UNTAGGED => load_ml(bldr, base, sp, LoadKind::Untagged),
+
+        // ---- heap store (mod.rs:3780-3887) ----
+        // val=pop; idx=untag(pop); base=peek(0); base[idx]=val (raw for
+        // STORE_UNTAGGED). Net: two pops + replace top with tagged(0)
+        // (sp = sp+1 overall: 2 pops then 1 push, peek consumes 1).
+        INSTR_STORE_ML_WORD => store_ml(bldr, base, sp, /*untagged=*/ false),
+        INSTR_STORE_UNTAGGED => store_ml(bldr, base, sp, /*untagged=*/ true),
+
+        // ---- cell introspection (mod.rs:3617-3634) ----
+        // peek obj; load length-word at obj[-1]; decode length / flags; push
+        // tagged. Replaces the top (peek + pop + push = sp unchanged).
+        INSTR_CELL_LENGTH => cell_intro(bldr, base, sp, CellField::Length),
+        INSTR_CELL_FLAGS => cell_intro(bldr, base, sp, CellField::Flags),
+
+        // ---- PC-relative constant push (mod.rs:4195-4216) ----
+        // The const-pool word is resolved at COMPILE time (heap frozen) and
+        // emitted as an iconst, then pushed — byte-identical to the interp's
+        // read_pc_const + push.
+        INSTR_CONST_ADDR8_0 | INSTR_CONST_ADDR8_1 | INSTR_CONST_ADDR8_8 | INSTR_CONST_ADDR16_8 => {
+            let bits = const_addr_word_bits(st.rc, pc, b).ok_or(BailReason::Truncated(pc))?;
+            let w = bldr.ins().iconst(types::I64, bits);
+            emit_push(bldr, base, sp, w)
         }
 
         // ---- fixed (tagged) arithmetic with Overflow / DivByZero ----
@@ -1074,6 +1219,205 @@ fn cond_jump(
         &[BlockArg::from(sp_popped)],
     );
     Ok(())
+}
+
+/// JUMP_NEQ_LOCAL / JUMP_NEQ_LOCAL_IND (mod.rs:4097-4123). Peek the local
+/// at `depth` (immediate 1); for the `_IND` variant deref its field 0
+/// first (a union-tag test on `*p`). Fall through (equal) iff `u` is
+/// tagged AND `u.untag() == want` (immediate 2); else jump to `after+off`
+/// (immediate 3). No stack effect. The equality `is_tagged && untag==want`
+/// is exactly `u == tagged(want)` (tagged(want)=2*want+1 is always odd, so
+/// a non-tagged word can never equal it), so the JUMP-taken condition is a
+/// single `u != tagged(want)`.
+#[allow(clippy::too_many_arguments)]
+fn neq_local_jump(
+    bldr: &mut FunctionBuilder,
+    st: &mut FnState,
+    base: Value,
+    sp: Value,
+    bc: &[u8],
+    pc: usize,
+    after: usize,
+    indirect: bool,
+) -> Result<(), BailReason> {
+    let depth = *bc.get(pc + 1).ok_or(BailReason::Truncated(pc))? as i64;
+    let want = *bc.get(pc + 2).ok_or(BailReason::Truncated(pc))? as i64;
+    let off = *bc.get(pc + 3).ok_or(BailReason::Truncated(pc))? as usize;
+    let t = after + off;
+    let mut u = emit_peek(bldr, base, sp, depth);
+    if indirect {
+        // _IND: u = *(local as *PolyWord) — load field 0 of the local.
+        u = bldr.ins().load(types::I64, MemFlags::trusted(), u, 0);
+    }
+    let want_tagged = tagged(bldr, want);
+    // JUMP taken iff NOT equal.
+    let take = bldr.ins().icmp(IntCC::NotEqual, u, want_tagged);
+    let target_blk = *st.blocks.get(&t).ok_or(BailReason::JumpMidInstruction(t))?;
+    let fall_blk = *st
+        .blocks
+        .get(&after)
+        .ok_or(BailReason::JumpMidInstruction(after))?;
+    bldr.ins().brif(
+        take,
+        target_blk,
+        &[BlockArg::from(sp)],
+        fall_blk,
+        &[BlockArg::from(sp)],
+    );
+    Ok(())
+}
+
+/// JUMP_TAGGED_LOCAL (mod.rs:4126-4133). Peek the local at `depth`
+/// (immediate 1); jump to `after+off` (immediate 2) iff it is tagged
+/// ((v&1)!=0); else fall through. No stack effect.
+fn tagged_local_jump(
+    bldr: &mut FunctionBuilder,
+    st: &mut FnState,
+    base: Value,
+    sp: Value,
+    bc: &[u8],
+    pc: usize,
+    after: usize,
+) -> Result<(), BailReason> {
+    let depth = *bc.get(pc + 1).ok_or(BailReason::Truncated(pc))? as i64;
+    let off = *bc.get(pc + 2).ok_or(BailReason::Truncated(pc))? as usize;
+    let t = after + off;
+    let u = emit_peek(bldr, base, sp, depth);
+    let one_bit = bldr.ins().band_imm(u, 1);
+    let zero = bldr.ins().iconst(types::I64, 0);
+    let take = bldr.ins().icmp(IntCC::NotEqual, one_bit, zero);
+    let target_blk = *st.blocks.get(&t).ok_or(BailReason::JumpMidInstruction(t))?;
+    let fall_blk = *st
+        .blocks
+        .get(&after)
+        .ok_or(BailReason::JumpMidInstruction(after))?;
+    bldr.ins().brif(
+        take,
+        target_blk,
+        &[BlockArg::from(sp)],
+        fall_blk,
+        &[BlockArg::from(sp)],
+    );
+    Ok(())
+}
+
+/// What `LOAD_ML_*` reads + how it re-tags.
+enum LoadKind {
+    /// LOAD_ML_WORD: load an I64 PolyWord at base + idx*8; value used as-is.
+    Word,
+    /// LOAD_ML_BYTE: load a u8 at base + idx; zero-extend then TAG.
+    Byte,
+    /// LOAD_UNTAGGED: load an I64 raw word at base + idx*8; TAG the bits.
+    Untagged,
+}
+
+/// LOAD_ML_WORD / LOAD_ML_BYTE / LOAD_UNTAGGED (mod.rs:3696-3779). The
+/// interp: `idx = untag(pop top); base = peek(0) (the new top after the
+/// pop); v = load base[idx]; pop; push v`. Net: two pops + one push (= sp
+/// rises by 1 from the index pop, the base peek+pop+push nets 0), so the
+/// final sp = sp + 1 with the result stored at the new top. Concretely:
+///   top    = stack[sp]   (the index, tagged)
+///   base   = stack[sp+1] (the object)
+///   stack[sp+1] = load(base, untag(index)); new sp = sp+1.
+/// LOAD_UNTAGGED's `is_data_ptr` debug-abort is IGNORED (diagnostics only);
+/// the fast path is just the load + re-tag.
+fn load_ml(b: &mut FunctionBuilder, base: Value, sp: Value, kind: LoadKind) -> Value {
+    let index_w = load_at(b, base, sp); // top = the tagged index
+    let idx = emit_untag(b, index_w); // untag -> raw index
+    let obj = emit_peek(b, base, sp, 1); // base object (below the index)
+    let new_sp = b.ins().iadd_imm(sp, 1); // the two pops + one push net +1
+    let r = match kind {
+        LoadKind::Word => {
+            // I64 at base + idx*8.
+            let a = addr_at(b, obj, idx);
+            b.ins().load(types::I64, MemFlags::trusted(), a, 0)
+        }
+        LoadKind::Byte => {
+            // u8 at base + idx; zero-extend then tag.
+            let a = b.ins().iadd(obj, idx);
+            let byte = b.ins().load(types::I8, MemFlags::trusted(), a, 0);
+            let z = b.ins().uextend(types::I64, byte);
+            emit_tag(b, z)
+        }
+        LoadKind::Untagged => {
+            // I64 raw word at base + idx*8; tag the bits (interp:
+            // PolyWord::tagged(raw.0 as isize)).
+            let a = addr_at(b, obj, idx);
+            let raw = b.ins().load(types::I64, MemFlags::trusted(), a, 0);
+            emit_tag(b, raw)
+        }
+    };
+    store_at(b, base, new_sp, r);
+    new_sp
+}
+
+/// STORE_ML_WORD / STORE_UNTAGGED (mod.rs:3780-3887). The interp:
+/// `val = pop; idx = untag(pop); base = peek(0); base[idx] = val; pop;
+/// push tagged(0)`. Stack layout at entry (top->down):
+///   stack[sp]   = val
+///   stack[sp+1] = index (tagged)
+///   stack[sp+2] = base object
+/// After: base[untag(index)] = val (STORE_UNTAGGED writes untag(val) as
+/// raw bits; STORE_ML_WORD writes val verbatim), result tagged(0) replaces
+/// the base; new sp = sp+2.
+fn store_ml(b: &mut FunctionBuilder, base: Value, sp: Value, untagged: bool) -> Value {
+    let val = load_at(b, base, sp); // top = value
+    let index_w = emit_peek(b, base, sp, 1); // index
+    let idx = emit_untag(b, index_w);
+    let obj = emit_peek(b, base, sp, 2); // base object
+    let to_store = if untagged {
+        // STORE_UNTAGGED writes untag(val) as the raw word bits.
+        emit_untag(b, val)
+    } else {
+        val
+    };
+    let a = addr_at(b, obj, idx);
+    b.ins().store(MemFlags::trusted(), to_store, a, 0);
+    let new_sp = b.ins().iadd_imm(sp, 2); // two pops + peek/push net +2
+    let zero = tagged(b, 0);
+    store_at(b, base, new_sp, zero);
+    new_sp
+}
+
+/// Which length-word field a cell-introspection op decodes.
+enum CellField {
+    /// CELL_LENGTH: length in words = length-word & LENGTH_MASK.
+    Length,
+    /// CELL_FLAGS: flag byte = length-word >> FLAGS_SHIFT (top byte).
+    Flags,
+}
+
+/// CELL_LENGTH / CELL_FLAGS (mod.rs:3617-3634). The length word sits at
+/// obj[-1]; length = lw & LENGTH_MASK (mask off the top flag byte); flags
+/// = lw >> FLAGS_SHIFT (the top byte). The interp peeks the object, reads
+/// the length word, pops, and pushes the tagged decoded field — net sp
+/// unchanged (peek + pop + push), replacing the top.
+fn cell_intro(b: &mut FunctionBuilder, base: Value, sp: Value, field: CellField) -> Value {
+    let obj = load_at(b, base, sp); // top = object pointer
+    // length word at obj[-1] (one word below the object body).
+    let lw_addr = b.ins().iadd_imm(obj, -8);
+    let lw = b.ins().load(types::I64, MemFlags::trusted(), lw_addr, 0);
+    let decoded = match field {
+        // length_of(word) = word.0 & LENGTH_MASK (= !FLAGS_MASK). FLAGS_MASK
+        // is the top byte (0xff << 56), so LENGTH_MASK keeps the low 56 bits.
+        CellField::Length => {
+            let mask = b
+                .ins()
+                .iconst(types::I64, polyml_runtime::length_word::LENGTH_MASK as i64);
+            b.ins().band(lw, mask)
+        }
+        // flags_of(word) = (word.0 >> FLAGS_SHIFT) as u8 (the top byte).
+        CellField::Flags => {
+            let shifted = b
+                .ins()
+                .ushr_imm(lw, i64::from(polyml_runtime::length_word::FLAGS_SHIFT));
+            // mask to a byte (mirrors the `as u8` truncation).
+            b.ins().band_imm(shifted, 0xff)
+        }
+    };
+    let r = emit_tag(b, decoded);
+    store_at(b, base, sp, r);
+    sp
 }
 
 enum WordOp {
@@ -1397,6 +1741,23 @@ mod tests {
             op::INSTR_CALL_CONST_ADDR8_8,
             op::INSTR_INDIRECT_0,
             op::INSTR_RESET_R_1,
+            // ---- S4a additions ----
+            op::INSTR_SET_STACK_VAL_B,
+            op::INSTR_JUMP_NEQ_LOCAL,
+            op::INSTR_JUMP_NEQ_LOCAL_IND,
+            op::INSTR_JUMP_TAGGED_LOCAL,
+            op::INSTR_IS_TAGGED_LOCAL_B,
+            op::INSTR_LOAD_ML_WORD,
+            op::INSTR_LOAD_ML_BYTE,
+            op::INSTR_LOAD_UNTAGGED,
+            op::INSTR_STORE_ML_WORD,
+            op::INSTR_STORE_UNTAGGED,
+            op::INSTR_CELL_LENGTH,
+            op::INSTR_CELL_FLAGS,
+            op::INSTR_CONST_ADDR8_0,
+            op::INSTR_CONST_ADDR8_1,
+            op::INSTR_CONST_ADDR8_8,
+            op::INSTR_CONST_ADDR16_8,
         ] {
             assert!(is_supported(b), "0x{b:02x} should be in the core subset");
         }
@@ -1439,5 +1800,38 @@ mod tests {
         b2[20] = op::INSTR_JUMP_BACK8;
         b2[21] = 8;
         assert_eq!(jump_target(&b2, 20, op::INSTR_JUMP_BACK8, 2), Some(12));
+    }
+
+    #[test]
+    fn fused_jump_target_arithmetic_matches_interpreter() {
+        // JUMP_NEQ_LOCAL is a 3-immediate op [depth, want, off]; total_len=4.
+        // The interp fetches all 3 immediates (pc now at after = pc+4) then,
+        // on mismatch, pc_offset_signed(off) => target = after + off.
+        let mut b = vec![0u8; 64];
+        b[8] = op::INSTR_JUMP_NEQ_LOCAL;
+        b[9] = 2; // depth
+        b[10] = 5; // want
+        b[11] = 12; // off
+        // total_len for JUMP_NEQ_LOCAL = 1 opcode + 3 immediates = 4.
+        assert_eq!(
+            jump_target(&b, 8, op::INSTR_JUMP_NEQ_LOCAL, 4),
+            Some(8 + 4 + 12)
+        );
+        // _IND uses the same operand shape.
+        b[8] = op::INSTR_JUMP_NEQ_LOCAL_IND;
+        assert_eq!(
+            jump_target(&b, 8, op::INSTR_JUMP_NEQ_LOCAL_IND, 4),
+            Some(8 + 4 + 12)
+        );
+        // JUMP_TAGGED_LOCAL is 2-immediate [depth, off]; total_len=3;
+        // target = after(=pc+3) + off.
+        let mut c = vec![0u8; 64];
+        c[16] = op::INSTR_JUMP_TAGGED_LOCAL;
+        c[17] = 3; // depth
+        c[18] = 7; // off
+        assert_eq!(
+            jump_target(&c, 16, op::INSTR_JUMP_TAGGED_LOCAL, 3),
+            Some(16 + 3 + 7)
+        );
     }
 }

@@ -508,7 +508,15 @@ fn run_image(
         );
         // Optional scan-only mode: report the candidates + exit (no run).
         if std::env::var("WHOLE_REGION_SCAN").is_ok() {
-            for (i, c) in candidates.iter().take(20).enumerate() {
+            // WHOLE_REGION_SCAN_ALL prints every candidate (provenance: e.g.
+            // grep the dump for an opcode like 0xdc LOAD_ML_BYTE to confirm a
+            // real heap region only compiles because of the S4a leaf opcodes).
+            let cap = if std::env::var("WHOLE_REGION_SCAN_ALL").is_ok() {
+                candidates.len()
+            } else {
+                20
+            };
+            for (i, c) in candidates.iter().take(cap).enumerate() {
                 let hex: Vec<String> = c.bytecode.iter().map(|b| format!("{b:02x}")).collect();
                 println!(
                     "    cand[{i}] root=0x{:016x} arity={} n_funcs={} bc_len={}",
