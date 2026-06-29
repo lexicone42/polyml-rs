@@ -849,15 +849,26 @@ pub unsafe fn scan_region_candidates(loaded: &polyml_runtime::LoadedImage) -> Ve
             };
             // SAFETY: root_addr is a live code object in the frozen heap.
             if let Ok(region) = unsafe { memtrans::build_region(&mut probe, root_addr) } {
-                // Live-dispatch safety gate: a recursive region (unbounded
-                // shared-stack growth) or one carrying a STACK_SIZE16
-                // prologue (the no-op'd stack-limit check) could over-push
-                // the stack Box with no StackOverflow raise. Such regions
-                // compile fine (the convention is sound — see the sumto
-                // test) but MUST NOT be registered for live dispatch until
-                // STACK_SIZE16 is lowered faithfully (S4). Exclude them
-                // from the candidate set.
-                if region.recursive || region.uses_stack_size {
+                // Live-dispatch safety gate. S4b lowers STACK_SIZE16
+                // faithfully, so a STACK_SIZE16-bearing region is now SAFE to
+                // admit (over-push traps at the prologue). But two classes
+                // stay REFUSED for live dispatch:
+                //  - recursive: a static CALL_CONST_ADDR self/mutual cycle
+                //    lowers to a native Cranelift self-`call` -> OS-thread
+                //    stack growth (SIGSEGV at depth, NOT a controlled
+                //    StackOverflow) + unchecked per-level pushes -> OOB write
+                //    below the stack Box. The SML STACK_SIZE16 check does not
+                //    bound the NATIVE recursion. (S4-proper: a native depth
+                //    guard.)
+                //  - has_dynamic_call: the CALL_LOCAL_B/CALL_CLOSURE
+                //    trampoline is sound + measured (3.3x), but
+                //    region_interp_call does not yet propagate a REAL
+                //    exception from the callee faithfully (maps to Overflow).
+                //    Live admission waits on that raise fidelity (S4-proper).
+                // The trampoline mechanism + microbench exercise dynamic
+                // calls directly (not via this live path), so the measurement
+                // stands.
+                if region.recursive || region.has_dynamic_call {
                     return;
                 }
                 // SAFETY: root_addr is live; resolve its bytecode for the
@@ -917,12 +928,12 @@ pub unsafe fn install_whole_region(
     for &root_addr in roots {
         // SAFETY: root_addr is a live code object in the frozen heap.
         if let Ok(region) = unsafe { memtrans::build_region(&mut jit, root_addr) } {
-            // Defense in depth: never register a recursive or
-            // STACK_SIZE16-bearing region for live dispatch (the
-            // unbounded-growth / no-op'd-stack-check hazard). Candidates
-            // from `scan_region_candidates` are already filtered; this
-            // guards any caller that passes raw roots.
-            if region.recursive || region.uses_stack_size {
+            // Defense in depth: STACK_SIZE16-bearing regions are now safe
+            // (faithful trap), but recursive regions (native self-`call` ->
+            // OS-stack SIGSEGV + unchecked over-push) and dynamic-call regions
+            // (trampoline raise-fidelity gap) stay OUT of live dispatch until
+            // S4-proper. Mirrors scan_region_candidates.
+            if region.recursive || region.has_dynamic_call {
                 continue;
             }
             built.push((root_addr, region.root_arity, region.root));
@@ -1514,6 +1525,13 @@ impl Jit {
         builder.symbol(
             "polyml_jit_region_native_tick",
             region::region_native_tick as *const u8,
+        );
+        // Whole-region DYNAMIC-call trampoline (S4e). A region's
+        // CALL_LOCAL_B / CALL_CLOSURE calls this to re-enter the
+        // interpreter's do_call for a non-static target.
+        builder.symbol(
+            "polyml_jit_region_interp_call",
+            boundary::polyml_jit_region_interp_call as *const u8,
         );
         Ok(Self {
             module: JITModule::new(builder),

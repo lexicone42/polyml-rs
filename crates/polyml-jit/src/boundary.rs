@@ -51,7 +51,9 @@
 
 use crate::Jit;
 use crate::memtrans::{self, CompiledMemRegion, EXN_DIVZERO, EXN_OVERFLOW};
-use crate::region::{ExnCtx, RegionFn, native_tick_count, reset_native_tick};
+use crate::region::{
+    ExnCtx, NO_HANDLER, RegionFn, RegionRet, native_tick_count, reset_native_tick,
+};
 
 /// Outcome of a region invocation through the boundary.
 #[derive(Debug, Clone, Copy)]
@@ -153,6 +155,68 @@ pub unsafe extern "C" fn polyml_jit_region_dispatch(
                 raised: 1,
             },
         }
+    }
+}
+
+/// THE DYNAMIC-CALL TRAMPOLINE C-ABI shim (S4e). A native region, at a
+/// `CALL_LOCAL_B` / `CALL_CLOSURE` (a non-static target), emits a `call`
+/// to THIS function (imported as `polyml_jit_region_interp_call`) with:
+///   - `interp_ptr`  = `ctx.interp_ptr` (the raw `*mut Interpreter` the
+///     do_call hook stashed BEFORE invoking the region),
+///   - `stack_base`  = the shared stack base (unused here — the interp
+///     re-enters on its OWN `self.stack`, the same Box; passed for ABI
+///     symmetry + a debug assert),
+///   - `sp_at_top_arg` = the downward index of the top callee arg the
+///     region just pushed,
+///   - `closure_bits`  = the dynamic closure word,
+///   - `ctx`           = the region's `ExnCtx` (the trampoline writes the
+///     exn sentinel into `ctx.exn_packet` on a raise).
+///
+/// Returns a [`RegionRet`]: on `raised == 0`, `new_sp` points at the
+/// single result on top of the shared stack (args collapsed exactly as
+/// the interpreter's `do_call` + `do_return` would). On `raised == 1`,
+/// `ctx.exn_packet` holds the region exn sentinel and `new_sp` is the
+/// interpreter's handler_sp.
+///
+/// SOUNDNESS (the make-or-break — NO aliasing UB): the only live
+/// `&mut Interpreter` up the call stack is the outer `do_call` hook's
+/// `&mut self`, and it is DORMANT for the entire region call (the hook
+/// reads `self` again only after the region returns). So the `&mut`
+/// reconstructed here from `interp_ptr` never aliases a *used* `&mut`.
+/// This is the exact discipline the per-function JIT fast path uses via
+/// the `JIT_INTERP` thread-local raw pointer. The reconstruction is a
+/// single transient `&mut *interp` that lives only for the
+/// `region_interp_call` call and is dropped before returning to native
+/// code.
+///
+/// # Safety
+/// `interp_ptr` must be the live `*mut Interpreter` the hook stored (it
+/// is, by construction — the region only calls this with `ctx.interp_ptr`
+/// from a ctx the hook built). `ctx` must be a valid `*mut ExnCtx`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn polyml_jit_region_interp_call(
+    interp_ptr: i64,
+    stack_base: *mut i64,
+    sp_at_top_arg: i64,
+    closure_bits: i64,
+    ctx: *mut ExnCtx,
+) -> RegionRet {
+    let _ = stack_base; // re-entry uses the interp's own self.stack
+    debug_assert!(interp_ptr != 0, "region_interp_call with null interp_ptr");
+    // SAFETY: the transient &mut lives only for this call; the outer
+    // &mut self is dormant (see the soundness note above).
+    let interp = unsafe { &mut *(interp_ptr as usize as *mut polyml_runtime::Interpreter) };
+    let mut packet: i64 = 0;
+    let ret = interp.region_interp_call(sp_at_top_arg, closure_bits, &mut packet);
+    if ret.raised != 0 {
+        // SAFETY: ctx is a valid *mut ExnCtx (caller upholds).
+        unsafe {
+            (*ctx).exn_packet = packet;
+        }
+    }
+    RegionRet {
+        new_sp: ret.new_sp,
+        raised: ret.raised,
     }
 }
 
@@ -1022,6 +1086,235 @@ pub fn run_sumto_both_ways(n: isize) -> RealRegionResult {
     }
 }
 
+// =====================================================================
+// S4e — THE CALL-LOOP PROTOTYPE REGION (measure the dynamic-call tax).
+//
+// A genuine PolyML bytecode region whose body is a LOOP that does a
+// DYNAMIC call (CALL_CLOSURE, which lowers to the region_interp_call
+// trampoline) to a tiny leaf callee each iteration, CONSUMING the result:
+//
+//   callloop(leafClo, n) = sum_{i=1}^{n} inc(i)        (root, arity 2)
+//       inc(x) = x + 1                                 (leaf, arity 1)
+//
+// inc is reached via CALL_CLOSURE on a closure VALUE (an arg to the root,
+// kept in a local) — so the call is DYNAMIC (a runtime stack value, not a
+// const-pool closure). Each iteration trampolines back into the
+// interpreter's do_call (which interprets inc) and resumes natively with
+// the result on the shared stack. This is the exact shape of the #1 hot
+// region (a hot loop dominated by a dynamic call), so its native-vs-interp
+// timing IS the trampoline-tax measurement.
+// =====================================================================
+
+/// Build the leaf `inc(x) = x + 1`, arity 1. Entry: LOCAL_0=clo,
+/// LOCAL_1=ret, LOCAL_2=x(top). Push x, push 1, FIXED_ADD, RETURN_B 1.
+fn build_inc_leaf(space: &mut MemorySpace) -> BuiltCode {
+    let bc = vec![
+        op::INSTR_LOCAL_2,   // push x
+        op::INSTR_CONST_1,   // push 1
+        op::INSTR_FIXED_ADD, // x + 1
+        op::INSTR_RETURN_B,
+        1,
+    ];
+    build_code_object(space, &bc, &[])
+}
+
+/// Build the call-loop root `callloop(leafClo, n) = sum_{i=1}^{n} inc(i)`,
+/// arity 2. The leaf closure is the root's DEEPEST arg (LOCAL_3 at entry),
+/// reached at runtime via CALL_CLOSURE — the DYNAMIC (trampolining) call.
+///
+/// Entry: LOCAL_0=clo, LOCAL_1=ret, LOCAL_2=n(top), LOCAL_3=leafClo.
+/// Two persistent loop locals (acc, i) pushed on the shared stack:
+///   prologue: push acc=0, push i=1.  Loop sp L = sp0-2.
+///   From L:   i=LOCAL_0, acc=LOCAL_1, clo=LOCAL_2, ret=LOCAL_3,
+///             n=LOCAL_4, leafClo=LOCAL_5.
+/// Test-at-top WHILE loop: exit when i > n.
+#[allow(clippy::vec_init_then_push)]
+fn build_callloop_region(space: &mut MemorySpace) -> (BuiltCode, BuiltCode) {
+    let leaf = build_inc_leaf(space);
+
+    let mut bc: Vec<u8> = Vec::new();
+    // ---- prologue: push acc=0, push i=1 ----
+    bc.push(op::INSTR_CONST_0); // acc=0  -> stack[sp0-1]
+    bc.push(op::INSTR_CONST_1); // i=1    -> stack[sp0-2] = L
+    // ---- Ltest: if i > n exit (fall to tail); else body ----
+    let ltest = bc.len();
+    // push i, push n, GREATER_SIGNED (y>x: i>n), JUMP_TRUE -> Lexit.
+    bc.push(op::INSTR_LOCAL_0); // push i   (sp L-1)
+    bc.push(op::INSTR_LOCAL_5); // push n (LOCAL_4 from L; +1 after i ⇒ LOCAL_5) (sp L-2)
+    bc.push(op::INSTR_GREATER_SIGNED); // i > n ? (sp L-1)
+    bc.push(op::INSTR_JUMP8_TRUE);
+    let jt_off_idx = bc.len();
+    bc.push(0x00); // off (patched -> Lexit)
+    // ---- body: acc = acc + inc(i); i = i + 1; JUMP_BACK to Ltest ----
+    // CALL_CLOSURE: push the arg (i), then push the leaf closure (top),
+    // then CALL_CLOSURE pops the closure + trampolines do_call(inc, i).
+    // After the call, inc(i)'s result is on top (sp back at L-1).
+    bc.push(op::INSTR_LOCAL_0); // push i (arg for inc)            (sp L-1)
+    bc.push(op::INSTR_LOCAL_6); // push leafClo (LOCAL_5 from L; +1 after i ⇒ LOCAL_6) (sp L-2)
+    bc.push(op::INSTR_CALL_CLOSURE); // pops closure, calls inc(i) -> result (sp L-1)
+    // acc = acc + result. result on top (L-1); push acc (LOCAL_2 from L-1).
+    bc.push(op::INSTR_LOCAL_2); // push acc (LOCAL_1 from L; +1 ⇒ LOCAL_2) (sp L-2)
+    bc.push(op::INSTR_FIXED_ADD); // result + acc                  (sp L-1)
+    bc.push(op::INSTR_SET_STACK_VAL_B); // store new acc into acc's slot
+    bc.push(2); //   idx=2: new_sp=L; L+2-1=L+1 = acc's slot       (sp L)
+    // i = i + 1.
+    bc.push(op::INSTR_LOCAL_0); // push i                          (sp L-1)
+    bc.push(op::INSTR_CONST_1); // push 1                          (sp L-2)
+    bc.push(op::INSTR_FIXED_ADD); // i + 1                         (sp L-1)
+    bc.push(op::INSTR_SET_STACK_VAL_B); // store i+1 into i's slot
+    bc.push(1); //   idx=1: new_sp=L; L+1-1=L = i's slot           (sp L)
+    // JUMP_BACK to Ltest.
+    let jback_pc = bc.len();
+    bc.push(op::INSTR_JUMP_BACK8);
+    let back_off = jback_pc as i64 - ltest as i64;
+    assert!(
+        (0..=255).contains(&back_off),
+        "callloop back-off {back_off} out of range"
+    );
+    bc.push(back_off as u8);
+    // ---- Lexit: result = acc; drop loop locals; RETURN_B 2 ----
+    let lexit = bc.len();
+    bc.push(op::INSTR_LOCAL_1); // push acc (LOCAL_1 from L)        (sp L-1)
+    bc.push(op::INSTR_RESET_R_2); // keep result, drop i+acc        (sp L+1)
+    bc.push(op::INSTR_RETURN_B); // collapse result+clo+ret+2 args
+    bc.push(2); //   arity 2
+
+    // JUMP8_TRUE forward off: interp lands at after + off, after = opcode
+    // idx + 2. The opcode is at jt_off_idx - 1. Target = Lexit.
+    let jt_opcode_idx = jt_off_idx - 1;
+    let jt_after = jt_opcode_idx + 2;
+    let fwd_off = lexit as i64 - jt_after as i64;
+    assert!(
+        (0..=255).contains(&fwd_off),
+        "callloop jt fwd-off {fwd_off} out of range"
+    );
+    bc[jt_off_idx] = fwd_off as u8;
+
+    let root = build_code_object(space, &bc, &[]);
+    (root, leaf)
+}
+
+/// The Rust reference for the call-loop: sum_{i=1}^{n} (i+1) = n(n+1)/2 + n.
+#[cfg(test)]
+fn callloop_reference(n: i64) -> i64 {
+    if n <= 0 { 0 } else { n * (n + 1) / 2 + n }
+}
+
+/// Run the call-loop region BOTH ways for `n`. Pure interp via do_call vs
+/// native via the boundary WITH the region_interp_call trampoline per
+/// iteration, on a real heap. Returns the differential + native ticks.
+pub fn run_callloop_both_ways(n: isize) -> RealRegionResult {
+    // ---- (1) PURE INTERP ----
+    let interp_result = {
+        let mut space = MemorySpace::new(1 << 16, SpaceKind::Code);
+        let (root, leaf) = build_callloop_region(&mut space);
+        let root_addr = root.code_addr;
+        let root_closure = root.closure;
+        let leaf_closure = leaf.closure;
+        let mut interp = Interpreter::from_bytes(8192, vec![]).with_alloc_space(space);
+        interp.test_seed_top(leaf_closure); // deepest arg (LOCAL_3 = leafClo)
+        interp.test_seed_top(PolyWord::tagged(n)); // top arg (LOCAL_2 = n)
+        interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+        interp.test_seed_top(root_closure); // closure (LOCAL_0)
+        // SAFETY: root_addr is a live code object now owned by interp.
+        unsafe { interp.set_code_segment_to_code_obj(root_addr as usize) };
+        let r = match interp.run() {
+            Ok(StepResult::Returned(w)) => (w.0 as i64, false),
+            Ok(other) => panic!("interp did not return cleanly: {other:?}"),
+            Err(e) => panic!("interp error: {e:?}"),
+        };
+        std::mem::forget(interp);
+        r
+    };
+
+    // ---- (2) NATIVE region via the boundary + trampoline ----
+    // The native path re-enters the interpreter via region_interp_call, so
+    // it needs a LIVE interpreter (the trampoline writes ctx.interp_ptr).
+    // We build the region in the interp's own alloc space + drive the root
+    // through dispatch_region with ctx.interp_ptr set to that interp.
+    let mut space = MemorySpace::new(1 << 16, SpaceKind::Code);
+    let (root, leaf) = build_callloop_region(&mut space);
+    let root_addr = root.code_addr;
+    let root_closure_bits = root.closure.0 as i64;
+    let leaf_closure = leaf.closure;
+
+    let mut jit = Jit::new().expect("jit");
+    // SAFETY: root_addr is a live code object in `space`.
+    let region = match unsafe { memtrans::build_region(&mut jit, root_addr) } {
+        Ok(r) => r,
+        Err(e) => panic!("callloop region build bailed: {e}"),
+    };
+    jit.module.finalize_definitions().expect("finalize");
+    let ptr = jit.module.get_finalized_function(region.root);
+    // SAFETY: region root has the RegionFn ABI.
+    let region_fn: RegionFn = unsafe { std::mem::transmute::<*const u8, RegionFn>(ptr) };
+
+    // The interpreter OWNS the heap (so its own self.stack is the shared
+    // stack the trampoline re-enters on). We dispatch the region against
+    // interp.stack via the same mechanism do_call's hook uses.
+    let mut interp = Interpreter::from_bytes(8192, vec![]).with_alloc_space(space);
+    let (native_result, raised_native, ticks) = run_region_on_interp(
+        &mut interp,
+        region_fn,
+        root_closure_bits,
+        &[leaf_closure, PolyWord::tagged(n)],
+    );
+    std::mem::forget(interp);
+
+    RealRegionResult {
+        interp_result: interp_result.0,
+        native_result,
+        native_ticks: ticks,
+        raised_interp: interp_result.1,
+        raised_native,
+    }
+}
+
+/// Drive a finalized region root against a LIVE interpreter's own shared
+/// stack, with `ctx.interp_ptr` set so the region's dynamic-call
+/// trampoline (`region_interp_call`) can re-enter `do_call` soundly.
+/// `args` are the SML args, DEEPEST first (so `args[len-1]` is the top
+/// arg). Returns (native_result_bits, raised, native_ticks).
+///
+/// SOUNDNESS: this is the SAME re-entry discipline as the do_call hook.
+/// `&mut interp` is borrowed to seed the stack + read the result, but it
+/// is DORMANT across `dispatch_region` (we touch it again only after the
+/// native call returns). The trampoline reconstructs a transient `&mut`
+/// from `ctx.interp_ptr` that never aliases a *used* outer `&mut`.
+fn run_region_on_interp(
+    interp: &mut Interpreter,
+    region_fn: RegionFn,
+    closure_bits: i64,
+    args: &[PolyWord],
+) -> (i64, bool, u64) {
+    // Seed the args on the interp's own stack (deepest first), then capture
+    // sp at the top arg.
+    for &a in args {
+        interp.test_seed_top(a);
+    }
+    let sp_top_arg = interp.test_sp() as i64;
+    let stack_base = interp.jit_stack_base_mut().cast::<i64>();
+    let interp_ptr = (interp as *mut Interpreter) as i64;
+    let mut ctx = ExnCtx {
+        handler_sp: NO_HANDLER,
+        exn_packet: 0,
+        interp_ptr,
+    };
+    reset_native_tick();
+    // SAFETY: stack_base is the interp's own stack Box (stable address);
+    // region_fn is finalized; ctx is valid; interp_ptr is the live interp
+    // and is dormant across this call (see the soundness note).
+    let outcome =
+        unsafe { dispatch_region(region_fn, stack_base, sp_top_arg, closure_bits, &mut ctx) };
+    match outcome {
+        BoundaryOutcome::Returned { new_sp } => {
+            let v = interp.peek_stack_for_debug(new_sp as usize) as i64;
+            (v, false, native_tick_count())
+        }
+        BoundaryOutcome::Raised { .. } => (0, true, native_tick_count()),
+    }
+}
+
 /// CLI entry: run the REAL whole-region demo (genuine PolyML bytecode
 /// region through the do_call boundary), print a differential +
 /// nativeness report, return `true` iff every case is differential-clean
@@ -1580,6 +1873,165 @@ mod tests {
         );
     }
 
+    // ----- S4e: the CALL-LOOP prototype (the dynamic-call trampoline) -----
+
+    /// The call-loop region must compile (CALL_CLOSURE is now in the
+    /// subset) and be byte-identical to the interpreter across n,
+    /// INCLUDING the absolute value (the Rust reference). Each iteration's
+    /// CALL_CLOSURE trampolines into the interpreter for inc(i).
+    #[test]
+    fn callloop_region_differential_clean() {
+        let mut diverged = 0usize;
+        let mut cases = 0usize;
+        for n in [-2isize, 0, 1, 2, 3, 5, 8, 13, 20, 50, 100] {
+            let r = run_callloop_both_ways(n);
+            cases += 1;
+            let interp = PolyWord::from_bits(r.interp_result as usize).untag() as i64;
+            let native = PolyWord::from_bits(r.native_result as usize).untag() as i64;
+            let want = callloop_reference(n as i64);
+            if interp != native || r.raised_interp != r.raised_native {
+                diverged += 1;
+                eprintln!("DIVERGE callloop({n}): interp={interp} native={native}");
+            }
+            assert_eq!(interp, want, "interp callloop({n}) must match reference");
+            assert_eq!(native, want, "native callloop({n}) must match reference");
+            // The native root ran once per call (the trampoline re-enters
+            // do_call, not the region root, for the leaf).
+            assert!(r.native_ticks >= 1, "callloop({n}) region ran NATIVE");
+        }
+        assert_eq!(diverged, 0, "{diverged}/{cases} callloop cases diverged");
+    }
+
+    /// THE TRAMPOLINE-TAX MICROBENCH (the second kill-switch). Time the
+    /// native call-loop region (WITH the region_interp_call round-trip per
+    /// iteration) vs the pure interpreter running the same region, isolating
+    /// the per-loop-iteration cost via the two-point (n=N minus n=0)
+    /// subtraction (setup/entry/exit cancel). Report native ns/iter, interp
+    /// ns/iter, the speedup, and the kill-switch call. Run:
+    ///   cargo test --release -p polyml-jit callloop_trampoline -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn callloop_trampoline_tax_microbench() {
+        use std::time::Instant;
+        const N: isize = 50_000; // inner-loop (dynamic-call) iterations / call
+        const ITERS: usize = 60; // timed repetitions
+
+        // ---- NATIVE: compile + finalize ONCE; drive on a live interp.
+        // Per timed call we re-seed a fresh interp + heap (the subtraction
+        // cancels the per-call setup), but the region is compiled once.
+        let mut nspace = MemorySpace::new(1 << 18, SpaceKind::Code);
+        let (root, leaf) = build_callloop_region(&mut nspace);
+        let root_addr = root.code_addr;
+        let root_closure_bits = root.closure.0 as i64;
+        let _leaf_closure = leaf.closure;
+        let mut jit = Jit::new().expect("jit");
+        // SAFETY: root_addr is a live code object in nspace.
+        let region = unsafe { memtrans::build_region(&mut jit, root_addr) }.expect("build");
+        jit.module.finalize_definitions().expect("finalize");
+        let ptr = jit.module.get_finalized_function(region.root);
+        // SAFETY: region root has the RegionFn ABI.
+        let region_fn: RegionFn = unsafe { std::mem::transmute::<*const u8, RegionFn>(ptr) };
+        // nspace is consumed building the region's code; keep it alive.
+        std::mem::forget(nspace);
+
+        // Build the region freshly in a heap owned by a live interp, then
+        // dispatch the native root on THAT interp's stack (so the
+        // trampoline re-enters the same interp). One call.
+        let native_once = |n: isize| -> i64 {
+            let mut space = MemorySpace::new(1 << 18, SpaceKind::Code);
+            let (_r2, leaf2) = build_callloop_region(&mut space);
+            let leaf2_clo = leaf2.closure;
+            let mut interp = Interpreter::from_bytes(1 << 14, vec![]).with_alloc_space(space);
+            let (v, raised, _t) = run_region_on_interp(
+                &mut interp,
+                region_fn,
+                root_closure_bits,
+                &[leaf2_clo, PolyWord::tagged(n)],
+            );
+            assert!(!raised, "native callloop raised");
+            std::mem::forget(interp);
+            v
+        };
+        let time_native = |n: isize| -> f64 {
+            native_once(n); // warmup
+            let t = Instant::now();
+            for _ in 0..ITERS {
+                std::hint::black_box(native_once(n));
+            }
+            t.elapsed().as_secs_f64() / ITERS as f64
+        };
+
+        // ---- INTERP: fresh setup per call (subtraction cancels it).
+        let interp_once = |n: isize| -> i64 {
+            let mut space = MemorySpace::new(1 << 18, SpaceKind::Code);
+            let (root, leaf) = build_callloop_region(&mut space);
+            let root_addr = root.code_addr;
+            let root_closure = root.closure;
+            let leaf_closure = leaf.closure;
+            let mut interp = Interpreter::from_bytes(1 << 14, vec![]).with_alloc_space(space);
+            interp.test_seed_top(leaf_closure);
+            interp.test_seed_top(PolyWord::tagged(n));
+            interp.test_seed_return_sentinel();
+            interp.test_seed_top(root_closure);
+            // SAFETY: root_addr is a live code object now owned by interp.
+            unsafe { interp.set_code_segment_to_code_obj(root_addr as usize) };
+            let r = match interp.run() {
+                Ok(StepResult::Returned(w)) => w.0 as i64,
+                other => panic!("interp: {other:?}"),
+            };
+            std::mem::forget(interp);
+            r
+        };
+        let time_interp = |n: isize| -> f64 {
+            interp_once(n); // warmup
+            let t = Instant::now();
+            for _ in 0..ITERS {
+                std::hint::black_box(interp_once(n));
+            }
+            t.elapsed().as_secs_f64() / ITERS as f64
+        };
+
+        // Correctness guard: native == interp at the bench size.
+        let nr = native_once(N);
+        let ir = interp_once(N);
+        assert_eq!(nr, ir, "native vs interp result mismatch at N={N}");
+
+        let nt_big = time_native(N);
+        let nt_zero = time_native(0);
+        let it_big = time_interp(N);
+        let it_zero = time_interp(0);
+
+        let nexec = nt_big - nt_zero; // per-call loop cost, native (w/ trampoline)
+        let iexec = it_big - it_zero; // per-call loop cost, interp
+        let speedup = iexec / nexec;
+        let ns_iter_native = nexec * 1e9 / N as f64;
+        let ns_iter_interp = iexec * 1e9 / N as f64;
+
+        eprintln!("==== S4e TRAMPOLINE TAX: call-loop region native vs interp ====");
+        eprintln!("  N={N} dynamic-call iters/call, {ITERS} timed reps");
+        eprintln!(
+            "  native: total {:.1}us, loop {:.1}us ({:.3} ns/iter, INCL trampoline)",
+            nt_big * 1e6,
+            nexec * 1e6,
+            ns_iter_native
+        );
+        eprintln!(
+            "  interp: total {:.1}us, loop {:.1}us ({:.3} ns/iter)",
+            it_big * 1e6,
+            iexec * 1e6,
+            ns_iter_interp
+        );
+        eprintln!(
+            "  trampoline round-trip ~ {:.3} ns/iter (native per-iter, dominated by it)",
+            ns_iter_native
+        );
+        eprintln!("  >>> SPEEDUP (interp/native, loop-isolated) = {speedup:.3}x");
+        eprintln!(
+            "  KILL-SWITCH: {} (>=1.2x build S4c/d; <1.2x STOP after S4a — tax kills the #1 win)",
+            if speedup >= 1.2 { "PASS" } else { "FAIL" }
+        );
+    }
+
     #[test]
     fn sumto_recursive_value_is_correct() {
         // sumto(10) = 0+1+..+10 = 55.
@@ -1655,6 +2107,25 @@ mod tests {
             "acyclic sum3 (root + add callee) must NOT be flagged recursive"
         );
         assert!(r2.funcs.len() >= 2, "sum3 region spans root + callee");
+        assert!(
+            !r2.has_dynamic_call,
+            "sum3 uses static CCA, not a dynamic call"
+        );
+
+        // A dynamic-call region (callloop -> CALL_CLOSURE) must be flagged
+        // has_dynamic_call so live registration refuses it (the trampoline
+        // raise-fidelity gap) until S4-proper — while the mechanism +
+        // microbench still exercise it directly.
+        let mut cl_space = MemorySpace::new(8192, SpaceKind::Code);
+        let (cl_root, _cl_leaf) = build_callloop_region(&mut cl_space);
+        let mut jit3 = Jit::new().expect("jit");
+        // SAFETY: cl_root.code_addr is a live code object in cl_space.
+        let r3 = unsafe { memtrans::build_region(&mut jit3, cl_root.code_addr) }
+            .expect("callloop builds");
+        assert!(
+            r3.has_dynamic_call,
+            "callloop (CALL_CLOSURE) must be flagged has_dynamic_call (the live-registration guard)"
+        );
     }
 
     // ----- GAP 3: Overflow / DivByZero / raised==1 on REAL wired regions -----

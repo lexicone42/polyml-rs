@@ -336,13 +336,19 @@ pub struct CompiledMemRegion {
     /// would write past the stack Box with no `StackOverflow` raise.
     pub recursive: bool,
     /// True if any function in the region carries an `INSTR_STACK_SIZE16`
-    /// prologue. The interpreter checks `sp < needed` there and raises
-    /// `StackOverflow`; our translator currently treats it as a no-op, so
-    /// a `STACK_SIZE16`-bearing region could over-push without that raise.
-    /// Such a region must NOT be registered for live dispatch until the
-    /// check is lowered faithfully (S4). Leaf regions (which declare no
-    /// stack need) are unaffected.
+    /// prologue. Now lowered FAITHFULLY (a real `sp < needed` check that
+    /// raises `StackOverflow`, S4b), so such a region is safe to register —
+    /// the flag is retained for diagnostics.
     pub uses_stack_size: bool,
+    /// True if any function in the region contains a DYNAMIC call
+    /// (`CALL_LOCAL_B` / `CALL_CLOSURE`). The trampoline that re-enters the
+    /// interpreter for the callee is sound + measured (S4e de-risk: 3.3x),
+    /// but `region_interp_call` does not yet propagate a REAL exception
+    /// raised by the callee faithfully (it maps to Overflow). So a
+    /// dynamic-call region must NOT be registered for LIVE dispatch until
+    /// that raise fidelity lands (S4-proper). The mechanism + microbench
+    /// exercise the trampoline directly, not via live registration.
+    pub has_dynamic_call: bool,
 }
 
 /// Build the region fixpoint from a root code-object address. Scans the
@@ -362,6 +368,7 @@ pub unsafe fn build_region(jit: &mut Jit, root_addr: u64) -> Result<CompiledMemR
     // STACK_SIZE16) without bailing — see `CompiledMemRegion`.
     let mut edges: Vec<(u64, u64)> = Vec::new();
     let mut uses_stack_size = false;
+    let mut has_dynamic_call = false;
     while let Some(addr) = worklist.pop() {
         if resolved.contains_key(&addr) {
             continue;
@@ -390,6 +397,9 @@ pub unsafe fn build_region(jit: &mut Jit, root_addr: u64) -> Result<CompiledMemR
             }
             if b == op::INSTR_STACK_SIZE16 {
                 uses_stack_size = true;
+            }
+            if b == op::INSTR_CALL_LOCAL_B || b == op::INSTR_CALL_CLOSURE {
+                has_dynamic_call = true;
             }
             if is_cca(b) {
                 // SAFETY: compile-time.
@@ -435,6 +445,7 @@ pub unsafe fn build_region(jit: &mut Jit, root_addr: u64) -> Result<CompiledMemR
         funcs: ids,
         recursive,
         uses_stack_size,
+        has_dynamic_call,
     })
 }
 
@@ -542,6 +553,8 @@ fn is_supported(b: u8) -> bool {
         // statically-resolved native call
         | INSTR_CALL_CONST_ADDR8_0 | INSTR_CALL_CONST_ADDR8_1
         | INSTR_CALL_CONST_ADDR8_8 | INSTR_CALL_CONST_ADDR16_8
+        // DYNAMIC call (trampolines into the interpreter's do_call)
+        | INSTR_CALL_LOCAL_B | INSTR_CALL_CLOSURE
     )
 }
 
@@ -610,6 +623,11 @@ const MAX_TAGGED: i64 = (1 << 62) - 1;
 /// real result value).
 pub const EXN_OVERFLOW: i64 = 0x0001_0000_0000_0002; // even (untagged sentinel)
 pub const EXN_DIVZERO: i64 = 0x0002_0000_0000_0002;
+/// StackOverflow sentinel — the faithful `STACK_SIZE16` lowering returns
+/// it when `sp < needed`, mirroring the interpreter's hard
+/// `InterpError::StackOverflow` at mod.rs:3457. MUST equal
+/// `polyml_runtime::REGION_EXN_STACKOVERFLOW`.
+pub const EXN_STACKOVERFLOW: i64 = 0x0003_0000_0000_0002;
 
 // =====================================================================
 // FUNCTION DEFINITION -- lower one resolved code object's bytecode.
@@ -623,6 +641,10 @@ struct FnState<'a> {
     blocks: BTreeMap<usize, Block>,
     /// FuncRefs for callees referenced in this function (declared up front).
     callee_refs: HashMap<u64, cranelift::codegen::ir::FuncRef>,
+    /// FuncRef for the dynamic-call trampoline
+    /// (`polyml_jit_region_interp_call`), declared lazily when a
+    /// CALL_LOCAL_B / CALL_CLOSURE is lowered. None until then.
+    interp_call_ref: Option<cranelift::codegen::ir::FuncRef>,
 }
 
 /// Define one region function: lower its bytecode against the shared
@@ -675,6 +697,43 @@ unsafe fn define_function(
         None
     };
 
+    // Pre-declare the dynamic-call trampoline iff this function makes a
+    // dynamic call (CALL_LOCAL_B / CALL_CLOSURE). Signature:
+    //   (interp_ptr, stack_base, sp, closure, ctx) -> (new_sp, raised)
+    let interp_call_ref = {
+        let mut has_dyn = false;
+        let mut pc = 0usize;
+        while pc < rc.bytecode.len() {
+            let b = rc.bytecode[pc];
+            let d = decode(&rc.bytecode, pc);
+            if d.total_len == 0 {
+                return Err(BailReason::Truncated(pc));
+            }
+            if b == op::INSTR_CALL_LOCAL_B || b == op::INSTR_CALL_CLOSURE {
+                has_dyn = true;
+                break;
+            }
+            pc += d.total_len;
+        }
+        if has_dyn {
+            let mut tsig = jit.module.make_signature();
+            tsig.params.push(AbiParam::new(types::I64)); // interp_ptr
+            tsig.params.push(AbiParam::new(types::I64)); // stack_base
+            tsig.params.push(AbiParam::new(types::I64)); // sp_at_top_arg
+            tsig.params.push(AbiParam::new(types::I64)); // closure_bits
+            tsig.params.push(AbiParam::new(types::I64)); // ctx ptr
+            tsig.returns.push(AbiParam::new(types::I64)); // new_sp
+            tsig.returns.push(AbiParam::new(types::I64)); // raised
+            let tid = jit
+                .module
+                .declare_function("polyml_jit_region_interp_call", Linkage::Import, &tsig)
+                .map_err(|e| BailReason::ModuleError(e.to_string()))?;
+            Some(jit.module.declare_func_in_func(tid, &mut ctx.func))
+        } else {
+            None
+        }
+    };
+
     // Compute all block boundaries (jump targets) up front.
     let blocks_offsets = compute_block_offsets(rc)?;
 
@@ -712,6 +771,7 @@ unsafe fn define_function(
             rc,
             blocks,
             callee_refs,
+            interp_call_ref,
         };
 
         emit_all_blocks(&mut bldr, &mut st, base, sp0, cctx, entry)?;
@@ -898,7 +958,13 @@ fn emit_one(
 
     let new_sp = match b {
         INSTR_NO_OP => sp,
-        INSTR_STACK_SIZE16 => sp, // prologue check -- interp only verifies space
+        // FAITHFUL STACK_SIZE16 (S4b): mirror mod.rs:3457 — if sp < needed,
+        // raise StackOverflow (a HARD error the boundary maps onto
+        // InterpError::StackOverflow). `needed` is the u16 immediate. This
+        // is what makes admitting recursive / stack-size regions SOUND: a
+        // dynamic callee or self-recursion that would over-push the shared
+        // stack now traps instead of writing past the Box.
+        INSTR_STACK_SIZE16 => emit_stack_size_check(bldr, sp, cctx, imm_u16 as i64),
 
         // ---- constants ----
         INSTR_CONST_0 => push_tagged(bldr, base, sp, 0),
@@ -1132,6 +1198,30 @@ fn emit_one(
         | INSTR_CALL_CONST_ADDR8_1
         | INSTR_CALL_CONST_ADDR8_8
         | INSTR_CALL_CONST_ADDR16_8 => emit_call_cca(bldr, st, base, sp, cctx, pc, b, total)?,
+
+        // ---- DYNAMIC call (non-static target) — trampoline into the
+        // interpreter's do_call via region_interp_call (S4e). ----
+        //
+        // CALL_CLOSURE (mod.rs:4223): the closure is on TOP; the interp
+        // POPS it (sp += 1) then do_call. So the closure = stack[sp] and
+        // the trampoline's sp_at_top_arg = sp + 1 (args after the pop).
+        INSTR_CALL_CLOSURE => {
+            emit_call_dynamic(bldr, st, base, sp, cctx, /*pop_top=*/ true, 0)?
+        }
+        // CALL_LOCAL_B (mod.rs:4256): the closure is PEEKED at depth n
+        // (NOT popped — it persists), the args are the top values. The
+        // trampoline's sp_at_top_arg = sp (unchanged), closure = stack[sp+n].
+        INSTR_CALL_LOCAL_B => {
+            emit_call_dynamic(
+                bldr,
+                st,
+                base,
+                sp,
+                cctx,
+                /*pop_top=*/ false,
+                imm1 as i64,
+            )?
+        }
 
         other => {
             return Err(BailReason::UnsupportedOpcode {
@@ -1714,6 +1804,113 @@ fn emit_call_cca(
     Ok(new_sp)
 }
 
+/// Load `ctx.interp_ptr` (offset 16) — the raw `*mut Interpreter` the
+/// dynamic-call trampoline re-enters through.
+fn load_interp_ptr(b: &mut FunctionBuilder, ctx: Value) -> Value {
+    b.ins().load(types::I64, MemFlags::trusted(), ctx, 16)
+}
+
+/// FAITHFUL STACK_SIZE16 (S4b): if `sp < needed`, raise StackOverflow
+/// (return new_sp = ctx.handler_sp, raised = 1, packet = EXN_STACKOVERFLOW).
+/// Else continue with sp unchanged. `needed` is the u16 immediate, in
+/// WORDS (the same units as the interpreter's `sp` index — mod.rs:3457
+/// compares `self.sp < needed` directly). Returns the (unchanged) sp on
+/// the continue path.
+fn emit_stack_size_check(bldr: &mut FunctionBuilder, sp: Value, ctx: Value, needed: i64) -> Value {
+    let cont_blk = bldr.create_block();
+    bldr.append_block_param(cont_blk, types::I64); // sp
+    let over_blk = bldr.create_block();
+    let needed_v = bldr.ins().iconst(types::I64, needed);
+    // interp: `if self.sp < needed { StackOverflow }` (unsigned index).
+    let lt = bldr.ins().icmp(IntCC::UnsignedLessThan, sp, needed_v);
+    bldr.ins()
+        .brif(lt, over_blk, &[], cont_blk, &[BlockArg::from(sp)]);
+
+    // overflow: raise.
+    bldr.switch_to_block(over_blk);
+    bldr.seal_block(over_blk);
+    emit_raise(bldr, ctx, EXN_STACKOVERFLOW);
+
+    bldr.switch_to_block(cont_blk);
+    bldr.seal_block(cont_blk);
+    bldr.block_params(cont_blk)[0]
+}
+
+/// DYNAMIC call lowering (S4e): CALL_LOCAL_B / CALL_CLOSURE. The callee
+/// target is a RUNTIME stack value (not a static const-pool closure), so
+/// it CANNOT be a native region-to-region call; instead we trampoline
+/// back into the interpreter's `do_call` via `region_interp_call`, which
+/// runs the callee (interpreted, OR re-enters a registered region) and
+/// hands back the result on the shared stack.
+///
+/// - `pop_top == true`  (CALL_CLOSURE): the closure is on TOP. The interp
+///   pops it (sp += 1) BEFORE do_call, so sp_at_top_arg = sp + 1 and the
+///   closure = stack[sp].
+/// - `pop_top == false` (CALL_LOCAL_B): the closure is at depth `depth`
+///   (peeked, NOT popped — it persists across the call), and the args are
+///   the values above it; sp_at_top_arg = sp (unchanged), closure =
+///   stack[sp + depth].
+///
+/// The trampoline returns the new sp (result on top, args collapsed by
+/// the callee's own RETURN_N exactly as do_return would) and a raised
+/// flag; on raised we propagate (return raised = 1 to ctx.handler_sp).
+#[allow(clippy::too_many_arguments)]
+fn emit_call_dynamic(
+    bldr: &mut FunctionBuilder,
+    st: &mut FnState,
+    base: Value,
+    sp: Value,
+    ctx: Value,
+    pop_top: bool,
+    depth: i64,
+) -> Result<Value, BailReason> {
+    let fref = st
+        .interp_call_ref
+        .ok_or(BailReason::UnresolvableCallee(0))?;
+
+    // Read the closure word + compute sp_at_top_arg, mirroring the interp.
+    let (closure, sp_top_arg) = if pop_top {
+        // CALL_CLOSURE: closure = stack[sp]; sp_at_top_arg = sp + 1.
+        let clo = load_at(bldr, base, sp);
+        let new = bldr.ins().iadd_imm(sp, 1);
+        (clo, new)
+    } else {
+        // CALL_LOCAL_B: closure = stack[sp + depth]; sp_at_top_arg = sp.
+        let idx = bldr.ins().iadd_imm(sp, depth);
+        let clo = load_at(bldr, base, idx);
+        (clo, sp)
+    };
+
+    let interp_ptr = load_interp_ptr(bldr, ctx);
+    let call = bldr
+        .ins()
+        .call(fref, &[interp_ptr, base, sp_top_arg, closure, ctx]);
+    let callee_sp = bldr.inst_results(call)[0];
+    let raised = bldr.inst_results(call)[1];
+
+    // brif raised -> propagate, else continue with sp = callee_sp.
+    let cont_blk = bldr.create_block();
+    bldr.append_block_param(cont_blk, types::I64);
+    let prop_blk = bldr.create_block();
+    bldr.ins().brif(
+        raised,
+        prop_blk,
+        &[],
+        cont_blk,
+        &[BlockArg::from(callee_sp)],
+    );
+
+    bldr.switch_to_block(prop_blk);
+    bldr.seal_block(prop_blk);
+    let hsp = load_handler_sp(bldr, ctx);
+    let one = bldr.ins().iconst(types::I64, 1);
+    bldr.ins().return_(&[hsp, one]);
+
+    bldr.switch_to_block(cont_blk);
+    bldr.seal_block(cont_blk);
+    Ok(bldr.block_params(cont_blk)[0])
+}
+
 const _: () = {
     // Compile-time link: NO_HANDLER is the boundary's ctx.handler_sp init.
     let _ = NO_HANDLER;
@@ -1761,20 +1958,28 @@ mod tests {
         ] {
             assert!(is_supported(b), "0x{b:02x} should be in the core subset");
         }
-        // ...and EXCLUDES the allocation / dynamic-call opcodes (which
-        // bail the whole region to the interpreter). Excluding the alloc
-        // opcodes is what keeps the current floor GC-trivially-safe: a
-        // region cannot allocate, so GC cannot fire mid-region. (When the
-        // alloc opcodes are added, the shared-stack-as-GC-root design —
-        // the region runs on interp.stack, scanned [sp,len) — is what
-        // makes a GC-triggering region correct.)
+        // S4e: the DYNAMIC-call opcodes (CALL_CLOSURE / CALL_LOCAL_B) are
+        // now in the subset — they trampoline into the interpreter's
+        // do_call via region_interp_call (a non-static target cannot be a
+        // native region-to-region call).
+        for b in [op::INSTR_CALL_CLOSURE, op::INSTR_CALL_LOCAL_B] {
+            assert!(
+                is_supported(b),
+                "0x{b:02x} should be in the core subset (dynamic-call trampoline)"
+            );
+        }
+        // ...and STILL EXCLUDES the allocation opcodes (which bail the whole
+        // region to the interpreter). Excluding the alloc opcodes is what
+        // keeps the current floor GC-trivially-safe: a region cannot
+        // allocate, so GC cannot fire mid-region. (When the alloc opcodes
+        // are added, the shared-stack-as-GC-root design — the region runs on
+        // interp.stack, scanned [sp,len) — is what makes a GC-triggering
+        // region correct.)
         for b in [
             op::INSTR_TUPLE_B,
             op::INSTR_CLOSURE_B,
             op::INSTR_ALLOC_WORD_MEMORY,
             op::INSTR_STACK_CONTAINER_B,
-            op::INSTR_CALL_CLOSURE,
-            op::INSTR_CALL_LOCAL_B,
             op::INSTR_SET_HANDLER8,
             op::INSTR_CALL_FAST_RTS1,
             op::INSTR_TAIL_B_B,

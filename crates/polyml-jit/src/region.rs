@@ -165,6 +165,12 @@ pub struct ExnCtx {
     pub handler_sp: i64,
     /// The raised value (tagged PolyWord bits), read by LDEXC.
     pub exn_packet: i64,
+    /// Raw `*mut Interpreter` (as `i64` bits), or 0. The do_call hook
+    /// stores the live interpreter pointer here BEFORE invoking the
+    /// region so the DYNAMIC-call trampoline (`region_interp_call`) can
+    /// re-enter `do_call` without a second aliasing `&mut Interpreter`.
+    /// Layout-identical to `polyml_runtime::ExnCtxC` (interp_ptr @ 16).
+    pub interp_ptr: i64,
 }
 
 impl Default for ExnCtx {
@@ -172,6 +178,7 @@ impl Default for ExnCtx {
         Self {
             handler_sp: NO_HANDLER,
             exn_packet: 0,
+            interp_ptr: 0,
         }
     }
 }
@@ -281,6 +288,12 @@ fn load_exn_packet(b: &mut FunctionBuilder, ctx: Value) -> Value {
 }
 fn store_exn_packet(b: &mut FunctionBuilder, ctx: Value, v: Value) {
     b.ins().store(MemFlags::trusted(), v, ctx, 8);
+}
+/// Load `ctx.interp_ptr` (offset 16) — the raw `*mut Interpreter` the
+/// dynamic-call trampoline re-enters through.
+#[allow(dead_code)]
+fn load_interp_ptr(b: &mut FunctionBuilder, ctx: Value) -> Value {
+    b.ins().load(types::I64, MemFlags::trusted(), ctx, 16)
 }
 
 // ---------------------------------------------------------------------

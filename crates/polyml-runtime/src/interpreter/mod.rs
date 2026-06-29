@@ -171,7 +171,8 @@ type JitCache = std::collections::HashMap<usize, JitEntry, FxBuildHasher>;
 // =====================================================================
 
 /// Mirror of `polyml_jit::region::ExnCtx` (handler_sp @ 0, exn_packet @
-/// 8). `#[repr(C)]` so the JIT loads/stores by fixed byte offset.
+/// 8, interp_ptr @ 16). `#[repr(C)]` so the JIT loads/stores by fixed
+/// byte offset.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ExnCtxC {
@@ -180,6 +181,13 @@ pub struct ExnCtxC {
     pub handler_sp: i64,
     /// The raised value (tagged PolyWord bits / region exn sentinel).
     pub exn_packet: i64,
+    /// Raw `*mut Interpreter` (as `i64` bits) the do_call hook stores
+    /// BEFORE invoking the region, so a region's DYNAMIC-call trampoline
+    /// (`region_interp_call`) can re-enter `do_call` via this raw pointer
+    /// WITHOUT materializing a second aliasing `&mut Interpreter`. 0 when
+    /// the region needs no dynamic-call re-entry (e.g. the static-only
+    /// boundary demo). See the soundness argument in the JIT boundary.
+    pub interp_ptr: i64,
 }
 
 /// Mirror of `polyml_jit::region::RegionRet` — NOT a bare tuple (tuples
@@ -243,6 +251,13 @@ pub const REGION_EXN_OVERFLOW: i64 = 0x0001_0000_0000_0002;
 /// Region DivByZero exn sentinel — MUST equal `polyml_jit::memtrans::
 /// EXN_DIVZERO`.
 pub const REGION_EXN_DIVZERO: i64 = 0x0002_0000_0000_0002;
+
+/// Region StackOverflow exn sentinel — MUST equal `polyml_jit::memtrans::
+/// EXN_STACKOVERFLOW`. The faithful `STACK_SIZE16` lowering returns this
+/// when `sp < needed`; the boundary maps it onto `InterpError::
+/// StackOverflow` (a HARD error, exactly like the interpreter at
+/// mod.rs:3457).
+pub const REGION_EXN_STACKOVERFLOW: i64 = 0x0003_0000_0000_0002;
 
 /// Inline (stack-allocated) capacity of the per-call JIT args buffer in
 /// `do_call`. Covers `arity_init` up to this many slots (= SML arity up
@@ -2725,6 +2740,140 @@ impl Interpreter {
     #[doc(hidden)]
     pub fn test_invoke_do_call(&mut self, closure: PolyWord) -> Result<(), InterpError> {
         self.do_call(closure)
+    }
+
+    /// WHOLE-REGION DYNAMIC-CALL TRAMPOLINE re-entry (S4e).
+    ///
+    /// A native region, at a `CALL_LOCAL_B` / `CALL_CLOSURE` (a dynamic
+    /// target), has already pushed the callee's N args onto the SHARED
+    /// stack (the same `self.stack`). It calls back here (via
+    /// `boundary::region_interp_call`, through the `interp_ptr` stored in
+    /// the region's `ExnCtx`) to run that callee in the interpreter and
+    /// hand the result back on the shared stack — then resume natively.
+    ///
+    /// `sp_at_top_arg` is the downward stack index of the top (last
+    /// pushed) callee arg; `closure_bits` is the closure word the region
+    /// would have called. On success the single result sits at
+    /// `stack[new_sp]` (the args + the synthetic closure/retPC slots
+    /// collapsed exactly as the interpreter's `do_call` + `do_return`
+    /// would), `raised == 0`. On an interpreter error the call returns
+    /// `raised == 1` with the region exn sentinel in `*exn_packet_out`.
+    ///
+    /// SOUNDNESS: this re-enters `do_call` / the interpreter run loop on
+    /// `self`. The ONLY live `&mut self` up the call stack belongs to the
+    /// outer `do_call` hook that invoked the region; that borrow is
+    /// DORMANT for the whole duration of the native region call (the hook
+    /// touches `self` again only after `dispatch(...)` returns). So the
+    /// `&mut self` the trampoline holds here never aliases a *used* outer
+    /// `&mut`. This is the exact discipline the per-function JIT fast
+    /// path already relies on via the `JIT_INTERP` thread-local raw
+    /// pointer (`jit_dispatch_*`). The re-entry SAVES and RESTORES the
+    /// interpreter's PC + code-segment + handler state around the run, so
+    /// the native region resumes with the interpreter exactly as it was.
+    ///
+    /// # Errors
+    /// Returns `raised == 1` (with a sentinel in `*exn_packet_out`) if the
+    /// callee run errors or fails to return cleanly.
+    #[doc(hidden)]
+    pub fn region_interp_call(
+        &mut self,
+        sp_at_top_arg: i64,
+        closure_bits: i64,
+        exn_packet_out: &mut i64,
+    ) -> RegionRetC {
+        // Save the interpreter execution state the run will clobber.
+        let saved_pc = self.pc;
+        let saved_start = self.code_start;
+        let saved_end = self.code_end;
+        let saved_frames_depth = self.frames.len();
+        let saved_handler = self.handler_sp;
+
+        // Point sp at the top callee arg (the region pushed the args onto
+        // the shared stack already). Then build the callee entry frame the
+        // SAME way do_call does: push retPC = 0 (the top-level sentinel,
+        // so the callee's RETURN_N yields `Returned`) then the closure.
+        self.sp = sp_at_top_arg as usize;
+        let closure = PolyWord::from_bits(closure_bits as usize);
+
+        // Push retPC sentinel (0) then closure, then jump to the callee's
+        // code object — exactly do_call's non-JIT frame setup, but with a
+        // 0 retPC so the run terminates at this callee's RETURN.
+        if self.push(PolyWord::from_bits(0)).is_err() || self.push(closure).is_err() {
+            *exn_packet_out = REGION_EXN_STACKOVERFLOW;
+            return RegionRetC {
+                new_sp: self.sp as i64,
+                raised: 1,
+            };
+        }
+        if !closure.is_data_ptr() {
+            *exn_packet_out = REGION_EXN_OVERFLOW; // misroute → treat as raise
+            return RegionRetC {
+                new_sp: self.sp as i64,
+                raised: 1,
+            };
+        }
+        let closure_ptr = closure.as_ptr::<PolyWord>();
+        // SAFETY: closure verified a data pointer just above.
+        let code_word = unsafe { *closure_ptr };
+        let new_code_obj = code_word.as_ptr::<PolyWord>();
+        self.frames.push((self.code_start, self.code_end));
+        // SAFETY: closure invariant guarantees a real code object.
+        let (consts_start, _) = unsafe { crate::length_word::const_segment_for_code(new_code_obj) };
+        self.code_start = new_code_obj.cast::<u8>();
+        self.code_end = consts_start.cast::<u8>();
+        self.pc = self.code_start;
+
+        // Run the callee to its top-level Returned (retPC == 0 sentinel).
+        // This RE-ENTERS the interpreter (and, for a registered region
+        // callee, the region dispatch again — native recursion through the
+        // interp). The recursion is bounded by the bytecode's own depth.
+        let run_result = self.run();
+
+        // Restore the saved interpreter state regardless of outcome.
+        self.pc = saved_pc;
+        self.code_start = saved_start;
+        self.code_end = saved_end;
+        self.frames.truncate(saved_frames_depth);
+        self.handler_sp = saved_handler;
+
+        match run_result {
+            Ok(StepResult::Returned(result)) => {
+                // The callee's do_return popped the result off (retPC == 0),
+                // leaving sp ABOVE the collapse point. Re-push the result so
+                // it sits on top at stack[new_sp] — the layout the native
+                // CALL site expects (result on top, args collapsed).
+                if self.push(result).is_err() {
+                    *exn_packet_out = REGION_EXN_STACKOVERFLOW;
+                    return RegionRetC {
+                        new_sp: self.sp as i64,
+                        raised: 1,
+                    };
+                }
+                RegionRetC {
+                    new_sp: self.sp as i64,
+                    raised: 0,
+                }
+            }
+            Ok(_) | Err(_) => {
+                // The callee did not return cleanly (an unsupported opcode
+                // would never appear in a registered region; an error path
+                // — e.g. a real DivByZero/Overflow inside the interpreted
+                // callee — surfaces here). Map it onto a region raise so the
+                // boundary drives the interpreter's real raise machinery.
+                // We conservatively route via the Overflow sentinel so the
+                // hook re-raises through raise_overflow (the only catchable
+                // path); a DivByZero callee already returned Err and the
+                // outer hook will see it via the normal interp error path
+                // when this region's raised==1 propagates. The minimal
+                // trampoline's prototype callee is pure arithmetic, so this
+                // arm is defensive.
+                *exn_packet_out = REGION_EXN_OVERFLOW;
+                RegionRetC {
+                    new_sp: self.sp as i64,
+                    raised: 1,
+                }
+            }
+        }
     }
 
     #[doc(hidden)]
@@ -6188,9 +6337,23 @@ impl Interpreter {
                     } else {
                         self.handler_sp as i64
                     };
+                    // SOUNDNESS (the dynamic-call trampoline): stash a raw
+                    // `*mut Interpreter` in the ctx BEFORE invoking the
+                    // region, so a region's CALL_LOCAL_B / CALL_CLOSURE
+                    // trampoline can re-enter `do_call` via this raw pointer
+                    // WITHOUT materializing a second aliasing `&mut self`.
+                    // The `&mut self` held by THIS `do_call` is dormant for
+                    // the entire `dispatch(...)` call (we touch `self` again
+                    // only AFTER it returns), so the transient `&mut` the
+                    // trampoline reconstructs from `interp_ptr` never aliases
+                    // a live one. This mirrors the established `JIT_INTERP`
+                    // thread-local raw-pointer re-entry the per-function JIT
+                    // fast path uses below.
+                    let interp_ptr = (self as *mut Interpreter) as i64;
                     let mut ctx = ExnCtxC {
                         handler_sp: handler_sp_i64,
                         exn_packet: 0,
+                        interp_ptr,
                     };
                     let stack_base = self.stack.as_mut_ptr().cast::<i64>();
                     let sp_at_top_arg = self.sp as i64;
@@ -6236,6 +6399,13 @@ impl Interpreter {
                             // sub/mult do via raise_overflow().
                             self.raise_overflow()?;
                             return Ok(());
+                        }
+                        REGION_EXN_STACKOVERFLOW => {
+                            // A region's faithful STACK_SIZE16 check tripped
+                            // (sp < needed). The interpreter treats this as
+                            // a HARD error (InterpError::StackOverflow,
+                            // mod.rs:3457) — mirror exactly.
+                            return Err(InterpError::StackOverflow);
                         }
                         other => {
                             // A genuine raised tagged value crossing the
