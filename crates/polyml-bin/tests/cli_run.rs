@@ -288,6 +288,10 @@ fn bootstrap_polyml_print_emits_output() {
 /// PolyMLException) with --jit. If basis fails to load (= 'Error-'
 /// or missing structures), the JIT install regressed something on
 /// the basis-load path.
+///
+/// JIT-only: the `--jit` flag is absent in interpreter-only builds
+/// (`--no-default-features`), so this test is compiled out there.
+#[cfg(feature = "jit")]
 #[test]
 fn bootstrap_jit_loads_initial_basis() {
     let polyml_dir = workspace_root().join("vendor/polyml");

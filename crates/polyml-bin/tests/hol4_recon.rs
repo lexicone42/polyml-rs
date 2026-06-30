@@ -110,6 +110,9 @@ fn run_through_checkpoint(sml: &str, max_steps: u64) -> Option<(String, i32)> {
     let ckpt = checkpoint_path()?;
     let mut cmd = Command::new(poly_bin());
     cmd.arg("run").arg("--max-steps").arg(max_steps.to_string());
+    // JIT-only: `--jit` is absent in interpreter-only builds, so only opt in
+    // when the feature is compiled (and the HOL4_TEST_JIT env var is set).
+    #[cfg(feature = "jit")]
     if std::env::var("HOL4_TEST_JIT").is_ok() {
         cmd.arg("--jit");
     }

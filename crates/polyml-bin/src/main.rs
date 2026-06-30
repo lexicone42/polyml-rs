@@ -5,6 +5,8 @@
 //! control" part yet — Phase 2.1 (bytecode interpreter port) unlocks
 //! that. For now this binary loads + reports.
 
+// `ExitStatusExt::signal` is only used by the JIT-only isolated diff scanner.
+#[cfg(feature = "jit")]
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -131,6 +133,7 @@ enum Cmd {
         /// in the interpreter's JIT cache before running. Speeds up
         /// CALL dispatch into JIT'd code (subject to the
         /// `MAX_JIT_DEPTH` cap on nested JIT dispatch).
+        #[cfg(feature = "jit")]
         #[arg(long)]
         jit: bool,
         /// WHOLE-REGION JIT (experimental): compile + run the
@@ -140,6 +143,7 @@ enum Cmd {
         /// image. This path is GATED so the default interpreter run and
         /// the per-function `--jit` path stay byte-identical. Equivalent
         /// to setting `WHOLE_REGION_JIT=1`.
+        #[cfg(feature = "jit")]
         #[arg(long)]
         whole_region: bool,
         /// UNTRUSTED (safe) MODE: treat the image as potentially malicious.
@@ -193,6 +197,7 @@ enum Cmd {
     /// `--args 0,1,2` supplies tagged-int values (`tag(0)`, `tag(1)`,
     /// `tag(2)`). `--scan` runs every arity-0 installed function with
     /// no args and prints divergences.
+    #[cfg(feature = "jit")]
     Diff {
         /// Path to a pexport (text) image.
         image: PathBuf,
@@ -274,7 +279,9 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             disasm_hottest,
             args,
             r#use,
+            #[cfg(feature = "jit")]
             jit,
+            #[cfg(feature = "jit")]
             whole_region,
             untrusted,
         } => {
@@ -283,6 +290,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             // hand-assembled region demos and return WITHOUT touching the
             // real run path. This is the S1-S3 mechanism check, not the
             // S3b milestone.
+            #[cfg(feature = "jit")]
             if std::env::var("WHOLE_REGION_DEMO").is_ok() {
                 let s12_clean = polyml_jit::region::run_whole_region_demo();
                 println!();
@@ -299,6 +307,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             // actual poly run. When the flag is ABSENT the runtime region
             // registry stays empty and the do_call hook is one never-taken
             // branch (the default + --jit paths are byte-identical).
+            #[cfg(feature = "jit")]
             let whole_region_on = *whole_region || polyml_jit::region::whole_region_enabled();
             run_image(
                 image,
@@ -308,7 +317,9 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 *disasm_hottest,
                 args.clone(),
                 r#use.clone(),
+                #[cfg(feature = "jit")]
                 *jit,
+                #[cfg(feature = "jit")]
                 whole_region_on,
                 *untrusted,
             )
@@ -328,6 +339,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             *max,
             *scan_all,
         ),
+        #[cfg(feature = "jit")]
         Cmd::Diff {
             image,
             list,
@@ -404,7 +416,6 @@ fn parse_image_auto(bytes: &[u8]) -> Result<Image, Box<dyn std::error::Error>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn run_image(
     path: &PathBuf,
     max_steps: u64,
@@ -413,8 +424,8 @@ fn run_image(
     disasm_hottest: bool,
     extra_args: Vec<String>,
     use_file: Option<PathBuf>,
-    install_jit: bool,
-    whole_region: bool,
+    #[cfg(feature = "jit")] install_jit: bool,
+    #[cfg(feature = "jit")] whole_region: bool,
     untrusted: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
@@ -522,6 +533,7 @@ fn run_image(
     if profile {
         interp = interp.enable_diagnostics();
     }
+    #[cfg(feature = "jit")]
     if install_jit {
         let mut jit = polyml_jit::Jit::new().map_err(|e| format!("jit init: {e}"))?;
         let (total, jit_ok, installed) =
@@ -541,6 +553,7 @@ fn run_image(
     // it so a real `poly run` dispatches it NATIVE through do_call. When
     // the flag is OFF this is skipped entirely → the region registry stays
     // empty → the do_call hook is a never-taken branch (byte-identical).
+    #[cfg(feature = "jit")]
     if whole_region {
         // SAFETY: image is loaded; heap is frozen (no GC has run yet).
         let candidates = unsafe { polyml_jit::scan_region_candidates(&loaded) };
@@ -641,6 +654,7 @@ fn run_image(
     interp.wait_for_children();
 
     println!();
+    #[cfg(feature = "jit")]
     if whole_region {
         // NATIVENESS PROOF: every native region-root entry bumps this
         // counter (the region root's first IR is a call to
@@ -988,6 +1002,7 @@ fn body_word_count_estimate(body: &ObjectBody) -> usize {
     }
 }
 
+#[cfg(feature = "jit")]
 #[allow(clippy::too_many_arguments)]
 fn diff_command(
     image_path: &PathBuf,
@@ -1126,6 +1141,7 @@ fn diff_command(
     }
 }
 
+#[cfg(feature = "jit")]
 fn parse_hex_addr(s: &str) -> Result<usize, Box<dyn std::error::Error>> {
     let trimmed = s.trim().trim_start_matches("0x").trim_start_matches("0X");
     usize::from_str_radix(trimmed, 16).map_err(|e| format!("bad hex address '{s}': {e}").into())
@@ -1218,83 +1234,100 @@ fn disasm_command(
         return Ok(ExitCode::SUCCESS);
     }
 
-    let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
-    let mut interp = unsafe { Interpreter::from_code_object(64 * 1024, code_obj_ptr) }
-        .with_default_alloc_space_bytes(256 * 1024 * 1024)
-        .with_rts(rts.clone());
-    let mut jit = polyml_jit::Jit::new()?;
-    let _ = polyml_jit::install_all_jit_entries(&mut jit, &loaded, &mut interp);
-    let mut entries = interp.jit_cache_entries();
-    entries.sort_by_key(|(p, _)| *p);
-
-    let (ptr, entry) = match (idx, code_obj_hex, bc_grep) {
-        (Some(i), None, None) => {
-            let pair = entries
-                .get(i)
-                .ok_or_else(|| format!("idx {i} out of range (have {} entries)", entries.len()))?;
-            (pair.0, pair.1)
-        }
-        (None, Some(s), None) => {
-            let addr = parse_hex_addr(s)?;
-            entries
-                .iter()
-                .find(|(p, _)| *p == addr)
-                .copied()
-                .ok_or_else(|| format!("no JIT entry at 0x{addr:016x}"))?
-        }
-        (None, None, Some(pat)) => {
-            let found = entries.iter().find(|(p, _)| {
-                let bc_head: String = unsafe {
-                    let bp = *p as *const u8;
-                    (0..32)
-                        .map(|k| format!("{:02x}", *bp.add(k)))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                };
-                bc_head.contains(pat)
-            });
-            *found.ok_or_else(|| format!("no entry matching bc-grep '{pat}'"))?
-        }
-        _ => return Err("specify exactly one of --idx, --code-obj, or --bc-grep".into()),
-    };
-
-    // Determine bytecode length from the code object's const-pool boundary.
-    // SAFETY: ptr is a JIT-installed code-obj pointer, so length-word is at
-    // ptr-8 per PolyML's heap layout.
-    let bytecode: &[u8] = unsafe {
-        let cp = polyml_runtime::length_word::const_segment_for_code(ptr as *const PolyWord).0;
-        let body_start = ptr;
-        let cp_start = cp as usize;
-        let bytecode_len = cp_start
-            .saturating_sub(body_start)
-            .saturating_sub(std::mem::size_of::<usize>());
-        std::slice::from_raw_parts(body_start as *const u8, bytecode_len)
-    };
-
-    println!(
-        "Disassembly: code_obj=0x{ptr:016x}, sml_arity={}, arity_init={}, bytecode_len={}",
-        entry.sml_arity,
-        entry.arity_init,
-        bytecode.len(),
-    );
-    println!("{:>5}  {:>4} {:<22} {}", "pc", "op", "mnemonic", "operands");
-    let decoded = disasm::disassemble(bytecode);
-    for (pc, d) in decoded.iter().take(max) {
-        let imm = d.imm_text.as_deref().unwrap_or("");
-        println!(
-            "{pc:>5}: {:>4} {:<22} {imm}",
-            format!("{:02x}", d.op),
-            d.mnemonic,
-        );
+    // The remaining selection modes (--idx / --code-obj / --bc-grep) pick a
+    // function out of the JIT-installed entry table, so they require the JIT
+    // feature. The interpreter-only build supports --scan-all (above) for
+    // disassembly without it.
+    #[cfg(not(feature = "jit"))]
+    {
+        let _ = code_obj_hex;
+        Err("this build has no JIT (rebuild with --features jit); \
+             disasm by --idx/--code-obj/--bc-grep selects from the \
+             JIT-installed entry table. Use --scan-all --bc-grep PATTERN \
+             for interpreter-only disassembly."
+            .into())
     }
-    if decoded.len() > max {
+
+    #[cfg(feature = "jit")]
+    {
+        let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
+        let mut interp = unsafe { Interpreter::from_code_object(64 * 1024, code_obj_ptr) }
+            .with_default_alloc_space_bytes(256 * 1024 * 1024)
+            .with_rts(rts.clone());
+        let mut jit = polyml_jit::Jit::new()?;
+        let _ = polyml_jit::install_all_jit_entries(&mut jit, &loaded, &mut interp);
+        let mut entries = interp.jit_cache_entries();
+        entries.sort_by_key(|(p, _)| *p);
+
+        let (ptr, entry) = match (idx, code_obj_hex, bc_grep) {
+            (Some(i), None, None) => {
+                let pair = entries.get(i).ok_or_else(|| {
+                    format!("idx {i} out of range (have {} entries)", entries.len())
+                })?;
+                (pair.0, pair.1)
+            }
+            (None, Some(s), None) => {
+                let addr = parse_hex_addr(s)?;
+                entries
+                    .iter()
+                    .find(|(p, _)| *p == addr)
+                    .copied()
+                    .ok_or_else(|| format!("no JIT entry at 0x{addr:016x}"))?
+            }
+            (None, None, Some(pat)) => {
+                let found = entries.iter().find(|(p, _)| {
+                    let bc_head: String = unsafe {
+                        let bp = *p as *const u8;
+                        (0..32)
+                            .map(|k| format!("{:02x}", *bp.add(k)))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    };
+                    bc_head.contains(pat)
+                });
+                *found.ok_or_else(|| format!("no entry matching bc-grep '{pat}'"))?
+            }
+            _ => return Err("specify exactly one of --idx, --code-obj, or --bc-grep".into()),
+        };
+
+        // Determine bytecode length from the code object's const-pool boundary.
+        // SAFETY: ptr is a JIT-installed code-obj pointer, so length-word is at
+        // ptr-8 per PolyML's heap layout.
+        let bytecode: &[u8] = unsafe {
+            let cp = polyml_runtime::length_word::const_segment_for_code(ptr as *const PolyWord).0;
+            let body_start = ptr;
+            let cp_start = cp as usize;
+            let bytecode_len = cp_start
+                .saturating_sub(body_start)
+                .saturating_sub(std::mem::size_of::<usize>());
+            std::slice::from_raw_parts(body_start as *const u8, bytecode_len)
+        };
+
         println!(
-            "... ({} more instructions; use --max {} to see all)",
-            decoded.len() - max,
-            decoded.len(),
+            "Disassembly: code_obj=0x{ptr:016x}, sml_arity={}, arity_init={}, bytecode_len={}",
+            entry.sml_arity,
+            entry.arity_init,
+            bytecode.len(),
         );
+        println!("{:>5}  {:>4} {:<22} {}", "pc", "op", "mnemonic", "operands");
+        let decoded = disasm::disassemble(bytecode);
+        for (pc, d) in decoded.iter().take(max) {
+            let imm = d.imm_text.as_deref().unwrap_or("");
+            println!(
+                "{pc:>5}: {:>4} {:<22} {imm}",
+                format!("{:02x}", d.op),
+                d.mnemonic,
+            );
+        }
+        if decoded.len() > max {
+            println!(
+                "... ({} more instructions; use --max {} to see all)",
+                decoded.len() - max,
+                decoded.len(),
+            );
+        }
+        Ok(ExitCode::SUCCESS)
     }
-    Ok(ExitCode::SUCCESS)
 }
 
 /// Spawn `poly diff <image> --idx N --args V` per test, capturing
@@ -1304,6 +1337,7 @@ fn disasm_command(
 /// Caps per `DIFF_SCAN_LIMIT` (default 50 to bound interactive
 /// runtime). Each function is tested with 6 different tagged-int
 /// args. Divergences are reported with full output.
+#[cfg(feature = "jit")]
 fn scan_isolated_command(image_path: &PathBuf) -> Result<ExitCode, Box<dyn std::error::Error>> {
     use std::process::{Command, Stdio};
 
@@ -1431,6 +1465,7 @@ fn scan_isolated_command(image_path: &PathBuf) -> Result<ExitCode, Box<dyn std::
 /// negatives are still possible (deref opcodes deeper in the
 /// function), but the early bytes are where arg-deref patterns
 /// usually appear.
+#[cfg(feature = "jit")]
 fn function_likely_derefs(code_obj_ptr: usize) -> bool {
     // INDIRECT_0..INDIRECT_5 (0x35..0x3a), INDIRECT_B (0x23),
     // INDIRECT_LOCAL_B0 (0xc7), INDIRECT_LOCAL_B1 (0xc1),
@@ -1462,6 +1497,7 @@ fn function_likely_derefs(code_obj_ptr: usize) -> bool {
     false
 }
 
+#[cfg(feature = "jit")]
 fn print_jit_entries(entries: &[(usize, polyml_runtime::JitEntry)], bc_grep: Option<&str>) {
     println!(
         "{:>4} {:>18} {:>9} {:>11}  {}",
@@ -1496,6 +1532,7 @@ fn print_jit_entries(entries: &[(usize, polyml_runtime::JitEntry)], bc_grep: Opt
     }
 }
 
+#[cfg(feature = "jit")]
 fn run_scan(
     interp: &mut Interpreter,
     entries: &[(usize, polyml_runtime::JitEntry)],

@@ -40,3 +40,37 @@ jobs:
 
       - name: JIT unit tests (data-free)
         run: cargo test --release -p polyml-jit --lib
+
+  # Interpreter-only gate: `poly` built with `--no-default-features` drops the
+  # Cranelift JIT (polyml-jit) from the dependency tree entirely. This is the
+  # smaller, faster-compiling build that also unblocks big-endian cross targets
+  # (s390x/ppc64) where Cranelift's build script is the blocker. We keep it
+  # green so the JIT stays genuinely optional.
+  interp-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting (interp-only feature set)
+        run: cargo fmt -p polyml-bin -- --check
+
+      - name: Build poly (interpreter-only, no Cranelift)
+        run: cargo build --release -p polyml-bin --no-default-features
+
+      - name: Prove the dep tree is Cranelift-free
+        run: |
+          n=$(cargo tree -p polyml-bin --no-default-features | grep -c cranelift || true)
+          echo "cranelift crates in interp-only tree: $n"
+          test "$n" -eq 0
+
+      - name: Clippy (interpreter-only)
+        run: cargo clippy --release -p polyml-bin --no-default-features --all-targets
+
+      - name: Tests (interpreter-only, data-free)
+        run: cargo test --release -p polyml-bin --no-default-features

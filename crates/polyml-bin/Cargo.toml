@@ -15,9 +15,23 @@ path = "src/main.rs"
 [dependencies]
 polyml-runtime = { workspace = true }
 polyml-image   = { workspace = true }
-polyml-jit     = { workspace = true }
+# The Cranelift JIT is OPTIONAL — gated behind the default-on `jit` feature.
+# Building with `--no-default-features` drops polyml-jit (and Cranelift) from
+# the dependency tree entirely, yielding a smaller interpreter-only `poly`
+# that compiles faster and cross-builds for big-endian targets where
+# Cranelift's build script is the blocker (s390x/ppc64). The default build is
+# unchanged (JIT on, byte-identical behaviour).
+polyml-jit     = { workspace = true, optional = true }
 clap = { version = "4.5", features = ["derive"] }
 libc = "0.2"
+
+[features]
+default = ["jit"]
+# `jit` pulls in the Cranelift-based polyml-jit crate and unlocks the JIT-only
+# CLI surface: `poly diff`, `poly run --jit`/`--whole-region`, and
+# `poly disasm --idx`. With it off, the interpreter path is the only one
+# compiled and the JIT-only flags/subcommands are absent.
+jit = ["dep:polyml-jit"]
 
 [lints]
 workspace = true
