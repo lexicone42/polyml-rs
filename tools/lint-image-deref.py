@@ -151,7 +151,10 @@ def lint_surface5():
     # consults it is NOT gated). The fix idiom is a CALL to one of these.
     SPACE_GATE_TOKENS = (
         "safe_rts_arg_ptr(",
+        "safe_rts_arg_obj(",  # task #132: the header-fit gate (validated handle
+        # carrying n_words; the multi-word / variable-length reader idiom)
         "contains_with_header(",
+        "validate_obj_fit(",
         "space_end_of(",
         ".safe_spaces",  # `ctx.safe_spaces.as_ref()` handed to a gate helper
     )

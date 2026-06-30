@@ -210,6 +210,99 @@ impl RtsSafeSpaces {
             .find(|&&(start, end)| a > start && a < end)
             .map(|&(_, end)| end)
     }
+
+    /// UNTRUSTED header-fit validation of an image-controlled RTS argument `w`
+    /// (the strong sibling of [`Self::contains_with_header`], mirroring
+    /// `safe_deref::SafeSpaces::validate_obj`): confirm `w` is an aligned,
+    /// in-space pointer with room for its length word, READ that length word,
+    /// and verify the WHOLE object `[p, p + n_words)` fits within its
+    /// containing space. Returns the validated `(body_ptr, n_words)` so a
+    /// multi-word / variable-length reader can bound each access; `None` for a
+    /// tagged / wild / misaligned arg or a forged length word that over-claims
+    /// the object (runs past the space end).
+    ///
+    /// This is what makes the multi-word RTS readers robust DIRECTLY:
+    /// `contains_with_header` alone only proves a single word at `p` is
+    /// readable, leaning on the implicit loader-slack invariant for the rest;
+    /// this proves the header-declared object actually fits.
+    ///
+    /// Takes a [`PolyWord`] (not a raw pointer) so the only deref is of a
+    /// pointer derived + bounds-checked locally — never the caller's argument.
+    #[must_use]
+    pub fn validate_obj_fit(&self, w: PolyWord) -> Option<(*const PolyWord, usize)> {
+        if !w.is_data_ptr() {
+            return None;
+        }
+        let wsz = std::mem::size_of::<PolyWord>();
+        let a = w.0;
+        // Alignment: a misaligned pointer makes the length-word read UB.
+        if a & (wsz - 1) != 0 {
+            return None;
+        }
+        let p = w.as_ptr::<PolyWord>();
+        // Find the containing space and require room for the length word at
+        // `p.sub(1)`: `a` must be at least one full word above the space start
+        // (independent of the start's own alignment, so this stays sound even
+        // for a hypothetical unaligned space base).
+        let &(_start, end) = self
+            .ranges
+            .iter()
+            .find(|&&(start, end)| a >= start.saturating_add(wsz) && a < end)?;
+        // SAFETY: `a >= start + wsz` and `a` is aligned, so `p.sub(1)` is an
+        // aligned, readable length-word slot inside `[start, end)`.
+        let lw = unsafe { *p.sub(1) };
+        let n_words = crate::length_word::length_of(lw);
+        // The body occupies `n_words` words from `p`; it must fit `[p, end)`.
+        let avail_bytes = end - a; // a < end, so > 0
+        let need_bytes = n_words.checked_mul(wsz)?;
+        if need_bytes <= avail_bytes {
+            Some((p, n_words))
+        } else {
+            None
+        }
+    }
+}
+
+/// A VALIDATED RTS-argument object handle (the header-fit twin of
+/// `safe_deref::ValidObj`).
+///
+/// Carries the object body pointer plus the verified body word count, so a
+/// multi-word / variable-length reader can bound each access (`word_in_bounds`
+/// / `clamp_body_words`) BEFORE the deref.
+///
+/// In TRUSTED mode `n_words == usize::MAX` — the "no bound" sentinel: every
+/// bound check passes and the reader trusts its own length read, EXACTLY the
+/// legacy fast path (byte-identical). A real length word never reaches
+/// `usize::MAX` (the length field is only the low ~56 bits), so the sentinel
+/// can never collide with a genuine count.
+#[derive(Clone, Copy)]
+pub struct RtsValidObj {
+    /// The (validated, in TRUSTED mode merely `is_data_ptr`) body pointer.
+    pub ptr: *const PolyWord,
+    /// Validated body word count (UNTRUSTED), or `usize::MAX` (TRUSTED =
+    /// unbounded, byte-identical legacy path).
+    pub n_words: usize,
+}
+
+impl RtsValidObj {
+    /// Body word index `idx` is in-bounds. TRUSTED (`n_words == MAX`): always
+    /// true (the legacy reader trusted its own length read).
+    #[inline]
+    #[must_use]
+    pub fn word_in_bounds(&self, idx: usize) -> bool {
+        idx < self.n_words
+    }
+
+    /// Clamp a length-word-derived body word count to the validated bound.
+    /// TRUSTED (`n_words == MAX`): returns `claimed` unchanged — byte-identical
+    /// (and in UNTRUSTED mode `claimed == n_words` already, since the gate read
+    /// the same length word, so this is a defensive no-op that documents the
+    /// bound the gate enforced).
+    #[inline]
+    #[must_use]
+    pub fn clamp_body_words(&self, claimed: usize) -> usize {
+        claimed.min(self.n_words)
+    }
 }
 
 /// THE misuse-resistant gate for the FIRST deref of an image-controlled RTS
@@ -246,6 +339,51 @@ pub fn safe_rts_arg_ptr(spaces: Option<&RtsSafeSpaces>, w: PolyWord) -> Option<*
         // Untrusted: gate the first deref on space-membership + header room.
         Some(s) if s.contains_with_header(p) => Some(p),
         Some(_) => None,
+    }
+}
+
+/// THE header-fit gate for the FIRST deref of an image-controlled RTS argument
+/// whose body is then read at MULTIPLE word offsets or for a VARIABLE length.
+///
+/// Covers `write_array` / `read_array_from_stream`'s 3-tuple,
+/// `poly_word_to_bigint`'s limbs, `poly_string_to_rust`'s chars, and
+/// `poly_copy_byte_vec_to_closure`'s body. STRONGER than [`safe_rts_arg_ptr`]:
+/// it returns a [`RtsValidObj`] carrying the validated body word count so the
+/// reader can bound each access.
+///
+///   - TRUSTED (`spaces == None`, the default): exactly the legacy
+///     `is_data_ptr` fast path, `n_words == usize::MAX` (unbounded) — NO header
+///     read, NO check, byte-identical. (A reader that uses the handle's bound
+///     helpers sees every check pass and runs its existing length-word logic.)
+///   - UNTRUSTED (`spaces == Some`): ALSO reads the length word and verifies
+///     the WHOLE object `[p, p + n_words)` fits its space (via
+///     `RtsSafeSpaces::validate_obj_fit`), returning the validated `n_words`. A
+///     wild / misaligned arg or a forged over-claiming length word yields
+///     `None`, and the reader falls into its existing non-pointer branch (a
+///     clean tagged(0) / EOF / empty / None result) — never an OOB deref.
+///
+/// Single-word readers (`read_real_word`, the wrapped-fd `*strm_p` reads, …)
+/// keep using [`safe_rts_arg_ptr`]: their one in-space word at `p` is already
+/// covered by `contains_with_header`.
+#[inline]
+#[must_use]
+pub fn safe_rts_arg_obj(spaces: Option<&RtsSafeSpaces>, w: PolyWord) -> Option<RtsValidObj> {
+    match spaces {
+        // Trusted: legacy behaviour (is_data_ptr only), unbounded — the bound
+        // helpers all pass, so the reader is byte-identical to before.
+        None => {
+            if !w.is_data_ptr() {
+                return None;
+            }
+            Some(RtsValidObj {
+                ptr: w.as_ptr::<PolyWord>(),
+                n_words: usize::MAX,
+            })
+        }
+        // Untrusted: space-membership + header-fit; carry the validated count.
+        Some(s) => s
+            .validate_obj_fit(w)
+            .map(|(ptr, n_words)| RtsValidObj { ptr, n_words }),
     }
 }
 
@@ -1983,19 +2121,23 @@ fn poly_word_to_bigint(spaces: Option<&RtsSafeSpaces>, w: PolyWord) -> Option<Bi
     if w.is_tagged() {
         return Some(BigInt::from(w.untag()));
     }
-    // Gate the boxed deref on space-membership (untrusted) / is_data_ptr
-    // (trusted, byte-identical).
-    let p = safe_rts_arg_ptr(spaces, w)?;
+    // Header-fit gate: in untrusted mode this validates that the WHOLE boxed
+    // bignum object fits its space, so the variable-length limb read below is
+    // bounded (trusted: is_data_ptr only, n_words == MAX — byte-identical).
+    let obj = safe_rts_arg_obj(spaces, w)?;
+    let p = obj.ptr;
     // SAFETY: trusted (is_data_ptr) OR untrusted-validated in-space object.
     let lw = unsafe { crate::space::MemorySpace::length_word_of(p) };
     let flags = crate::length_word::flags_of(lw);
-    let n_words = crate::length_word::length_of(lw);
+    // Bound the limb count by the validated handle: the gate proved
+    // [p, p+n_words) fits the space, so reading n_words*8 bytes is in-bounds.
+    let n_words = obj.clamp_body_words(crate::length_word::length_of(lw));
     let sign = if flags & crate::length_word::F_NEGATIVE_BIT != 0 {
         Sign::Minus
     } else {
         Sign::Plus
     };
-    // SAFETY: body is n_words words = n_words * 8 bytes.
+    // SAFETY: body is n_words words = n_words * 8 bytes, bounded to the space.
     let body_ptr = p.cast::<u8>();
     let body =
         unsafe { std::slice::from_raw_parts(body_ptr, n_words * std::mem::size_of::<usize>()) };
@@ -2662,9 +2804,12 @@ fn poly_copy_byte_vec_to_closure(
     // image-controlled args whose length words are read below; gate both first
     // derefs on space-membership (None in trusted -> byte-identical).
     let spaces = ctx.safe_spaces.as_ref();
-    let (Some(bv_ptr), Some(cl_const)) = (
-        safe_rts_arg_ptr(spaces, byte_vec),
-        safe_rts_arg_ptr(spaces, closure),
+    // Header-fit gate: in untrusted mode this validates that BOTH the byte
+    // vector and the closure objects fit their spaces, so the wholesale body
+    // copy below is bounded (trusted: is_data_ptr only — byte-identical).
+    let (Some(bv_obj), Some(cl_obj)) = (
+        safe_rts_arg_obj(spaces, byte_vec),
+        safe_rts_arg_obj(spaces, closure),
     ) else {
         if RTS_TRACE.load(Ordering::Relaxed) {
             eprintln!(
@@ -2673,7 +2818,8 @@ fn poly_copy_byte_vec_to_closure(
         }
         return PolyWord::tagged(0);
     };
-    let cl_ptr = cl_const.cast_mut();
+    let bv_ptr = bv_obj.ptr;
+    let cl_ptr = cl_obj.ptr.cast_mut();
     // SAFETY: bv_ptr/cl_ptr space-validated (untrusted) / is_data_ptr (trusted).
     unsafe {
         let bv_len_word = crate::space::MemorySpace::length_word_of(bv_ptr);
@@ -2688,7 +2834,9 @@ fn poly_copy_byte_vec_to_closure(
             }
             return PolyWord::tagged(0);
         }
-        let n_words = length_of(bv_len_word);
+        // Bound the body word count copied below by the validated handle: the
+        // gate proved [bv_ptr, bv_ptr+n_words) fits the byte vector's space.
+        let n_words = bv_obj.clamp_body_words(length_of(bv_len_word));
 
         let cl_len_word = crate::space::MemorySpace::length_word_of(cl_ptr);
         if length_of(cl_len_word) != 1 || (flags_of(cl_len_word) & F_MUTABLE_BIT) == 0 {
@@ -3429,11 +3577,13 @@ fn write_array(spaces: Option<&RtsSafeSpaces>, strm: PolyWord, arg: PolyWord) ->
     // Best-effort fd extraction. `strm` is conventionally a
     // wrapped-fd object (see `wrap_file_descriptor`): a 1-word byte
     // object holding `fd + 1`.
-    // UNTRUSTED MODE (task #96, HOLE 5): `strm` and `arg` are
-    // image-controlled IO args; gate their first deref on space-membership.
-    let (Some(strm_p), Some(p)) = (
+    // UNTRUSTED MODE (task #96/#132): `strm` and `arg` are image-controlled IO
+    // args. `strm` is a single-word wrapped-fd read (safe_rts_arg_ptr); `arg`
+    // is a 3-tuple read at p[0..3], so gate it on header-fit and bound the 3
+    // word reads on its validated length.
+    let (Some(strm_p), Some(arg_obj)) = (
         safe_rts_arg_ptr(spaces, strm),
-        safe_rts_arg_ptr(spaces, arg),
+        safe_rts_arg_obj(spaces, arg),
     ) else {
         return PolyWord::tagged(0);
     };
@@ -3442,16 +3592,23 @@ fn write_array(spaces: Option<&RtsSafeSpaces>, strm: PolyWord, arg: PolyWord) ->
     if fd_plus_one == 0 {
         return PolyWord::tagged(0);
     }
-    // arg shape: 3-tuple (vec, offset, length).
+    // arg shape: 3-tuple (vec, offset, length). Bound the three word reads on
+    // the validated arg length (trusted: always passes — byte-identical).
+    if !arg_obj.word_in_bounds(2) {
+        return PolyWord::tagged(0);
+    }
+    let p = arg_obj.ptr;
+    // SAFETY: arg has >= 3 body words (untrusted) / is_data_ptr (trusted).
     let (vec, offset, length) = unsafe { (*p, *p.add(1), *p.add(2)) };
     if !offset.is_tagged() || !length.is_tagged() {
         return PolyWord::tagged(0);
     }
-    // UNTRUSTED MODE: `vec` is image-controlled; gate its deref on
-    // space-membership before the length-word shape check.
-    let Some(vec_p) = safe_rts_arg_ptr(spaces, vec) else {
+    // UNTRUSTED MODE: `vec` is image-controlled; gate its deref on header-fit
+    // so the body-size bound below is sound (not derived from a forged header).
+    let Some(vec_obj) = safe_rts_arg_obj(spaces, vec) else {
         return PolyWord::tagged(0);
     };
+    let vec_p = vec_obj.ptr;
     #[allow(clippy::cast_sign_loss)]
     let off = offset.untag() as usize;
     #[allow(clippy::cast_sign_loss)]
@@ -3473,14 +3630,19 @@ fn write_array(spaces: Option<&RtsSafeSpaces>, strm: PolyWord, arg: PolyWord) ->
         // SAFETY: vec_p is space-validated (untrusted) / is_data_ptr (trusted),
         // so vec-1 is a readable length word.
         let lw = unsafe { crate::space::MemorySpace::length_word_of(vec_p) };
-        let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
+        // Bound the body size by the validated handle: in untrusted mode the
+        // gate proved [vec_p, vec_p+n_words) fits the space, so `body_bytes` is
+        // a SOUND upper bound (trusted: n_words == MAX — byte-identical).
+        let body_bytes = vec_obj
+            .clamp_body_words(length_of(lw))
+            .saturating_mul(std::mem::size_of::<usize>());
         if !is_byte_object(lw) || off.checked_add(len).is_none_or(|end| end > body_bytes) {
             return PolyWord::tagged(0);
         }
     }
     // SAFETY: vec is a byte object and `off + len <= body_bytes` was just
     // verified, so reading off..off+len bytes of its body is in-bounds.
-    let base = vec.as_ptr::<u8>();
+    let base = vec_p.cast::<u8>();
     let slice = unsafe { std::slice::from_raw_parts(base.add(off), len) };
     // Route via std::io for fds 1/2; write real files via their fd.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -3748,7 +3910,11 @@ fn getrusage_micros(_who: i32, _user: bool) -> i128 {
 /// BEFORE any shape check. The deref is gated by [`safe_rts_arg_ptr`] on
 /// `spaces` (None in trusted mode -> byte-identical; a wild arg -> `None`).
 fn poly_string_to_rust(spaces: Option<&RtsSafeSpaces>, s: PolyWord) -> Option<String> {
-    let p = safe_rts_arg_ptr(spaces, s)?;
+    // Header-fit gate: in untrusted mode this validates the whole string
+    // object fits its space, so `body_bytes` below is a SOUND upper bound for
+    // the variable-length chars read (trusted: is_data_ptr only — identical).
+    let obj = safe_rts_arg_obj(spaces, s)?;
+    let p = obj.ptr;
     // Defence-in-depth (unsafe-audit finding #8, sibling of finding #6's
     // write_array/read_array guards): the trusted compiler always hands a real
     // PolyStringObject (a byte object whose word 0 is the byte length and whose
@@ -3769,7 +3935,12 @@ fn poly_string_to_rust(spaces: Option<&RtsSafeSpaces>, s: PolyWord) -> Option<St
     if !is_byte_object(lw) {
         return None;
     }
-    let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
+    // Bound the body size by the validated handle: in untrusted mode the gate
+    // proved [p, p+n_words) fits the space, so `body_bytes` is a SOUND upper
+    // bound for the chars read below (trusted: n_words == MAX — byte-identical).
+    let body_bytes = obj
+        .clamp_body_words(length_of(lw))
+        .saturating_mul(std::mem::size_of::<usize>());
     // word 0 of the body holds the byte count; the chars follow.
     // SAFETY: p is a byte object (just checked) of >= 1 word, so reading its
     // word 0 (the stored byte length) is in-bounds.
@@ -4029,10 +4200,12 @@ fn read_array_from_stream(
     arg: PolyWord,
 ) -> PolyWord {
     use std::io::Read;
-    // UNTRUSTED MODE: gate the strm + arg derefs on space-membership.
-    let (Some(strm_p), Some(p)) = (
+    // UNTRUSTED MODE (task #96/#132): `strm` is a single-word wrapped-fd read
+    // (safe_rts_arg_ptr); `arg` is a 3-tuple read at p[0..3], so gate it on
+    // header-fit and bound the three word reads on its validated length.
+    let (Some(strm_p), Some(arg_obj)) = (
         safe_rts_arg_ptr(spaces, strm),
-        safe_rts_arg_ptr(spaces, arg),
+        safe_rts_arg_obj(spaces, arg),
     ) else {
         return PolyWord::tagged(0);
     };
@@ -4040,14 +4213,21 @@ fn read_array_from_stream(
     if fd_plus_one == 0 {
         return PolyWord::tagged(0);
     }
+    if !arg_obj.word_in_bounds(2) {
+        return PolyWord::tagged(0);
+    }
+    let p = arg_obj.ptr;
+    // SAFETY: arg has >= 3 body words (untrusted) / is_data_ptr (trusted).
     let (buf, offset, length) = unsafe { (*p, *p.add(1), *p.add(2)) };
     if !offset.is_tagged() || !length.is_tagged() {
         return PolyWord::tagged(0);
     }
-    // UNTRUSTED MODE: gate the buf deref on space-membership.
-    let Some(buf_p) = safe_rts_arg_ptr(spaces, buf) else {
+    // UNTRUSTED MODE: gate the buf deref on header-fit so the body-size bound
+    // below is sound (not derived from a forged header).
+    let Some(buf_obj) = safe_rts_arg_obj(spaces, buf) else {
         return PolyWord::tagged(0);
     };
+    let buf_p = buf_obj.ptr;
     let off = offset.untag() as usize;
     let len = length.untag() as usize;
     if len == 0 {
@@ -4064,7 +4244,12 @@ fn read_array_from_stream(
         use crate::length_word::{is_byte_object, length_of};
         // SAFETY: buf_p is space-validated (untrusted) / is_data_ptr (trusted).
         let lw = unsafe { crate::space::MemorySpace::length_word_of(buf_p) };
-        let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
+        // Bound the body size by the validated handle: in untrusted mode the
+        // gate proved [buf_p, buf_p+n_words) fits the space, so `body_bytes` is
+        // a SOUND upper bound (trusted: n_words == MAX — byte-identical).
+        let body_bytes = buf_obj
+            .clamp_body_words(length_of(lw))
+            .saturating_mul(std::mem::size_of::<usize>());
         if !is_byte_object(lw) || off.checked_add(len).is_none_or(|end| end > body_bytes) {
             return PolyWord::tagged(0);
         }
@@ -5262,5 +5447,144 @@ mod tests {
         // Read it back via our converter.
         let bi = poly_word_to_bigint(None, r).expect("readable bignum");
         assert_eq!(bi, BigInt::from(1u64 << 63), "wrong product");
+    }
+
+    // ================================================================
+    // task #132 — the header-fit RTS-arg gate (RtsValidObj /
+    // safe_rts_arg_obj / RtsSafeSpaces::validate_obj_fit).
+    // ================================================================
+
+    /// Build an `RtsSafeSpaces` covering exactly `[storage_start,
+    /// storage_start + used_words)` of a `MemorySpace` — mirroring the live
+    /// snapshot the interpreter hands the RTS in untrusted mode.
+    fn rts_spaces_of(space: &crate::space::MemorySpace) -> RtsSafeSpaces {
+        let start = space.storage_bytes().as_ptr() as usize;
+        let end = start + space.used_words() * std::mem::size_of::<PolyWord>();
+        RtsSafeSpaces {
+            ranges: vec![(start, end)],
+        }
+    }
+
+    /// The gate ACCEPTS a legitimate in-space object and reports its true body
+    /// word count; the validated handle bounds each access correctly.
+    #[test]
+    fn rts_arg_obj_accepts_valid_and_reports_words() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Immutable);
+        let obj = space.alloc(3);
+        // SAFETY: just allocated 3 words.
+        unsafe { crate::space::set_length_word(obj, 3, 0) };
+        let spaces = rts_spaces_of(&space);
+        let w = PolyWord::from_ptr(obj.cast_const());
+
+        let v = safe_rts_arg_obj(Some(&spaces), w).expect("valid object accepted");
+        assert_eq!(v.n_words, 3);
+        assert!(v.word_in_bounds(0) && v.word_in_bounds(2));
+        assert!(!v.word_in_bounds(3), "index 3 is OOB for a 3-word object");
+        assert_eq!(
+            v.clamp_body_words(1_000_000),
+            3,
+            "clamped to validated size"
+        );
+        assert_eq!(v.clamp_body_words(2), 2);
+    }
+
+    /// THE CORE REJECTION: a FORGED length word that over-claims the object
+    /// (so the body would run past the space end) is rejected — the gate does
+    /// NOT hand back a handle a multi-word reader could over-read through.
+    #[test]
+    fn rts_arg_obj_rejects_forged_oversized_header() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Immutable);
+        let obj = space.alloc(2);
+        // Forge a length word claiming a million-word object that runs far past
+        // the space end (the exact over-read primitive a hostile image uses).
+        // SAFETY: writing the length word of a just-allocated object.
+        unsafe { crate::space::set_length_word(obj, 1_000_000, 0) };
+        let spaces = rts_spaces_of(&space);
+        let w = PolyWord::from_ptr(obj.cast_const());
+        assert!(
+            safe_rts_arg_obj(Some(&spaces), w).is_none(),
+            "an over-claiming header must be rejected (header-fit)"
+        );
+        // The string / bigint readers route the forged arg through the gate,
+        // so they yield the clean non-pointer result instead of over-reading.
+        assert_eq!(
+            poly_word_to_bigint(Some(&spaces), w),
+            None,
+            "bigint reader must not over-read a forged-length object"
+        );
+        assert_eq!(poly_string_to_rust(Some(&spaces), w), None);
+    }
+
+    /// BOUNDARY: an object whose claimed length EXACTLY fits the space is
+    /// accepted; claiming one word more (which would escape the slack) is
+    /// rejected. Proves the fit check is tight, not slack-dependent.
+    #[test]
+    fn rts_arg_obj_boundary_exact_fit_vs_one_over() {
+        // capacity = 4 words: [len][w0][w1][w2]. Allocate a 3-word object so
+        // its body occupies exactly w0..w2 (the last word is the space end).
+        let mut space = crate::space::MemorySpace::new(4, crate::space::SpaceKind::Immutable);
+        let obj = space.alloc(3);
+        let spaces = rts_spaces_of(&space); // end == start + 4 words
+        let w = PolyWord::from_ptr(obj.cast_const());
+
+        // Exact fit: length 3 -> body [p, p+3) == [w0, end). Accepted.
+        // SAFETY: writing the length word of a just-allocated object.
+        unsafe { crate::space::set_length_word(obj, 3, 0) };
+        assert_eq!(
+            safe_rts_arg_obj(Some(&spaces), w).map(|v| v.n_words),
+            Some(3),
+            "an object that exactly fills the space must be accepted"
+        );
+
+        // One over: length 4 -> body would run one word past the space end.
+        // SAFETY: writing the length word of a just-allocated object.
+        unsafe { crate::space::set_length_word(obj, 4, 0) };
+        assert!(
+            safe_rts_arg_obj(Some(&spaces), w).is_none(),
+            "a one-word-too-long header must be rejected"
+        );
+    }
+
+    /// The gate rejects non-pointer / wild / misaligned args (no deref).
+    #[test]
+    fn rts_arg_obj_rejects_tagged_wild_and_misaligned() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Immutable);
+        let obj = space.alloc(2);
+        // SAFETY: writing the length word of a just-allocated object.
+        unsafe { crate::space::set_length_word(obj, 2, 0) };
+        let spaces = rts_spaces_of(&space);
+
+        // Tagged int: not a pointer.
+        assert!(safe_rts_arg_obj(Some(&spaces), PolyWord::tagged(5)).is_none());
+        // Wild pointer far outside the space.
+        let wild = PolyWord::from_bits(0x4000_0000_0000_usize & !1);
+        assert!(safe_rts_arg_obj(Some(&spaces), wild).is_none());
+        // Misaligned but in-range: rejected before any (UB) length-word read.
+        let p = obj as usize;
+        let misaligned = PolyWord::from_bits(p | 0x2);
+        assert!(
+            safe_rts_arg_obj(Some(&spaces), misaligned).is_none(),
+            "a misaligned arg must be rejected before the length-word read"
+        );
+    }
+
+    /// TRUSTED MODE is byte-identical: `spaces == None` yields an UNBOUNDED
+    /// handle (the legacy is_data_ptr fast path) — every bound check passes and
+    /// no header is read, so the readers behave exactly as before.
+    #[test]
+    fn rts_arg_obj_trusted_is_unbounded_fast_path() {
+        let mut space = crate::space::MemorySpace::new(64, crate::space::SpaceKind::Immutable);
+        let obj = space.alloc(1);
+        // SAFETY: writing the length word of a just-allocated object.
+        unsafe { crate::space::set_length_word(obj, 1, 0) };
+        let w = PolyWord::from_ptr(obj.cast_const());
+
+        let v = safe_rts_arg_obj(None, w).expect("trusted accepts any data ptr");
+        assert_eq!(v.n_words, usize::MAX, "trusted sentinel = unbounded");
+        assert!(v.word_in_bounds(0) && v.word_in_bounds(1_000_000));
+        // clamp is a no-op in trusted mode (the reader uses its own length).
+        assert_eq!(v.clamp_body_words(7), 7);
+        // A tagged int is still rejected (matches the legacy is_data_ptr gate).
+        assert!(safe_rts_arg_obj(None, PolyWord::tagged(1)).is_none());
     }
 }
