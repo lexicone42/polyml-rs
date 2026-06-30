@@ -1892,7 +1892,7 @@ impl Interpreter {
             // mutex to unlocked and wake all blocked waiters.
             "PolyThreadMutexUnlock" => {
                 if let Some(mutex) = args.get(1) {
-                    Self::reset_mutex_word(*mutex);
+                    self.reset_mutex_word(*mutex)?;
                 }
                 self.runtime.notify_block_event();
                 Ok(Some(self.push_continue(PolyWord::tagged(0))?))
@@ -2214,12 +2214,28 @@ impl Interpreter {
     /// Reset a mutex object's word 0 to TAGGED(0) (unlocked). Mirrors
     /// `InterpreterReleaseMutex` (bytecode.cpp:2465). Defensive against a
     /// non-pointer "mutex".
-    fn reset_mutex_word(mutex: PolyWord) {
+    fn reset_mutex_word(&self, mutex: PolyWord) -> Result<(), InterpError> {
         if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
+            if self.untrusted {
+                // The mutex pointer is image-controlled (reachable only via
+                // PolyThreadMutexUnlock under POLY_REAL_THREADS=1 + --untrusted
+                // — the experimental real-threads + untrusted combo). Validate
+                // in-space + >= 1 word before the OOB-prone write. (#96
+                // secondary finding from the adversarial re-verify: this static
+                // fn could not consult self.untrusted; now a &self method.)
+                let vo = self.validate_obj(mutex, "MUTEX_UNLOCK")?;
+                vo.check_word_index(0)
+                    .map_err(|why| InterpError::BadImage {
+                        op: "MUTEX_UNLOCK",
+                        why,
+                    })?;
+            }
             let p = mutex.as_ptr::<PolyWord>().cast_mut();
-            // SAFETY: pointer-aligned data ptr ⇒ valid mutex slot.
+            // SAFETY: trusted (compiler-emitted mutex) OR untrusted-validated
+            // in-space object >= 1 word.
             unsafe { p.write(PolyWord::tagged(0)) };
         }
+        Ok(())
     }
 
     /// Run a copying GC over the alloc space, forwarding all roots
@@ -6423,7 +6439,7 @@ impl Interpreter {
     fn call_fast_r_to_r(&mut self) -> Result<StepResult, InterpError> {
         let stub = self.pop()?;
         let arg = self.pop()?;
-        let result = self.dispatch_typed_fast_call(stub, &[arg]);
+        let result = self.dispatch_typed_fast_call(stub, &[arg])?;
         let p = self.alloc_real(result)?;
         self.push_continue(p)
     }
@@ -6438,7 +6454,7 @@ impl Interpreter {
         let stub = self.pop()?;
         let arg2 = self.pop()?;
         let arg1 = self.pop()?;
-        let result = self.dispatch_typed_fast_call(stub, &[arg1, arg2]);
+        let result = self.dispatch_typed_fast_call(stub, &[arg1, arg2])?;
         let p = self.alloc_real(result)?;
         self.push_continue(p)
     }
@@ -6449,7 +6465,7 @@ impl Interpreter {
     fn call_fast_f_to_f(&mut self) -> Result<StepResult, InterpError> {
         let stub = self.pop()?;
         let arg = self.pop()?;
-        let result = self.dispatch_typed_fast_call(stub, &[arg]);
+        let result = self.dispatch_typed_fast_call(stub, &[arg])?;
         #[allow(clippy::cast_possible_truncation)]
         let f = result as f32;
         self.push_continue(Self::box_float(f))
@@ -6462,7 +6478,7 @@ impl Interpreter {
         let stub = self.pop()?;
         let arg2 = self.pop()?;
         let arg1 = self.pop()?;
-        let result = self.dispatch_typed_fast_call(stub, &[arg1, arg2]);
+        let result = self.dispatch_typed_fast_call(stub, &[arg1, arg2])?;
         #[allow(clippy::cast_possible_truncation)]
         let f = result as f32;
         self.push_continue(Self::box_float(f))
@@ -6479,15 +6495,35 @@ impl Interpreter {
     /// For our stub Real RTS impls (which return TAGGED(0)), the
     /// "f64 result" is 0.0 — which lets compilation pass even
     /// though runtime values are garbage. Real impl can replace.
-    fn dispatch_typed_fast_call(&mut self, stub: PolyWord, args: &[PolyWord]) -> f64 {
+    fn dispatch_typed_fast_call(
+        &mut self,
+        stub: PolyWord,
+        args: &[PolyWord],
+    ) -> Result<f64, InterpError> {
         if !stub.is_data_ptr() {
-            return 0.0;
+            return Ok(0.0);
+        }
+        if self.untrusted {
+            // The stub is an IMAGE-CONTROLLED operand off the stack: validate
+            // it is an in-space object with >= 1 word before reading word0 as
+            // the token. This is the #96 third sibling (found by the
+            // independent adversarial re-verify): the generic CALL_FAST_RTS
+            // path (rts_call) validates its stub, but this typed-FP twin
+            // (reached by CALL_FAST_*_TO_*) open-coded the same `(*p).0` read
+            // after only is_data_ptr -> 8-byte OOB read -> SEGV under
+            // --untrusted. Same fix shape as read_real/read_lg_word.
+            let vo = self.validate_obj(stub, "FAST_CALL")?;
+            vo.check_word_index(0)
+                .map_err(|why| InterpError::BadImage {
+                    op: "FAST_CALL",
+                    why,
+                })?;
         }
         let p = stub.as_ptr::<PolyWord>();
-        // SAFETY: stub is an entry-point object; word 0 is the token.
+        // SAFETY: trusted stub OR untrusted-validated in-space object >= 1 word.
         let token = unsafe { (*p).0 };
         let Some(entry) = self.rts.entry(token) else {
-            return 0.0;
+            return Ok(0.0);
         };
         let entry_func = entry.func;
         let rts_ref = self.rts.clone();
@@ -6506,12 +6542,11 @@ impl Interpreter {
             (2, crate::rts::RtsFn::Arity2(f)) => f(&mut ctx, args[0], args[1]),
             _ => PolyWord::tagged(0),
         };
-        if result_word.is_data_ptr() {
-            // SAFETY: result is a boxed-Real object.
-            unsafe { *result_word.as_ptr::<f64>() }
-        } else {
-            0.0
-        }
+        drop(ctx);
+        // The result is RTS-computed (a freshly-allocated boxed real), so it is
+        // safe to deref; route it through the validated reader for defense in
+        // depth (untrusted also bounds-checks it; trusted = direct deref).
+        self.read_real(result_word)
     }
 
     /// Real binop helper: pop x (boxed Real), peek y (boxed Real),

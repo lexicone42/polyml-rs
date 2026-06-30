@@ -361,6 +361,46 @@ fn corpus_real_wild_operand() -> (&'static str, &'static str, Vec<u8>) {
     )
 }
 
+/// Wild-pointer STUB to a typed fast-call (the task #96 THIRD sibling, found by
+/// the independent adversarial re-verify: `dispatch_typed_fast_call` read the
+/// image-controlled stub's word0 token via `(*p).0` after only is_data_ptr, with
+/// no untrusted gate — the typed-FP twin of the hardened generic CALL_FAST_RTS
+/// path. Reached by the CALL_FAST_*_TO_* family). Reads a forged word from a
+/// Bytes object, dups it (arg + stub both wild), then ESCAPE; CALL_FAST_R_TO_R.
+/// Pre-fix: SEGV under --untrusted. Post-fix: validate_obj(stub) -> BadImage.
+fn corpus_fastcall_wild_stub() -> (&'static str, &'static str, Vec<u8>) {
+    const ESCAPE: u8 = 0xfe;
+    const CALL_FAST_R_TO_R: u8 = 0x8f;
+    // LOCAL_0; INDIRECT_B 1 (bytes obj); INDIRECT_B 0 (forged word = arg);
+    // LOCAL_0 (dup -> stub = forged too); ESCAPE; CALL_FAST_R_TO_R; RETURN_B 1
+    let root_code = code(vec![
+        LOCAL_0,
+        INDIRECT_B,
+        1,
+        INDIRECT_B,
+        0,
+        LOCAL_0,
+        ESCAPE,
+        CALL_FAST_R_TO_R,
+        RETURN_B,
+        1,
+    ]);
+    let forged: [u8; 8] = [0x40, 0x42, 0x42, 0x42, 0x42, 0x00, 0x00, 0x00];
+    let objs = vec![
+        imm(ObjectBody::Closure {
+            code_addr: 1,
+            values: vec![Value::Ref(2)],
+        }),
+        imm(root_code),
+        imm(ObjectBody::Bytes(forged.to_vec())),
+    ];
+    (
+        "fastcall_wild_stub",
+        "a forged wild pointer used as the STUB of CALL_FAST_R_TO_R -> dispatch_typed_fast_call token OOB read",
+        to_text(&image_of(0, objs)),
+    )
+}
+
 fn corpus() -> Vec<(&'static str, &'static str, Vec<u8>)> {
     vec![
         corpus_lf_ref_52(),
@@ -371,6 +411,7 @@ fn corpus() -> Vec<(&'static str, &'static str, Vec<u8>)> {
         corpus_wild_pointer(),
         corpus_store_into_immutable(),
         corpus_real_wild_operand(),
+        corpus_fastcall_wild_stub(),
     ]
 }
 

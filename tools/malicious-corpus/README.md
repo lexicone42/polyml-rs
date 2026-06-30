@@ -27,3 +27,4 @@ These are regenerated + replayed by
 - `wild_pointer_from_bytes.txt` — read a forged 8-byte word from a Bytes object, then follow it as a pointer → wild deref
 - `code_object_as_ref_cell.txt` — a code object reached via a closure capture and dereferenced as a ref cell
 - `real_neg_wild_operand.txt` — a forged wild pointer used as the operand of REAL_NEG -> read_real OOB deref
+- `fastcall_wild_stub.txt` — a forged wild pointer used as the STUB of CALL_FAST_R_TO_R -> dispatch_typed_fast_call token OOB read
