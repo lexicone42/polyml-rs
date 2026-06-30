@@ -196,6 +196,57 @@ impl RtsSafeSpaces {
         let a = p as usize;
         self.ranges.iter().any(|&(start, end)| a > start && a < end)
     }
+
+    /// The exclusive end address (`usize`) of the live space containing `p`,
+    /// if any. Used to bound an object's body length against its containing
+    /// space (header sanity) — e.g. the export graph walk clamps a code/word
+    /// object's word count so a forged length word cannot drive a read past
+    /// the space end.
+    #[must_use]
+    pub fn space_end_of(&self, p: *const PolyWord) -> Option<usize> {
+        let a = p as usize;
+        self.ranges
+            .iter()
+            .find(|&&(start, end)| a > start && a < end)
+            .map(|&(_, end)| end)
+    }
+}
+
+/// THE misuse-resistant gate for the FIRST deref of an image-controlled RTS
+/// argument (task #96, HOLE 5). Every RTS reader free-function that derefs a
+/// `PolyWord` parameter (`read_real_word`, `poly_word_to_bigint`,
+/// `poly_string_to_rust`, the IO/array readers, `reset_mutex`, the byte-vec
+/// copier, …) MUST obtain its body pointer through this ONE helper instead of
+/// open-coding `w.is_data_ptr()` + `w.as_ptr()`. That makes the hole
+/// un-reintroducible: a future reader that forgets the space check simply
+/// cannot get a pointer without going through here.
+///
+/// Returns `Some(body_ptr)` ONLY when it is safe to deref `w` (its word0 and
+/// its length word at `p.sub(1)`):
+///   - TRUSTED (`spaces == None`, the default at every non-untrusted dispatch
+///     site): exactly the legacy `w.is_data_ptr()` gate — byte-identical, no
+///     extra cost. (Word-alignment was implied by the legacy code's deref; we
+///     do not add an alignment reject here so the trusted result set is the
+///     same as before.)
+///   - UNTRUSTED (`spaces == Some`, set only by the interpreter's `rts_call`
+///     when in untrusted mode): ALSO requires space-membership with header
+///     room (`contains_with_header`), so a wild / type-confused arg yields
+///     `None` and the reader falls into its existing non-pointer branch (a
+///     clean tagged(0) / EOF / empty-string result), never an OOB deref.
+#[inline]
+#[must_use]
+pub fn safe_rts_arg_ptr(spaces: Option<&RtsSafeSpaces>, w: PolyWord) -> Option<*const PolyWord> {
+    if !w.is_data_ptr() {
+        return None;
+    }
+    let p = w.as_ptr::<PolyWord>();
+    match spaces {
+        // Trusted: legacy behaviour (is_data_ptr only) — byte-identical.
+        None => Some(p),
+        // Untrusted: gate the first deref on space-membership + header room.
+        Some(s) if s.contains_with_header(p) => Some(p),
+        Some(_) => None,
+    }
 }
 
 // ---- RtsTable ---------------------------------------------------------
@@ -402,55 +453,55 @@ fn register_builtins(t: &mut RtsTable) {
     // a tagged int as a boxed double → wrong value / SEGV. Implement them for real.
     t.register(
         "PolyRealSqrt",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sqrt())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).sqrt())),
     );
     t.register(
         "PolyRealSin",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sin())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).sin())),
     );
     t.register(
         "PolyRealCos",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).cos())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).cos())),
     );
     t.register(
         "PolyRealTan",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).tan())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).tan())),
     );
     t.register(
         "PolyRealArcSin",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).asin())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).asin())),
     );
     t.register(
         "PolyRealArcCos",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).acos())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).acos())),
     );
     t.register(
         "PolyRealArctan",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).atan())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).atan())),
     );
     t.register(
         "PolyRealSinh",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).sinh())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).sinh())),
     );
     t.register(
         "PolyRealCosh",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).cosh())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).cosh())),
     );
     t.register(
         "PolyRealTanh",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).tanh())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).tanh())),
     );
     t.register(
         "PolyRealExp",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).exp())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).exp())),
     );
     t.register(
         "PolyRealLog",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).ln())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).ln())),
     );
     t.register(
         "PolyRealLog10",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).log10())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).log10())),
     );
     // floor/ceil/trunc obvious; round replicates upstream PolyRealRound's exact
     // fmod/floor(x+0.5) algorithm (reals.cpp:350-359) — round-half-to-even
@@ -458,19 +509,24 @@ fn register_builtins(t: &mut RtsTable) {
     // would diverge on sign-of-zero; see poly_real_round_f64.
     t.register(
         "PolyRealFloor",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).floor())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).floor())),
     );
     t.register(
         "PolyRealCeil",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).ceil())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).ceil())),
     );
     t.register(
         "PolyRealRound",
-        RtsFn::Arity1(|c, x| box_real(c, poly_real_round_f64(read_real_word(x)))),
+        RtsFn::Arity1(|c, x| {
+            box_real(
+                c,
+                poly_real_round_f64(read_real_word(c.safe_spaces.as_ref(), x)),
+            )
+        }),
     );
     t.register(
         "PolyRealTrunc",
-        RtsFn::Arity1(|c, x| box_real(c, read_real_word(x).trunc())),
+        RtsFn::Arity1(|c, x| box_real(c, read_real_word(c.safe_spaces.as_ref(), x).trunc())),
     );
     // FLOAT (Real32) unary math (rtsCallFastF_F: Real32 -> Real32, no threadId).
     // On 64-bit, Real32 args/results are TAGGED floats (f32 bits in the high 32,
@@ -552,25 +608,57 @@ fn register_builtins(t: &mut RtsTable) {
     // DOUBLE binary math (rtsCallFastRR_R: real*real -> real, no threadId).
     t.register(
         "PolyRealAtan2",
-        RtsFn::Arity2(|c, y, x| box_real(c, read_real_word(y).atan2(read_real_word(x)))),
+        RtsFn::Arity2(|c, y, x| {
+            box_real(
+                c,
+                read_real_word(c.safe_spaces.as_ref(), y)
+                    .atan2(read_real_word(c.safe_spaces.as_ref(), x)),
+            )
+        }),
     );
     t.register(
         "PolyRealPow",
-        RtsFn::Arity2(|c, b, e| box_real(c, read_real_word(b).powf(read_real_word(e)))),
+        RtsFn::Arity2(|c, b, e| {
+            box_real(
+                c,
+                read_real_word(c.safe_spaces.as_ref(), b)
+                    .powf(read_real_word(c.safe_spaces.as_ref(), e)),
+            )
+        }),
     );
     t.register(
         "PolyRealCopySign",
-        RtsFn::Arity2(|c, a, b| box_real(c, read_real_word(a).copysign(read_real_word(b)))),
+        RtsFn::Arity2(|c, a, b| {
+            box_real(
+                c,
+                read_real_word(c.safe_spaces.as_ref(), a)
+                    .copysign(read_real_word(c.safe_spaces.as_ref(), b)),
+            )
+        }),
     );
     t.register(
         "PolyRealRem",
-        RtsFn::Arity2(|c, a, b| box_real(c, read_real_word(a) % read_real_word(b))),
+        RtsFn::Arity2(|c, a, b| {
+            box_real(
+                c,
+                read_real_word(c.safe_spaces.as_ref(), a)
+                    % read_real_word(c.safe_spaces.as_ref(), b),
+            )
+        }),
     );
     // Real.nextAfter (Real.sml:480). Registered FIRST here to preserve the
     // dispatch-token ordinal it had as the head of the old stub array.
     t.register(
         "PolyRealNextAfter",
-        RtsFn::Arity2(|c, a, b| box_real(c, next_after(read_real_word(a), read_real_word(b)))),
+        RtsFn::Arity2(|c, a, b| {
+            box_real(
+                c,
+                next_after(
+                    read_real_word(c.safe_spaces.as_ref(), a),
+                    read_real_word(c.safe_spaces.as_ref(), b),
+                ),
+            )
+        }),
     );
     // FLOAT (Real32) binary math (rtsCallFastFF_F: Real32*Real32 -> Real32, no
     // threadId). Same tagged-f32 in / boxed-f64 out convention as the unary
@@ -608,7 +696,10 @@ fn register_builtins(t: &mut RtsTable) {
         RtsFn::Arity2(|c, m, e| {
             #[allow(clippy::cast_possible_truncation)]
             let exp = e.untag().clamp(-2000, 2000) as i32;
-            box_real(c, read_real_word(m) * 2f64.powi(exp))
+            box_real(
+                c,
+                read_real_word(c.safe_spaces.as_ref(), m) * 2f64.powi(exp),
+            )
         }),
     );
     // Real.fromLargeInt (and, under arbitrary-precision int, Real.fromInt): convert
@@ -623,7 +714,7 @@ fn register_builtins(t: &mut RtsTable) {
             use num_traits::ToPrimitive;
             box_real(
                 c,
-                poly_word_to_bigint(x)
+                poly_word_to_bigint(c.safe_spaces.as_ref(), x)
                     .and_then(|n| n.to_f64())
                     .unwrap_or(0.0),
             )
@@ -950,14 +1041,16 @@ fn register_builtins(t: &mut RtsTable) {
     // value >= 2^62). The SML wrapper only calls this for boxed (large) values.
     t.register(
         "PolyLog2Arbitrary",
-        RtsFn::Arity1(|_, x| match poly_word_to_bigint(x) {
-            Some(n) if n.bits() > 0 =>
-            {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                PolyWord::tagged((n.bits() - 1) as isize)
-            }
-            _ => PolyWord::tagged(0),
-        }),
+        RtsFn::Arity1(
+            |c, x| match poly_word_to_bigint(c.safe_spaces.as_ref(), x) {
+                Some(n) if n.bits() > 0 =>
+                {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    PolyWord::tagged((n.bits() - 1) as isize)
+                }
+                _ => PolyWord::tagged(0),
+            },
+        ),
     );
     t.register(
         "PolySizeDouble",
@@ -1268,7 +1361,7 @@ fn poly_export(
     root: PolyWord,
 ) -> PolyWord {
     use std::io::BufWriter;
-    let Some(name) = poly_string_to_rust(filename) else {
+    let Some(name) = poly_string_to_rust(ctx.safe_spaces.as_ref(), filename) else {
         ctx.raised_exception = Some(make_simple_exception(
             ctx,
             "PolyExport: filename is not a string",
@@ -1282,7 +1375,10 @@ fn poly_export(
         ));
         return PolyWord::tagged(0);
     }
-    let image = unsafe { crate::export::snapshot(root) };
+    // UNTRUSTED MODE (task #96, SURFACE 6): hand the live-space snapshot to the
+    // graph walk so it never derefs a wild/type-confused root or field. `None`
+    // (trusted) -> the byte-identical legacy walk.
+    let image = unsafe { crate::export::snapshot_gated(root, ctx.safe_spaces.clone()) };
     let file = match std::fs::File::create(&name) {
         Ok(f) => f,
         Err(e) => {
@@ -1639,10 +1735,10 @@ fn poly_process_env_error_name(
     // safety (a small SysWord could in principle arrive untagged).
     let e: i64 = if syserr.is_tagged() {
         syserr.untag() as i64
-    } else if syserr.is_data_ptr() {
-        // SAFETY: caller passes a boxed SysWord (1-word byte object);
-        // read its first body word as the errno.
-        let p = syserr.as_ptr::<PolyWord>();
+    } else if let Some(p) = safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), syserr) {
+        // UNTRUSTED MODE (task #96, HOLE 5): `syserr` is image-controlled; the
+        // boxed SysWord deref is gated on space-membership.
+        // SAFETY: p space-validated (untrusted) / is_data_ptr (trusted).
         unsafe { (*p).0 as i64 }
     } else {
         0
@@ -1717,8 +1813,8 @@ fn poly_get_function_name(ctx: &mut RtsContext<'_>, _tid: PolyWord, _code: PolyW
 /// (= unlocked), so the caller's retry loop exits on its next
 /// tryLockMutex.
 #[allow(clippy::needless_pass_by_value)]
-fn poly_thread_mutex_block(_: &mut RtsContext<'_>, _tid: PolyWord, mutex: PolyWord) -> PolyWord {
-    reset_mutex(mutex);
+fn poly_thread_mutex_block(ctx: &mut RtsContext<'_>, _tid: PolyWord, mutex: PolyWord) -> PolyWord {
+    reset_mutex(ctx.safe_spaces.as_ref(), mutex);
     PolyWord::tagged(0)
 }
 
@@ -1727,8 +1823,8 @@ fn poly_thread_mutex_block(_: &mut RtsContext<'_>, _tid: PolyWord, mutex: PolyWo
 /// `bytecode.cpp:2465`. (In multi-thread mode this also wakes
 /// waiters; single-thread has none.)
 #[allow(clippy::needless_pass_by_value)]
-fn poly_thread_mutex_unlock(_: &mut RtsContext<'_>, _tid: PolyWord, mutex: PolyWord) -> PolyWord {
-    reset_mutex(mutex);
+fn poly_thread_mutex_unlock(ctx: &mut RtsContext<'_>, _tid: PolyWord, mutex: PolyWord) -> PolyWord {
+    reset_mutex(ctx.safe_spaces.as_ref(), mutex);
     PolyWord::tagged(0)
 }
 
@@ -1754,6 +1850,13 @@ fn poly_basic_io_general(
         eprintln!("    PolyBasicIOGeneral subcode={c}");
     }
     let _ = (strm, arg);
+    // UNTRUSTED MODE (task #96, HOLE 5): snapshot the live spaces so the
+    // ctx-less stream readers (write_array / read_array_from_stream /
+    // close_file / close_directory) can gate their image-arg derefs without a
+    // borrow conflict with the `ctx`-taking arms. `None` in trusted mode -> a
+    // trivial clone, byte-identical.
+    let io_spaces = ctx.safe_spaces.clone();
+    let io_spaces = io_spaces.as_ref();
     match c {
         // 0/1/2: return wrapped stdio fds
         0 => wrap_file_descriptor(ctx, 0),
@@ -1767,11 +1870,11 @@ fn poly_basic_io_general(
         5 | 6 => open_file_output(ctx, arg, false),
         13 | 14 => open_file_output(ctx, arg, true),
         // 7: close the file (and mark the stream as closed).
-        7 => close_file(strm),
+        7 => close_file(io_spaces, strm),
         // 8/9: read text/binary into an array. arg is a 3-tuple
         //      (buffer, offset, length). Returns # bytes read
         //      (0 = EOF).
-        8 | 9 => read_array_from_stream(strm, arg),
+        8 | 9 => read_array_from_stream(io_spaces, strm, arg),
         // 10/26: read text/binary as a (PolyML) string. Route to
         // std::io::stdin for fd 0 so the bootstrap can actually
         // consume input from a pipe; everything else returns
@@ -1780,7 +1883,7 @@ fn poly_basic_io_general(
         // 11/12: write array — actually attempt to write to the fd
         // and return the byte count. Empty-pretend wasn't tested
         // yet but full write support makes future REPL output work.
-        11 | 12 => write_array(strm, arg),
+        11 | 12 => write_array(io_spaces, strm, arg),
         // 15: return recommended buffer size (4096)
         15 => PolyWord::tagged(4096),
         // 16: input available? Pretend yes.
@@ -1794,11 +1897,11 @@ fn poly_basic_io_general(
         // We use a global directory-state map keyed by a fresh id.
         50 => open_directory(ctx, arg),
         51 => read_directory(ctx, strm),
-        52 => close_directory(strm),
+        52 => close_directory(io_spaces, strm),
         // 54: getcwd
         54 => get_current_dir(ctx),
         // 57: isDir(name) → 1 / 0
-        57 => fs_is_dir(arg),
+        57 => fs_is_dir(io_spaces, arg),
         // 60: fullPath(name) → canonicalized absolute path
         60 => fs_full_path(ctx, arg),
         // 61: modTime(name) → microseconds since epoch as tagged-or-arb int
@@ -1808,9 +1911,9 @@ fn poly_basic_io_general(
         // 64: remove(name) — delete a file. HOL4's HolSat writes DIMACS temp
         //     files (via tmpName) and clean_delete()s them; without this they
         //     leak into the temp dir on every SAT/tautLib call.
-        64 => fs_remove(arg),
+        64 => fs_remove(io_spaces, arg),
         // 66: access(name, mode) → 1 / 0
-        66 => fs_access(arg, strm),
+        66 => fs_access(io_spaces, arg, strm),
         // 67: tmpName() → a fresh unique temp-file path string.
         //     HOL4's HolSat (dimacsTools) needs this before it falls
         //     through to its pure-SML DPLL prover; without it the call
@@ -1870,15 +1973,20 @@ use num_bigint::{BigInt, Sign};
 
 /// Read a `PolyWord` as a `BigInt`. Handles both tagged-int and
 /// PolyML-boxed bignum representations.
-fn poly_word_to_bigint(w: PolyWord) -> Option<BigInt> {
+///
+/// UNTRUSTED MODE (task #96, HOLE 5): `w` is an IMAGE-CONTROLLED IntInf arg;
+/// the boxed branch reads its length word at `p.sub(1)` (a deref BEFORE any
+/// shape check). The deref is gated by [`safe_rts_arg_ptr`] on `spaces` (None
+/// in trusted mode -> byte-identical; a wild/non-member arg -> `None`, which
+/// every caller turns into a clean tagged(0) / Div-handled result).
+fn poly_word_to_bigint(spaces: Option<&RtsSafeSpaces>, w: PolyWord) -> Option<BigInt> {
     if w.is_tagged() {
         return Some(BigInt::from(w.untag()));
     }
-    if !w.is_data_ptr() {
-        return None;
-    }
-    // SAFETY: caller passes a value the compiler trusts as a bignum.
-    let p = w.as_ptr::<PolyWord>();
+    // Gate the boxed deref on space-membership (untrusted) / is_data_ptr
+    // (trusted, byte-identical).
+    let p = safe_rts_arg_ptr(spaces, w)?;
+    // SAFETY: trusted (is_data_ptr) OR untrusted-validated in-space object.
     let lw = unsafe { crate::space::MemorySpace::length_word_of(p) };
     let flags = crate::length_word::flags_of(lw);
     let n_words = crate::length_word::length_of(lw);
@@ -1951,12 +2059,16 @@ fn i64_from_bigint_in_tag_range(n: &BigInt) -> Option<i64> {
 /// dispatch), and this is the slow boxed-overflow path, not the tagged
 /// fast path.
 fn arb_via_bigint(
+    spaces: Option<&RtsSafeSpaces>,
     alloc: Option<&mut crate::space::MemorySpace>,
     x: PolyWord,
     y: PolyWord,
     op: impl FnOnce(BigInt, BigInt) -> BigInt,
 ) -> PolyWord {
-    let (Some(a), Some(b)) = (poly_word_to_bigint(y), poly_word_to_bigint(x)) else {
+    let (Some(a), Some(b)) = (
+        poly_word_to_bigint(spaces, y),
+        poly_word_to_bigint(spaces, x),
+    ) else {
         return PolyWord::tagged(0);
     };
     let mut ctx = RtsContext {
@@ -1976,27 +2088,30 @@ fn arb_via_bigint(
 /// upstream `bytecode.cpp:1077` `INSTR_arbAdd` where y is the
 /// peek and x is the pop).
 pub fn arb_add_via_bigint(
+    spaces: Option<&RtsSafeSpaces>,
     alloc: Option<&mut crate::space::MemorySpace>,
     x: PolyWord,
     y: PolyWord,
 ) -> PolyWord {
-    arb_via_bigint(alloc, x, y, |a, b| a + b)
+    arb_via_bigint(spaces, alloc, x, y, |a, b| a + b)
 }
 
 pub fn arb_sub_via_bigint(
+    spaces: Option<&RtsSafeSpaces>,
     alloc: Option<&mut crate::space::MemorySpace>,
     x: PolyWord,
     y: PolyWord,
 ) -> PolyWord {
-    arb_via_bigint(alloc, x, y, |a, b| a - b)
+    arb_via_bigint(spaces, alloc, x, y, |a, b| a - b)
 }
 
 pub fn arb_mult_via_bigint(
+    spaces: Option<&RtsSafeSpaces>,
     alloc: Option<&mut crate::space::MemorySpace>,
     x: PolyWord,
     y: PolyWord,
 ) -> PolyWord {
-    arb_via_bigint(alloc, x, y, |a, b| a * b)
+    arb_via_bigint(spaces, alloc, x, y, |a, b| a * b)
 }
 
 // ---- arbitrary precision fast paths (tagged-int) -----------------
@@ -2050,7 +2165,10 @@ where
     {
         return PolyWord::tagged(r as isize);
     }
-    let (Some(a), Some(b)) = (poly_word_to_bigint(arg2), poly_word_to_bigint(arg1)) else {
+    let (Some(a), Some(b)) = (
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg2),
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg1),
+    ) else {
         return PolyWord::tagged(0);
     };
     let r = op_slow(&a, &b);
@@ -2126,7 +2244,10 @@ fn poly_divide_arbitrary(
         }
         // Fall through to bigint for MIN_TAGGED / -1 overflow.
     }
-    let (Some(a), Some(b)) = (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) else {
+    let (Some(a), Some(b)) = (
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg1),
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg2),
+    ) else {
         return PolyWord::tagged(0);
     };
     if b == BigInt::from(0) {
@@ -2150,7 +2271,10 @@ fn poly_remainder_arbitrary(
             return PolyWord::tagged(dvd % dvdr);
         }
     }
-    let (Some(a), Some(b)) = (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) else {
+    let (Some(a), Some(b)) = (
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg1),
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg2),
+    ) else {
         return PolyWord::tagged(0);
     };
     if b == BigInt::from(0) {
@@ -2160,7 +2284,7 @@ fn poly_remainder_arbitrary(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn poly_compare_arbitrary(_: &mut RtsContext<'_>, arg1: PolyWord, arg2: PolyWord) -> PolyWord {
+fn poly_compare_arbitrary(ctx: &mut RtsContext<'_>, arg1: PolyWord, arg2: PolyWord) -> PolyWord {
     // IntInf/LargeInt compare: TAGGED sign(arg1 - arg2) ∈ {-1,0,1}.
     // arb.cpp:1858-1862 PolyCompareArbitrary = compareLong(arg2,arg1) = sign(arg1-arg2).
     // The SML side (Int.sml:84-96, InitialBasis.ML) only calls this when at least one
@@ -2173,7 +2297,10 @@ fn poly_compare_arbitrary(_: &mut RtsContext<'_>, arg1: PolyWord, arg2: PolyWord
     if arg1.0 == arg2.0 {
         return PolyWord::tagged(0);
     }
-    let ord = match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+    let ord = match (
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg1),
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg2),
+    ) {
         (Some(a), Some(b)) => a.cmp(&b),
         _ => return PolyWord::tagged(0),
     };
@@ -2197,7 +2324,10 @@ fn poly_or_arbitrary(
     if both_tagged(arg1, arg2).is_some() {
         return PolyWord::from_bits(arg1.0 | arg2.0);
     }
-    match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+    match (
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg1),
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg2),
+    ) {
         (Some(a), Some(b)) => bigint_to_poly_word(ctx, &(a | b)),
         _ => PolyWord::tagged(0),
     }
@@ -2212,7 +2342,10 @@ fn poly_and_arbitrary(
     if both_tagged(arg1, arg2).is_some() {
         return PolyWord::from_bits(arg1.0 & arg2.0);
     }
-    match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+    match (
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg1),
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg2),
+    ) {
         (Some(a), Some(b)) => bigint_to_poly_word(ctx, &(a & b)),
         _ => PolyWord::tagged(0),
     }
@@ -2228,7 +2361,10 @@ fn poly_xor_arbitrary(
         // XOR cancels the tag bits → set it back.
         return PolyWord::from_bits((arg1.0 ^ arg2.0) | 1);
     }
-    match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+    match (
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg1),
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg2),
+    ) {
         (Some(a), Some(b)) => bigint_to_poly_word(ctx, &(a ^ b)),
         _ => PolyWord::tagged(0),
     }
@@ -2253,7 +2389,7 @@ fn poly_shift_left_arbitrary(
     if by <= 0 {
         return arg; // shift 0 is identity; negatives don't occur (word arg)
     }
-    let Some(n) = poly_word_to_bigint(arg) else {
+    let Some(n) = poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg) else {
         return PolyWord::tagged(0);
     };
     #[allow(clippy::cast_sign_loss)]
@@ -2281,7 +2417,7 @@ fn poly_shift_right_arbitrary(
     if by <= 0 {
         return arg;
     }
-    let Some(n) = poly_word_to_bigint(arg) else {
+    let Some(n) = poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg) else {
         return PolyWord::tagged(0);
     };
     #[allow(clippy::cast_sign_loss)]
@@ -2313,7 +2449,10 @@ fn poly_gcd_arbitrary(
         }
     }
     use num_integer::Integer;
-    match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+    match (
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg1),
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg2),
+    ) {
         (Some(a), Some(b)) => bigint_to_poly_word(ctx, &a.gcd(&b)),
         _ => PolyWord::tagged(0),
     }
@@ -2380,7 +2519,10 @@ fn poly_lcm_arbitrary(
         // overflow: fall through to BigInt.
     }
     // BigInt fallback: compute |lcm| then restore the signed convention.
-    match (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) {
+    match (
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg1),
+        poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg2),
+    ) {
         (Some(a), Some(b)) => {
             let mut l = a.lcm(&b); // non-negative magnitude
             // sign(arg1) * sign(arg2): negate iff exactly one operand is negative.
@@ -2423,7 +2565,10 @@ fn poly_quot_rem_arbitrary_pair(
             (PolyWord::tagged(dvd / dvdr), PolyWord::tagged(dvd % dvdr))
         }
     } else {
-        let (Some(a), Some(b)) = (poly_word_to_bigint(arg1), poly_word_to_bigint(arg2)) else {
+        let (Some(a), Some(b)) = (
+            poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg1),
+            poly_word_to_bigint(ctx.safe_spaces.as_ref(), arg2),
+        ) else {
             return PolyWord::tagged(0);
         };
         // Zero divisor with a boxed dividend (e.g. divMod(2^70, 0)) — raise Div.
@@ -2462,12 +2607,12 @@ fn poly_get_low_order_as_large_word(
         #[allow(clippy::cast_sign_loss)]
         let v = arg.untag() as usize;
         v
-    } else if arg.is_data_ptr() {
+    } else if let Some(p) = safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), arg) {
         // Boxed: read first body word as the low limb of the MAGNITUDE.
         // Bignums are sign-magnitude, so for a negative-flagged object the
         // two's-complement low word is `0 - low` (arb.cpp:1936 `if(negative) p=0-p`).
-        let p = arg.as_ptr::<PolyWord>();
-        // SAFETY: caller-trusted boxed bignum.
+        // UNTRUSTED MODE (task #96, HOLE 5): the boxed deref is gated above.
+        // SAFETY: p space-validated (untrusted) / is_data_ptr (trusted).
         let low = unsafe { (*p).0 };
         let lw = unsafe { crate::space::MemorySpace::length_word_of(p) };
         if crate::length_word::flags_of(lw) & crate::length_word::F_NEGATIVE_BIT != 0 {
@@ -2513,17 +2658,23 @@ fn poly_copy_byte_vec_to_closure(
     closure: PolyWord,
 ) -> PolyWord {
     use crate::length_word::{F_CODE_OBJ, F_MUTABLE_BIT, flags_of, is_byte_object, length_of};
-    if !byte_vec.is_data_ptr() || !closure.is_data_ptr() {
+    // UNTRUSTED MODE (task #96, HOLE 5): byte_vec + closure are
+    // image-controlled args whose length words are read below; gate both first
+    // derefs on space-membership (None in trusted -> byte-identical).
+    let spaces = ctx.safe_spaces.as_ref();
+    let (Some(bv_ptr), Some(cl_const)) = (
+        safe_rts_arg_ptr(spaces, byte_vec),
+        safe_rts_arg_ptr(spaces, closure),
+    ) else {
         if RTS_TRACE.load(Ordering::Relaxed) {
             eprintln!(
-                "  PolyCopyByteVecToClosure: non-pointer arg(s)? byte_vec={byte_vec:?}, closure={closure:?}"
+                "  PolyCopyByteVecToClosure: non-pointer / out-of-space arg(s)? byte_vec={byte_vec:?}, closure={closure:?}"
             );
         }
         return PolyWord::tagged(0);
-    }
-    let bv_ptr = byte_vec.as_ptr::<PolyWord>();
-    let cl_ptr = closure.as_ptr::<PolyWord>().cast_mut();
-    // SAFETY: caller (compiler) is trusted on the object layouts.
+    };
+    let cl_ptr = cl_const.cast_mut();
+    // SAFETY: bv_ptr/cl_ptr space-validated (untrusted) / is_data_ptr (trusted).
     unsafe {
         let bv_len_word = crate::space::MemorySpace::length_word_of(bv_ptr);
         if !is_byte_object(bv_len_word) {
@@ -2893,12 +3044,8 @@ fn poly_real_double_to_string(
     kind: PolyWord,
     prec: PolyWord,
 ) -> PolyWord {
-    let v: f64 = if arg.is_data_ptr() {
-        // SAFETY: caller passes a boxed Real (1-word byte object).
-        unsafe { *arg.as_ptr::<f64>() }
-    } else {
-        0.0
-    };
+    // HOLE 5: `arg` is the image-controlled real arg; gate via the helper.
+    let v: f64 = read_real_word(ctx.safe_spaces.as_ref(), arg);
     let kind_ch = if kind.is_tagged() {
         u32::try_from(kind.untag())
             .ok()
@@ -3017,10 +3164,16 @@ fn strip_g_trailing(s: &str) -> String {
 /// Returns a 2-word tuple `[boxed_mantissa, tagged_exponent]`.
 #[allow(clippy::needless_pass_by_value)]
 /// Read a `PolyWord` argument as an `f64` (boxed Real = 1-word byte object).
-fn read_real_word(x: PolyWord) -> f64 {
-    if x.is_data_ptr() {
-        // SAFETY: caller passes a boxed Real (1-word byte object).
-        unsafe { *x.as_ptr::<f64>() }
+///
+/// UNTRUSTED MODE (task #96, HOLE 5): `x` is the IMAGE-CONTROLLED RTS arg of
+/// every Real op (sqrt/sin/.../atan2/pow/copysign/rem/nextafter — ~30 regs);
+/// a wild-but-aligned arg is an 8-byte OOB read -> SEGV. The deref is gated by
+/// [`safe_rts_arg_ptr`] on `spaces` (None in trusted mode -> byte-identical;
+/// a non-member pointer -> the 0.0 non-pointer branch).
+fn read_real_word(spaces: Option<&RtsSafeSpaces>, x: PolyWord) -> f64 {
+    if let Some(p) = safe_rts_arg_ptr(spaces, x) {
+        // SAFETY: trusted (is_data_ptr) OR untrusted-validated in-space object.
+        unsafe { *p.cast::<f64>() }
     } else {
         0.0
     }
@@ -3184,12 +3337,10 @@ fn box_real(ctx: &mut RtsContext<'_>, v: f64) -> PolyWord {
 
 fn poly_real_frexp(ctx: &mut RtsContext<'_>, _tid: PolyWord, x: PolyWord) -> PolyWord {
     use crate::length_word::F_BYTE_OBJ;
-    let v: f64 = if x.is_data_ptr() {
-        // SAFETY: caller passes a boxed Real (1-word byte object).
-        unsafe { *x.as_ptr::<f64>() }
-    } else {
-        0.0
-    };
+    // HOLE 5 (the prompt's named PoC): `x` is the image-controlled real arg;
+    // gate its deref through the misuse-resistant helper (None in trusted ->
+    // byte-identical; a wild/non-member arg -> the 0.0 branch).
+    let v: f64 = read_real_word(ctx.safe_spaces.as_ref(), x);
     // Rust doesn't have built-in frexp; use the standard
     // decomposition via integer bit pattern manipulation.
     let (mantissa, exponent) = frexp_f64(v);
@@ -3274,24 +3425,33 @@ use std::io::Write;
 /// shape doesn't match (or strm isn't wrapping a real fd), we
 /// return 0 — meaning "wrote nothing" — which is the safe stub
 /// behaviour that doesn't break consumers.
-fn write_array(strm: PolyWord, arg: PolyWord) -> PolyWord {
+fn write_array(spaces: Option<&RtsSafeSpaces>, strm: PolyWord, arg: PolyWord) -> PolyWord {
     // Best-effort fd extraction. `strm` is conventionally a
     // wrapped-fd object (see `wrap_file_descriptor`): a 1-word byte
     // object holding `fd + 1`.
-    if !strm.is_data_ptr() || !arg.is_data_ptr() {
+    // UNTRUSTED MODE (task #96, HOLE 5): `strm` and `arg` are
+    // image-controlled IO args; gate their first deref on space-membership.
+    let (Some(strm_p), Some(p)) = (
+        safe_rts_arg_ptr(spaces, strm),
+        safe_rts_arg_ptr(spaces, arg),
+    ) else {
         return PolyWord::tagged(0);
-    }
-    // SAFETY: caller (compiler) is trusted.
-    let fd_plus_one = unsafe { *strm.as_ptr::<PolyWord>() }.0;
+    };
+    // SAFETY: trusted (is_data_ptr) OR untrusted-validated in-space object.
+    let fd_plus_one = unsafe { *strm_p }.0;
     if fd_plus_one == 0 {
         return PolyWord::tagged(0);
     }
     // arg shape: 3-tuple (vec, offset, length).
-    let p = arg.as_ptr::<PolyWord>();
     let (vec, offset, length) = unsafe { (*p, *p.add(1), *p.add(2)) };
-    if !vec.is_data_ptr() || !offset.is_tagged() || !length.is_tagged() {
+    if !offset.is_tagged() || !length.is_tagged() {
         return PolyWord::tagged(0);
     }
+    // UNTRUSTED MODE: `vec` is image-controlled; gate its deref on
+    // space-membership before the length-word shape check.
+    let Some(vec_p) = safe_rts_arg_ptr(spaces, vec) else {
+        return PolyWord::tagged(0);
+    };
     #[allow(clippy::cast_sign_loss)]
     let off = offset.untag() as usize;
     #[allow(clippy::cast_sign_loss)]
@@ -3310,8 +3470,9 @@ fn write_array(strm: PolyWord, arg: PolyWord) -> PolyWord {
     // unsafe slice; on violation return the existing "wrote nothing" stub.
     {
         use crate::length_word::{is_byte_object, length_of};
-        // SAFETY: vec.is_data_ptr() checked above, so vec-1 is a length word.
-        let lw = unsafe { crate::space::MemorySpace::length_word_of(vec.as_ptr()) };
+        // SAFETY: vec_p is space-validated (untrusted) / is_data_ptr (trusted),
+        // so vec-1 is a readable length word.
+        let lw = unsafe { crate::space::MemorySpace::length_word_of(vec_p) };
         let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
         if !is_byte_object(lw) || off.checked_add(len).is_none_or(|end| end > body_bytes) {
             return PolyWord::tagged(0);
@@ -3353,7 +3514,7 @@ static DIR_STATE: std::sync::Mutex<Vec<Option<Vec<Vec<u8>>>>> = std::sync::Mutex
 /// IO subcode 50: open directory. Wraps the read-dir iterator in
 /// a stream-like object keyed by an integer id.
 fn open_directory(ctx: &mut RtsContext<'_>, name_arg: PolyWord) -> PolyWord {
-    let Some(name) = poly_string_to_rust(name_arg) else {
+    let Some(name) = poly_string_to_rust(ctx.safe_spaces.as_ref(), name_arg) else {
         return PolyWord::tagged(0);
     };
     if RTS_TRACE.load(Ordering::Relaxed) {
@@ -3391,11 +3552,12 @@ fn open_directory(ctx: &mut RtsContext<'_>, name_arg: PolyWord) -> PolyWord {
 
 /// IO subcode 51: read next directory entry. Returns "" at end.
 fn read_directory(ctx: &mut RtsContext<'_>, strm: PolyWord) -> PolyWord {
-    if !strm.is_data_ptr() {
+    // UNTRUSTED MODE: gate the strm deref on space-membership.
+    let Some(strm_p) = safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), strm) else {
         return alloc_empty_string(ctx);
-    }
-    // SAFETY: strm is a wrapped-fd object.
-    let id_plus_one = unsafe { *strm.as_ptr::<PolyWord>() }.0;
+    };
+    // SAFETY: strm_p is space-validated (untrusted) / is_data_ptr (trusted).
+    let id_plus_one = unsafe { *strm_p }.0;
     if id_plus_one == 0 {
         return alloc_empty_string(ctx);
     }
@@ -3415,12 +3577,13 @@ fn read_directory(ctx: &mut RtsContext<'_>, strm: PolyWord) -> PolyWord {
 }
 
 /// IO subcode 52: close directory.
-fn close_directory(strm: PolyWord) -> PolyWord {
-    if !strm.is_data_ptr() {
+fn close_directory(spaces: Option<&RtsSafeSpaces>, strm: PolyWord) -> PolyWord {
+    // UNTRUSTED MODE: gate the strm deref on space-membership.
+    let Some(strm_p) = safe_rts_arg_ptr(spaces, strm) else {
         return PolyWord::tagged(0);
-    }
-    let p = strm.as_ptr::<PolyWord>().cast_mut();
-    // SAFETY: strm is a wrapped object.
+    };
+    let p = strm_p.cast_mut();
+    // SAFETY: strm_p is space-validated (untrusted) / is_data_ptr (trusted).
     unsafe {
         let id_plus_one = (*p).0;
         if id_plus_one > 0 {
@@ -3461,16 +3624,16 @@ fn fs_tmp_name(ctx: &mut RtsContext<'_>) -> PolyWord {
 /// IO subcode 64: `OS.FileSys.remove` — delete a file. Best-effort:
 /// errors are swallowed (callers like HOL4's `clean_delete` already wrap
 /// this in an exception handler), and the result is unit (`TAGGED(0)`).
-fn fs_remove(arg: PolyWord) -> PolyWord {
-    if let Some(name) = poly_string_to_rust(arg) {
+fn fs_remove(spaces: Option<&RtsSafeSpaces>, arg: PolyWord) -> PolyWord {
+    if let Some(name) = poly_string_to_rust(spaces, arg) {
         let _ = std::fs::remove_file(&name);
     }
     PolyWord::tagged(0)
 }
 
 /// IO subcode 57: `OS.FileSys.isDir`.
-fn fs_is_dir(arg: PolyWord) -> PolyWord {
-    let Some(name) = poly_string_to_rust(arg) else {
+fn fs_is_dir(spaces: Option<&RtsSafeSpaces>, arg: PolyWord) -> PolyWord {
+    let Some(name) = poly_string_to_rust(spaces, arg) else {
         return PolyWord::tagged(0);
     };
     match std::fs::metadata(&name) {
@@ -3485,7 +3648,7 @@ fn fs_is_dir(arg: PolyWord) -> PolyWord {
 /// string by substituting `"."` before calling `realpath`, so
 /// `fullPath "" = fullPath "."` = the current directory (Test196).
 fn fs_full_path(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
-    let Some(name) = poly_string_to_rust(arg) else {
+    let Some(name) = poly_string_to_rust(ctx.safe_spaces.as_ref(), arg) else {
         return alloc_empty_string(ctx);
     };
     // Empty path is treated as "." (the cwd), matching upstream.
@@ -3501,7 +3664,7 @@ fn fs_full_path(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
 /// IO subcode 61: `OS.FileSys.modTime` — microseconds since epoch.
 /// Returns a tagged or arbitrary-precision integer.
 fn fs_mod_time(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
-    let Some(name) = poly_string_to_rust(arg) else {
+    let Some(name) = poly_string_to_rust(ctx.safe_spaces.as_ref(), arg) else {
         return PolyWord::tagged(0);
     };
     let usecs: i128 = std::fs::metadata(&name)
@@ -3516,7 +3679,7 @@ fn fs_mod_time(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
 
 /// IO subcode 62: `OS.FileSys.fileSize`.
 fn fs_file_size(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
-    let Some(name) = poly_string_to_rust(arg) else {
+    let Some(name) = poly_string_to_rust(ctx.safe_spaces.as_ref(), arg) else {
         return PolyWord::tagged(0);
     };
     let size = std::fs::metadata(&name).map(|m| m.len()).unwrap_or(0);
@@ -3525,8 +3688,8 @@ fn fs_file_size(ctx: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
 
 /// IO subcode 66: `OS.FileSys.access(name, mode)`.
 /// The mode is a bit-set: 1=read, 2=write, 4=exec, 8=exists.
-fn fs_access(name_arg: PolyWord, mode_arg: PolyWord) -> PolyWord {
-    let Some(name) = poly_string_to_rust(name_arg) else {
+fn fs_access(spaces: Option<&RtsSafeSpaces>, name_arg: PolyWord, mode_arg: PolyWord) -> PolyWord {
+    let Some(name) = poly_string_to_rust(spaces, name_arg) else {
         return PolyWord::tagged(0);
     };
     let Ok(meta) = std::fs::metadata(&name) else {
@@ -3579,10 +3742,13 @@ fn getrusage_micros(_who: i32, _user: bool) -> i128 {
 
 /// Extract a Rust `String` from a PolyString pointer. Returns
 /// `None` for non-pointer / non-string-shaped args.
-fn poly_string_to_rust(s: PolyWord) -> Option<String> {
-    if !s.is_data_ptr() {
-        return None;
-    }
+///
+/// UNTRUSTED MODE (task #96, HOLE 5): `s` is an IMAGE-CONTROLLED string arg
+/// (every filename / string RTS arg); its length word at `p.sub(1)` is read
+/// BEFORE any shape check. The deref is gated by [`safe_rts_arg_ptr`] on
+/// `spaces` (None in trusted mode -> byte-identical; a wild arg -> `None`).
+fn poly_string_to_rust(spaces: Option<&RtsSafeSpaces>, s: PolyWord) -> Option<String> {
+    let p = safe_rts_arg_ptr(spaces, s)?;
     // Defence-in-depth (unsafe-audit finding #8, sibling of finding #6's
     // write_array/read_array guards): the trusted compiler always hands a real
     // PolyStringObject (a byte object whose word 0 is the byte length and whose
@@ -3596,9 +3762,9 @@ fn poly_string_to_rust(s: PolyWord) -> Option<String> {
     // over-read to ~1 MB but did NOT prevent it. Verify the object is a byte
     // object and `len` fits its body (matching `name_for_code_object` in
     // length_word.rs and the write_array guard).
-    let p = s.as_ptr::<PolyWord>();
     use crate::length_word::{is_byte_object, length_of};
-    // SAFETY: s.is_data_ptr() checked above, so p-1 is a length word.
+    // SAFETY: p is space-validated (untrusted) / is_data_ptr (trusted), so
+    // p-1 is a readable length word.
     let lw = unsafe { crate::space::MemorySpace::length_word_of(p) };
     if !is_byte_object(lw) {
         return None;
@@ -3626,7 +3792,7 @@ fn poly_string_to_rust(s: PolyWord) -> Option<String> {
 /// or a TAGGED(0) on error (caller treats that as failure).
 fn open_file_input(ctx: &mut RtsContext<'_>, name_arg: PolyWord) -> PolyWord {
     use std::os::fd::IntoRawFd;
-    let Some(name) = poly_string_to_rust(name_arg) else {
+    let Some(name) = poly_string_to_rust(ctx.safe_spaces.as_ref(), name_arg) else {
         if RTS_TRACE.load(Ordering::Relaxed) {
             eprintln!("  open_file_input: couldn't decode filename");
         }
@@ -3788,7 +3954,7 @@ pub fn make_div_exception(ctx: &mut RtsContext<'_>) -> PolyWord {
 /// hard stub that returned `""`, which the basis wrapped as `SOME ""`
 /// for *every* variable (set or not).
 fn poly_get_env(ctx: &mut RtsContext<'_>, _tid: PolyWord, name_arg: PolyWord) -> PolyWord {
-    let Some(name) = poly_string_to_rust(name_arg) else {
+    let Some(name) = poly_string_to_rust(ctx.safe_spaces.as_ref(), name_arg) else {
         ctx.raised_exception = Some(make_syserr_exception(ctx, "getEnv: bad argument"));
         return PolyWord::tagged(0);
     };
@@ -3807,7 +3973,7 @@ fn poly_get_env(ctx: &mut RtsContext<'_>, _tid: PolyWord, name_arg: PolyWord) ->
 /// unless `append`).
 fn open_file_output(ctx: &mut RtsContext<'_>, name_arg: PolyWord, append: bool) -> PolyWord {
     use std::os::fd::IntoRawFd;
-    let Some(name) = poly_string_to_rust(name_arg) else {
+    let Some(name) = poly_string_to_rust(ctx.safe_spaces.as_ref(), name_arg) else {
         return PolyWord::tagged(0);
     };
     let mut opts = std::fs::OpenOptions::new();
@@ -3830,14 +3996,15 @@ fn open_file_output(ctx: &mut RtsContext<'_>, name_arg: PolyWord, append: bool) 
 /// IO subcode 7: close the file. Skips stdio (fds 0/1/2). After
 /// close, mark the stream object as `0` (= "closed") so re-close
 /// is a no-op.
-fn close_file(strm: PolyWord) -> PolyWord {
+fn close_file(spaces: Option<&RtsSafeSpaces>, strm: PolyWord) -> PolyWord {
     use std::os::fd::FromRawFd;
-    if !strm.is_data_ptr() {
+    // UNTRUSTED MODE: gate the strm deref on space-membership.
+    let Some(strm_p) = safe_rts_arg_ptr(spaces, strm) else {
         return PolyWord::tagged(0);
-    }
-    let p = strm.as_ptr::<PolyWord>().cast_mut();
-    // SAFETY: stream is a wrapped-fd object (1 byte-object word
-    // holding fd+1).
+    };
+    let p = strm_p.cast_mut();
+    // SAFETY: strm_p is space-validated (untrusted) / is_data_ptr (trusted);
+    // a wrapped-fd object (1 byte-object word holding fd+1).
     unsafe {
         let fd_plus_one = (*p).0;
         if fd_plus_one > 3 {
@@ -3856,20 +4023,31 @@ fn close_file(strm: PolyWord) -> PolyWord {
 /// the 3-tuple.
 #[allow(clippy::cast_sign_loss)]
 #[allow(clippy::cast_possible_wrap)]
-fn read_array_from_stream(strm: PolyWord, arg: PolyWord) -> PolyWord {
+fn read_array_from_stream(
+    spaces: Option<&RtsSafeSpaces>,
+    strm: PolyWord,
+    arg: PolyWord,
+) -> PolyWord {
     use std::io::Read;
-    if !strm.is_data_ptr() || !arg.is_data_ptr() {
+    // UNTRUSTED MODE: gate the strm + arg derefs on space-membership.
+    let (Some(strm_p), Some(p)) = (
+        safe_rts_arg_ptr(spaces, strm),
+        safe_rts_arg_ptr(spaces, arg),
+    ) else {
         return PolyWord::tagged(0);
-    }
-    let fd_plus_one = unsafe { *strm.as_ptr::<PolyWord>() }.0;
+    };
+    let fd_plus_one = unsafe { *strm_p }.0;
     if fd_plus_one == 0 {
         return PolyWord::tagged(0);
     }
-    let p = arg.as_ptr::<PolyWord>();
     let (buf, offset, length) = unsafe { (*p, *p.add(1), *p.add(2)) };
-    if !buf.is_data_ptr() || !offset.is_tagged() || !length.is_tagged() {
+    if !offset.is_tagged() || !length.is_tagged() {
         return PolyWord::tagged(0);
     }
+    // UNTRUSTED MODE: gate the buf deref on space-membership.
+    let Some(buf_p) = safe_rts_arg_ptr(spaces, buf) else {
+        return PolyWord::tagged(0);
+    };
     let off = offset.untag() as usize;
     let len = length.untag() as usize;
     if len == 0 {
@@ -3884,8 +4062,8 @@ fn read_array_from_stream(strm: PolyWord, arg: PolyWord) -> PolyWord {
     // unsafe mutable slice; on violation return the "read nothing" stub.
     {
         use crate::length_word::{is_byte_object, length_of};
-        // SAFETY: buf.is_data_ptr() checked above, so buf-1 is a length word.
-        let lw = unsafe { crate::space::MemorySpace::length_word_of(buf.as_ptr()) };
+        // SAFETY: buf_p is space-validated (untrusted) / is_data_ptr (trusted).
+        let lw = unsafe { crate::space::MemorySpace::length_word_of(buf_p) };
         let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
         if !is_byte_object(lw) || off.checked_add(len).is_none_or(|end| end > body_bytes) {
             return PolyWord::tagged(0);
@@ -3893,7 +4071,7 @@ fn read_array_from_stream(strm: PolyWord, arg: PolyWord) -> PolyWord {
     }
     // SAFETY: buf is a byte object and `off + len <= body_bytes` was just
     // verified, so writing off..off+len bytes of its body is in-bounds.
-    let base = buf.as_ptr::<u8>().cast_mut();
+    let base = buf_p.cast::<u8>().cast_mut();
     let slice = unsafe { std::slice::from_raw_parts_mut(base.add(off), len) };
     #[allow(clippy::cast_possible_truncation)]
     let fd = (fd_plus_one - 1) as i32;
@@ -3925,12 +4103,13 @@ fn read_array_from_stream(strm: PolyWord, arg: PolyWord) -> PolyWord {
 /// require a real file-open path (subcodes 3/4) first.
 fn read_string_from_stream(ctx: &mut RtsContext<'_>, strm: PolyWord, arg: PolyWord) -> PolyWord {
     use std::io::Read;
-    if !strm.is_data_ptr() {
+    // UNTRUSTED MODE: gate the strm deref on space-membership.
+    let Some(strm_p) = safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), strm) else {
         return alloc_empty_string(ctx);
-    }
-    // SAFETY: strm is a wrapped-fd object created by
-    // `wrap_file_descriptor` (or an equivalent boxed sysword).
-    let fd_plus_one = unsafe { *strm.as_ptr::<PolyWord>() }.0;
+    };
+    // SAFETY: strm_p is space-validated (untrusted) / is_data_ptr (trusted);
+    // a wrapped-fd object created by `wrap_file_descriptor`.
+    let fd_plus_one = unsafe { *strm_p }.0;
     #[allow(clippy::cast_sign_loss)]
     let want = if arg.is_tagged() {
         let n = arg.untag();
@@ -4009,7 +4188,7 @@ fn poly_create_entry_point_object(
     name_arg: PolyWord,
 ) -> PolyWord {
     use crate::length_word::{F_BYTE_OBJ, F_MUTABLE_BIT, F_NO_OVERWRITE, F_WEAK_BIT};
-    let Some(name) = poly_string_to_rust(name_arg) else {
+    let Some(name) = poly_string_to_rust(ctx.safe_spaces.as_ref(), name_arg) else {
         return PolyWord::tagged(0);
     };
     let Some(rts) = ctx.rts else {
@@ -4087,12 +4266,19 @@ fn wrap_file_descriptor(ctx: &mut RtsContext<'_>, fd: u32) -> PolyWord {
     PolyWord::from_ptr(p.cast_const())
 }
 
-fn reset_mutex(mutex: PolyWord) {
-    if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
-        let p = mutex.as_ptr::<PolyWord>().cast_mut();
-        // SAFETY: pointer-aligned & is_data_ptr → valid mutex slot
-        unsafe { p.write(PolyWord::tagged(0)) };
+fn reset_mutex(spaces: Option<&RtsSafeSpaces>, mutex: PolyWord) {
+    // UNTRUSTED MODE (task #96, HOLE 5): `mutex` is an image-controlled arg
+    // written through (`p.write`); gate it on space-membership + alignment.
+    if mutex.0 & (std::mem::size_of::<usize>() - 1) != 0 {
+        return;
     }
+    let Some(p) = safe_rts_arg_ptr(spaces, mutex) else {
+        return;
+    };
+    let p = p.cast_mut();
+    // SAFETY: p is space-validated (untrusted) / is_data_ptr (trusted) and
+    // word-aligned → a valid mutex slot.
+    unsafe { p.write(PolyWord::tagged(0)) };
 }
 
 #[cfg(test)]
@@ -4404,20 +4590,26 @@ mod tests {
         let ok = mk_tuple(&mut space, 0, 16);
         // fd 0 write_array returns 0 ("nothing written") by design; the point
         // is it does NOT trip the bounds guard and does NOT fault.
-        let _ = write_array(strm, ok);
-        let _ = read_array_from_stream(strm, ok);
+        let _ = write_array(None, strm, ok);
+        let _ = read_array_from_stream(None, strm, ok);
 
         // OOB: off=0, len=1<<20 >> 16-byte body. The guard must short-circuit
         // to Tagged(0) WITHOUT constructing the over-long slice (no OOB / no
         // fault). If the guard were missing this test would SIGSEGV.
         let bad_len = mk_tuple(&mut space, 0, 1 << 20);
-        assert_eq!(write_array(strm, bad_len), PolyWord::tagged(0));
-        assert_eq!(read_array_from_stream(strm, bad_len), PolyWord::tagged(0));
+        assert_eq!(write_array(None, strm, bad_len), PolyWord::tagged(0));
+        assert_eq!(
+            read_array_from_stream(None, strm, bad_len),
+            PolyWord::tagged(0)
+        );
 
         // OOB via offset: off past the body, len small.
         let bad_off = mk_tuple(&mut space, 1000, 8);
-        assert_eq!(write_array(strm, bad_off), PolyWord::tagged(0));
-        assert_eq!(read_array_from_stream(strm, bad_off), PolyWord::tagged(0));
+        assert_eq!(write_array(None, strm, bad_off), PolyWord::tagged(0));
+        assert_eq!(
+            read_array_from_stream(None, strm, bad_off),
+            PolyWord::tagged(0)
+        );
     }
 
     // Regression for Test196 (`OS.FileSys.fullPath ""` = `fullPath "."`).
@@ -4442,8 +4634,8 @@ mod tests {
         let empty_res = fs_full_path(&mut ctx, empty_arg);
         let dot_res = fs_full_path(&mut ctx, dot_arg);
 
-        let empty_str = poly_string_to_rust(empty_res).expect("fullPath \"\" decodes");
-        let dot_str = poly_string_to_rust(dot_res).expect("fullPath \".\" decodes");
+        let empty_str = poly_string_to_rust(None, empty_res).expect("fullPath \"\" decodes");
+        let dot_str = poly_string_to_rust(None, dot_res).expect("fullPath \".\" decodes");
 
         // The empty path must canonicalize to the cwd, not stay empty…
         assert!(!empty_str.is_empty(), "fullPath \"\" should not be empty");
@@ -4541,12 +4733,15 @@ mod tests {
         );
         assert!(a.is_data_ptr());
         let r = poly_and_arbitrary(&mut c, t(), a, PolyWord::tagged(0xFF));
-        assert_eq!(poly_word_to_bigint(r).unwrap(), BigInt::from(0xFu8));
+        assert_eq!(poly_word_to_bigint(None, r).unwrap(), BigInt::from(0xFu8));
         // gcd of two boxed multiples: gcd(2^65, 3*2^65) == 2^65
         let g1 = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 65u32));
         let g2 = bigint_to_poly_word(&mut c, &(BigInt::from(3u8) * (BigInt::from(1u8) << 65u32)));
         let g = poly_gcd_arbitrary(&mut c, t(), g1, g2);
-        assert_eq!(poly_word_to_bigint(g).unwrap(), BigInt::from(1u8) << 65u32);
+        assert_eq!(
+            poly_word_to_bigint(None, g).unwrap(),
+            BigInt::from(1u8) << 65u32
+        );
     }
 
     /// Pack an f32 the way the interpreter's `box_float` does: f32 bits in the
@@ -4653,10 +4848,10 @@ mod tests {
             r.is_data_ptr(),
             "errorName must return a boxed string, not tagged(0)"
         );
-        assert_eq!(poly_string_to_rust(r).as_deref(), Some("ENOENT"));
+        assert_eq!(poly_string_to_rust(None, r).as_deref(), Some("ENOENT"));
         // Unknown code falls back to ERROR<n> (process_env.cpp:255).
         let r = poly_process_env_error_name(&mut c, t(), PolyWord::tagged(99999));
-        assert_eq!(poly_string_to_rust(r).as_deref(), Some("ERROR99999"));
+        assert_eq!(poly_string_to_rust(None, r).as_deref(), Some("ERROR99999"));
     }
 
     // unsafe-audit finding #8: poly_string_to_rust used to over-read past the
@@ -4678,7 +4873,7 @@ mod tests {
             PolyWord::from_ptr(good.cast_const())
         };
         assert_eq!(
-            poly_string_to_rust(good_w).as_deref(),
+            poly_string_to_rust(None, good_w).as_deref(),
             Some("ok"),
             "a well-formed PolyString must still decode"
         );
@@ -4692,7 +4887,7 @@ mod tests {
             PolyWord::from_ptr(liar.cast_const())
         };
         assert_eq!(
-            poly_string_to_rust(liar_w),
+            poly_string_to_rust(None, liar_w),
             None,
             "an oversized stored length must be rejected, not over-read"
         );
@@ -4707,13 +4902,13 @@ mod tests {
             PolyWord::from_ptr(tup.cast_const())
         };
         assert_eq!(
-            poly_string_to_rust(tup_w),
+            poly_string_to_rust(None, tup_w),
             None,
             "a non-byte object must be rejected (no is_byte_object -> length confusion)"
         );
 
         // A tagged int is rejected by the existing is_data_ptr gate.
-        assert_eq!(poly_string_to_rust(PolyWord::tagged(42)), None);
+        assert_eq!(poly_string_to_rust(None, PolyWord::tagged(42)), None);
     }
 
     #[test]
@@ -4733,7 +4928,7 @@ mod tests {
                 RtsFn::Arity1(f) => f(c, PolyWord::tagged(0)),
                 _ => panic!("arity"),
             };
-            poly_word_to_bigint(w)
+            poly_word_to_bigint(None, w)
                 .and_then(|n| num_traits::ToPrimitive::to_i128(&n))
                 .unwrap()
         };
@@ -4771,7 +4966,10 @@ mod tests {
         let big = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 80u32));
         assert!(big.is_data_ptr(), "2^80 must box");
         let r = poly_and_arbitrary(&mut c, t(), PolyWord::tagged(-1), big);
-        assert_eq!(poly_word_to_bigint(r).unwrap(), BigInt::from(1u8) << 80u32);
+        assert_eq!(
+            poly_word_to_bigint(None, r).unwrap(),
+            BigInt::from(1u8) << 80u32
+        );
     }
 
     #[test]
@@ -4794,7 +4992,7 @@ mod tests {
         assert_eq!(BigInt::from(neg_p62.untag()), -&p62);
         let r = poly_and_arbitrary(&mut c, t(), neg_p62, boxed_p62);
         assert_eq!(
-            poly_word_to_bigint(r).unwrap(),
+            poly_word_to_bigint(None, r).unwrap(),
             p62.clone(),
             "andb(-2^62, 2^62) should be 2^62"
         );
@@ -4803,7 +5001,7 @@ mod tests {
         let boxed_p64 = bigint_to_poly_word(&mut c, &p64);
         let r2 = poly_and_arbitrary(&mut c, t(), PolyWord::tagged(MIN_TAGGED), boxed_p64);
         assert_eq!(
-            poly_word_to_bigint(r2).unwrap(),
+            poly_word_to_bigint(None, r2).unwrap(),
             p64,
             "andb(-2^62, 2^64) should be 2^64"
         );
@@ -4838,7 +5036,7 @@ mod tests {
         let neg_p80 = bigint_to_poly_word(&mut c, &(-(BigInt::from(1u8) << 80u32)));
         let r = poly_lcm_arbitrary(&mut c, t(), neg_p80, PolyWord::tagged(6));
         assert_eq!(
-            poly_word_to_bigint(r).unwrap(),
+            poly_word_to_bigint(None, r).unwrap(),
             -((BigInt::from(1u8) << 80u32) * BigInt::from(3u8)),
             "lcm(-2^80, 6) should be -(3*2^80)"
         );
@@ -4855,7 +5053,7 @@ mod tests {
         let mt = BigInt::from(max_tag);
         let expected = &mt / mt.gcd(&BigInt::from(100)) * BigInt::from(100);
         assert_eq!(
-            poly_word_to_bigint(r2).unwrap(),
+            poly_word_to_bigint(None, r2).unwrap(),
             expected,
             "lcm(2^62-1, 100) must not truncate to 0"
         );
@@ -4940,7 +5138,7 @@ mod tests {
         };
         let r = poly_shift_left_arbitrary(&mut c, t(), PolyWord::tagged(1), PolyWord::tagged(70));
         assert!(r.is_data_ptr(), "1<<70 should be boxed");
-        let bi = poly_word_to_bigint(r).expect("readable bignum");
+        let bi = poly_word_to_bigint(None, r).expect("readable bignum");
         assert_eq!(bi, BigInt::from(1u128 << 70));
         // round-trip back down: (1<<70) ~>> 70 = 1.
         let back = poly_shift_right_arbitrary(&mut c, t(), r, PolyWord::tagged(70));
@@ -5020,7 +5218,7 @@ mod tests {
             r.is_data_ptr(),
             "2^62 should be boxed (MAX_TAGGED = 2^62-1)"
         );
-        let bi = poly_word_to_bigint(r).expect("readable bignum");
+        let bi = poly_word_to_bigint(None, r).expect("readable bignum");
         assert_eq!(bi, BigInt::from(1u64 << 62), "wrong product");
     }
 
@@ -5039,7 +5237,7 @@ mod tests {
         let b = PolyWord::tagged(1 << 32);
         let r = poly_multiply_arbitrary(&mut ctx, t(), a, b);
         assert!(r.is_data_ptr(), "expected boxed");
-        let bi = poly_word_to_bigint(r).expect("readable");
+        let bi = poly_word_to_bigint(None, r).expect("readable");
         let expected = -BigInt::from(1u64 << 63);
         assert_eq!(bi, expected);
     }
@@ -5062,7 +5260,7 @@ mod tests {
         let r = poly_multiply_arbitrary(&mut ctx, PolyWord::tagged(0), a, b);
         assert!(r.is_data_ptr(), "expected boxed bignum, got {r:?}");
         // Read it back via our converter.
-        let bi = poly_word_to_bigint(r).expect("readable bignum");
+        let bi = poly_word_to_bigint(None, r).expect("readable bignum");
         assert_eq!(bi, BigInt::from(1u64 << 63), "wrong product");
     }
 }

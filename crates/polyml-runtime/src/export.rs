@@ -48,8 +48,41 @@ use std::collections::HashMap;
 /// underlying memory must stay valid for the duration of the call.
 #[must_use]
 pub unsafe fn snapshot(root: PolyWord) -> Image {
-    let mut builder = SnapshotBuilder::default();
-    let root_id = unsafe { builder.intern(root) };
+    // Trusted call site: no space validation (byte-identical to before).
+    unsafe { snapshot_gated(root, None) }
+}
+
+/// Build an [`Image`] snapshot, optionally gating EVERY pointer-follow on a
+/// live-space membership test (task #96, HOLE 6 / SURFACE 6).
+///
+/// The export path (`PolyExport` / `PolyExportPortable`, reachable from
+/// untrusted bytecode via `CALL_FULL_RTS3`) walks the object graph reachable
+/// from `root`, dereferencing `*body_ptr.sub(1)` for the root AND every child
+/// pointer it interns. A wild / type-confused `root` or field would SEGV
+/// during that walk. When `spaces` is `Some`, a pointer that is not a live
+/// space member is NOT interned/walked — it is emitted as a safe placeholder
+/// (`Value::Tagged(0)`), so the walk only ever derefs space-validated
+/// addresses. `None` (trusted) is byte-identical to the legacy walk.
+///
+/// # Safety
+/// `root` must be a tagged value or a valid heap pointer; in untrusted mode
+/// (`spaces == Some`) an out-of-space `root` yields an empty image instead of
+/// a deref. The underlying memory must stay valid for the call.
+#[must_use]
+pub unsafe fn snapshot_gated(root: PolyWord, spaces: Option<crate::rts::RtsSafeSpaces>) -> Image {
+    let mut builder = SnapshotBuilder {
+        spaces,
+        ..SnapshotBuilder::default()
+    };
+    // Validate the root before interning: an out-of-space root must not enter
+    // the work queue (else drain would deref its length word).
+    let root_id = if root.is_tagged() || builder.ptr_ok(root) {
+        unsafe { builder.intern(root) }
+    } else {
+        // Out-of-space root: emit a single empty placeholder object as root.
+        builder.objects.push(placeholder());
+        0
+    };
     unsafe { builder.drain() };
     Image {
         root: root_id,
@@ -70,6 +103,24 @@ struct SnapshotBuilder {
     /// Queue of object addresses whose bodies still need walking.
     /// We pop until empty.
     pending: Vec<usize>,
+    /// UNTRUSTED MODE (task #96, SURFACE 6): the live image+alloc spaces. When
+    /// `Some`, every pointer is checked for space-membership before it is
+    /// interned/walked, so the graph walk never derefs a wild/type-confused
+    /// pointer. `None` (trusted) -> no check, byte-identical.
+    spaces: Option<crate::rts::RtsSafeSpaces>,
+}
+
+impl SnapshotBuilder {
+    /// Whether following `w` as a heap pointer is safe in the current mode:
+    /// trusted (`spaces == None`) -> always (the legacy behaviour);
+    /// untrusted (`spaces == Some`) -> only when `w` is a live-space member
+    /// with header room. Caller has already excluded tagged values.
+    #[inline]
+    fn ptr_ok(&self, w: PolyWord) -> bool {
+        self.spaces
+            .as_ref()
+            .is_none_or(|s| w.is_data_ptr() && s.contains_with_header(w.as_ptr::<PolyWord>()))
+    }
 }
 
 impl SnapshotBuilder {
@@ -103,7 +154,22 @@ impl SnapshotBuilder {
     }
 
     unsafe fn build_object(&mut self, body_ptr: *const PolyWord, lw: PolyWord) -> Object {
-        let n = length_word::length_of(lw);
+        // HEADER SANITY (task #96, SURFACE 6): the length word is image
+        // controlled. In untrusted mode clamp the object's word count to what
+        // fits its containing space, so a forged oversized header cannot drive
+        // build_code/build_ordinary to read past the space end (a SEGV).
+        // Trusted mode (spaces None) uses `n` verbatim — byte-identical.
+        let n = {
+            let raw_n = length_word::length_of(lw);
+            self.spaces
+                .as_ref()
+                .and_then(|s| s.space_end_of(body_ptr))
+                .map_or(raw_n, |end| {
+                    let avail =
+                        end.saturating_sub(body_ptr as usize) / std::mem::size_of::<usize>();
+                    raw_n.min(avail)
+                })
+        };
         let raw_flags = length_word::flags_of(lw);
         let ty = length_word::type_of(lw);
         let mut flags = ObjFlags::default();
@@ -155,10 +221,14 @@ impl SnapshotBuilder {
         // Word 0 is a raw code-object pointer; remaining words are
         // captured ML values.
         let code_word = unsafe { *body_ptr };
-        let code_addr = if code_word.is_tagged() {
-            // Strange — but produce a stable placeholder.
+        let code_addr = if code_word.is_tagged() || !self.ptr_ok(code_word) {
+            // Tagged (strange) OR — UNTRUSTED MODE (SURFACE 6) — an
+            // out-of-space code pointer: produce a stable placeholder rather
+            // than interning + later dereferencing a wild code-object pointer.
             self.tagged_as_dummy_obj(code_word)
         } else {
+            // SAFETY: code_word space-validated by ptr_ok (untrusted) /
+            // trusted caller upholds validity.
             unsafe { self.intern(code_word) }
         };
         let mut values = Vec::with_capacity(n.saturating_sub(1));
@@ -190,9 +260,50 @@ impl SnapshotBuilder {
         // single PolyWord so the snapshot doesn't include the count
         // word as if it were bytecode.
         let word_bytes = std::mem::size_of::<usize>();
-        let (cp_start, count) = unsafe { length_word::const_segment_for_code(body_ptr) };
-        let cp_start_addr = cp_start as usize;
         let body_start_addr = body_ptr as usize;
+        let (cp_start, count) = if self.spaces.is_some() {
+            // UNTRUSTED MODE (task #96, SURFACE 6): `const_segment_for_code`
+            // derefs the trailing-offset word at body[n-1] AND the count word
+            // at cp[-1] for an attacker-controlled `cp` — two unguarded reads
+            // (the residual the cold export_corrupt_code_oob_repro probe
+            // documents). Compute (cp, count) inline with bounds: `n` is the
+            // SPACE-CLAMPED word count, so body[n-1] is in-space; `cp` is
+            // derived from the (forged-allowed) trailing offset by INTEGER
+            // arithmetic and only the count word is read AFTER confirming cp[-1]
+            // lies inside the object body. A wild cp yields count 0.
+            let obj_end = body_start_addr + n.saturating_mul(word_bytes);
+            if n < 2 {
+                (body_ptr, 0usize)
+            } else {
+                // SAFETY: n >= 2 and n is space-clamped, so body[n-1] is a
+                // readable in-space word.
+                let last_word_ptr = unsafe { body_ptr.add(n - 1) };
+                #[allow(clippy::cast_possible_wrap)]
+                let offset_bytes = unsafe { (*last_word_ptr).0 } as isize;
+                #[allow(clippy::cast_possible_wrap)]
+                let wb = word_bytes as isize;
+                // cp = last_word_ptr + 1 + offset_bytes/word_bytes (integer
+                // arithmetic, never a wild pointer `.offset`).
+                #[allow(clippy::cast_sign_loss)]
+                let off_term = (offset_bytes / wb).wrapping_mul(wb) as usize;
+                let cp_addr = (last_word_ptr as usize)
+                    .wrapping_add(word_bytes)
+                    .wrapping_add(off_term);
+                // The count word is at cp-1; it must lie inside the object body
+                // (>= body_start + 1 word so cp-1 is a body slot, < obj_end).
+                if cp_addr > body_start_addr && cp_addr <= obj_end {
+                    // SAFETY: cp-1 is in [body_start, obj_end) ⊆ the in-space body.
+                    let cnt = unsafe { *((cp_addr - word_bytes) as *const PolyWord) }.0;
+                    (cp_addr as *const PolyWord, cnt)
+                } else {
+                    (body_ptr, 0usize)
+                }
+            }
+        } else {
+            // Trusted: byte-identical to the legacy walk.
+            unsafe { length_word::const_segment_for_code(body_ptr) }
+        };
+        let cp_start_addr = cp_start as usize;
         // The whole object body spans [body_start_addr, obj_end_addr). The
         // const-segment pointer and count come from `const_segment_for_code`,
         // which reads the object's own (loader-written) trailing-offset and
@@ -250,8 +361,16 @@ impl SnapshotBuilder {
         if w.is_tagged() {
             return Value::Tagged(w.untag() as i64);
         }
-        // It's a pointer. Intern.
-        // SAFETY: caller of snapshot upholds heap validity.
+        // It's a pointer. UNTRUSTED MODE (SURFACE 6): only intern (and thus
+        // later deref via drain) a pointer that is a live-space member; a
+        // wild/type-confused field becomes a safe placeholder so the graph
+        // walk never follows it. Trusted mode (spaces None) interns everything
+        // — byte-identical.
+        if !self.ptr_ok(w) {
+            return Value::Tagged(0);
+        }
+        // SAFETY: caller of snapshot upholds heap validity (trusted) OR `w`
+        // was just space-validated by ptr_ok (untrusted).
         let id = unsafe { self.intern(w) };
         Value::Ref(id)
     }

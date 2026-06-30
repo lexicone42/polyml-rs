@@ -65,15 +65,37 @@ were audited systematically, and the runtime is fuzzed against untrusted input.
   mismatch), both **fixed**; the denial-of-service hardening held perfectly (zero
   hangs, zero out-of-memory kills, zero panics across the corpus).
 
-### The one honest caveat
+### Untrusted images: the `--untrusted` safe mode
 
 The pexport image format carries *untyped* references: a well-formed, in-range word
 can point at a wrong-*type* object, and the loader cannot reject that without
-whole-image type inference. The trusted SML compiler never emits such a word, so
-this is not reachable when running compiler-produced images — but it means
-**loading a deliberately-malicious image is not guaranteed safe.** This is the
-*same* exposure upstream Poly/ML's format has. Hardening the interpreter's
-dereferences with a typed-pointer check is tracked future work.
+whole-image type inference (the *same* exposure upstream Poly/ML's format has). The
+trusted SML compiler never emits such a word, so this is not reachable when running
+compiler-produced images.
+
+For running *foreign* images, **`poly run --untrusted <image>`** is a memory-safe
+mode: every dangerous pointer-follow — the field-load / call / heap read-write
+opcodes, the PC-relative constant reads, the RTS argument readers, and the export
+object-graph walk — validates the pointer (space-membership + object-header sanity +
+per-op shape) before the unsafe use, turning a malicious image's would-be UB (OOB
+read/write, wild jump) into a clean `BadImage` halt. The **default (trusted) path is
+byte-identical and exactly as fast** — the bootstrap runs the same 1,110,805 steps;
+every check sits behind `if self.untrusted`, so the proven-fastest path is untouched.
+A committed malicious-image corpus (`tools/malicious-corpus/`,
+`crates/polyml-bin/tests/untrusted_corpus.rs`) proves it: each image genuinely SEGVs
+in trusted mode and is a clean halt under `--untrusted`; a mechanical lint
+(`tools/lint-image-deref.py`) enumerates the whole image-controlled-operand deref
+surface and is a regression guard. (The hardening was found, the hard way, to span
+three deref *surfaces* — per-opcode operand reads, PC-relative code-stream reads, and
+the RTS-argument / export readers — across four adversarial-verification rounds; the
+lint exists so a future change re-flags any un-gated deref instead of shipping it.)
+
+*Residual (defense-in-depth, not weaponizable):* the RTS-argument gate checks
+space-membership but not the full object-length-fits invariant the per-opcode path
+enforces, so a few multi-word RTS readers still lean on allocator invariants (which
+were traced and currently hold); routing them through the full predicate is a tracked
+hardening follow-up. Running the experimental real-OS-threads mode together with
+`--untrusted` is likewise out of the validated envelope.
 
 ## Reproducing
 

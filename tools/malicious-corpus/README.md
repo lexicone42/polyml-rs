@@ -28,3 +28,5 @@ These are regenerated + replayed by
 - `code_object_as_ref_cell.txt` — a code object reached via a closure capture and dereferenced as a ref cell
 - `real_neg_wild_operand.txt` — a forged wild pointer used as the operand of REAL_NEG -> read_real OOB deref
 - `fastcall_wild_stub.txt` — a forged wild pointer used as the STUB of CALL_FAST_R_TO_R -> dispatch_typed_fast_call token OOB read
+- `const_addr32_wild.txt` — CONST_ADDR32_16 with a 1 GiB byte offset -> read_pc_const escapes the code object -> wild OOB read
+- `rts_reader_wild.txt` — PolyRealFrexp via CALL_FAST_RTS2 with a forged wild real arg -> read_real_word OOB *f64 deref

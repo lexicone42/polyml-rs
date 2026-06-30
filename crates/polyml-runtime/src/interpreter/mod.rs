@@ -5056,24 +5056,24 @@ impl Interpreter {
             //   const_addr16_8    val = (PolyWord*)(self.pc + imm1_16)[imm2 + 3]
             INSTR_CONST_ADDR8_0 => {
                 let imm = self.fetch_u8()? as usize;
-                let w = unsafe { self.read_pc_const(imm, 3) };
+                let w = unsafe { self.read_pc_const(imm, 3) }?;
                 self.push_continue(w)
             }
             INSTR_CONST_ADDR8_1 => {
                 let imm = self.fetch_u8()? as usize;
-                let w = unsafe { self.read_pc_const(imm, 4) };
+                let w = unsafe { self.read_pc_const(imm, 4) }?;
                 self.push_continue(w)
             }
             INSTR_CONST_ADDR8_8 => {
                 let imm1 = self.fetch_u8()? as usize;
                 let imm2 = self.fetch_u8()? as usize;
-                let w = unsafe { self.read_pc_const(imm1, imm2 + 3) };
+                let w = unsafe { self.read_pc_const(imm1, imm2 + 3) }?;
                 self.push_continue(w)
             }
             INSTR_CONST_ADDR16_8 => {
                 let imm1 = self.fetch_u16_le()? as usize;
                 let imm2 = self.fetch_u8()? as usize;
-                let w = unsafe { self.read_pc_const(imm1, imm2 + 3) };
+                let w = unsafe { self.read_pc_const(imm1, imm2 + 3) }?;
                 self.push_continue(w)
             }
 
@@ -5091,27 +5091,27 @@ impl Interpreter {
             // (same formula as const_addr*) then dispatch as CALL_CLOSURE.
             INSTR_CALL_CONST_ADDR8_0 => {
                 let imm = self.fetch_u8()? as usize;
-                let closure = unsafe { self.read_pc_const(imm, 3) };
+                let closure = unsafe { self.read_pc_const(imm, 3) }?;
                 self.do_call(closure)?;
                 Ok(StepResult::Continue)
             }
             INSTR_CALL_CONST_ADDR8_1 => {
                 let imm = self.fetch_u8()? as usize;
-                let closure = unsafe { self.read_pc_const(imm, 4) };
+                let closure = unsafe { self.read_pc_const(imm, 4) }?;
                 self.do_call(closure)?;
                 Ok(StepResult::Continue)
             }
             INSTR_CALL_CONST_ADDR8_8 => {
                 let imm1 = self.fetch_u8()? as usize;
                 let imm2 = self.fetch_u8()? as usize;
-                let closure = unsafe { self.read_pc_const(imm1, imm2 + 3) };
+                let closure = unsafe { self.read_pc_const(imm1, imm2 + 3) }?;
                 self.do_call(closure)?;
                 Ok(StepResult::Continue)
             }
             INSTR_CALL_CONST_ADDR16_8 => {
                 let imm1 = self.fetch_u16_le()? as usize;
                 let imm2 = self.fetch_u8()? as usize;
-                let closure = unsafe { self.read_pc_const(imm1, imm2 + 3) };
+                let closure = unsafe { self.read_pc_const(imm1, imm2 + 3) }?;
                 self.do_call(closure)?;
                 Ok(StepResult::Continue)
             }
@@ -5184,7 +5184,18 @@ impl Interpreter {
                     // (We've already advanced past arg1; just add arg1*2.)
                     self.pc_offset_signed(arg1 * 2)?;
                 } else {
-                    // SAFETY: u in [0, arg1), so table entry exists.
+                    // UNTRUSTED MODE (task #96, HOLE 4): the inline jump table
+                    // `[table_after, table_after + arg1*2)` lives in the code
+                    // object's bytecode; `u` (the selector) and `arg1` (the
+                    // table size) are both image-controlled. A forged arg1 /
+                    // selector can drive `entry` past the code object into the
+                    // adjacent arena. Bound the 2-byte read window
+                    // `[entry, entry+2)` against the current code object body
+                    // before the read; trusted path is byte-identical.
+                    if self.untrusted {
+                        self.check_case16_table_read(table_after, u as usize)?;
+                    }
+                    // SAFETY: u in [0, arg1) (trusted), or bounds-checked above.
                     let entry_off = unsafe {
                         let entry = table_after.add((u as usize) * 2);
                         let lo = *entry as usize;
@@ -5963,8 +5974,10 @@ impl Interpreter {
             EXTINSTR_CONST_ADDR32_16 => {
                 let byte_off = self.fetch_u32_le()? as usize;
                 let c_num = self.fetch_u16_le()? as usize;
-                // SAFETY: trusted compiler-emitted offsets.
-                let w = unsafe { self.read_pc_const(byte_off, c_num + 3) };
+                // SAFETY: trusted compiler-emitted offsets (or, in untrusted
+                // mode, read_pc_const bounds the 32-bit offset vs the current
+                // code object before the read — HOLE 4's killer).
+                let w = unsafe { self.read_pc_const(byte_off, c_num + 3) }?;
                 self.push_continue(w)
             }
 
@@ -6752,7 +6765,12 @@ impl Interpreter {
                 return Ok(StepResult::Continue);
             }
         }
-        let result = crate::rts::arb_add_via_bigint(self.alloc_space_mut(), x, y);
+        // UNTRUSTED MODE (task #96, HOLE 5): the inline ARB opcode path reaches
+        // poly_word_to_bigint on stack operands that may be forged boxed
+        // bignum pointers; thread the live safe-space snapshot so the bignum
+        // reader gates its deref. None in trusted mode -> byte-identical.
+        let spaces = self.rts_safe_spaces();
+        let result = crate::rts::arb_add_via_bigint(spaces.as_ref(), self.alloc_space_mut(), x, y);
         self.stack[self.sp] = result;
         Ok(StepResult::Continue)
     }
@@ -6770,7 +6788,8 @@ impl Interpreter {
                 return Ok(StepResult::Continue);
             }
         }
-        let result = crate::rts::arb_sub_via_bigint(self.alloc_space_mut(), x, y);
+        let spaces = self.rts_safe_spaces();
+        let result = crate::rts::arb_sub_via_bigint(spaces.as_ref(), self.alloc_space_mut(), x, y);
         self.stack[self.sp] = result;
         Ok(StepResult::Continue)
     }
@@ -6791,7 +6810,8 @@ impl Interpreter {
         // Overflow or boxed args: defer to the bignum-aware RTS impl.
         // Critical for SML loops like LibrarySupport.maxShort that
         // use IS_TAGGED on the result to detect overflow.
-        let result = crate::rts::arb_mult_via_bigint(self.alloc_space_mut(), x, y);
+        let spaces = self.rts_safe_spaces();
+        let result = crate::rts::arb_mult_via_bigint(spaces.as_ref(), self.alloc_space_mut(), x, y);
         self.stack[self.sp] = result;
         Ok(StepResult::Continue)
     }
@@ -7832,12 +7852,93 @@ impl Interpreter {
     /// # Safety
     /// `self.pc + byte_off + idx*sizeof(PolyWord)` must land within
     /// the constant pool of the current code object.
-    unsafe fn read_pc_const(&self, byte_off: usize, idx: usize) -> PolyWord {
-        // SAFETY: precondition.
-        unsafe {
+    ///
+    /// UNTRUSTED MODE (task #96, HOLE 4): `byte_off` is an IMAGE-CONTROLLED
+    /// immediate baked into the bytecode (up to 4 GiB via
+    /// `CONST_ADDR32_16`'s 32-bit offset), so in trusted mode the raw
+    /// `read_unaligned` at `pc + byte_off` can escape the process map and
+    /// SEGV / OOB. When `self.untrusted` we bound the computed read window
+    /// `[addr, addr + 8)` against the CURRENT code object's body
+    /// `[code_start, code_obj_end)` BEFORE the read and reject an
+    /// out-of-bounds access as a clean [`InterpError::BadImage`]. The trusted
+    /// path is byte-identical (the exact original `read_unaligned`).
+    unsafe fn read_pc_const(&self, byte_off: usize, idx: usize) -> Result<PolyWord, InterpError> {
+        if self.untrusted {
+            self.check_pc_const_bounds(byte_off, idx)?;
+        }
+        // SAFETY: precondition (trusted) OR bounds-checked above (untrusted).
+        Ok(unsafe {
             let base = self.pc.add(byte_off);
             base.cast::<PolyWord>().add(idx).read_unaligned()
+        })
+    }
+
+    /// UNTRUSTED MODE: bound the PC-relative constant read computed by
+    /// [`Self::read_pc_const`] against the current code object's full word
+    /// extent `[code_start, code_start + n_words*8)`. The constant pool lives
+    /// inside the code object body, so any legitimate constant read lands in
+    /// `[code_start, code_obj_end)`; an image-controlled `byte_off` that
+    /// escapes that window is a forged read and is rejected. Computes the
+    /// candidate address by INTEGER arithmetic (never `.add` past the
+    /// allocation) and only COMPARES — no deref here.
+    #[cold]
+    fn check_pc_const_bounds(&self, byte_off: usize, idx: usize) -> Result<(), InterpError> {
+        let op = "CONST_ADDR";
+        // The current code object body pointer (code_start is its byte addr).
+        let code_obj = self.code_start.cast::<PolyWord>();
+        // Validate the code object itself is an in-space code object, then use
+        // its header length to bound the read. (code_start always points at
+        // the active code object's body, set by do_call/enter from a closure
+        // whose word0 was already validated by untrusted_validate_call.)
+        let code = self.validate_obj(PolyWord::from_ptr(code_obj), op)?;
+        code.require_code()
+            .map_err(|why| InterpError::BadImage { op, why })?;
+        // The read window is [addr, addr + 8): addr = pc + byte_off + idx*8.
+        let word_bytes = std::mem::size_of::<PolyWord>();
+        let addr = (self.pc as usize)
+            .wrapping_add(byte_off)
+            .wrapping_add(idx.wrapping_mul(word_bytes));
+        let read_end = addr.wrapping_add(word_bytes);
+        let lo = self.code_start as usize;
+        // code_obj_end = code_start + n_words * word_bytes (header-validated
+        // by validate_obj, so n_words fits the space).
+        let hi = lo.wrapping_add(code.n_words.wrapping_mul(word_bytes));
+        // Require the whole 8-byte window inside the code object body, and no
+        // address wrap.
+        if addr < lo || read_end > hi || read_end < addr {
+            return Err(InterpError::BadImage {
+                op,
+                why: DerefError::IndexOutOfBounds,
+            });
         }
+        Ok(())
+    }
+
+    /// UNTRUSTED MODE: bound a CASE16 inline jump-table entry read against the
+    /// current code object body. `table_after` is the byte address of the
+    /// table start (derived from `self.pc`); `u` is the (image-controlled)
+    /// selector; the entry occupies `[table_after + u*2, table_after + u*2 +
+    /// 2)`. Rejects any window that escapes `[code_start, code_obj_end)`.
+    /// Integer arithmetic + compares only; no deref.
+    #[cold]
+    fn check_case16_table_read(&self, table_after: *const u8, u: usize) -> Result<(), InterpError> {
+        let op = "CASE16";
+        let code_obj = self.code_start.cast::<PolyWord>();
+        let code = self.validate_obj(PolyWord::from_ptr(code_obj), op)?;
+        code.require_code()
+            .map_err(|why| InterpError::BadImage { op, why })?;
+        let entry = (table_after as usize).wrapping_add(u.wrapping_mul(2));
+        // The two table bytes occupy [entry, entry + 2).
+        let entry_end = entry.wrapping_add(2);
+        let lo = self.code_start as usize;
+        let hi = lo.wrapping_add(code.n_words.wrapping_mul(std::mem::size_of::<PolyWord>()));
+        if entry < lo || entry_end > hi || entry_end < entry {
+            return Err(InterpError::BadImage {
+                op,
+                why: DerefError::IndexOutOfBounds,
+            });
+        }
+        Ok(())
     }
 }
 

@@ -42,9 +42,13 @@ use polyml_image::pexport::{Image, ObjFlags, Object, ObjectBody, SourceArch, Val
 // ---- bytecode opcodes used by the hand-assembled root code objects ----
 // (mirrors crates/polyml-runtime/src/interpreter/opcodes.rs)
 const LOCAL_0: u8 = 0x29; // push sp[0]
+const LOCAL_B: u8 = 0x22; // push sp[imm]
 const INDIRECT_B: u8 = 0x23; // pop obj, push obj[imm]
 const CALL_CLOSURE: u8 = 0x0c; // pop closure, call it
 const RETURN_B: u8 = 0x1f; // return, dropping imm args
+const ESCAPE: u8 = 0xfe; // prefix for extended opcodes
+const EXT_CONST_ADDR32_16: u8 = 0xf0; // 32-bit byte-off + 16-bit const index
+const CALL_FAST_RTS2: u8 = 0x85; // pop stub, pop 2 args, dispatch RTS fn
 
 /// Build an `Image` from a root index, arch=Interpreted, 64-bit, and the
 /// given object bodies. All objects immutable unless `mutable` is set.
@@ -401,6 +405,105 @@ fn corpus_fastcall_wild_stub() -> (&'static str, &'static str, Vec<u8>) {
     )
 }
 
+/// HOLE 4 — PC-RELATIVE CODE-STREAM READ (task #96 fourth surface, found by the
+/// mechanical lint). The CONST_ADDR family routes through `read_pc_const`, which
+/// did `self.pc.add(byte_off).cast::<PolyWord>().add(idx).read_unaligned()` with
+/// NO bound on the IMAGE-CONTROLLED `byte_off`. The killer is
+/// `EXTINSTR_CONST_ADDR32_16` (ESCAPE 0xfe; 0xf0): a 32-bit byte offset (up to
+/// 4 GiB) guarantees an escape from the process map -> SEGV. This image emits
+/// CONST_ADDR32_16 with a ~1 GiB offset. Pre-fix: SEGV under --untrusted.
+/// Post-fix: read_pc_const bounds the computed address vs the current code
+/// object body -> a clean BadImage halt (exit 4).
+fn corpus_const_addr32_wild() -> (&'static str, &'static str, Vec<u8>) {
+    // 0: root closure C -> code @1 (no captures needed)
+    // 1: root code: ESCAPE; CONST_ADDR32_16 <byte_off=0x4000_0000> <c_num=0>
+    //    -> read_pc_const(0x4000_0000, 0+3) reads at pc + 1 GiB + 24 bytes,
+    //    far outside the code object / process map -> SEGV (trusted).
+    let off: u32 = 0x4000_0000; // 1 GiB forward
+    let c_num: u16 = 0;
+    let mut bc = vec![ESCAPE, EXT_CONST_ADDR32_16];
+    bc.extend_from_slice(&off.to_le_bytes()); // 32-bit byte offset (LE by format)
+    bc.extend_from_slice(&c_num.to_le_bytes()); // 16-bit const index
+    bc.push(RETURN_B);
+    bc.push(0);
+    let objs = vec![
+        imm(ObjectBody::Closure {
+            code_addr: 1,
+            values: Vec::new(),
+        }),
+        imm(code(bc)),
+    ];
+    (
+        "const_addr32_wild",
+        "CONST_ADDR32_16 with a 1 GiB byte offset -> read_pc_const escapes the code object -> wild OOB read",
+        to_text(&image_of(0, objs)),
+    )
+}
+
+/// HOLE 5 — RTS READER FREE-FUNCTION (task #96 fifth surface, found by the
+/// mechanical lint). The RTS numeric/IO/string readers (read_real_word,
+/// poly_word_to_bigint, poly_string_to_rust, the array/IO readers, reset_mutex,
+/// the byte-vec copier, …) deref an IMAGE-CONTROLLED RTS argument after only
+/// is_data_ptr (NOT a space check). The prompt's named PoC: `PolyRealFrexp` via
+/// CALL_FAST_RTS2 with a forged real arg -> read_real_word does
+/// `*x.as_ptr::<f64>()` on a wild pointer -> SEGV. This image captures a Bytes
+/// object holding a forged wild-but-aligned 8-byte address + a PolyRealFrexp
+/// EntryPoint stub (patched to its dispatch token at load), then drives
+/// CALL_FAST_RTS2 with the forged real as the (deref'd) `x` arg.
+/// Pre-fix: SEGV under --untrusted. Post-fix: read_real_word gates the deref on
+/// space-membership -> the 0.0 branch -> a clean result (exit-4 SAFE / clean).
+fn corpus_rts_reader_wild() -> (&'static str, &'static str, Vec<u8>) {
+    // 0: root closure C -> code @1, capturing [Bytes @2, EntryPoint @3]
+    //    (field 1 = capture[0] = Bytes; field 2 = capture[1] = EntryPoint)
+    // 1: root code (builds the CALL_FAST_RTS2 stack: threadId, x, stub):
+    //      LOCAL_B 0           ; push C as the threadId placeholder (args[0])
+    //      LOCAL_B 1           ; re-push the ORIGINAL closure C (now at depth 1)
+    //      INDIRECT_B 1        ; -> capture[0] = Bytes object
+    //      INDIRECT_B 0        ; -> word0 of Bytes = the forged wild real (args[1]=x)
+    //      LOCAL_B 2           ; re-push C (now at depth 2)
+    //      INDIRECT_B 2        ; -> capture[1] = the PolyRealFrexp EntryPoint stub
+    //      CALL_FAST_RTS2      ; pop stub, args[1]=forged x, args[0]=threadId
+    //                          ;   -> poly_real_frexp -> read_real_word(x) wild deref
+    //      RETURN_B 1          ; drop the original closure beneath the result
+    // 2: Bytes object whose 8 bytes spell a wild word-aligned address.
+    // 3: EntryPoint "PolyRealFrexp" (loader patches word0 to the dispatch token).
+    let root_code = code(vec![
+        LOCAL_B,
+        0, // threadId placeholder (args[0], unused by frexp)
+        LOCAL_B,
+        1,
+        INDIRECT_B,
+        1,
+        INDIRECT_B,
+        0, // forged real (args[1] = x)
+        LOCAL_B,
+        2,
+        INDIRECT_B,
+        2, // the EntryPoint stub
+        CALL_FAST_RTS2,
+        RETURN_B,
+        1,
+    ]);
+    // 8 little-endian bytes = 0x0000_4242_4242_4240 (LSB=0 -> looks like a data
+    // pointer, but points nowhere live) — the forged Real arg read_real_word
+    // would dereference as *f64.
+    let forged: [u8; 8] = [0x40, 0x42, 0x42, 0x42, 0x42, 0x00, 0x00, 0x00];
+    let objs = vec![
+        imm(ObjectBody::Closure {
+            code_addr: 1,
+            values: vec![Value::Ref(2), Value::Ref(3)],
+        }),
+        imm(root_code),
+        imm(ObjectBody::Bytes(forged.to_vec())),
+        imm(ObjectBody::EntryPoint("PolyRealFrexp".to_string())),
+    ];
+    (
+        "rts_reader_wild",
+        "PolyRealFrexp via CALL_FAST_RTS2 with a forged wild real arg -> read_real_word OOB *f64 deref",
+        to_text(&image_of(0, objs)),
+    )
+}
+
 fn corpus() -> Vec<(&'static str, &'static str, Vec<u8>)> {
     vec![
         corpus_lf_ref_52(),
@@ -412,6 +515,8 @@ fn corpus() -> Vec<(&'static str, &'static str, Vec<u8>)> {
         corpus_store_into_immutable(),
         corpus_real_wild_operand(),
         corpus_fastcall_wild_stub(),
+        corpus_const_addr32_wild(),
+        corpus_rts_reader_wild(),
     ]
 }
 
