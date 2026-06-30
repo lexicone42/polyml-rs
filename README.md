@@ -95,6 +95,22 @@ JIT's primary value today is as a correctness testbed (a differential harness
 that runs each function in both JIT and interpreter and compares). See
 `CLAUDE.md` for the honest performance analysis.
 
+The JIT (and its Cranelift dependency) is an **optional cargo feature** (default
+on). `cargo build -p polyml-bin --no-default-features` produces an
+**interpreter-only** `poly` — **74% smaller** (≈8.9 MB vs ≈34.6 MB), Cranelift-free,
+~8× faster to compile, byte-identical execution — which also **cross-compiles
+natively to big-endian s390x** (no Cranelift build-script workaround needed).
+
+### 6. Run an untrusted image safely
+
+`poly run --untrusted <image>` is a memory-safe mode for *foreign* images: every
+dangerous pointer-follow validates (space-membership + object-header sanity +
+per-op shape) before the unsafe use, so a deliberately-malicious image gets a clean
+halt instead of undefined behaviour. The default (trusted) path is byte-identical
+and exactly as fast — every check sits behind the untrusted flag. A committed
+malicious-image corpus (`tools/malicious-corpus/`) + a deref-surface lint
+(`tools/lint-image-deref.py`) fence it.
+
 ---
 
 ## Faithfulness, not just "it boots"
@@ -159,6 +175,8 @@ What is proved (each a fenced regression test under `crates/polyml-bin/tests/isa
 
 | Theorem | File |
 |---|---|
+| **The Quadratic Reciprocity Law** `(p/q)(q/p) = (−1)^(((p−1)/2)((q−1)/2))` — Gauss's *theorema aureum*, via Gauss's lemma → the Eisenstein bridge → the lattice-point count | `isabelle_quadratic_reciprocity.rs` |
+| **Bertrand's postulate** `∀n. 0<n ⟹ ∃ prime p. n < p ≤ 2n` — unconditional, the full Erdős proof (central-binomial bounds → the analytic threshold) | `isabelle_bertrand.rs` |
 | **Wilson's theorem** `(p−1)! ≡ −1 (mod p)`, its **converse**, and the full **iff** primality criterion | `isabelle_wilson{,_converse,_iff}.rs` |
 | **Fermat's little theorem** `a^p ≡ a (mod p)` | `isabelle_flt.rs` |
 | **Euler's theorem** `a^φ(n) ≡ 1 (mod n)` + **Euler's criterion** (±1 dichotomy) | `isabelle_euler{,_criterion}.rs` |
@@ -174,19 +192,29 @@ What is proved (each a fenced regression test under `crates/polyml-bin/tests/isa
 | **The binomial theorem**, Vandermonde, the central binomial identity, Nicomachus / Faulhaber closed forms, Gauss summation | `isabelle_binom_thm.rs`, `isabelle_combinatorics.rs`, `isabelle_central_binomial.rs`, `isabelle_summation_forms.rs` |
 | gcd/Bézout, modular inverse, Euclid's lemma, the division theorem, the multiplicative group mod p, ℕ as a commutative semiring + linear order, divisibility | `isabelle_gcd.rs`, `isabelle_euclid_lemma.rs`, `isabelle_division.rs`, `isabelle_mult_group.rs`, … |
 
-…and more (56 Isabelle proof tests in all).
+…and more (59 Isabelle proof tests in all).
 
-### The tower is complete — including Lagrange's four-square theorem
+### Three capstones: Quadratic Reciprocity, Bertrand's Postulate, Lagrange's four squares
 
-The last open partial is closed: **Lagrange's four-square theorem**
-(`∀n. ∃a b c d. n = a²+b²+c²+d²` — every natural is a sum of four squares) is
-**proved**, a 0-hyp theorem by genuine LCF kernel inference. The classical Euler
-descent: the four-square identity (multiplicativity) + the 8 signed Euler
-divide-by-m² leaves assembled through a 16→9 disjE tree into the strict descent
-step, then strong induction down to every prime. So **every landmark theorem of
-elementary number theory listed above is machine-checked on the self-bootstrapped
-Rust runtime — no open partials.** Details:
-[`docs/four-square-progress-2026-06-17.md`](docs/four-square-progress-2026-06-17.md).
+The tower has no open partials, and it is crowned by three of the hardest results
+in elementary number theory — each a 0-hypothesis theorem by genuine LCF kernel
+inference, axiom-audited (only excluded middle), on the self-bootstrapped Rust
+runtime:
+
+- **The Quadratic Reciprocity Law** — Gauss's *theorema aureum*, proved via Gauss's
+  lemma → the Eisenstein lattice bridge → the lattice-point count.
+- **Bertrand's Postulate** — `∀n>0. ∃ prime p. n < p ≤ 2n`, unconditional, the full
+  Erdős proof (central-binomial bounds → the `4^(2n/3)` refinement → the analytic
+  threshold contradiction, closed by a fixed-exponent poly-vs-exp induction; ~224
+  billion bytecode steps to re-verify).
+- **Lagrange's four-square theorem** — `∀n. ∃a b c d. n = a²+b²+c²+d²`, via the
+  classical Euler descent (the four-square identity + the signed divide-by-`m²`
+  leaves → strict descent → strong induction to every prime). Details:
+  [`docs/four-square-progress-2026-06-17.md`](docs/four-square-progress-2026-06-17.md).
+
+So **every landmark theorem listed above is machine-checked on a Rust
+reimplementation of Poly/ML, by the real Isabelle/Pure kernel — no open partials,
+no fabricated axioms.**
 
 ---
 
@@ -205,11 +233,16 @@ Rust runtime — no open partials.** Details:
   [`docs/tier-b-portable-images-design.md`](docs/tier-b-portable-images-design.md).
 - **Windows** — not yet validated (the RTS/filesystem layer is Unix-oriented). The
   endianness gap is **closed**: s390x (big-endian) runs byte-identically (above).
-- **Concurrency** — the interpreter is single-threaded; Poly/ML's thread/`Future`
-  machinery loads lazily but isn't scheduled concurrently (real threading needs a
-  safepoint GC that scans every thread's stack — a larger effort). **Interrupts
-  *are* done**: Ctrl-C (SIGINT) raises the SML `Interrupt` exception, which the
-  REPL / a handler catches — a runaway loop is interruptible instead of hard-killed.
+- **Full concurrency** — real OS threads (`Thread.fork` / `Thread.Mutex` /
+  `ConditionVar` over a shared heap) work behind **`POLY_REAL_THREADS=1`** (default
+  OFF): a giant-lock + safepoint stop-the-world GC model — *concurrency, not
+  parallelism* (one mutator runs bytecode at a time, matching upstream's
+  interpreter-mode semantics). A 2-thread mutex demo runs end-to-end on the REPL
+  (counter → 200000). Default OFF keeps the bootstrap/REPL/HOL4/Isabelle paths
+  byte-identical single-threaded. Still open: a *preemptive* scheduler (beyond the
+  cooperative safepoint yield) and full `Thread.Thread` attribute fidelity.
+  **Interrupts are done**: Ctrl-C (SIGINT) raises the SML `Interrupt` exception, so
+  a runaway loop is interruptible instead of hard-killed.
 - **JIT as a big speedup** — it's correct and a *modest* (~2%) win. Whole-region
   native compilation was built end-to-end and measured: **byte-identical across the
   full 27.7-billion-step self-bootstrap (a deep soundness result) but a net
@@ -225,7 +258,7 @@ Rust runtime — no open partials.** Details:
 |---|---|
 | [`polyml-runtime`](crates/polyml-runtime) | the bytecode interpreter, runtime system (RTS) calls, exceptions, and the copying GC — the Rust port of `vendor/polyml/libpolyml/` |
 | [`polyml-image`](crates/polyml-image)   | heap-image formats: the `pexport` text reader/writer and the compact binary `bicimage` format (endian-neutral, ~½ the size) |
-| [`polyml-jit`](crates/polyml-jit)       | the Cranelift-backed JIT (bytecode → Cranelift IR) |
+| [`polyml-jit`](crates/polyml-jit)       | the Cranelift-backed JIT (bytecode → Cranelift IR) — an **optional** (default-on) feature; drop it for interpreter-only builds |
 | [`polyml-bin`](crates/polyml-bin)       | the `poly` binary (`run` / `inspect` / `disasm` / `diff` / `bic`) + the HOL4 / Isabelle proof tests |
 
 Upstream Poly/ML is obtained read-only under `vendor/polyml/` (git-ignored; see
@@ -239,7 +272,8 @@ the C++ it ports (`libpolyml/bytecode.cpp`) by line.
 Requires the pinned toolchain (Rust 1.96, via `rust-toolchain.toml`).
 
 ```sh
-cargo build --release -p polyml-bin     # build the `poly` binary
+cargo build --release -p polyml-bin                       # the `poly` binary (with JIT)
+cargo build --release -p polyml-bin --no-default-features # interpreter-only (no Cranelift, 74% smaller)
 tools/regression.sh fast                # build + always-on tests (~2 min, no checkpoints)
 tools/regression.sh full                # + the headline HOL4/Isabelle workloads (~50 min)
 ```
@@ -268,8 +302,17 @@ The original staged plan is in [`PLAN.md`](PLAN.md). In short:
   run faithfully on 32-bit (its bytecode bakes in 64-bit word-size constants);
   this matches upstream's documented limitation. So cross-word-size carries data,
   not compiled code; a true 64↔32 execution story needs recompilation.
-- **Next:** the larger subsystems — concurrency/interrupts, Windows, and maturing
-  the JIT into a genuine speedup. (The number-theory tower is complete.)
+- **Settled this cycle:** real OS threads behind `POLY_REAL_THREADS=1` (giant-lock +
+  safepoint-GC concurrency); interrupts (SIGINT → SML `Interrupt`); the
+  memory-safety residual (the `--untrusted` safe mode); the JIT made an optional
+  feature (interpreter-only / big-endian-native builds); and the
+  **whole-region-JIT-as-speedup question — answered "no"**: it was built end-to-end,
+  proven byte-identical across the 27.7-billion-step self-bootstrap, but measured a
+  net slowdown (the tight threaded interpreter wins). The number-theory tower is
+  complete.
+- **Next:** the remaining larger subsystems — a *preemptive* thread scheduler (beyond
+  the cooperative safepoint yield), Windows, and the cross-*word-size* recompilation
+  story.
 
 ---
 
