@@ -1043,6 +1043,7 @@ pub unsafe extern "C" fn rts_trampoline(stub_word: i64, n_args: i64, args: *cons
         raised_exception: None,
         rts: Some(&rts_ref),
         bootstrap_tail_call: seed_bootstrap_tail,
+        safe_spaces: None,
     };
     let result = match entry.func {
         RtsFn::Arity0(f) => f(&mut ctx),

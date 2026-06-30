@@ -56,6 +56,17 @@ fn ensure_runnable(loaded: &LoadedImage) -> Result<(), Box<dyn std::error::Error
         })
 }
 
+/// `(base_ptr, used_words)` of a loaded image space, for the untrusted-mode
+/// typed-deref predicate. `base_ptr` is the address of the space's first
+/// body slot (null + 0 words for an empty space).
+fn image_space_bounds(space: &MemorySpace) -> (*const PolyWord, usize) {
+    let base = space
+        .iter()
+        .next()
+        .map_or(std::ptr::null::<PolyWord>(), std::ptr::from_ref);
+    (base, space.used_words())
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "poly",
@@ -131,6 +142,17 @@ enum Cmd {
         /// to setting `WHOLE_REGION_JIT=1`.
         #[arg(long)]
         whole_region: bool,
+        /// UNTRUSTED (safe) MODE: treat the image as potentially malicious.
+        /// Every dangerous pointer-follow in the interpreter (field loads,
+        /// calls, heap reads/writes, the code-constant RTS family) is
+        /// validated against the live heap spaces with a typed-deref
+        /// predicate BEFORE the unsafe use; a violation halts cleanly with a
+        /// "bad untrusted image" error instead of causing UB (a SEGV / OOB /
+        /// wild jump). Slower, but the only safe way to run a foreign image.
+        /// DEFAULT is trusted (compiler-produced images): byte-identical and
+        /// exactly as fast.
+        #[arg(long)]
+        untrusted: bool,
     },
     /// Disassemble a code object's bytecode into human-readable
     /// opcode mnemonics. Either specify `--idx N` to pick the Nth
@@ -254,6 +276,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             r#use,
             jit,
             whole_region,
+            untrusted,
         } => {
             // WHOLE-REGION JIT DEMO (proof-of-mechanism): when
             // WHOLE_REGION_DEMO=1 is set, run ONLY the synthetic +
@@ -287,6 +310,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 r#use.clone(),
                 *jit,
                 whole_region_on,
+                *untrusted,
             )
         }
         Cmd::Disasm {
@@ -380,6 +404,7 @@ fn parse_image_auto(bytes: &[u8]) -> Result<Image, Box<dyn std::error::Error>> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_image(
     path: &PathBuf,
     max_steps: u64,
@@ -390,6 +415,7 @@ fn run_image(
     use_file: Option<PathBuf>,
     install_jit: bool,
     whole_region: bool,
+    untrusted: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let image = parse_image_auto(&bytes)?;
@@ -476,6 +502,22 @@ fn run_image(
         .with_rts(rts);
     if let Some(p) = image_mut_ptr {
         interp = interp.with_image_mutable_root(p, image_mut_len);
+    }
+    // UNTRUSTED (safe) MODE: register the loaded image's spaces with the
+    // typed-deref predicate and flip the interpreter into untrusted mode.
+    // Every dangerous pointer-follow then validates against these live
+    // spaces (+ the alloc space) before the unsafe use. Skipped entirely on
+    // the trusted default → byte-identical. The CLI `--untrusted` flag OR a
+    // loader-side mark (`LoadedImage::mark_untrusted`) enables it.
+    let untrusted = untrusted || loaded.untrusted;
+    if untrusted {
+        let immut = image_space_bounds(&loaded.immutable);
+        let mutb = image_space_bounds(&loaded.mutable);
+        let codes = image_space_bounds(&loaded.code);
+        interp = interp
+            .with_untrusted_spaces(immut, mutb, codes)
+            .with_untrusted(true);
+        println!("  UNTRUSTED MODE: typed-deref predicate active (safe, slower).");
     }
     if profile {
         interp = interp.enable_diagnostics();

@@ -165,6 +165,37 @@ pub struct RtsContext<'a> {
     /// real interpreter dispatch (tests / numeric helper contexts), matching
     /// the old static's never-set behaviour on those paths.
     pub bootstrap_tail_call: PolyWord,
+    /// UNTRUSTED-MODE typed-deref validator (task #96). `None` = trusted
+    /// (the default at every construction site): the RTS code-constant
+    /// family follows pointers on the exact current fast path. `Some` (set
+    /// ONLY by the interpreter's `rts_call` when the interpreter is in
+    /// untrusted mode) carries the live image-space bounds + the live alloc
+    /// range so a code-constant write/read can validate the resolved code
+    /// object against real spaces BEFORE the deref — turning the R1 OOB
+    /// write (and its read siblings) into a clean no-op on a forged image.
+    pub safe_spaces: Option<RtsSafeSpaces>,
+}
+
+/// A snapshot of the live spaces handed to an RTS function in untrusted
+/// mode so the code-constant family can validate a resolved code-object
+/// pointer. A small, copyable bundle (≤ 4 ranges). Built by the
+/// interpreter's `rts_call` from its `safe_deref::SafeSpaces` + live alloc
+/// range; `None` (trusted) at every other construction site.
+#[derive(Clone)]
+pub struct RtsSafeSpaces {
+    /// Half-open `[start, end)` ranges over `PolyWord` slots (as `usize`):
+    /// the image immutable/mutable/code spaces plus the live alloc space.
+    pub ranges: Vec<(usize, usize)>,
+}
+
+impl RtsSafeSpaces {
+    /// Whether `p` lies inside a live space AND there is room for a length
+    /// word at `p.sub(1)` (i.e. `p` is strictly above a space start).
+    #[must_use]
+    pub fn contains_with_header(&self, p: *const PolyWord) -> bool {
+        let a = p as usize;
+        self.ranges.iter().any(|&(start, end)| a > start && a < end)
+    }
 }
 
 // ---- RtsTable ---------------------------------------------------------
@@ -1933,6 +1964,7 @@ fn arb_via_bigint(
         raised_exception: None,
         rts: None,
         bootstrap_tail_call: PolyWord::ZERO,
+        safe_spaces: None,
     };
     bigint_to_poly_word(&mut ctx, &op(a, b))
 }
@@ -2553,7 +2585,7 @@ fn poly_copy_byte_vec_to_closure(
 /// Mirrors `poly_specific.cpp:272-309`.
 #[allow(clippy::needless_pass_by_value)]
 fn poly_set_code_constant(
-    _ctx: &mut RtsContext<'_>,
+    ctx: &mut RtsContext<'_>,
     closure: PolyWord,
     offset: PolyWord,
     c_word: PolyWord,
@@ -2566,7 +2598,16 @@ fn poly_set_code_constant(
     // Closure may be either a code object directly or a closure whose
     // slot 0 points at one.
     let cl_ptr = closure.as_ptr::<PolyWord>();
-    // SAFETY: caller trusted.
+    // UNTRUSTED MODE (R1): before reading cl_ptr's length word, confirm it
+    // lies inside a live space (else a wild closure pointer would OOB-read
+    // the length word). `safe_spaces` is None in trusted mode → skipped,
+    // byte-identical.
+    if let Some(spaces) = &ctx.safe_spaces
+        && !spaces.contains_with_header(cl_ptr)
+    {
+        return PolyWord::tagged(0);
+    }
+    // SAFETY: caller trusted (or cl_ptr validated in-space above).
     // `code_obj` is the PolyWord-pointer to the code object's body;
     // `start_code` is the same address as a byte pointer. We derive the
     // code object's byte length from its own length word so the offset
@@ -2585,7 +2626,30 @@ fn poly_set_code_constant(
                 return PolyWord::tagged(0);
             }
             let code_obj = code_word.as_ptr::<PolyWord>();
+            // UNTRUSTED MODE (R1): validate the resolved code object is
+            // in-space BEFORE reading its length word.
+            if let Some(spaces) = &ctx.safe_spaces
+                && !spaces.contains_with_header(code_obj)
+            {
+                return PolyWord::tagged(0);
+            }
             let clw = crate::space::MemorySpace::length_word_of(code_obj);
+            // R1 FIX (unsafe-audit, task #96): the resolved target MUST be a
+            // CODE object before we treat its length word as a code-byte
+            // length and write into it. Without this, a corrupted/untrusted
+            // image whose closure word0 points at a wrong-type (or wild)
+            // object turns this into an OOB / wrong-type WRITE — the
+            // highest-value corruption primitive (the R1 reachable OOB-write
+            // the unsafe-audit flagged). The compiler always passes a real
+            // code object, so this guard never rejects a legitimate call.
+            if !is_code_object(clw) {
+                if RTS_TRACE.load(Ordering::Relaxed) {
+                    eprintln!(
+                        "  PolySetCodeConstant: closure word0 is not a code object (rejected)"
+                    );
+                }
+                return PolyWord::tagged(0);
+            }
             (
                 code_word.as_ptr::<u8>().cast_mut(),
                 length_of(clw) * std::mem::size_of::<PolyWord>(),
@@ -2653,7 +2717,7 @@ fn poly_set_code_constant(
 /// Mirrors `poly_specific.cpp:234-263`.
 #[allow(clippy::needless_pass_by_value)]
 fn poly_lock_mutable_closure(
-    _ctx: &mut RtsContext<'_>,
+    ctx: &mut RtsContext<'_>,
     _tid: PolyWord,
     closure: PolyWord,
 ) -> PolyWord {
@@ -2662,14 +2726,36 @@ fn poly_lock_mutable_closure(
         return PolyWord::tagged(0);
     }
     let cl_ptr = closure.as_ptr::<PolyWord>();
-    // SAFETY: caller trusted.
+    // UNTRUSTED MODE: cl_ptr must be in-space before reading its word0.
+    if let Some(spaces) = &ctx.safe_spaces
+        && !spaces.contains_with_header(cl_ptr)
+    {
+        return PolyWord::tagged(0);
+    }
+    // SAFETY: caller trusted (or cl_ptr validated in-space above).
     unsafe {
         let code_word = *cl_ptr;
         if !code_word.is_data_ptr() {
             return PolyWord::tagged(0);
         }
         let code_obj = code_word.as_ptr::<PolyWord>().cast_mut();
+        // UNTRUSTED MODE: validate the resolved code object in-space before
+        // reading its length word.
+        if let Some(spaces) = &ctx.safe_spaces
+            && !spaces.contains_with_header(code_obj)
+        {
+            return PolyWord::tagged(0);
+        }
         let lw = crate::space::MemorySpace::length_word_of(code_obj);
+        // R1 sibling (D29): the resolved target must ALREADY be a code
+        // object before we rewrite its length word as F_CODE_OBJ — else a
+        // corrupt image could clear/forge the flags of a wrong-type object.
+        if !crate::length_word::is_code_object(lw) {
+            if RTS_TRACE.load(Ordering::Relaxed) {
+                eprintln!("  PolyLockMutableClosure: word0 is not a code object (rejected)");
+            }
+            return PolyWord::tagged(0);
+        }
         let n = length_of(lw);
         crate::space::set_length_word(code_obj, n, F_CODE_OBJ);
     }
@@ -2681,7 +2767,7 @@ fn poly_lock_mutable_closure(
 /// `poly_specific.cpp:396-402`.
 #[allow(clippy::needless_pass_by_value)]
 fn poly_set_code_byte(
-    _ctx: &mut RtsContext<'_>,
+    ctx: &mut RtsContext<'_>,
     closure: PolyWord,
     offset: PolyWord,
     byte_val: PolyWord,
@@ -2690,16 +2776,36 @@ fn poly_set_code_byte(
         return PolyWord::tagged(0);
     }
     let cl_ptr = closure.as_ptr::<PolyWord>();
-    // SAFETY: caller (compiler-generated bytecode) is trusted.
+    // UNTRUSTED MODE: cl_ptr must be in-space before reading word0.
+    if let Some(spaces) = &ctx.safe_spaces
+        && !spaces.contains_with_header(cl_ptr)
+    {
+        return PolyWord::tagged(0);
+    }
+    // SAFETY: caller (compiler-generated bytecode) is trusted (or cl_ptr
+    // validated in-space above).
     unsafe {
         let code_word = *cl_ptr;
         if !code_word.is_data_ptr() {
             return PolyWord::tagged(0);
         }
         let code_obj = code_word.as_ptr::<PolyWord>();
-        let code_byte_len =
-            crate::length_word::length_of(crate::space::MemorySpace::length_word_of(code_obj))
-                * std::mem::size_of::<PolyWord>();
+        // UNTRUSTED MODE: resolved code object must be in-space.
+        if let Some(spaces) = &ctx.safe_spaces
+            && !spaces.contains_with_header(code_obj)
+        {
+            return PolyWord::tagged(0);
+        }
+        let clw = crate::space::MemorySpace::length_word_of(code_obj);
+        // R1 sibling (D10): the resolved target must be a code object before
+        // we write into it (else a wrong-type/wild WRITE on a corrupt image).
+        if !crate::length_word::is_code_object(clw) {
+            if RTS_TRACE.load(Ordering::Relaxed) {
+                eprintln!("  PolySetCodeByte: closure word0 is not a code object (rejected)");
+            }
+            return PolyWord::tagged(0);
+        }
+        let code_byte_len = crate::length_word::length_of(clw) * std::mem::size_of::<PolyWord>();
         let code_ptr = code_word.as_ptr::<u8>().cast_mut();
         let off = offset.untag() as usize;
         // BOUNDS CHECK (unsafe-audit finding #9): reject an out-of-range
@@ -2724,7 +2830,7 @@ fn poly_set_code_byte(
 /// `poly_specific.cpp:371-393`.
 #[allow(clippy::needless_pass_by_value)]
 fn poly_get_code_constant(
-    _ctx: &mut RtsContext<'_>,
+    ctx: &mut RtsContext<'_>,
     closure: PolyWord,
     offset: PolyWord,
     _flags: PolyWord,
@@ -2733,16 +2839,32 @@ fn poly_get_code_constant(
         return PolyWord::tagged(0);
     }
     let cl_ptr = closure.as_ptr::<PolyWord>();
-    // SAFETY: caller trusted; assume code object pointer.
+    // UNTRUSTED MODE: cl_ptr must be in-space before reading word0.
+    if let Some(spaces) = &ctx.safe_spaces
+        && !spaces.contains_with_header(cl_ptr)
+    {
+        return PolyWord::tagged(0);
+    }
+    // SAFETY: caller trusted (or cl_ptr validated in-space above).
     unsafe {
         let code_word = *cl_ptr;
         if !code_word.is_data_ptr() {
             return PolyWord::tagged(0);
         }
         let code_obj = code_word.as_ptr::<PolyWord>();
-        let code_byte_len =
-            crate::length_word::length_of(crate::space::MemorySpace::length_word_of(code_obj))
-                * std::mem::size_of::<PolyWord>();
+        // UNTRUSTED MODE: resolved code object must be in-space.
+        if let Some(spaces) = &ctx.safe_spaces
+            && !spaces.contains_with_header(code_obj)
+        {
+            return PolyWord::tagged(0);
+        }
+        let clw = crate::space::MemorySpace::length_word_of(code_obj);
+        // R1 sibling (D28): the resolved target must be a code object before
+        // we read from it as one (else a wrong-type / wild OOB READ).
+        if !crate::length_word::is_code_object(clw) {
+            return PolyWord::tagged(0);
+        }
+        let code_byte_len = crate::length_word::length_of(clw) * std::mem::size_of::<PolyWord>();
         let code_ptr = code_word.as_ptr::<u8>();
         let off = offset.untag() as usize;
         // BOUNDS CHECK (unsafe-audit finding #9, read sibling): reject an
@@ -4004,6 +4126,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         // SML's rtsCallFast1 means PolyIsBigEndian is invoked with a
         // dummy unit arg, even though the C function takes none.
@@ -4035,6 +4158,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         }
     }
     fn t() -> PolyWord {
@@ -4309,6 +4433,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         // Build poly-string args for "" and "." in the same space.
         let empty_arg = alloc_poly_string(&mut ctx, b"");
@@ -4374,6 +4499,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         let big = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 70u32));
         let big1 = bigint_to_poly_word(&mut c, &((BigInt::from(1u8) << 70u32) + BigInt::from(1u8)));
@@ -4406,6 +4532,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         // (2^64 | 0xF) & 0xFF == 0xF   (boxed operand -> RTS path)
         let a = bigint_to_poly_word(
@@ -4444,6 +4571,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         // RTS result is a BOXED f64 (the live dispatch path reads as_ptr::<f64>()).
         let asf32 = |w: PolyWord| -> f32 {
@@ -4517,6 +4645,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         // errno 2 == ENOENT (errors.cpp errortable). Must return a BOXED string.
         let r = poly_process_env_error_name(&mut c, t(), PolyWord::tagged(2));
@@ -4595,6 +4724,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         let table = RtsTable::new();
         let call = |c: &mut RtsContext<'_>, name: &str| -> i128 {
@@ -4636,6 +4766,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         let big = bigint_to_poly_word(&mut c, &(BigInt::from(1u8) << 80u32));
         assert!(big.is_data_ptr(), "2^80 must box");
@@ -4654,6 +4785,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         let p62 = BigInt::from(1u8) << 62u32;
         let boxed_p62 = bigint_to_poly_word(&mut c, &p62);
@@ -4697,6 +4829,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         // lcm(0,0) divides by zero (gcd=0) → upstream raises Div.
         let _ = poly_lcm_arbitrary(&mut c, t(), PolyWord::tagged(0), PolyWord::tagged(0));
@@ -4803,6 +4936,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         let r = poly_shift_left_arbitrary(&mut c, t(), PolyWord::tagged(1), PolyWord::tagged(70));
         assert!(r.is_data_ptr(), "1<<70 should be boxed");
@@ -4821,6 +4955,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         // -(2^64 + 7): magnitude needs >64 bits so it boxes; negative-flagged.
         let n = -(BigInt::from(1u128 << 64) + BigInt::from(7u8));
@@ -4873,6 +5008,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         let r = poly_multiply_arbitrary(
             &mut ctx,
@@ -4897,6 +5033,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         let a = PolyWord::tagged(-(1 << 31));
         let b = PolyWord::tagged(1 << 32);
@@ -4917,6 +5054,7 @@ mod tests {
             raised_exception: None,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: None,
         };
         // 2^31 * 2^32 = 2^63 which exceeds MAX_TAGGED.
         let a = PolyWord::tagged(1 << 31);

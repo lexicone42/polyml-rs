@@ -56,6 +56,42 @@ pub struct LoadedImage {
     /// stays permissive — it loads data-only images too (e.g. in tests) — so the
     /// run path MUST check this before treating the root as a closure.
     pub runnable: Result<(), &'static str>,
+    /// Whether this image should be run in UNTRUSTED (safe) mode (task #96).
+    /// `false` by default — compiler-produced images are trusted. The
+    /// loader (or a caller — e.g. the `--untrusted` CLI flag, or a future
+    /// provenance heuristic) can set this so the run path flips the
+    /// interpreter into the typed-deref safe mode. The interpreter consults
+    /// the predicate ONLY when its own `untrusted` flag is set; this field
+    /// is the loader-side carrier of that intent (see
+    /// [`LoadedImage::mark_untrusted`]).
+    pub untrusted: bool,
+}
+
+impl LoadedImage {
+    /// Mark this image as untrusted, so the run path will enable the
+    /// interpreter's typed-deref safe mode for it. Idempotent.
+    pub fn mark_untrusted(&mut self) {
+        self.untrusted = true;
+    }
+
+    /// `(base_ptr, used_words)` of the immutable / mutable / code spaces —
+    /// the live image spaces the untrusted-mode predicate validates pointers
+    /// against. A null base + 0 words denotes an empty space.
+    #[must_use]
+    pub fn space_bounds(&self) -> [(*const PolyWord, usize); 3] {
+        let bounds = |s: &MemorySpace| -> (*const PolyWord, usize) {
+            let base = s
+                .iter()
+                .next()
+                .map_or(std::ptr::null::<PolyWord>(), std::ptr::from_ref);
+            (base, s.used_words())
+        };
+        [
+            bounds(&self.immutable),
+            bounds(&self.mutable),
+            bounds(&self.code),
+        ]
+    }
 }
 
 // Pointers into the loaded heap are necessarily raw — both Send and
@@ -339,6 +375,7 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
         root: root_ptr,
         entry_points,
         runnable,
+        untrusted: false,
     })
 }
 

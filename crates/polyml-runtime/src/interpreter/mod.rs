@@ -74,8 +74,10 @@
 pub mod diag;
 pub mod disasm;
 pub mod opcodes;
+pub mod safe_deref;
 
 use diag::DiagState;
+use safe_deref::{DerefError, SafeSpaces, SpaceRange, ValidObj};
 
 use std::sync::Arc;
 
@@ -426,6 +428,13 @@ pub enum InterpError {
     },
     #[error("Thread.fork: OS thread spawn failed: {0}")]
     ThreadSpawnFailed(String),
+    /// An untrusted image drove a dangerous pointer-follow that the
+    /// typed-deref predicate rejected. This is the CLEAN, deterministic
+    /// outcome of the `--untrusted` safe mode: a controlled halt instead of
+    /// the UB (OOB read/write, wild jump, non-pointer deref) the follow
+    /// would otherwise have caused. The `op` names the bytecode site.
+    #[error("bad untrusted image: {op}: {why}")]
+    BadImage { op: &'static str, why: DerefError },
 }
 
 /// A bytecode interpreter operating on PolyML code objects.
@@ -563,6 +572,22 @@ pub struct Interpreter {
     /// the global region-dispatch boundary instead of setting up an
     /// interpreter frame. The default + --jit paths are byte-identical.
     region_registry: RegionRegistry,
+    /// UNTRUSTED MODE (the one honest memory-safety caveat, task #96):
+    /// `false` by default = TRUSTED. When `false` EVERY hardened deref site
+    /// takes the exact current fast path — there is no extra check, no
+    /// field read of `safe_spaces`, so the trusted bootstrap / REPL / HOL4 /
+    /// Isabelle paths stay byte-identical and exactly as fast. When `true`
+    /// (set via [`Interpreter::with_untrusted`] + the `--untrusted` CLI
+    /// flag), each dangerous pointer-follow first validates against
+    /// `safe_spaces` with the typed-deref predicate; a failure produces
+    /// [`InterpError::BadImage`] (a clean halt), never UB. See
+    /// [`safe_deref`].
+    untrusted: bool,
+    /// The live image spaces consulted by the typed-deref predicate IN
+    /// UNTRUSTED MODE ONLY (the alloc space is read live; see
+    /// `alloc_space_range`). Default-empty + never read in trusted mode.
+    /// Populated by [`Interpreter::with_untrusted_spaces`].
+    safe_spaces: SafeSpaces,
 }
 
 /// A cached JIT'd function with the metadata needed to invoke it
@@ -1131,6 +1156,8 @@ impl Interpreter {
             diag: None,
             jit_cache: JitCache::default(),
             region_registry: RegionRegistry::default(),
+            untrusted: false,
+            safe_spaces: SafeSpaces::default(),
         }
     }
 
@@ -1184,6 +1211,8 @@ impl Interpreter {
             diag: None,
             jit_cache: JitCache::default(),
             region_registry: RegionRegistry::default(),
+            untrusted: false,
+            safe_spaces: SafeSpaces::default(),
         }
     }
 
@@ -1239,6 +1268,12 @@ impl Interpreter {
             diag: None,
             jit_cache: JitCache::default(),
             region_registry: RegionRegistry::default(),
+            // A forked child inherits the parent's trust posture is not yet
+            // wired (real threads are an opt-in path with its own fork
+            // discipline). The single-threaded floor never reaches here;
+            // default trusted is the safe, byte-identical choice.
+            untrusted: false,
+            safe_spaces: SafeSpaces::default(),
         }
     }
 
@@ -1533,6 +1568,193 @@ impl Interpreter {
         // entries.)
         self.runtime.add_image_root(ptr, len_words);
         self
+    }
+
+    /// Switch this interpreter into UNTRUSTED mode (the opt-in safe mode
+    /// for explicitly-foreign images). When `on` is `true`, every hardened
+    /// pointer-follow validates against the typed-deref predicate before the
+    /// unsafe use; a failure halts cleanly with [`InterpError::BadImage`].
+    /// DEFAULT is `false` (trusted): the hardened sites take the exact
+    /// current fast path, byte-identical.
+    ///
+    /// You almost always want to pair this with [`Self::with_untrusted_spaces`]
+    /// so the predicate has the live image spaces to validate against.
+    #[must_use]
+    pub fn with_untrusted(mut self, on: bool) -> Self {
+        self.untrusted = on;
+        self
+    }
+
+    /// Register the loaded image's spaces (immutable / mutable / code) as
+    /// the live spaces the typed-deref predicate validates pointers against
+    /// IN UNTRUSTED MODE. Has no effect on the trusted fast path (the
+    /// predicate is never consulted there). The alloc space is NOT passed
+    /// here — it is read live on each check (the GC swaps it).
+    ///
+    /// Pass each space's body base pointer + its `used_words`. A null/empty
+    /// space is ignored.
+    #[must_use]
+    pub fn with_untrusted_spaces(
+        mut self,
+        immutable: (*const PolyWord, usize),
+        mutable: (*const PolyWord, usize),
+        code: (*const PolyWord, usize),
+    ) -> Self {
+        self.safe_spaces.push_image_space(immutable.0, immutable.1);
+        self.safe_spaces.push_image_space(mutable.0, mutable.1);
+        self.safe_spaces.push_image_space(code.0, code.1);
+        self
+    }
+
+    /// Whether this interpreter is in untrusted (safe) mode.
+    #[must_use]
+    pub fn is_untrusted(&self) -> bool {
+        self.untrusted
+    }
+
+    /// The live alloc-space range, read FRESH (the Cheney GC swaps the
+    /// alloc space wholesale, so a cached bound would dangle). `None` if no
+    /// alloc space is attached. Used ONLY by the untrusted-mode predicate.
+    #[inline]
+    fn alloc_space_range(&self) -> Option<SpaceRange> {
+        let space = self.alloc_space_ref()?;
+        let base = space
+            .iter()
+            .next()
+            .map_or(std::ptr::null::<PolyWord>(), std::ptr::from_ref);
+        let base = if base.is_null() {
+            // An empty alloc space: derive the storage start so a pointer
+            // freshly bump-allocated (after this check) still falls inside.
+            space.storage_bytes().as_ptr().cast::<PolyWord>()
+        } else {
+            base
+        };
+        // The membership check uses the *capacity* end, not the used end:
+        // an object validated here may have been allocated up to the
+        // capacity bound, and the predicate's header-fit check needs the
+        // full live extent. Using `used_words` would spuriously reject a
+        // just-allocated object near the bump pointer.
+        let cap = space.capacity_words();
+        // SAFETY: base + cap is one-past-the-end of the alloc storage.
+        let end = unsafe { base.add(cap) };
+        Some(SpaceRange { start: base, end })
+    }
+
+    /// Validate a word as an object pointer in untrusted mode: steps
+    /// (a)–(c) of the predicate (tag, space-membership, header sanity).
+    /// Maps a failure to [`InterpError::BadImage`] tagged with the opcode
+    /// `op`. Called ONLY behind `if self.untrusted`.
+    #[inline]
+    fn validate_obj(&self, w: PolyWord, op: &'static str) -> Result<ValidObj, InterpError> {
+        let alloc = self.alloc_space_range();
+        self.safe_spaces
+            .validate_obj(w, alloc)
+            .map_err(|why| InterpError::BadImage { op, why })
+    }
+
+    /// Build the live-space snapshot handed to RTS functions IN UNTRUSTED
+    /// MODE (so the code-constant family — the R1 OOB-write site and its
+    /// siblings — can validate a resolved code object before the deref).
+    /// Returns `None` in trusted mode (the RTS path stays byte-identical).
+    /// Must be called BEFORE borrowing `alloc_space_mut` for the RtsContext
+    /// (it reads the alloc range immutably).
+    fn rts_safe_spaces(&self) -> Option<crate::rts::RtsSafeSpaces> {
+        if !self.untrusted {
+            return None;
+        }
+        let mut ranges: Vec<(usize, usize)> = self.safe_spaces.image_ranges_usize();
+        if let Some(a) = self.alloc_space_range() {
+            ranges.push((a.start as usize, a.end as usize));
+        }
+        Some(crate::rts::RtsSafeSpaces { ranges })
+    }
+
+    /// Untrusted-mode convenience: a container reference points INTO this
+    /// interpreter's own stack (emitted by `STACK_CONTAINER_B`), not into a
+    /// heap space. Validate that `container_ref` is a stack-internal pointer
+    /// and that `container_ref + n` (the slot the op will touch) stays
+    /// within the live stack. Returns the validated `*const PolyWord` base.
+    /// Called ONLY behind `if self.untrusted`.
+    #[inline]
+    fn untrusted_container_ptr(
+        &self,
+        container_ref: PolyWord,
+        n: usize,
+        op: &'static str,
+    ) -> Result<*const PolyWord, InterpError> {
+        let bits = container_ref.0;
+        // Must be word-aligned and non-tagged (a stack address).
+        if container_ref.is_tagged() || bits & (std::mem::size_of::<usize>() - 1) != 0 {
+            return Err(InterpError::BadImage {
+                op,
+                why: DerefError::NotAPointer,
+            });
+        }
+        let base = self.stack.as_ptr();
+        // SAFETY: forming the one-past-end bound of the owned stack Box.
+        let end = unsafe { base.add(self.stack.len()) };
+        let p = bits as *const PolyWord;
+        // p must be in [base, end), and p + n must be < end (room for the
+        // touched slot). Use address comparisons; n is bounded by checking
+        // the touched slot lies strictly within the stack.
+        if p < base || p >= end {
+            return Err(InterpError::BadImage {
+                op,
+                why: DerefError::NotInSpace,
+            });
+        }
+        // SAFETY: p is within the stack allocation; forming p+n for the
+        // compare is in-bounds-or-one-past for the allocation since we
+        // bound-check it against `end` immediately.
+        let touched = unsafe { p.add(n) };
+        if touched >= end {
+            return Err(InterpError::BadImage {
+                op,
+                why: DerefError::IndexOutOfBounds,
+            });
+        }
+        Ok(p)
+    }
+
+    /// Whether it is safe to dereference word0 of `w` as a mutable cell in
+    /// the CURRENT mode. In TRUSTED mode this is just the existing
+    /// `is_data_ptr` + alignment gate (byte-identical). In UNTRUSTED mode it
+    /// ALSO requires space-membership + a header with at least one word, so
+    /// a wild-but-aligned pointer falls through to the op's safe non-pointer
+    /// branch instead of an OOB read/write. Used by the atomic / mutex
+    /// builtins, whose `if is_data_ptr {…} else {safe}` shape already has a
+    /// no-deref fallback.
+    #[inline]
+    fn word0_deref_ok(&self, w: PolyWord) -> bool {
+        if !w.is_data_ptr() || w.0 & (std::mem::size_of::<usize>() - 1) != 0 {
+            return false;
+        }
+        if self.untrusted {
+            // Must be in a live space with room for word0 + its length word.
+            match self.validate_obj(w, "ATOMIC") {
+                Ok(v) => v.n_words >= 1,
+                Err(_) => false,
+            }
+        } else {
+            true
+        }
+    }
+
+    /// Untrusted-mode convenience: validate `w` as an object, bounds-check
+    /// field `idx`, and read it. Returns the field value or a clean
+    /// [`InterpError::BadImage`]. Called ONLY behind `if self.untrusted`.
+    #[inline]
+    fn untrusted_field(
+        &self,
+        w: PolyWord,
+        idx: usize,
+        op: &'static str,
+    ) -> Result<PolyWord, InterpError> {
+        let v = self.validate_obj(w, op)?;
+        v.check_word_index(idx)
+            .map_err(|why| InterpError::BadImage { op, why })?;
+        // SAFETY: validated pointer + in-bounds index.
+        Ok(unsafe { *v.ptr.add(idx) })
     }
 
     /// Request a stop-the-world GC and run it as the collector (3c).
@@ -4003,6 +4225,13 @@ impl Interpreter {
                 let n = self.fetch_u8()? as usize;
                 let u = self.pop()?;
                 let container_ref = self.peek(0)?;
+                if self.untrusted {
+                    let p =
+                        self.untrusted_container_ptr(container_ref, n, "MOVE_TO_CONTAINER_B")?;
+                    // SAFETY: validated stack-internal pointer + in-bounds slot.
+                    unsafe { p.cast_mut().add(n).write(u) };
+                    return Ok(StepResult::Continue);
+                }
                 let ref_ptr = container_ref.0 as *mut PolyWord;
                 // SAFETY: ref_ptr is a real stack-slot pointer we
                 // emitted in STACK_CONTAINER_B; the compiler is
@@ -4015,6 +4244,14 @@ impl Interpreter {
             INSTR_INDIRECT_CONTAINER_B => {
                 let n = self.fetch_u8()? as usize;
                 let container_ref = self.peek(0)?;
+                if self.untrusted {
+                    let p =
+                        self.untrusted_container_ptr(container_ref, n, "INDIRECT_CONTAINER_B")?;
+                    // SAFETY: validated stack-internal pointer + in-bounds slot.
+                    let val = unsafe { *p.add(n) };
+                    self.pop()?;
+                    return self.push_continue(val);
+                }
                 let ref_ptr = container_ref.0 as *const PolyWord;
                 // SAFETY: same as MOVE_TO_CONTAINER_B
                 let val = unsafe { *ref_ptr.add(n) };
@@ -4025,6 +4262,12 @@ impl Interpreter {
             // ----- Cell introspection (length / flag-byte of a heap obj)
             INSTR_CELL_LENGTH => {
                 let v = self.peek(0)?;
+                if self.untrusted {
+                    let vo = self.validate_obj(v, "CELL_LENGTH")?;
+                    let len = crate::length_word::length_of(vo.length_word);
+                    self.pop()?;
+                    return self.push_continue(PolyWord::tagged(len as isize));
+                }
                 let p = v.as_ptr::<PolyWord>();
                 // SAFETY: caller emitted a valid object reference
                 let lw = unsafe { MemorySpace::length_word_of(p) };
@@ -4034,6 +4277,12 @@ impl Interpreter {
             }
             INSTR_CELL_FLAGS => {
                 let v = self.peek(0)?;
+                if self.untrusted {
+                    let vo = self.validate_obj(v, "CELL_FLAGS")?;
+                    let f = crate::length_word::flags_of(vo.length_word);
+                    self.pop()?;
+                    return self.push_continue(PolyWord::tagged(isize::from(f)));
+                }
                 let p = v.as_ptr::<PolyWord>();
                 // SAFETY: caller emitted a valid object reference
                 let lw = unsafe { MemorySpace::length_word_of(p) };
@@ -4105,6 +4354,11 @@ impl Interpreter {
             INSTR_LOAD_ML_WORD => {
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
+                if self.untrusted {
+                    let v = self.untrusted_field(base, index, "LOAD_ML_WORD")?;
+                    self.pop()?;
+                    return self.push_continue(v);
+                }
                 let p = base.as_ptr::<PolyWord>();
                 // SAFETY: caller emits valid offsets
                 let v = unsafe { *p.add(index) };
@@ -4114,6 +4368,18 @@ impl Interpreter {
             INSTR_LOAD_ML_BYTE => {
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
+                if self.untrusted {
+                    let vobj = self.validate_obj(base, "LOAD_ML_BYTE")?;
+                    vobj.check_byte_range(index, 1)
+                        .map_err(|why| InterpError::BadImage {
+                            op: "LOAD_ML_BYTE",
+                            why,
+                        })?;
+                    // SAFETY: validated object + in-bounds byte index.
+                    let b = unsafe { *vobj.ptr.cast::<u8>().add(index) };
+                    self.pop()?;
+                    return self.push_continue(PolyWord::tagged(isize::from(b)));
+                }
                 let p = base.as_ptr::<u8>();
                 // SAFETY: caller emits valid offsets
                 let b = unsafe { *p.add(index) };
@@ -4123,6 +4389,11 @@ impl Interpreter {
             INSTR_LOAD_UNTAGGED => {
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
+                if self.untrusted {
+                    let v = self.untrusted_field(base, index, "LOAD_UNTAGGED")?;
+                    self.pop()?;
+                    return self.push_continue(PolyWord::tagged(v.0 as isize));
+                }
                 if !base.is_data_ptr() {
                     eprintln!(
                         "  LOAD_UNTAGGED: base={base:?}, index={index}, sp_depth={}, frames={}",
@@ -4191,6 +4462,21 @@ impl Interpreter {
                 let index_word = self.pop()?;
                 let index = index_word.untag() as usize;
                 let base = self.peek(0)?;
+                if self.untrusted {
+                    let v = self.validate_obj(base, "STORE_ML_WORD")?;
+                    let bad = v
+                        .require_mutable()
+                        .and_then(|()| v.require_word_typed())
+                        .and_then(|()| v.check_word_index(index));
+                    bad.map_err(|why| InterpError::BadImage {
+                        op: "STORE_ML_WORD",
+                        why,
+                    })?;
+                    // SAFETY: validated mutable word-typed object + in-bounds index.
+                    unsafe { v.ptr.cast_mut().add(index).write(to_store) };
+                    self.pop()?;
+                    return self.push_continue(PolyWord::tagged(0));
+                }
                 // Diagnostic: catch bad bases (non-pointer or below
                 // mapped memory) and dump context. Gated on env var.
                 // Also fires when the popped INDEX is itself a pointer
@@ -4275,6 +4561,20 @@ impl Interpreter {
                 let to_store = self.pop()?.untag() as u8;
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
+                if self.untrusted {
+                    let v = self.validate_obj(base, "STORE_ML_BYTE")?;
+                    let bad = v
+                        .require_mutable()
+                        .and_then(|()| v.check_byte_range(index, 1));
+                    bad.map_err(|why| InterpError::BadImage {
+                        op: "STORE_ML_BYTE",
+                        why,
+                    })?;
+                    // SAFETY: validated mutable object + in-bounds byte index.
+                    unsafe { v.ptr.cast_mut().cast::<u8>().add(index).write(to_store) };
+                    self.pop()?;
+                    return self.push_continue(PolyWord::tagged(0));
+                }
                 let p = base.as_ptr::<u8>().cast_mut();
                 // SAFETY: caller emits valid offsets; base is mutable
                 unsafe { p.add(index).write(to_store) };
@@ -4288,6 +4588,25 @@ impl Interpreter {
                 let raw = self.pop()?.untag() as usize;
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
+                if self.untrusted {
+                    // STORE_UNTAGGED writes raw bits into a word slot of a
+                    // mutable byte/word object (e.g. a Word8Array.update or a
+                    // mutable boxed-word cell). It must NOT be allowed to
+                    // plant a forged pointer into a code object, so require
+                    // mutable + an in-bounds word slot.
+                    let v = self.validate_obj(base, "STORE_UNTAGGED")?;
+                    let bad = v.require_mutable().and_then(|()| v.check_word_index(index));
+                    bad.map_err(|why| InterpError::BadImage {
+                        op: "STORE_UNTAGGED",
+                        why,
+                    })?;
+                    // SAFETY: validated mutable object + in-bounds word index.
+                    unsafe {
+                        v.ptr.cast_mut().add(index).write(PolyWord::from_bits(raw));
+                    }
+                    self.pop()?;
+                    return self.push_continue(PolyWord::tagged(0));
+                }
                 let p = base.as_ptr::<PolyWord>().cast_mut();
                 // SAFETY: caller emits valid offset on mutable base
                 unsafe { p.add(index).write(PolyWord::from_bits(raw)) };
@@ -4301,9 +4620,32 @@ impl Interpreter {
             INSTR_BLOCK_MOVE_BYTE => {
                 let length = self.pop()?.untag() as usize;
                 let dest_off = self.pop()?.untag() as usize;
-                let dest = self.pop()?.as_ptr::<u8>().cast_mut();
+                let dest_word = self.pop()?;
                 let src_off = self.pop()?.untag() as usize;
-                let src = self.peek(0)?.as_ptr::<u8>();
+                let src_word = self.peek(0)?;
+                if self.untrusted {
+                    let dv = self.validate_obj(dest_word, "BLOCK_MOVE_BYTE")?;
+                    let sv = self.validate_obj(src_word, "BLOCK_MOVE_BYTE")?;
+                    dv.require_mutable()
+                        .and_then(|()| dv.check_byte_range(dest_off, length))
+                        .and_then(|()| sv.check_byte_range(src_off, length))
+                        .map_err(|why| InterpError::BadImage {
+                            op: "BLOCK_MOVE_BYTE",
+                            why,
+                        })?;
+                    // SAFETY: both ranges validated in-bounds; dest mutable.
+                    unsafe {
+                        std::ptr::copy(
+                            sv.ptr.cast::<u8>().add(src_off),
+                            dv.ptr.cast_mut().cast::<u8>().add(dest_off),
+                            length,
+                        );
+                    }
+                    self.pop()?;
+                    return self.push_continue(PolyWord::tagged(0));
+                }
+                let dest = dest_word.as_ptr::<u8>().cast_mut();
+                let src = src_word.as_ptr::<u8>();
                 // SAFETY: caller emits valid offsets + lengths
                 unsafe { std::ptr::copy(src.add(src_off), dest.add(dest_off), length) };
                 self.pop()?;
@@ -4313,9 +4655,41 @@ impl Interpreter {
             INSTR_BLOCK_MOVE_WORD => {
                 let length = self.pop()?.untag() as usize;
                 let dest_off = self.pop()?.untag() as usize;
-                let dest = self.pop()?.as_ptr::<PolyWord>().cast_mut();
+                let dest_word = self.pop()?;
                 let src_off = self.pop()?.untag() as usize;
-                let src = self.peek(0)?.as_ptr::<PolyWord>();
+                let src_word = self.peek(0)?;
+                if self.untrusted {
+                    let dv = self.validate_obj(dest_word, "BLOCK_MOVE_WORD")?;
+                    let sv = self.validate_obj(src_word, "BLOCK_MOVE_WORD")?;
+                    let dest_end = dest_off.checked_add(length);
+                    let src_end = src_off.checked_add(length);
+                    let ok = dv.require_mutable().is_ok()
+                        && dest_end.is_some_and(|e| e <= dv.n_words)
+                        && src_end.is_some_and(|e| e <= sv.n_words);
+                    if !ok {
+                        let why = if dv.require_mutable().is_err() {
+                            DerefError::WrongType
+                        } else {
+                            DerefError::IndexOutOfBounds
+                        };
+                        return Err(InterpError::BadImage {
+                            op: "BLOCK_MOVE_WORD",
+                            why,
+                        });
+                    }
+                    // SAFETY: both word ranges validated in-bounds; dest mutable.
+                    unsafe {
+                        std::ptr::copy(
+                            sv.ptr.add(src_off),
+                            dv.ptr.cast_mut().add(dest_off),
+                            length,
+                        );
+                    }
+                    self.pop()?;
+                    return self.push_continue(PolyWord::tagged(0));
+                }
+                let dest = dest_word.as_ptr::<PolyWord>().cast_mut();
+                let src = src_word.as_ptr::<PolyWord>();
                 // SAFETY: caller emits valid offsets + lengths
                 unsafe { std::ptr::copy(src.add(src_off), dest.add(dest_off), length) };
                 self.pop()?;
@@ -4326,14 +4700,33 @@ impl Interpreter {
             INSTR_BLOCK_EQUAL_BYTE => {
                 let length = self.pop()?.untag() as usize;
                 let off2 = self.pop()?.untag() as usize;
-                let p2 = self.pop()?.as_ptr::<u8>();
+                let w2 = self.pop()?;
                 let off1 = self.pop()?.untag() as usize;
-                let p1 = self.peek(0)?.as_ptr::<u8>();
-                // SAFETY: caller emits valid offsets + lengths
-                let equal = unsafe {
-                    let s1 = std::slice::from_raw_parts(p1.add(off1), length);
-                    let s2 = std::slice::from_raw_parts(p2.add(off2), length);
-                    s1 == s2
+                let w1 = self.peek(0)?;
+                let equal = if self.untrusted {
+                    let v1 = self.validate_obj(w1, "BLOCK_EQUAL_BYTE")?;
+                    let v2 = self.validate_obj(w2, "BLOCK_EQUAL_BYTE")?;
+                    v1.check_byte_range(off1, length)
+                        .and_then(|()| v2.check_byte_range(off2, length))
+                        .map_err(|why| InterpError::BadImage {
+                            op: "BLOCK_EQUAL_BYTE",
+                            why,
+                        })?;
+                    // SAFETY: both byte ranges validated in-bounds.
+                    unsafe {
+                        let s1 = std::slice::from_raw_parts(v1.ptr.cast::<u8>().add(off1), length);
+                        let s2 = std::slice::from_raw_parts(v2.ptr.cast::<u8>().add(off2), length);
+                        s1 == s2
+                    }
+                } else {
+                    let p2 = w2.as_ptr::<u8>();
+                    let p1 = w1.as_ptr::<u8>();
+                    // SAFETY: caller emits valid offsets + lengths
+                    unsafe {
+                        let s1 = std::slice::from_raw_parts(p1.add(off1), length);
+                        let s2 = std::slice::from_raw_parts(p2.add(off2), length);
+                        s1 == s2
+                    }
                 };
                 self.pop()?;
                 self.push_continue(if equal {
@@ -4347,14 +4740,33 @@ impl Interpreter {
             INSTR_BLOCK_COMPARE_BYTE => {
                 let length = self.pop()?.untag() as usize;
                 let off2 = self.pop()?.untag() as usize;
-                let p2 = self.pop()?.as_ptr::<u8>();
+                let w2 = self.pop()?;
                 let off1 = self.pop()?.untag() as usize;
-                let p1 = self.peek(0)?.as_ptr::<u8>();
-                // SAFETY: caller emits valid offsets + lengths
-                let ordering = unsafe {
-                    let s1 = std::slice::from_raw_parts(p1.add(off1), length);
-                    let s2 = std::slice::from_raw_parts(p2.add(off2), length);
-                    s1.cmp(s2)
+                let w1 = self.peek(0)?;
+                let ordering = if self.untrusted {
+                    let v1 = self.validate_obj(w1, "BLOCK_COMPARE_BYTE")?;
+                    let v2 = self.validate_obj(w2, "BLOCK_COMPARE_BYTE")?;
+                    v1.check_byte_range(off1, length)
+                        .and_then(|()| v2.check_byte_range(off2, length))
+                        .map_err(|why| InterpError::BadImage {
+                            op: "BLOCK_COMPARE_BYTE",
+                            why,
+                        })?;
+                    // SAFETY: both byte ranges validated in-bounds.
+                    unsafe {
+                        let s1 = std::slice::from_raw_parts(v1.ptr.cast::<u8>().add(off1), length);
+                        let s2 = std::slice::from_raw_parts(v2.ptr.cast::<u8>().add(off2), length);
+                        s1.cmp(s2)
+                    }
+                } else {
+                    let p2 = w2.as_ptr::<u8>();
+                    let p1 = w1.as_ptr::<u8>();
+                    // SAFETY: caller emits valid offsets + lengths
+                    unsafe {
+                        let s1 = std::slice::from_raw_parts(p1.add(off1), length);
+                        let s2 = std::slice::from_raw_parts(p2.add(off2), length);
+                        s1.cmp(s2)
+                    }
                 };
                 self.pop()?;
                 self.push_continue(PolyWord::tagged(match ordering {
@@ -4462,6 +4874,10 @@ impl Interpreter {
             INSTR_INDIRECT_LOCAL_B0 => {
                 let depth = self.fetch_u8()? as usize;
                 let u = self.peek(depth)?;
+                if self.untrusted {
+                    let val = self.untrusted_field(u, 0, "INDIRECT_LOCAL_B0")?;
+                    return self.push_continue(val);
+                }
                 let p = u.as_ptr::<PolyWord>();
                 // SAFETY: caller emitted a valid object reference
                 let val = unsafe { *p };
@@ -4470,6 +4886,10 @@ impl Interpreter {
             INSTR_INDIRECT_LOCAL_B1 => {
                 let depth = self.fetch_u8()? as usize;
                 let u = self.peek(depth)?;
+                if self.untrusted {
+                    let val = self.untrusted_field(u, 1, "INDIRECT_LOCAL_B1")?;
+                    return self.push_continue(val);
+                }
                 let p = u.as_ptr::<PolyWord>();
                 // SAFETY: caller emitted a valid object reference
                 let val = unsafe { *p.add(1) };
@@ -4477,6 +4897,10 @@ impl Interpreter {
             }
             INSTR_INDIRECT_0_LOCAL_0 => {
                 let u = self.peek(0)?;
+                if self.untrusted {
+                    let val = self.untrusted_field(u, 0, "INDIRECT_0_LOCAL_0")?;
+                    return self.push_continue(val);
+                }
                 let p = u.as_ptr::<PolyWord>();
                 // SAFETY: caller emitted a valid object reference
                 let val = unsafe { *p };
@@ -4486,6 +4910,10 @@ impl Interpreter {
                 let depth = self.fetch_u8()? as usize;
                 let slot = self.fetch_u8()? as usize;
                 let u = self.peek(depth)?;
+                if self.untrusted {
+                    let val = self.untrusted_field(u, slot, "INDIRECT_LOCAL_BB")?;
+                    return self.push_continue(val);
+                }
                 let p = u.as_ptr::<PolyWord>();
                 // SAFETY: caller emitted a valid object reference + slot
                 let val = unsafe { *p.add(slot) };
@@ -4521,9 +4949,13 @@ impl Interpreter {
                 let want = self.fetch_u8()?;
                 let off = self.fetch_u8()? as usize;
                 let local = self.peek(depth)?;
-                let p = local.as_ptr::<PolyWord>();
-                // SAFETY: caller emitted a valid tuple reference
-                let u = unsafe { *p };
+                let u = if self.untrusted {
+                    self.untrusted_field(local, 0, "JUMP_NEQ_LOCAL_IND")?
+                } else {
+                    let p = local.as_ptr::<PolyWord>();
+                    // SAFETY: caller emitted a valid tuple reference
+                    unsafe { *p }
+                };
                 if u.is_tagged() && u.untag() == isize::from(want) {
                     // fall through
                 } else {
@@ -4567,6 +4999,11 @@ impl Interpreter {
                 let depth = self.fetch_u8()? as usize;
                 let slot = self.fetch_u8()? as usize;
                 let closure_word = self.peek(depth)?;
+                if self.untrusted {
+                    let val =
+                        self.untrusted_field(closure_word, 1 + slot, "INDIRECT_CLOSURE_BB")?;
+                    return self.push_continue(val);
+                }
                 let p = closure_word.as_ptr::<PolyWord>();
                 // SAFETY: caller emitted valid slot index
                 let val = unsafe { *p.add(1 + slot) };
@@ -4986,22 +5423,21 @@ impl Interpreter {
             // without touching memory.
             EXTINSTR_LOCK_MUTEX => {
                 let mutex = self.peek(0)?;
-                let acquired =
-                    if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
-                        let p = mutex.as_ptr::<PolyWord>().cast_mut();
-                        // SAFETY: pointer-aligned & is_data_ptr ⇒ valid mutex slot
-                        let old = unsafe { *p };
-                        let was_unlocked = old.0 == PolyWord::tagged(0).0;
-                        // Bump counter by 2 (PolyML convention; we don't
-                        // need the count in single-thread but preserve it
-                        // for round-trips with unlockMutex).
-                        let new_bits = old.0.wrapping_add(2);
-                        // SAFETY: same
-                        unsafe { p.write(PolyWord::from_bits(new_bits)) };
-                        was_unlocked
-                    } else {
-                        true
-                    };
+                let acquired = if self.word0_deref_ok(mutex) {
+                    let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                    // SAFETY: pointer-aligned & is_data_ptr ⇒ valid mutex slot
+                    let old = unsafe { *p };
+                    let was_unlocked = old.0 == PolyWord::tagged(0).0;
+                    // Bump counter by 2 (PolyML convention; we don't
+                    // need the count in single-thread but preserve it
+                    // for round-trips with unlockMutex).
+                    let new_bits = old.0.wrapping_add(2);
+                    // SAFETY: same
+                    unsafe { p.write(PolyWord::from_bits(new_bits)) };
+                    was_unlocked
+                } else {
+                    true
+                };
                 self.pop()?;
                 self.push_continue(if acquired {
                     PolyWord::tagged(1)
@@ -5011,20 +5447,19 @@ impl Interpreter {
             }
             EXTINSTR_TRY_LOCK_MUTEX => {
                 let mutex = self.peek(0)?;
-                let acquired =
-                    if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
-                        let p = mutex.as_ptr::<PolyWord>().cast_mut();
-                        // SAFETY: same as above
-                        let old = unsafe { *p };
-                        let was_unlocked = old.0 == PolyWord::tagged(0).0;
-                        if was_unlocked {
-                            // SAFETY: same
-                            unsafe { p.write(PolyWord::tagged(1)) };
-                        }
-                        was_unlocked
-                    } else {
-                        true
-                    };
+                let acquired = if self.word0_deref_ok(mutex) {
+                    let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                    // SAFETY: same as above
+                    let old = unsafe { *p };
+                    let was_unlocked = old.0 == PolyWord::tagged(0).0;
+                    if was_unlocked {
+                        // SAFETY: same
+                        unsafe { p.write(PolyWord::tagged(1)) };
+                    }
+                    was_unlocked
+                } else {
+                    true
+                };
                 self.pop()?;
                 self.push_continue(if acquired {
                     PolyWord::tagged(1)
@@ -5044,21 +5479,20 @@ impl Interpreter {
             // forced a spurious Full-RTS call on every uncontended unlock.
             EXTINSTR_ATOMIC_RESET => {
                 let mutex = self.pop()?;
-                let was_sole_locker =
-                    if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
-                        let p = mutex.as_ptr::<PolyWord>().cast_mut();
-                        // SAFETY: pointer-aligned & is_data_ptr
-                        let old = unsafe { *p };
-                        // SAFETY: same
-                        unsafe { p.write(PolyWord::tagged(0)) };
-                        old.0 == PolyWord::tagged(1).0
-                    } else {
-                        // Non-pointer/misaligned defensive case (no upstream
-                        // analogue). False = conservative "contended" path,
-                        // harmless single-threaded (the follow-up
-                        // PolyThreadMutexUnlock is an idempotent reset).
-                        false
-                    };
+                let was_sole_locker = if self.word0_deref_ok(mutex) {
+                    let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                    // SAFETY: pointer-aligned & is_data_ptr
+                    let old = unsafe { *p };
+                    // SAFETY: same
+                    unsafe { p.write(PolyWord::tagged(0)) };
+                    old.0 == PolyWord::tagged(1).0
+                } else {
+                    // Non-pointer/misaligned defensive case (no upstream
+                    // analogue). False = conservative "contended" path,
+                    // harmless single-threaded (the follow-up
+                    // PolyThreadMutexUnlock is an idempotent reset).
+                    false
+                };
                 self.push_continue(if was_sole_locker {
                     PolyWord::tagged(1)
                 } else {
@@ -5078,7 +5512,7 @@ impl Interpreter {
             EXTINSTR_ATOMIC_EXCH_ADD => {
                 let addend = self.pop()?;
                 let obj = self.peek(0)?;
-                let old = if obj.is_data_ptr() && obj.0 & (std::mem::size_of::<usize>() - 1) == 0 {
+                let old = if self.word0_deref_ok(obj) {
                     let p = obj.as_ptr::<PolyWord>().cast_mut();
                     // SAFETY: pointer-aligned & is_data_ptr
                     let old = unsafe { *p };
@@ -5111,6 +5545,11 @@ impl Interpreter {
             EXTINSTR_INDIRECT_W => {
                 let idx = self.fetch_u16_le()? as usize;
                 let v = self.peek(0)?;
+                if self.untrusted {
+                    let field = self.untrusted_field(v, idx, "INDIRECT_W")?;
+                    self.pop()?;
+                    return self.push_continue(field);
+                }
                 let p = v.as_ptr::<PolyWord>();
                 // SAFETY: caller emits valid offset
                 let field = unsafe { *p.add(idx) };
@@ -5142,6 +5581,11 @@ impl Interpreter {
                 // leak desynced every later frame. (Mirrors EXTINSTR_INDIRECT_W.)
                 let item = self.fetch_u16_le()? as usize;
                 let closure_word = self.peek(0)?;
+                if self.untrusted {
+                    let val = self.untrusted_field(closure_word, 1 + item, "INDIRECT_CLOSURE_W")?;
+                    self.pop()?;
+                    return self.push_continue(val);
+                }
                 let p = closure_word.as_ptr::<PolyWord>();
                 // SAFETY: caller emits a valid closure with field index in range.
                 let val = unsafe { *p.add(1 + item) };
@@ -5164,6 +5608,15 @@ impl Interpreter {
             // bytecode.cpp:1545-1557.
             EXTINSTR_LONG_W_TO_TAGGED => {
                 let p = self.peek(0)?;
+                if self.untrusted {
+                    if p.is_data_ptr() {
+                        let v = self.untrusted_field(p, 0, "LONG_W_TO_TAGGED")?;
+                        #[allow(clippy::cast_possible_wrap)]
+                        let val = v.0 as isize;
+                        self.stack[self.sp] = PolyWord::tagged(val);
+                    }
+                    return Ok(StepResult::Continue);
+                }
                 if p.is_data_ptr() {
                     let ptr = p.as_ptr::<PolyWord>();
                     // SAFETY: caller-trusted long-word object.
@@ -5223,6 +5676,21 @@ impl Interpreter {
             EXTINSTR_LOAD_POLY_WORD | EXTINSTR_LOAD_NATIVE_WORD => {
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
+                if self.untrusted {
+                    // Raw word-array read: a `usize` is PolyWord-sized, so the
+                    // word index must be in-bounds for the object's words.
+                    let v = self.validate_obj(base, "LOAD_POLY_WORD")?;
+                    v.check_word_index(index)
+                        .map_err(|why| InterpError::BadImage {
+                            op: "LOAD_POLY_WORD",
+                            why,
+                        })?;
+                    // SAFETY: validated object + in-bounds word index.
+                    let r = unsafe { *v.ptr.cast::<usize>().add(index) };
+                    let boxed = self.alloc_lg_word(r)?;
+                    self.stack[self.sp] = boxed;
+                    return Ok(StepResult::Continue);
+                }
                 let p = base.as_ptr::<usize>();
                 // SAFETY: compiler emits a valid base + in-bounds index.
                 let r = unsafe { *p.add(index) };
@@ -5233,9 +5701,23 @@ impl Interpreter {
             // storePolyWord: pop toStore (boxed; read its word), pop index,
             // peek base, base[index] := toStore, replace top with Zero. Net -2.
             EXTINSTR_STORE_POLY_WORD => {
-                let to_store = unsafe { Self::read_lg_word(self.pop()?) };
+                let lgw = self.pop()?;
+                let to_store = self.read_lg_word(lgw)?;
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
+                if self.untrusted {
+                    let v = self.validate_obj(base, "STORE_POLY_WORD")?;
+                    v.require_mutable()
+                        .and_then(|()| v.check_word_index(index))
+                        .map_err(|why| InterpError::BadImage {
+                            op: "STORE_POLY_WORD",
+                            why,
+                        })?;
+                    // SAFETY: validated mutable object + in-bounds word index.
+                    unsafe { *v.ptr.cast::<usize>().cast_mut().add(index) = to_store };
+                    self.stack[self.sp] = PolyWord::tagged(0);
+                    return Ok(StepResult::Continue);
+                }
                 let p = base.as_ptr::<usize>().cast_mut();
                 // SAFETY: compiler emits a valid mutable base + in-bounds index.
                 unsafe { *p.add(index) = to_store };
@@ -5244,9 +5726,22 @@ impl Interpreter {
             }
             // storeNativeWord: same but does NOT replace top — base stays. Net -2.
             EXTINSTR_STORE_NATIVE_WORD => {
-                let to_store = unsafe { Self::read_lg_word(self.pop()?) };
+                let lgw = self.pop()?;
+                let to_store = self.read_lg_word(lgw)?;
                 let index = self.pop()?.untag() as usize;
                 let base = self.peek(0)?;
+                if self.untrusted {
+                    let v = self.validate_obj(base, "STORE_NATIVE_WORD")?;
+                    v.require_mutable()
+                        .and_then(|()| v.check_word_index(index))
+                        .map_err(|why| InterpError::BadImage {
+                            op: "STORE_NATIVE_WORD",
+                            why,
+                        })?;
+                    // SAFETY: validated mutable object + in-bounds word index.
+                    unsafe { *v.ptr.cast::<usize>().cast_mut().add(index) = to_store };
+                    return Ok(StepResult::Continue);
+                }
                 let p = base.as_ptr::<usize>().cast_mut();
                 // SAFETY: compiler emits a valid mutable base + in-bounds index.
                 unsafe { *p.add(index) = to_store };
@@ -5290,7 +5785,7 @@ impl Interpreter {
             EXTINSTR_REAL_TO_FLOAT => {
                 let r = self.peek(0)?;
                 // SAFETY: peek returns a boxed Real pointer.
-                let d = unsafe { Self::read_real(r) };
+                let d = self.read_real(r)?;
                 // bytecode.cpp:1999 — realToFloat carries a trailing rounding-mode
                 // operand byte (genDoubleToFloat emits 5 = use-current-rounding).
                 // It MUST be consumed; otherwise PC lands on that byte and, since
@@ -5392,7 +5887,7 @@ impl Interpreter {
                 // rounding-mode operand byte (0=nearest, 1=floor, 2=ceil,
                 // 3=trunc); it MUST be consumed or PC lands on it and traps.
                 let r = self.peek(0)?;
-                let f = unsafe { Self::read_real(r) };
+                let f = self.read_real(r)?;
                 let mode = self.fetch_u8()?;
                 match Self::real_to_int_round(f, mode) {
                     Some(i) => {
@@ -5575,6 +6070,16 @@ impl Interpreter {
         if !cell.is_data_ptr() {
             return Err(InterpError::NotAClosure(cell));
         }
+        if self.untrusted {
+            // word0 read+write: require an in-space mutable cell with a word.
+            let v = self.validate_obj(cell, "ATOMIC_INCR_DECR")?;
+            v.require_mutable()
+                .and_then(|()| v.check_word_index(0))
+                .map_err(|why| InterpError::BadImage {
+                    op: "ATOMIC_INCR_DECR",
+                    why,
+                })?;
+        }
         let p = cell.as_ptr::<PolyWord>().cast_mut();
         // SAFETY: cell is a heap-allocated mutable ref cell.
         let new_word = unsafe {
@@ -5595,6 +6100,16 @@ impl Interpreter {
 
     fn indirect(&mut self, n: usize) -> Result<StepResult, InterpError> {
         let obj_word = self.pop()?;
+        if self.untrusted {
+            let v = self.validate_obj(obj_word, "INDIRECT")?;
+            v.check_word_index(n).map_err(|why| InterpError::BadImage {
+                op: "INDIRECT",
+                why,
+            })?;
+            // SAFETY: validated pointer + in-bounds index.
+            let field = unsafe { *v.ptr.add(n) };
+            return self.push_continue(field);
+        }
         let p = obj_word.as_ptr::<PolyWord>();
         // SAFETY: caller (compiled code) is trusted to emit valid offsets.
         let field = unsafe { *p.add(n) };
@@ -5651,9 +6166,13 @@ impl Interpreter {
         // Now the source closure is on top. Copy its first word
         // (code address) to slot 0 of the new closure.
         let src_word = self.peek(0)?;
-        let src_ptr = src_word.as_ptr::<PolyWord>();
-        // SAFETY: src is a valid closure
-        let code_addr = unsafe { *src_ptr };
+        let code_addr = if self.untrusted {
+            self.untrusted_field(src_word, 0, "CLOSURE")?
+        } else {
+            let src_ptr = src_word.as_ptr::<PolyWord>();
+            // SAFETY: src is a valid closure
+            unsafe { *src_ptr }
+        };
         // SAFETY: slot 0 is in bounds
         unsafe { p.add(0).write(code_addr) };
         // Replace top of stack with new closure.
@@ -5671,9 +6190,13 @@ impl Interpreter {
         let p = self.allocate(length, F_CLOSURE_OBJ | F_MUTABLE_BIT)?;
         // Source closure is on top: copy its first word (code addr).
         let src_word = self.peek(0)?;
-        let src_ptr = src_word.as_ptr::<PolyWord>();
-        // SAFETY: src closure invariant
-        let code_addr = unsafe { *src_ptr };
+        let code_addr = if self.untrusted {
+            self.untrusted_field(src_word, 0, "ALLOC_MUT_CLOSURE")?
+        } else {
+            let src_ptr = src_word.as_ptr::<PolyWord>();
+            // SAFETY: src closure invariant
+            unsafe { *src_ptr }
+        };
         // SAFETY: indices < length
         unsafe {
             p.add(0).write(code_addr);
@@ -5692,6 +6215,18 @@ impl Interpreter {
     fn do_move_to_mut_closure(&mut self, slot: usize) -> Result<StepResult, InterpError> {
         let u = self.pop()?;
         let target = self.peek(0)?;
+        if self.untrusted {
+            let v = self.validate_obj(target, "MOVE_TO_MUT_CLOSURE")?;
+            v.require_mutable()
+                .and_then(|()| v.check_word_index(slot + 1))
+                .map_err(|why| InterpError::BadImage {
+                    op: "MOVE_TO_MUT_CLOSURE",
+                    why,
+                })?;
+            // SAFETY: validated mutable object + in-bounds slot.
+            unsafe { v.ptr.cast_mut().add(slot + 1).write(u) };
+            return Ok(StepResult::Continue);
+        }
         let p = target.as_ptr::<PolyWord>();
         // We need mutable access despite holding a *const. Cast is
         // safe because the closure was allocated mutable.
@@ -5723,6 +6258,27 @@ impl Interpreter {
         use crate::length_word::{self, F_MUTABLE_BIT};
 
         let v = self.peek(0)?;
+        if self.untrusted {
+            // validate_obj proves there is room for the length word at
+            // ptr.sub(1) (it read it). Rewriting that one length word in
+            // place is bounded; no body access.
+            let vo = self.validate_obj(v, "CLEAR_MUTABLE")?;
+            let new_bits =
+                vo.length_word.0 & !((F_MUTABLE_BIT as usize) << length_word::FLAGS_SHIFT);
+            // SAFETY: vo.ptr.sub(1) is the validated length-word slot.
+            unsafe {
+                vo.ptr
+                    .cast_mut()
+                    .sub(1)
+                    .write(PolyWord::from_bits(new_bits))
+            };
+            return if replace_with_zero {
+                self.pop()?;
+                self.push_continue(PolyWord::tagged(0))
+            } else {
+                Ok(StepResult::Continue)
+            };
+        }
         let p = v.as_ptr::<PolyWord>().cast_mut();
         // SAFETY: caller upholds top is a mutable heap object.
         unsafe {
@@ -5744,6 +6300,17 @@ impl Interpreter {
     fn do_indirect_closure(&mut self, slot_offset: usize) -> Result<StepResult, InterpError> {
         let depth = self.fetch_u8()? as usize;
         let closure_word = self.peek(depth)?;
+        if self.untrusted {
+            let v = self.validate_obj(closure_word, "INDIRECT_CLOSURE")?;
+            v.check_word_index(1 + slot_offset)
+                .map_err(|why| InterpError::BadImage {
+                    op: "INDIRECT_CLOSURE",
+                    why,
+                })?;
+            // SAFETY: validated pointer + in-bounds slot.
+            let val = unsafe { *v.ptr.add(1 + slot_offset) };
+            return self.push_continue(val);
+        }
         let p = closure_word.as_ptr::<PolyWord>();
         // SAFETY: closure has at least slot_offset+2 words.
         let val = unsafe { *p.add(1 + slot_offset) };
@@ -5924,6 +6491,7 @@ impl Interpreter {
         };
         let entry_func = entry.func;
         let rts_ref = self.rts.clone();
+        let rts_spaces = self.rts_safe_spaces();
         let mut ctx = crate::rts::RtsContext {
             alloc_space: self.alloc_space_mut(),
             raised_exception: None,
@@ -5931,6 +6499,7 @@ impl Interpreter {
             // The typed-FP fast-call path never dispatches
             // `PolyEndBootstrapMode`, so the slot stays ZERO (unused).
             bootstrap_tail_call: PolyWord::ZERO,
+            safe_spaces: rts_spaces,
         };
         let result_word = match (args.len(), entry_func) {
             (1, crate::rts::RtsFn::Arity1(f)) => f(&mut ctx, args[0]),
@@ -5952,8 +6521,8 @@ impl Interpreter {
         let x = self.pop()?;
         let y = self.peek(0)?;
         // SAFETY: caller (compiler) emits valid boxed reals.
-        let fx = unsafe { Self::read_real(x) };
-        let fy = unsafe { Self::read_real(y) };
+        let fx = self.read_real(x)?;
+        let fy = self.read_real(y)?;
         let result = op(fy, fx);
         let p = self.alloc_real(result)?;
         self.stack[self.sp] = p;
@@ -5962,7 +6531,7 @@ impl Interpreter {
 
     fn real_unop<F: FnOnce(f64) -> f64>(&mut self, op: F) -> Result<StepResult, InterpError> {
         let r = self.peek(0)?;
-        let f = unsafe { Self::read_real(r) };
+        let f = self.read_real(r)?;
         let p = self.alloc_real(op(f))?;
         self.stack[self.sp] = p;
         Ok(StepResult::Continue)
@@ -5971,8 +6540,8 @@ impl Interpreter {
     fn real_cmp<F: FnOnce(f64, f64) -> bool>(&mut self, op: F) -> Result<StepResult, InterpError> {
         let x = self.pop()?;
         let y = self.peek(0)?;
-        let fx = unsafe { Self::read_real(x) };
-        let fy = unsafe { Self::read_real(y) };
+        let fx = self.read_real(x)?;
+        let fy = self.read_real(y)?;
         self.stack[self.sp] = PolyWord::tagged(isize::from(op(fy, fx)));
         Ok(StepResult::Continue)
     }
@@ -5981,13 +6550,24 @@ impl Interpreter {
     ///
     /// # Safety
     /// `w` must be a valid boxed-Real pointer.
-    unsafe fn read_real(w: PolyWord) -> f64 {
+    fn read_real(&self, w: PolyWord) -> Result<f64, InterpError> {
         if !w.is_data_ptr() {
-            return 0.0;
+            return Ok(0.0);
         }
-        // SAFETY: 1 word = 8 bytes = sizeof(f64); object body is
-        // word-aligned per Poly invariants.
-        unsafe { *w.as_ptr::<f64>() }
+        if self.untrusted {
+            // The operand is image-controlled: validate it is an in-space
+            // object with >= 8 bytes (1 word = sizeof(f64)) BEFORE the deref.
+            // A wild-but-aligned pointer here is an 8-byte OOB read -> SEGV
+            // (the task #96 hole found in adversarial verify: read_real was
+            // an associated fn that derefed after only is_data_ptr, before any
+            // untrusted branch, reached by every Real op).
+            let vo = self.validate_obj(w, "REAL")?;
+            vo.check_byte_range(0, std::mem::size_of::<f64>())
+                .map_err(|why| InterpError::BadImage { op: "REAL", why })?;
+        }
+        // SAFETY: trusted (compiler-emitted boxed real) OR untrusted-validated
+        // in-space object of >= 8 bytes; 1 word = sizeof(f64), word-aligned.
+        Ok(unsafe { *w.as_ptr::<f64>() })
     }
 
     /// Round an f64 to an integer per PolyML's rounding-mode byte
@@ -6045,8 +6625,8 @@ impl Interpreter {
     {
         let x = self.pop()?;
         let y = self.peek(0)?;
-        let wx = unsafe { Self::read_lg_word(x) };
-        let wy = unsafe { Self::read_lg_word(y) };
+        let wx = self.read_lg_word(x)?;
+        let wy = self.read_lg_word(y)?;
         let result_word = op(wy, wx);
         let p = self.alloc_lg_word(result_word)?;
         self.stack[self.sp] = p;
@@ -6063,7 +6643,7 @@ impl Interpreter {
         let y = self.peek(0)?;
         #[allow(clippy::cast_sign_loss)]
         let shift = x.untag() as usize;
-        let wy = unsafe { Self::read_lg_word(y) };
+        let wy = self.read_lg_word(y)?;
         let result_word = op(wy, shift);
         let p = self.alloc_lg_word(result_word)?;
         self.stack[self.sp] = p;
@@ -6077,8 +6657,8 @@ impl Interpreter {
     {
         let x = self.pop()?;
         let y = self.peek(0)?;
-        let wx = unsafe { Self::read_lg_word(x) };
-        let wy = unsafe { Self::read_lg_word(y) };
+        let wx = self.read_lg_word(x)?;
+        let wy = self.read_lg_word(y)?;
         self.stack[self.sp] = PolyWord::tagged(isize::from(op(wy, wx)));
         Ok(StepResult::Continue)
     }
@@ -6087,7 +6667,7 @@ impl Interpreter {
     ///
     /// # Safety
     /// `w` must be a valid boxed-LargeWord pointer (1+ word byte object).
-    unsafe fn read_lg_word(w: PolyWord) -> usize {
+    fn read_lg_word(&self, w: PolyWord) -> Result<usize, InterpError> {
         if !w.is_data_ptr() {
             if arbint_trace_on() {
                 eprintln!(
@@ -6097,9 +6677,20 @@ impl Interpreter {
                 );
                 std::process::abort();
             }
-            return 0;
+            return Ok(0);
         }
-        unsafe { (*w.as_ptr::<PolyWord>()).0 }
+        if self.untrusted {
+            // Image-controlled operand: validate >= 1 word in-space BEFORE the
+            // word0 deref (the task #96 sibling hole — read_lg_word derefed
+            // after only is_data_ptr, reached by the LargeWord/PackWord ops +
+            // STORE_POLY/NATIVE_WORD's to_store operand).
+            let vo = self.validate_obj(w, "LGWORD")?;
+            vo.check_word_index(0)
+                .map_err(|why| InterpError::BadImage { op: "LGWORD", why })?;
+        }
+        // SAFETY: trusted (compiler-emitted boxed long-word) OR untrusted-
+        // validated in-space object of >= 1 word.
+        Ok(unsafe { (*w.as_ptr::<PolyWord>()).0 })
     }
 
     fn alloc_lg_word(&mut self, word: usize) -> Result<PolyWord, InterpError> {
@@ -6238,9 +6829,19 @@ impl Interpreter {
     /// and push the result.
     fn rts_call(&mut self, n_args: usize) -> Result<StepResult, InterpError> {
         let stub = self.pop()?;
+        if self.untrusted {
+            // The stub must be a valid in-space object with a word0 token.
+            // A forged stub would otherwise OOB-read word0 here.
+            let v = self.validate_obj(stub, "CALL_FAST_RTS")?;
+            v.check_word_index(0).map_err(|why| InterpError::BadImage {
+                op: "CALL_FAST_RTS",
+                why,
+            })?;
+        }
         let p = stub.as_ptr::<PolyWord>();
         // SAFETY: caller (bytecode) guarantees `stub` is a valid
-        // EntryPoint object with word 0 holding the dispatch token.
+        // EntryPoint object with word 0 holding the dispatch token. In
+        // untrusted mode `stub` was validated above.
         let token = unsafe { (*p).0 };
         let entry_opt = self.rts.entry(token).cloned();
         let (entry_name, entry_func) = match entry_opt {
@@ -6271,6 +6872,7 @@ impl Interpreter {
                     raised_exception: None,
                     rts: None,
                     bootstrap_tail_call: PolyWord::ZERO,
+                    safe_spaces: None,
                 };
                 let pkt = crate::rts::make_simple_exception_pub(
                     &mut ctx,
@@ -6319,6 +6921,9 @@ impl Interpreter {
         // `alloc_space_mut()` borrow (which now borrows all of `self`,
         // since the heap moved behind `runtime.heap_mut()`).
         let seed_tail = self.bootstrap_tail_call;
+        // Untrusted-mode: snapshot the live spaces for the code-constant
+        // family's R1 guard BEFORE the `alloc_space_mut()` borrow.
+        let rts_spaces = self.rts_safe_spaces();
         let mut ctx = RtsContext {
             alloc_space: self.alloc_space_mut(),
             raised_exception: None,
@@ -6328,6 +6933,7 @@ impl Interpreter {
             // via the context; we read it back below. (Replaces the old
             // process-global static.)
             bootstrap_tail_call: seed_tail,
+            safe_spaces: rts_spaces,
         };
         let result = match entry_func {
             RtsFn::Arity0(f) => f(&mut ctx),
@@ -6399,6 +7005,7 @@ impl Interpreter {
                 raised_exception: None,
                 rts: None,
                 bootstrap_tail_call: PolyWord::ZERO,
+                safe_spaces: None,
             };
             crate::rts::make_overflow_exception(&mut ctx)
         };
@@ -6419,6 +7026,7 @@ impl Interpreter {
                 raised_exception: None,
                 rts: None,
                 bootstrap_tail_call: PolyWord::ZERO,
+                safe_spaces: None,
             };
             crate::rts::make_interrupt_exception(&mut ctx)
         };
@@ -6510,8 +7118,116 @@ impl Interpreter {
     /// 1. push retPC (current pc, encoded as raw bits);
     /// 2. push closure;
     /// 3. jump to closure's first word (which is the code address).
+    /// UNTRUSTED-MODE validation of the call primitive (Tier 0 — the
+    /// wild-jump). Validates, in order:
+    ///   1. `closure` is a valid in-space object (tag + membership +
+    ///      header) — so reading its word0 is in-bounds.
+    ///   2. word0 (the code address) resolves to a valid in-space object
+    ///      that IS a code object.
+    ///   3. The code object's trailing const-segment (read by
+    ///      `const_segment_for_code` to set the PC bounds) lands WITHIN the
+    ///      code object's space — i.e. the derived `code_end` is not wild.
+    /// Any failure → a clean [`InterpError::BadImage`], never the wild jump.
+    fn untrusted_validate_call(&self, closure: PolyWord) -> Result<(), InterpError> {
+        let op = "CALL";
+        // (1) The closure object itself. Word0 must exist (n_words >= 1).
+        let cl = self.validate_obj(closure, op)?;
+        cl.check_word_index(0)
+            .map_err(|why| InterpError::BadImage { op, why })?;
+        // SAFETY: cl validated; index 0 in bounds.
+        let code_word = unsafe { *cl.ptr };
+
+        // (2) word0 resolves to an in-space CODE object.
+        let code = self.validate_obj(code_word, op)?;
+        code.require_code()
+            .map_err(|why| InterpError::BadImage { op, why })?;
+
+        // (3) The const-segment derivation must stay within the code
+        // object's containing space. Re-derive `cp` exactly as
+        // const_segment_for_code does, but with bounds checks instead of
+        // blind deref. We need: n_words >= 2 (a code object has at least
+        // the trailing offset word + count word), and the computed cp (and
+        // cp-1) lie within the same space as the code object body.
+        let n_words = code.n_words;
+        if n_words < 2 {
+            return Err(InterpError::BadImage {
+                op,
+                why: DerefError::BadHeader,
+            });
+        }
+        // The space containing the code object (re-find it; cheap).
+        let space = match self.space_of_ptr(code.ptr) {
+            Some(s) => s,
+            None => {
+                return Err(InterpError::BadImage {
+                    op,
+                    why: DerefError::NotInSpace,
+                });
+            }
+        };
+        // last_word = code.ptr + (n_words - 1) — in bounds (header checked).
+        // SAFETY: code object fits the space (validate_obj), so
+        // code.ptr + (n_words-1) is the last body word.
+        let last_word_ptr = unsafe { code.ptr.add(n_words - 1) };
+        // SAFETY: last_word_ptr is within the validated object body.
+        let offset_bytes = unsafe { (*last_word_ptr).0 } as isize;
+        let word_bytes = std::mem::size_of::<usize>() as isize;
+        // cp = last_word_ptr + 1 + offset_bytes/word_bytes (mirrors
+        // const_segment_for_code). CRUCIAL: a forged `offset_bytes` can be a
+        // wild value, so we must NOT form `cp` with pointer `.offset()` (that
+        // is itself UB if it leaves the allocation). Compute the candidate
+        // address by INTEGER arithmetic (wrapping) and only ever COMPARE it
+        // against the space bounds — never deref it here.
+        let cp_addr = (last_word_ptr as usize)
+            .wrapping_add(word_bytes as usize) // + 1 word
+            .wrapping_add((offset_bytes / word_bytes).wrapping_mul(word_bytes) as usize);
+        let start_addr = space.start as usize;
+        let end_addr = space.end as usize;
+        let code_addr = code.ptr as usize;
+        // cp[-1] (the const-count word) must be a readable slot inside the
+        // space: cp must be strictly above the space start (room for cp-1)
+        // and at most one-past-the-end.
+        if cp_addr <= start_addr || cp_addr > end_addr {
+            return Err(InterpError::BadImage {
+                op,
+                why: DerefError::BadHeader,
+            });
+        }
+        // cp must be at/after the code object body start so the PC range
+        // [code_start, cp) lies within the code object.
+        if cp_addr < code_addr {
+            return Err(InterpError::BadImage {
+                op,
+                why: DerefError::BadHeader,
+            });
+        }
+        Ok(())
+    }
+
+    /// Find the live space (image or alloc) containing `p`, returning its
+    /// range. Untrusted-mode only.
+    fn space_of_ptr(&self, p: *const PolyWord) -> Option<SpaceRange> {
+        self.safe_spaces.space_containing(p).or_else(|| {
+            self.alloc_space_range()
+                .filter(|a| p >= a.start && p < a.end)
+        })
+    }
+
     fn do_call(&mut self, closure: PolyWord) -> Result<(), InterpError> {
         use crate::length_word;
+
+        // === UNTRUSTED MODE: validate the wild-jump primitive (Tier 0). ===
+        // This is the most dangerous deref in the whole interpreter: word0
+        // of the "closure" becomes the code-object address whose trailing
+        // const-segment offset sets the PC bounds for the NEXT function. A
+        // wrong-type / wild closure here lets an untrusted image jump into
+        // attacker-shaped memory. Validate the closure AND the resolved code
+        // object (space-member + header + is_code_object + const-segment
+        // fits the space) BEFORE the jump. The trusted path is untouched
+        // below.
+        if self.untrusted {
+            self.untrusted_validate_call(closure)?;
+        }
 
         if !closure.is_data_ptr() || closure.0 & (std::mem::size_of::<usize>() - 1) != 0 {
             // Diagnostic dump — always print since this is fatal.
