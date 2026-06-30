@@ -20,10 +20,15 @@
 //! sub-lemmas, zero exceptions; axiom audit clean — only the established
 //! conservative foundation + the single classical `ex_middle`).
 //!
-//! NOTE: this driver is currently SELF-CONTAINED (it embeds its own foundation
-//! rather than splicing via a `common::with_*` helper, like isabelle_modular/
-//! power/fta_unique). Consolidating it onto `with_wilson_inverse` +
-//! isabelle_euler_foundations.sml is a tracked follow-up.
+//! NOTE: this driver is INTENTIONALLY SELF-CONTAINED — it embeds its own
+//! foundation rather than splicing via a `common::with_*` helper. Consolidating
+//! it onto the splice chain was considered (task #87) and DECLINED: the proof is
+//! a working, fenced, byte-for-byte reproducible 3.27-billion-step artifact, and
+//! re-deriving it through the shared context only to dedup ~14k lines of embedded
+//! foundation is marginal-value, high-risk surgery (the cterm/context threading
+//! is the documented silent-no-op footgun). A standalone driver is also the more
+//! *shareable* form — it reads end-to-end without the splice helpers. Kept as-is
+//! by design; #87 closed resolved-not-consolidated.
 //!
 //! `#[ignore]` (needs /tmp/isabelle_pure from tools/build-isabelle-pure.sh):
 //! ```sh
