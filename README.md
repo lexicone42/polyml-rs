@@ -266,11 +266,11 @@ no fabricated axioms.**
   argv/env, ...). Beyond that, coverage is explicit stubs: the `Posix`
   structure, sockets, the C FFI, signal *delivery* (Ctrl-C works;
   `Signal.signal` handlers don't fire), `OS.Process.system`, SaveState, and
-  `Date` local-time. Today several of these return *success-shaped* defaults
-  rather than raising (`OS.Process.system` "succeeds" without running
-  anything); converting them to raise a catchable not-implemented exception is
-  in progress, as is proper `SysErr` signaling for IO errors (a failed write
-  currently reports 0 bytes written instead of raising).
+  `Date` local-time. These raise a **catchable exception** (`SysErr` for the
+  OS-level surface) rather than faking success — proven byte-identical on the
+  27.7B-step self-bootstrap and fenced by `tests/rts_defang.rs`. Still open:
+  proper `SysErr` signaling for IO *errors* (a failed write currently reports
+  0 bytes written instead of raising).
 - **Windows** — not yet validated (the RTS/filesystem layer is Unix-oriented). The
   endianness gap is **closed**: s390x (big-endian) runs byte-identically (above).
 - **Full concurrency** — real OS threads (`Thread.fork` / `Thread.Mutex` /

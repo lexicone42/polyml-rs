@@ -285,12 +285,16 @@ How it works:
   by `tools/malicious-corpus/` + `untrusted_corpus.rs`;
   `tools/lint-image-deref.py` is the surface-completeness guard. NB it is
   *memory* safety, not a sandbox (see `SECURITY.md`).
-- **RTS breadth**: ~103 of 228 registered entries are constant stubs (Posix,
-  sockets, C FFI, signal delivery, SaveState, Date local-time, ...); several
-  return *success-shaped* defaults instead of raising (`OS.Process.system`
-  "succeeds" without running anything) — de-fang = task #135. IO errors are
-  silently swallowed (failed write → "0 bytes written", read error ≡ EOF);
-  SysErr routing = task #136.
+- **RTS breadth**: many entries are stubs (Posix, sockets, C FFI, signal
+  delivery, SaveState, Date local-time, ...). The deceptive ones are
+  **DE-FANGED** (#135): they raise a catchable exception (SysErr for the
+  OS surface) instead of success-shaped defaults; A/B-proven byte-identical
+  on the 27.7B-step chain, fenced by `tests/rts_defang.rs`. Load-bearing
+  carve-outs (must NOT raise, measured): `getConst` (code 4) errno tables +
+  `PolyPosixCreatePersistentFD` (Posix stdin/stdout/stderr) at basis load,
+  `PolySetSignalHandler` at REPL startup, IO codes 17/18/20/22/27 (REPL
+  stdin). IO errors are still silently swallowed (failed write → "0 bytes
+  written", read error ≡ EOF); SysErr routing = task #136.
 - Real OS threads exist behind `POLY_REAL_THREADS=1` (giant lock + safepoint GC,
   see Architecture); a **preemptive scheduler** (beyond cooperative safepoint
   yielding) and full `Thread` attribute fidelity are still open (task #140,

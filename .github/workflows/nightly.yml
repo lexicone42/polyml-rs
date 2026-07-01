@@ -56,6 +56,12 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "3628800"
 
+      # Only CI context with a basis-bearing image: pin the de-fanged RTS
+      # stub contract (unimplemented OS entry points raise catchable
+      # SysErr, never success-shaped defaults).
+      - name: De-fanged RTS stub contract (rts_defang)
+        run: cargo test --release -p polyml-bin --test rts_defang
+
   cross-check:
     runs-on: ubuntu-latest
     timeout-minutes: 45

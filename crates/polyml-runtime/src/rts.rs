@@ -571,9 +571,18 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyGetRoundingMode",
         RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
     ); // TO_NEAREST
+    // Setting TO_NEAREST (0) matches the hardware default and is honored;
+    // any other mode would be silently ignored (wrong rounding in every
+    // subsequent FP op), so it raises instead.
     t.register(
         "PolySetRoundingMode",
-        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+        RtsFn::Arity1(|ctx, mode| {
+            if mode == PolyWord::tagged(0) {
+                PolyWord::tagged(0)
+            } else {
+                fail_unimpl(ctx, "IEEEReal.setRoundingMode (non-default mode)")
+            }
+        }),
     );
     t.register("PolyRealFrexp", RtsFn::Arity2(poly_real_frexp));
     t.register(
@@ -884,7 +893,12 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyTimingBaseYear",
         RtsFn::Arity1(|_, _| PolyWord::tagged(1970)),
     );
-    t.register("PolyTimingConvertDateStuct", RtsFn::Arity2(zero2));
+    // mktime for Date.toTime — a tagged(0) return here read as "the epoch"
+    // (silently wrong for every local date), so it raises instead.
+    t.register(
+        "PolyTimingConvertDateStuct",
+        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "Date.toTime (mktime)")),
+    );
     t.register(
         "PolyTimingLocalOffset",
         RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
@@ -964,37 +978,72 @@ fn register_builtins(t: &mut RtsTable) {
     // Portable variant uses the same pexport text format as our regular
     // export — both go through the same snapshot path.
     t.register("PolyExportPortable", RtsFn::Arity3(poly_export));
-    t.register("PolyChDir", RtsFn::Arity2(zero2));
+    t.register(
+        "PolyChDir",
+        RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "OS.FileSys.chDir")),
+    );
     t.register(
         "PolyGetModuleDirectory",
         RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)),
     );
-    // FFI library loading stubs.
+    // FFI library loading — de-fanged: a tagged(0) "handle" from these made
+    // every downstream Foreign.* use silently operate on garbage.
     t.register(
         "PolyFFILoadExecutable",
-        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+        RtsFn::Arity1(|ctx, _| fail_unimpl(ctx, "Foreign: loadExecutable (no C FFI)")),
     );
-    t.register("PolyFFILoadLibrary", RtsFn::Arity2(zero2));
+    t.register(
+        "PolyFFILoadLibrary",
+        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "Foreign: loadLibrary (no C FFI)")),
+    );
     t.register(
         "PolyFFIUnloadLibrary",
-        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+        RtsFn::Arity1(|ctx, _| fail_unimpl(ctx, "Foreign: unloadLibrary (no C FFI)")),
     );
-    t.register("PolyFFIGetSymbolAddress", RtsFn::Arity2(zero2));
-    t.register("PolyFFIMalloc", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyFFICreateExtData", RtsFn::Arity2(zero2));
-    t.register("PolyFFICreateExtFn", RtsFn::Arity2(zero2));
-    // Network stubs (we don't support sockets).
+    t.register(
+        "PolyFFIGetSymbolAddress",
+        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "Foreign: getSymbol (no C FFI)")),
+    );
+    t.register(
+        "PolyFFIMalloc",
+        RtsFn::Arity1(|ctx, _| fail_unimpl(ctx, "Foreign.Memory.malloc (no C FFI)")),
+    );
+    t.register(
+        "PolyFFICreateExtData",
+        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "Foreign: createExtData (no C FFI)")),
+    );
+    t.register(
+        "PolyFFICreateExtFn",
+        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "Foreign: createExtFn (no C FFI)")),
+    );
+    // Network entries. The list/table queries below are REAL (the basis
+    // builds the AF_/SOCK_ tables from them at load time) and INADDR_ANY=0
+    // is the genuinely correct "any" IPv4 address; the operational socket
+    // calls are de-fanged to raise SysErr (sockets are unimplemented —
+    // a tagged(0) "socket" faked successful connections).
     t.register(
         "PolyNetworkGetFamilyFromAddress",
-        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+        RtsFn::Arity1(|ctx, _| syserr_unimpl(ctx, "sockets (getFamilyFromAddress)")),
     );
     t.register(
         "PolyNetworkGetAddrList",
         RtsFn::Arity1(|_, _| poly_network_get_addr_list_inner()),
     );
+    // Real: the basis exposes this as NetHostDB.getHostName; an empty
+    // string here was a silent lie and the real call is trivial.
     t.register(
         "PolyNetworkGetHostName",
-        RtsFn::Arity1(|ctx, _| alloc_empty_string(ctx)),
+        RtsFn::Arity1(|ctx, _| {
+            let mut buf = [0u8; 256];
+            // SAFETY: buf is a valid writable buffer of buf.len() bytes.
+            let r = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+            if r == 0 {
+                let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                alloc_poly_string(ctx, &buf[..len])
+            } else {
+                syserr_unimpl(ctx, "gethostname")
+            }
+        }),
     );
     t.register(
         "PolyNetworkGetSockTypeList",
@@ -1008,9 +1057,9 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkReturnIP6AddressAny",
         RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
     );
-    // Many more network stubs — all unimplemented; Socket.sml will
-    // fail at runtime if you try to use them, but registration is
-    // enough for compile-time.
+    // Many more network entries — all unimplemented; registration is
+    // enough for compile-time, and at runtime each raises a catchable
+    // SysErr (they used to return tagged(0), which faked working sockets).
     let net_stubs_arity1: &[&str] = &[
         "PolyNetworkBytesAvailable",
         "PolyNetworkCloseSocket",
@@ -1021,7 +1070,10 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkGetLinger",
     ];
     for n in net_stubs_arity1 {
-        t.register(n, RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+        t.register(
+            n,
+            RtsFn::Arity1(|ctx, _| syserr_unimpl(ctx, "sockets (Socket.*)")),
+        );
     }
     let net_stubs_arity2: &[&str] = &[
         "PolyNetworkAccept",
@@ -1045,7 +1097,10 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkIP6AddressToString",
     ];
     for n in net_stubs_arity2 {
-        t.register(n, RtsFn::Arity2(zero2));
+        t.register(
+            n,
+            RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "sockets (Socket.*)")),
+        );
     }
     let net_stubs_arity3: &[&str] = &[
         "PolyNetworkGetOption",
@@ -1057,7 +1112,10 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkCreateSocketPair",
     ];
     for n in net_stubs_arity3 {
-        t.register(n, RtsFn::Arity3(zero3));
+        t.register(
+            n,
+            RtsFn::Arity3(|ctx, _, _, _| syserr_unimpl(ctx, "sockets (Socket.*)")),
+        );
     }
     let net_stubs_arity4: &[&str] = &[
         "PolyNetworkReceiveFrom",
@@ -1065,7 +1123,10 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkSelect",
     ];
     for n in net_stubs_arity4 {
-        t.register(n, RtsFn::Arity4(zero4));
+        t.register(
+            n,
+            RtsFn::Arity4(|ctx, _, _, _, _| syserr_unimpl(ctx, "sockets (Socket.*)")),
+        );
     }
     // process_env return values.
     t.register(
@@ -1084,22 +1145,56 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyProcessEnvErrorFromString",
         RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)),
     );
+    // De-fanged: this returned tagged(0) — which is ALSO the registered
+    // success value — so `OS.Process.system "cmd"` reported success
+    // without running anything (the worst silent-lie in the table).
     t.register(
         "PolyProcessEnvSystem",
-        RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)),
+        RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "OS.Process.system")),
     );
     t.register("PolyTerminate", RtsFn::Arity2(poly_terminate));
     t.register("PolyPollIODescriptors", RtsFn::Arity4(zero4));
     // rtsCallFull2 → threadId + 2 args → CALL_FAST_RTS3.
     t.register("PolySetSignalHandler", RtsFn::Arity3(zero3));
-    t.register("PolyOSSpecificGeneral", RtsFn::Arity3(zero3));
+    // The entire Posix structure dispatches through this one entry. Code 4
+    // (getConst) runs ~dozens of times at BASIS LOAD to build the errno /
+    // conf constant tables (Posix.sml:599 `fun getConst i =
+    // osSpecificGeneral (4, i)`) — it must keep returning tagged(0), the
+    // value the working basis has always been built from, or Posix.sml
+    // fails to elaborate and the self-bootstrap chain dies (measured).
+    // Every OPERATIONAL request raises a catchable SysErr instead of the
+    // old success-shaped 0.
+    t.register(
+        "PolyOSSpecificGeneral",
+        RtsFn::Arity3(|ctx, _tid, code, _arg| {
+            if code == PolyWord::tagged(4) {
+                PolyWord::tagged(0)
+            } else {
+                syserr_unimpl(ctx, "Posix (OSSpecificGeneral)")
+            }
+        }),
+    );
+    // LOAD-BEARING stub: Posix.sml builds Posix.FileSys.stdin/stdout/stderr
+    // at structure elaboration via three persistentFD calls (Posix.sml:1048)
+    // — raising here kills the basis load / self-bootstrap chain (measured:
+    // exactly 3 SysErr raises at `Use: basis/Posix.sml`). Keep the
+    // historical tagged(0) the working basis has always been built from.
     t.register("PolyPosixCreatePersistentFD", RtsFn::Arity2(zero2));
-    t.register("PolyPosixSleep", RtsFn::Arity3(zero3));
-    t.register("PolyUnixExecute", RtsFn::Arity4(zero4));
-    t.register("PolyNetworkUnixPathToSockAddr", RtsFn::Arity2(zero2));
+    t.register(
+        "PolyPosixSleep",
+        RtsFn::Arity3(|ctx, _, _, _| syserr_unimpl(ctx, "Posix.Process.sleep")),
+    );
+    t.register(
+        "PolyUnixExecute",
+        RtsFn::Arity4(|ctx, _, _, _, _| syserr_unimpl(ctx, "Unix.execute")),
+    );
+    t.register(
+        "PolyNetworkUnixPathToSockAddr",
+        RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "UnixSock")),
+    );
     t.register(
         "PolyNetworkUnixSockAddrToPath",
-        RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)),
+        RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "UnixSock")),
     );
     t.register("PolyGetRemoteStats", RtsFn::Arity2(zero2));
     t.register("PolySetUserStat", RtsFn::Arity3(zero3));
@@ -1109,18 +1204,45 @@ fn register_builtins(t: &mut RtsTable) {
     t.register("PolyShareCommonData", RtsFn::Arity2(zero2));
     t.register("PolySpecificGeneral", RtsFn::Arity3(poly_specific_general));
     t.register("PolyProfiling", RtsFn::Arity2(zero2));
-    t.register("PolyLoadHierarchy", RtsFn::Arity2(zero2));
-    t.register("PolyLoadModule", RtsFn::Arity2(zero2));
-    t.register("PolyLoadState", RtsFn::Arity2(zero2));
-    t.register("PolyReleaseModule", RtsFn::Arity2(zero2));
-    t.register("PolyRenameParent", RtsFn::Arity3(zero3));
-    t.register("PolySaveState", RtsFn::Arity3(zero3));
+    // SaveState / module hierarchy — de-fanged: PolySaveState returning 0
+    // meant `PolyML.SaveState.saveState f` "succeeded" while writing
+    // nothing (data loss masquerading as success).
+    t.register(
+        "PolyLoadHierarchy",
+        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "PolyML.SaveState.loadHierarchy")),
+    );
+    t.register(
+        "PolyLoadModule",
+        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "PolyML.loadModule")),
+    );
+    t.register(
+        "PolyLoadState",
+        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "PolyML.SaveState.loadState")),
+    );
+    t.register(
+        "PolyReleaseModule",
+        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "PolyML.releaseModule")),
+    );
+    t.register(
+        "PolyRenameParent",
+        RtsFn::Arity3(|ctx, _, _, _| fail_unimpl(ctx, "PolyML.SaveState.renameParent")),
+    );
+    t.register(
+        "PolySaveState",
+        RtsFn::Arity3(|ctx, _, _, _| fail_unimpl(ctx, "PolyML.SaveState.saveState")),
+    );
     t.register(
         "PolyShowParent",
         RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)),
     );
-    t.register("PolyStoreModule", RtsFn::Arity3(zero3));
-    t.register("PolyGetModuleInfo", RtsFn::Arity2(zero2));
+    t.register(
+        "PolyStoreModule",
+        RtsFn::Arity3(|ctx, _, _, _| fail_unimpl(ctx, "PolyML.storeModule")),
+    );
+    t.register(
+        "PolyGetModuleInfo",
+        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "PolyML module info")),
+    );
     // Thread cond var stubs (no-ops in single-threaded mode).
     t.register("PolyThreadCondVarWait", RtsFn::Arity2(noop2));
     t.register("PolyThreadCondVarWaitUntil", RtsFn::Arity3(zero3));
@@ -1355,11 +1477,18 @@ fn register_builtins(t: &mut RtsTable) {
         RtsFn::Arity2(poly_lock_mutable_closure),
     );
 
-    // Interpreted-mode FFI
+    // Interpreted-mode FFI — de-fanged: a fake CIF made Foreign.call
+    // silently "call" C functions that never ran.
     //   PolyInterpretedCreateCIF(threadId, abi, resType, argTypes) → 4
-    t.register("PolyInterpretedCreateCIF", RtsFn::Arity4(zero4));
+    t.register(
+        "PolyInterpretedCreateCIF",
+        RtsFn::Arity4(|ctx, _, _, _, _| fail_unimpl(ctx, "Foreign: createCIF (no C FFI)")),
+    );
     //   PolyInterpretedCallFunction(threadId, cif, cfun, res, argv) → 5
-    t.register("PolyInterpretedCallFunction", RtsFn::Arity5(zero5));
+    t.register(
+        "PolyInterpretedCallFunction",
+        RtsFn::Arity5(|ctx, _, _, _, _, _| fail_unimpl(ctx, "Foreign: callFunction (no C FFI)")),
+    );
     //   PolyCreateEntryPointObject(threadId, name, isFunc) → 3
     // PolyCreateEntryPointObject(threadId, name) → 2 (rtsCallFull1)
     // PolyCreateEntryPointObject(threadId, name) → 2 (rtsCallFull1).
@@ -1400,16 +1529,8 @@ fn zero3(_: &mut RtsContext<'_>, _: PolyWord, _: PolyWord, _: PolyWord) -> PolyW
 fn zero4(_: &mut RtsContext<'_>, _: PolyWord, _: PolyWord, _: PolyWord, _: PolyWord) -> PolyWord {
     PolyWord::tagged(0)
 }
-fn zero5(
-    _: &mut RtsContext<'_>,
-    _: PolyWord,
-    _: PolyWord,
-    _: PolyWord,
-    _: PolyWord,
-    _: PolyWord,
-) -> PolyWord {
-    PolyWord::tagged(0)
-}
+// (zero5 was removed when its last user, PolyInterpretedCallFunction,
+// was de-fanged to raise instead of faking a successful C call.)
 
 // ---- Built-in impls (real where simple, stubbed otherwise) -----------
 
@@ -2061,11 +2182,16 @@ fn poly_basic_io_general(
         //     through to its pure-SML DPLL prover; without it the call
         //     returns a tagged int and faults on `tmp ^ ".cnf"`.
         67 => fs_tmp_name(ctx),
+        // 19: seek-to-position — unimplemented. A tagged(0) made seeks
+        // silent no-ops (position-dependent IO silently corrupted), so it
+        // raises instead. NB 18/20 (position READS) keep their tagged(0):
+        // the stage-0 REPL queries stream position at startup, so raising
+        // there breaks the byte-identical bootstrap (measured: −71 steps).
+        19 => syserr_unimpl(ctx, "stream seek (setPos)"),
         // Various stub returns of TAGGED(0):
         //   17: bytes available
-        //   18: get stream position
-        //   19: seek to position (no-op)
-        //   20: end-of-stream position
+        //   18: get stream position (REPL-load-bearing, see above)
+        //   20: end-of-stream position (ditto)
         //   22: polling options
         //   27: block until input available (= ready)
         _ => PolyWord::tagged(0),
@@ -4067,6 +4193,29 @@ fn make_syserr_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
         p.add(3).write(PolyWord::tagged(0)); // ex_location = NONE
     }
     PolyWord::from_ptr(p.cast_const())
+}
+
+/// De-fanged stub: raise a catchable `SysErr` instead of faking success.
+/// For OS-level operations we don't implement, SysErr is upstream's own
+/// failure shape, so `handle OS.SysErr _` code behaves sanely and code
+/// that assumed success gets an honest, catchable failure — never a
+/// silent success-shaped default (the old `OS.Process.system` stub
+/// "succeeded" without running anything).
+fn syserr_unimpl(ctx: &mut RtsContext<'_>, what: &str) -> PolyWord {
+    let msg = format!("{what}: not implemented (polyml-rs)");
+    let pkt = make_syserr_exception(ctx, &msg);
+    ctx.raised_exception = Some(pkt);
+    PolyWord::tagged(0)
+}
+
+/// De-fanged stub for non-OS entry points (FFI, SaveState, Date
+/// conversion): raise a generic catchable exception. Not `SysErr` —
+/// these aren't errno-shaped failures upstream.
+fn fail_unimpl(ctx: &mut RtsContext<'_>, what: &str) -> PolyWord {
+    let msg = format!("{what}: not implemented (polyml-rs)");
+    let pkt = make_simple_exception(ctx, &msg);
+    ctx.raised_exception = Some(pkt);
+    PolyWord::tagged(0)
 }
 
 /// Build a nullary pervasive-exception packet: a 4-word ordinary object
