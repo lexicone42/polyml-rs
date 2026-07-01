@@ -166,10 +166,33 @@ all fenced by `tools/regression.sh full`):
 
 Isabelle's logical core (`Pure`) loads — 261/285 files; the remaining 24 are the
 Scala/PIDE frontend, which genuinely needs Scala/sockets, not logic — and
-*proves*. On top of it, we built up elementary number theory from first
-principles and machine-checked the landmark theorems by the **real LCF kernel**
-(0-hypothesis, axiom-audited, with soundness probes that confirm the kernel
-rejects false variants; the only classical assumption is excluded middle).
+*proves*. On top of it, we built up elementary number theory **from first
+principles** and machine-checked the landmark theorems by the **real LCF kernel**.
+The proofs are original ML-on-`Pure` (constructed via `Thm.*`/`Drule.*`/tactics),
+**not lifted** from Isabelle's `HOL-Number_Theory` or the AFP (only `Pure` itself is
+vendored, so there is nothing upstream to copy).
+
+Every theorem test machine-enforces a soundness audit
+([`tests/isabelle_support/sound_audit.sml`](crates/polyml-bin/tests/isabelle_support/sound_audit.sml)):
+the proved theorem is **0-hypothesis** (`hyps_of = []`, `extra_shyps = []`),
+**oracle-free** (`Thm_Deps.all_oracles = []` — no `Skip_Proof`/oracle escape, even
+under `Proofterm.proofs := 0`), and **every axiom of its theory is a member of a
+known-conservative allowlist** (the object-logic ND rules, Peano, and the
+fresh-constant defining/recursion equations) with **exactly one classical axiom,
+excluded middle** — plus α-equivalence + negative probes that confirm the kernel
+*rejects* false variants. A committed negative test smuggles axioms under innocuous
+names + a `Skip_Proof` oracle and confirms the audit **fails**, so the gate has
+teeth (it's a membership *allowlist*, not a name blacklist).
+
+*The one honest boundary:* the audit certifies every axiom is a recognized
+*conservative* name and that EM is the sole classical assumption, but the
+**conservativity of each axiom and the consistency of the whole foundation is a
+mathematical (human) argument, not machine-checked** — `Pure`, like any foundational
+kernel, does not prove its own consistency. (This is the same footing as any
+Isabelle/HOL development: you trust the kernel + the axioms; here the axioms are the
+enumerated conservative base + excluded middle, and nothing else.) These claims have
+been put through an independent read-only adversarial audit (cheat-scan + live axiom/
+oracle enumeration + provenance + cold reproduction).
 
 What is proved (each a fenced regression test under `crates/polyml-bin/tests/isabelle_*.rs`):
 
