@@ -10,7 +10,10 @@ gauss_stageP.sml
 gauss_final_appendix.sml
 recon_plan.json
 qr_foundation_wf.js
+# NB: qr_f1_toolbox.sml is NOT superseded scratch — the isabelle_quadratic_
+# reciprocity test READS it (the first of its 5 concatenated pieces), so it is
+# TRACKED (must be present for a clean-checkout QR reproduction). Only qr_f2.sml
+# (the QR test uses qr_f2_appendix.sml instead) is genuinely superseded.
 gauss_progress.json
 eisenstein_recon.json
-qr_f1_toolbox.sml
 qr_f2.sml
