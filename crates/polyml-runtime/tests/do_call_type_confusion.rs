@@ -139,8 +139,8 @@ fn do_call_accepts_type_confused_closure_and_corrupts_code_end() {
     let bad_closure = make_closure_word0(&mut code_space, PolyWord::from_ptr(tuple));
 
     let mut interp = unsafe { Interpreter::from_code_object(64, caller_code) };
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(PolyWord::ZERO);
+    interp.seed_return_sentinel();
+    interp.seed_push(PolyWord::ZERO);
 
     // Record the tuple's true end for comparison.
     let tuple_start = tuple as usize;
@@ -200,8 +200,8 @@ fn do_call_accepts_tagged_int_in_word0() {
     let bad_closure = make_closure_word0(&mut code_space, PolyWord::from_bits(aliased));
 
     let mut interp = unsafe { Interpreter::from_code_object(64, caller_code) };
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(PolyWord::ZERO);
+    interp.seed_return_sentinel();
+    interp.seed_push(PolyWord::ZERO);
 
     let res = interp.test_invoke_do_call(PolyWord::from_ptr(bad_closure));
     assert!(
@@ -316,8 +316,8 @@ unsafe fn crash_via_type_confused_closure() {
     let caller_code = make_trivial_code(&mut code_space);
 
     let mut interp = unsafe { Interpreter::from_code_object(64, caller_code) };
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(PolyWord::ZERO);
+    interp.seed_return_sentinel();
+    interp.seed_push(PolyWord::ZERO);
 
     // do_call -> reads closure.word0 (= fake_code, in the guard page) -> treats
     // it as a code object -> const_segment_for_code reads the body word in the

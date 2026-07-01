@@ -64,7 +64,7 @@ fn interp_do_call_dispatches_to_jit_cache() {
     //    retPC, arg_0]. The interpreter usually pushes retPC+closure
     //    inside do_call; we just seed the arg here and let do_call do
     //    its thing.
-    interp.test_seed_top(PolyWord::from_bits(tag(7) as usize));
+    interp.seed_push(PolyWord::from_bits(tag(7) as usize));
     // Save SP so we can verify post-call state.
     let sp_before_call = interp.test_sp();
 

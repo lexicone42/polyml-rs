@@ -56,8 +56,8 @@ fn dump_stack_at_hot_loop_entry() {
         .with_default_alloc_space_words(8 * 1024 * 1024)
         .with_rts(rts1)
         .enable_diagnostics();
-    interp1.test_seed_return_sentinel();
-    interp1.test_seed_top(root_closure_word);
+    interp1.seed_return_sentinel();
+    interp1.seed_push(root_closure_word);
     for _ in 0..2_000_000 {
         if !matches!(interp1.step(), Ok(StepResult::Continue)) {
             break;
@@ -89,8 +89,8 @@ fn dump_stack_at_hot_loop_entry() {
         .with_default_alloc_space_words(8 * 1024 * 1024)
         .with_rts(rts2)
         .enable_diagnostics();
-    interp2.test_seed_return_sentinel();
-    interp2.test_seed_top(root_closure_word2);
+    interp2.seed_return_sentinel();
+    interp2.seed_push(root_closure_word2);
 
     // Walk until we've hit the same `(code, hot_off)` pair N times,
     // dumping stack at iterations 1, 2, 100, 1000, 10000. If the
@@ -156,8 +156,8 @@ fn profile_bootstrap_hot_pcs() {
         .with_default_alloc_space_words(8 * 1024 * 1024)
         .with_rts(rts)
         .enable_diagnostics();
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(root_closure_word);
+    interp.seed_return_sentinel();
+    interp.seed_push(root_closure_word);
 
     // 5M steps is enough to see the dominant loop without taking
     // ages. Bumping this gives more accurate ratios but doesn't

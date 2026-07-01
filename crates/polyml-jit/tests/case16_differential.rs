@@ -53,10 +53,10 @@ fn case16_bytecode() -> Vec<u8> {
 
 fn run_interp(bc: &[u8], selector: i64) -> i64 {
     let mut interp = Interpreter::from_bytes(64, bc.to_vec());
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(PolyWord::from_bits(selector as usize)); // arg_0 = selector
-    interp.test_seed_top(PolyWord::from_bits(0)); // retPC
-    interp.test_seed_top(PolyWord::from_bits(0)); // closure
+    interp.seed_return_sentinel();
+    interp.seed_push(PolyWord::from_bits(selector as usize)); // arg_0 = selector
+    interp.seed_push(PolyWord::from_bits(0)); // retPC
+    interp.seed_push(PolyWord::from_bits(0)); // closure
     loop {
         match interp.step() {
             Ok(StepResult::Continue) => continue,

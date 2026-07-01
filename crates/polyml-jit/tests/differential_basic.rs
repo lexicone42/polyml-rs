@@ -43,11 +43,11 @@ fn differential_matches_for_simple_add() {
     // word in this scenario), so we run the interp by stepping it
     // directly. For from_bytes, the code_start is already set to
     // bytecode start. Just push stack like differential.rs does.
-    interp.test_seed_return_sentinel();
+    interp.seed_return_sentinel();
     let arg = differential::tag(5);
-    interp.test_seed_top(PolyWord::from_bits(arg as usize));
-    interp.test_seed_top(PolyWord::from_bits(0)); // retPC
-    interp.test_seed_top(PolyWord::from_bits(0)); // closure
+    interp.seed_push(PolyWord::from_bits(arg as usize));
+    interp.seed_push(PolyWord::from_bits(0)); // retPC
+    interp.seed_push(PolyWord::from_bits(0)); // closure
     let interp_result = loop {
         match interp.step() {
             Ok(polyml_runtime::StepResult::Continue) => continue,

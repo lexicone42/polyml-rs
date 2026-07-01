@@ -52,7 +52,7 @@ fn main() {
     // INDIRECT_LOCAL_B0 over a slot it didn't prove holds a >=1-word
     // object; a corrupted image can. Tagged(0x1234) -> bits 0x2469 ->
     // as_ptr() == 0x2469 -> *p SIGSEGVs at that low address.
-    interp.test_seed_top(PolyWord::tagged(0x1234));
+    interp.seed_push(PolyWord::tagged(0x1234));
 
     eprintln!(
         "about to step INDIRECT_LOCAL_B0 over a tagged-int local; \

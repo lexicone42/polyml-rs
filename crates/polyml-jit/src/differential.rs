@@ -242,14 +242,14 @@ fn run_under_interp(
     //
     // For the sentinel, the top-level `do_return` checks retPC==0
     // and yields `Returned`.
-    interp.test_seed_return_sentinel();
+    interp.seed_return_sentinel();
     for &v in args {
-        interp.test_seed_top(PolyWord::from_bits(v as usize));
+        interp.seed_push(PolyWord::from_bits(v as usize));
     }
     // retPC = 0 sentinel: when RETURN fires it pops this as retPC
     // and yields `Returned(result)`.
-    interp.test_seed_top(PolyWord::from_bits(0));
-    interp.test_seed_top(PolyWord::from_bits(closure_word as usize));
+    interp.seed_push(PolyWord::from_bits(0));
+    interp.seed_push(PolyWord::from_bits(closure_word as usize));
     // SAFETY: caller supplies a valid code-object pointer.
     unsafe {
         interp.set_code_segment_to_code_obj(code_obj_ptr);

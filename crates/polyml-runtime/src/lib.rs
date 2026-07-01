@@ -20,6 +20,7 @@ pub mod loader;
 pub mod poly_word;
 pub mod rts;
 pub mod sched;
+pub mod session;
 pub mod space;
 
 pub use interpreter::{
@@ -35,4 +36,5 @@ pub use jit_bridge::{
 pub use loader::{LoadError, LoadedImage, load_image};
 pub use poly_word::PolyWord;
 pub use rts::{RtsFn, RtsTable, patch_entry_points};
+pub use session::{RunOutcome, RunResult, Session, SessionConfig, SessionError};
 pub use space::{MemorySpace, SpaceKind};

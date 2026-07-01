@@ -180,9 +180,9 @@ fn two_threads_shared_heap_gc_handshake() {
                 // retPC=null]. RETURN_B 0 pops result(counter), closure,
                 // retPC; seeing retPC=null it yields Returned. (Same shape
                 // as the interpreter's own `run_to_int` test helper.)
-                w.test_seed_return_sentinel(); // retPC = null (deepest)
-                w.test_seed_top(PolyWord::tagged(0)); // dummy closure
-                w.test_seed_top(PolyWord::tagged(this)); // loop counter (top)
+                w.seed_return_sentinel(); // retPC = null (deepest)
+                w.seed_push(PolyWord::tagged(0)); // dummy closure
+                w.seed_push(PolyWord::tagged(this)); // loop counter (top)
                 // SAFETY: code_ptr is a valid code object in the shared heap.
                 unsafe { w.set_code_segment_to_code_obj(code.0) };
                 let (_, r) = w.run_until(u64::MAX);
@@ -267,11 +267,11 @@ fn threads_interleave_under_giant_lock() {
             let mut w = Interpreter::for_shared_runtime_test(rt);
             for _ in 0..chunks {
                 w.reset_stack();
-                w.test_seed_return_sentinel();
-                w.test_seed_top(PolyWord::tagged(0));
+                w.seed_return_sentinel();
+                w.seed_push(PolyWord::tagged(0));
                 // A biggish chunk so the safepoint yield fires inside it,
                 // forcing a hand-off mid-chunk.
-                w.test_seed_top(PolyWord::tagged(200_000));
+                w.seed_push(PolyWord::tagged(200_000));
                 unsafe { w.set_code_segment_to_code_obj(code.0) };
                 let _ = w.run_until(u64::MAX);
                 log.lock().unwrap().push(tid);

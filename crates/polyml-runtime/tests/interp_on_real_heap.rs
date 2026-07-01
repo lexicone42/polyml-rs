@@ -47,9 +47,9 @@ fn interpreter_reads_real_heap_via_indirect() {
     let code = vec![INSTR_INDIRECT_0, INSTR_RETURN_B, 0];
     let mut interp = Interpreter::from_bytes(64, code);
     // Set up the call frame our RETURN expects: [closure, retPC=null].
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(PolyWord::ZERO); // dummy "self" closure slot
-    interp.test_seed_top(PolyWord::from_ptr(loaded.root)); // top: the value INDIRECT will read
+    interp.seed_return_sentinel();
+    interp.seed_push(PolyWord::ZERO); // dummy "self" closure slot
+    interp.seed_push(PolyWord::from_ptr(loaded.root)); // top: the value INDIRECT will read
 
     let result = interp.run().expect("run");
     let StepResult::Returned(code_word) = result else {

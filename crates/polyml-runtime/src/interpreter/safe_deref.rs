@@ -39,7 +39,7 @@
 //! - **(b) space-membership** — `w` lies within a *live* heap space (the
 //!   loaded image's immutable / mutable / code spaces **plus** the live
 //!   alloc space), AND there is room for its length word at `w.sub(1)`.
-//!   This generalizes [`crate::gc::Collector::contains_polyword`] (one
+//!   This generalizes `crate::gc::Collector::contains_polyword` (one
 //!   `from_start..from_end` range) to a membership test over the vector of
 //!   live spaces.
 //! - **(c) header sanity** — the object's length word at `w.sub(1)` gives a
@@ -50,7 +50,8 @@
 //!   is byte-typed (string ops), etc. These are the per-call helpers.
 //!
 //! On any failure: a clean [`DerefError`], which the call site turns into
-//! [`InterpError::BadImage`] — a controlled halt, never UB.
+//! [`InterpError::BadImage`](crate::InterpError::BadImage) — a controlled
+//! halt, never UB.
 
 // The `unsafe impl Send/Sync for SafeSpaces` is deliberate: the raw
 // pointers it holds are read-only space bounds (compared, never followed

@@ -91,8 +91,8 @@ fn step_bootstrap_entry_as_far_as_possible() {
         // have no GC yet.
         .with_default_alloc_space_words(8 * 1024 * 1024)
         .with_rts(rts);
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(root_closure_word);
+    interp.seed_return_sentinel();
+    interp.seed_push(root_closure_word);
 
     // Step until something happens. Cap iterations to keep the test
     // bounded. Keep a ring buffer of the most recent ~80 steps so we

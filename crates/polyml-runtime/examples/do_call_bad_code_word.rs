@@ -96,7 +96,7 @@ fn main() {
     // return sentinel + the closure on the stack the way a CALL site
     // would.
     let mut interp = Interpreter::from_bytes(1024, vec![0u8; 16]);
-    interp.test_seed_return_sentinel();
+    interp.seed_return_sentinel();
 
     println!(
         "  -> calling do_call(bad_closure); in RELEASE this is the wild deref the audit flags..."

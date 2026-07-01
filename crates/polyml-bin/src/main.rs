@@ -406,13 +406,10 @@ fn bic_command(
 
 /// Read image bytes and parse them, auto-detecting the binary bicimage format
 /// (by its magic prefix) vs the pexport text format. Both `poly run` and the
-/// inspect path accept either form.
+/// inspect path accept either form. Detection lives in
+/// [`polyml_image::parse_auto`]; this wrapper only adapts the error type.
 fn parse_image_auto(bytes: &[u8]) -> Result<Image, Box<dyn std::error::Error>> {
-    if polyml_image::is_bicimage(bytes) {
-        Ok(Image::read_bic(bytes)?)
-    } else {
-        Ok(Image::parse(bytes)?)
-    }
+    Ok(polyml_image::parse_auto(bytes)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -602,8 +599,8 @@ fn run_image(
         polyml_jit::region::reset_native_tick();
     }
 
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(root_closure_word);
+    interp.seed_return_sentinel();
+    interp.seed_push(root_closure_word);
 
     // Ctrl-C now raises an SML `Interrupt` (caught by the REPL / a handler)
     // instead of the OS killing the process mid-run.
