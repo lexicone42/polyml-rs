@@ -1,9 +1,10 @@
 //! PolyML heap-image formats.
 //!
-//! Stage 2 starts with the legacy `pexport` text format produced by
-//! upstream PolyML (`vendor/polyml/libpolyml/pexport.cpp`). Eventually
-//! this crate will also implement the new `bicimage` format described
-//! in `notes/hard-problems.md` §5.
+//! Two formats, one object model: the legacy `pexport` text format
+//! produced by upstream PolyML (`vendor/polyml/libpolyml/pexport.cpp`),
+//! and the compact binary `bicimage` format (endian-neutral on the wire,
+//! roughly half the size, loads + runs identically). `poly bic` converts
+//! between them; `poly run` auto-detects the format.
 
 pub mod bicimage;
 pub mod pexport;

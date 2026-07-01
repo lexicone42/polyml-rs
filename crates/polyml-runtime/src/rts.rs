@@ -424,13 +424,17 @@ impl RtsTable {
         }
     }
 
-    /// Table preloaded with the built-in implementations of the
-    /// architecture-query and simplest functions. Functions we
-    /// haven't implemented yet are NOT registered — the loader will
-    /// leave their entry points unpatched, and the interpreter will
-    /// trap when bytecode tries to call them. (Easier to get a
-    /// `MissingRtsFunction` error than to silently produce wrong
-    /// results.)
+    /// Table preloaded with the built-in implementations. Everything the
+    /// bootstrap / compiler / HOL4 / Isabelle workloads exercise is
+    /// implemented faithfully — but coverage is *partial*, and NB: a
+    /// substantial minority of registered entries are constant STUBS
+    /// (the `Posix` structure, sockets, the C FFI, signal delivery,
+    /// SaveState, `Date` local-time, ...) because the basis probes them
+    /// unconditionally at startup; they return defaults instead of
+    /// raising (see the per-entry comments and README §"What's not done
+    /// yet"). Names not registered at all are left unpatched by the
+    /// loader, and the interpreter traps with a catchable exception when
+    /// bytecode calls them.
     #[must_use]
     pub fn new() -> Self {
         let mut t = Self::empty();

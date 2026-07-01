@@ -457,7 +457,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "polyml-bin"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "libc",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "polyml-image"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bitflags 2.11.1",
  "thiserror",
@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "polyml-jit"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cranelift",
  "cranelift-jit",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "polyml-runtime"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libc",
  "num-bigint",

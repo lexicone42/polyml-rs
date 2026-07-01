@@ -90,12 +90,13 @@ three deref *surfaces* — per-opcode operand reads, PC-relative code-stream rea
 the RTS-argument / export readers — across four adversarial-verification rounds; the
 lint exists so a future change re-flags any un-gated deref instead of shipping it.)
 
-*Residual (defense-in-depth, not weaponizable):* the RTS-argument gate checks
-space-membership but not the full object-length-fits invariant the per-opcode path
-enforces, so a few multi-word RTS readers still lean on allocator invariants (which
-were traced and currently hold); routing them through the full predicate is a tracked
-hardening follow-up. Running the experimental real-OS-threads mode together with
-`--untrusted` is likewise out of the validated envelope.
+*Residuals:* the RTS-argument gate now enforces the full object-length-fits
+invariant too (the follow-up noted in earlier revisions of this page — closed).
+Two boundaries remain worth stating: running the experimental real-OS-threads mode
+together with `--untrusted` is out of the validated envelope; and `--untrusted` is
+*memory* safety, **not a sandbox** — the image still runs with the invoking user's
+ambient authority (filesystem, environment, stdout). See `SECURITY.md` for the
+threat model.
 
 ## Reproducing
 

@@ -824,8 +824,8 @@ impl ThreadRoots {
     /// Scrub the below-`sp` (free/garbage) region to a safe tagged
     /// sentinel, closing the dangling-from-space-pointer window after
     /// the collector freed from-space. (See the long comment at the
-    /// call site in `gc()` and `docs/gc-memory-soak-findings-2026-06-19.md`,
-    /// task #109.)
+    /// call site in `gc()`; history: the GC-soak findings + fix,
+    /// commits 77b6141 + 8756419, task #109.)
     ///
     /// # Safety
     /// `self.stack_ptr` must be valid for at least `self.sp` slots.
@@ -2441,8 +2441,8 @@ impl Interpreter {
         // O(sp) once per collect — cheap vs the Cheney copy; deliberately
         // NOT on the hot drop_n/RESET path. This runs AFTER from-space is
         // freed (replace_storage inside collect) and BEFORE any op or the
-        // audit, closing the dangling-pointer window. See
-        // docs/gc-memory-soak-findings-2026-06-19.md (task #109).
+        // audit, closing the dangling-pointer window. History: the GC-soak
+        // findings + fix, commits 77b6141 + 8756419 (task #109).
         for roots in registry.iter_mut() {
             // SAFETY: captures still alias live interpreter state; the
             // collect above has freed from-space, so scrub then fixup.

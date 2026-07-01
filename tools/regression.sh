@@ -11,9 +11,10 @@
 #       MESON/METIS/Pelletier, the Isabelle term + theorem kernels, the int-flip
 #       basis, etc.). ~50 min. Run before a release / after a risky runtime change.
 #
-# Why this exists: the headline capabilities are pinned only by #[ignore] tests that
-# need manually-built /tmp checkpoints, and there is no CI. This script is the
-# practical gate (foundation audit, docs/foundation-audit-2026-06-08.md).
+# Why this exists: the headline capabilities are pinned by #[ignore] tests that
+# need manually-built /tmp checkpoints, which GitHub CI cannot build — CI covers
+# build/lints/unit + data-free tests only (.github/workflows/ci.yml). This script
+# is the practical FULL gate (methodology: docs/correctness-and-safety.md).
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 MODE="${1:-fast}"
@@ -53,8 +54,8 @@ if [ "$MODE" = "full" ]; then
 
   echo; echo "--- headline #[ignore] integration suite ---"
   # NB: isabelle_bertrand (~224B steps / 12 GB heap, tens of minutes) and
-  # isabelle_quadratic_reciprocity (heavy; also needs the locally-untracked
-  # qr_resume/qr_f1_toolbox.sml) are the two most expensive Isabelle workloads.
+  # isabelle_quadratic_reciprocity (heavy; reads the committed qr_resume
+  # pieces) are the two most expensive Isabelle workloads.
   # Both now carry the shared SOUND_AUDIT_OK certification (oracle-free + axiom
   # allowlist, classical == 1). They dominate the full-tier wall clock.
   ipass=0; ifail=0
@@ -79,7 +80,8 @@ if [ "$MODE" = "full" ]; then
   if [ -x /tmp/polybuild/poly ] && [ -f /tmp/basis_loaded ]; then
     # The only known divergences are the basis-compiled IntInf.andb/orb stage-0
     # compiler bug (intinf.sml + intinf_bitwise_order.sml, the same andb(~1,2^80)
-    # family — docs/differential-oracle-2026-06-09.md). Everything else AGREES.
+    # family — a latent UPSTREAM bug we reproduce byte-for-byte; see
+    # docs/correctness-and-safety.md). Everything else AGREES.
     # Includes the generative fuzz_{int,word,real,intinf,convert} (numerics) +
     # fuzz_{list,string,array,vector} (structures, ~53.7K cases) per-op drivers,
     # PLUS the whole-program fuzzer's frozen regression subset (genprog/, 300

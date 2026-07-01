@@ -6,7 +6,8 @@ rust-version.workspace = true
 license.workspace      = true
 repository.workspace   = true
 authors.workspace      = true
-description = "PolyML heap-image formats: pexport reader/writer (and eventually bicimage)"
+publish.workspace      = true
+description = "PolyML heap-image formats: the pexport text reader/writer and the compact binary bicimage format"
 
 [dependencies]
 bitflags = "2.6"

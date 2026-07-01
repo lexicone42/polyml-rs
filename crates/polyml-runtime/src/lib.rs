@@ -1,11 +1,14 @@
-//! PolyML runtime: heap, GC, scheduler, FFI, exceptions.
+//! The Poly/ML runtime, reimplemented in Rust: the bytecode interpreter,
+//! RTS (runtime-system) calls, exceptions, the copying (Cheney) GC, the
+//! real-thread scheduler, and heap-image export. This crate is the Rust
+//! port of `vendor/polyml/libpolyml/`; non-trivial interpreter opcode
+//! handlers cite the upstream `bytecode.cpp` line ranges they port.
 //!
-//! See `notes/runtime-gc.md` and `notes/runtime-scheduler-ffi.md` for
-//! the design background. This crate is the Rust reimplementation of
-//! `vendor/polyml/libpolyml/`.
-//!
-//! Stage 2 status: just the value model and a heap-image loader so
-//! far. No GC, no scheduler, no real execution.
+//! It executes real Poly/ML end to end: boots the upstream bootstrap
+//! image, self-compiles the full 7-stage compiler chain, and hosts HOL4
+//! and Isabelle/Pure. Faithfulness + memory-safety methodology:
+//! `docs/correctness-and-safety.md`; operational guide: the repo-root
+//! `CLAUDE.md`.
 
 pub mod export;
 pub mod gc;

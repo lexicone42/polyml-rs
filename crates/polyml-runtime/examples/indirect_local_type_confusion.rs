@@ -17,7 +17,7 @@
 //! without whole-image type inference, and the field-load opcodes trust
 //! the pointer at deref time.
 //!
-//! POST-SCRUB NUANCE (see docs/gc-memory-soak-findings-2026-06-19.md): the
+//! POST-SCRUB NUANCE (GC-soak fix, commit 8756419): the
 //! GC now scrubs `[0, sp)` to `Tagged(0)`. `Tagged(0)`'s bits are 1, so
 //! `as_ptr()` is address 1 and the deref is a DETERMINISTIC near-null
 //! SIGSEGV (a loud crash) rather than a silent use-after-free. This repro

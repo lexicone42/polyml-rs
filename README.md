@@ -54,7 +54,10 @@ echo "fun fact 0 = 1 | fact n = n * fact (n-1); fact 10;" \
 
 That's a real SML REPL — Hindley–Milner type inference, recursive and
 higher-order functions, the lot — running an image **our runtime
-self-bootstrapped** (see #2).
+self-bootstrapped** (see #2). NB `vendor/polyml/polyexport` is *produced by*
+example #2 — run that first (~5 min), or point `run` at
+`vendor/polyml/bootstrap/bootstrap64.txt` for the bare stage-0 compiler (no
+basis loaded, so no REPL niceties).
 
 ### 2. Self-compile Poly/ML end to end
 
@@ -110,6 +113,10 @@ halt instead of undefined behaviour. The default (trusted) path is byte-identica
 and exactly as fast — every check sits behind the untrusted flag. A committed
 malicious-image corpus (`tools/malicious-corpus/`) + a deref-surface lint
 (`tools/lint-image-deref.py`) fence it.
+
+Scope note: `--untrusted` is *memory* safety, **not a sandbox** — the image still
+runs with your user's ambient authority (filesystem, environment, stdout). See
+[`SECURITY.md`](SECURITY.md) for the threat model.
 
 ---
 
@@ -254,6 +261,16 @@ no fabricated axioms.**
   guarantee across word sizes without recompilation"); cross-word-size carries
   *data*, not compiled code. Details + proof in
   [`docs/tier-b-portable-images-design.md`](docs/tier-b-portable-images-design.md).
+- **OS / Basis-library breadth** — the RTS implements what the compiler, REPL,
+  HOL4, and Isabelle workloads exercise (files, arithmetic, strings, time,
+  argv/env, ...). Beyond that, coverage is explicit stubs: the `Posix`
+  structure, sockets, the C FFI, signal *delivery* (Ctrl-C works;
+  `Signal.signal` handlers don't fire), `OS.Process.system`, SaveState, and
+  `Date` local-time. Today several of these return *success-shaped* defaults
+  rather than raising (`OS.Process.system` "succeeds" without running
+  anything); converting them to raise a catchable not-implemented exception is
+  in progress, as is proper `SysErr` signaling for IO errors (a failed write
+  currently reports 0 bytes written instead of raising).
 - **Windows** — not yet validated (the RTS/filesystem layer is Unix-oriented). The
   endianness gap is **closed**: s390x (big-endian) runs byte-identically (above).
 - **Full concurrency** — real OS threads (`Thread.fork` / `Thread.Mutex` /
@@ -282,7 +299,7 @@ no fabricated axioms.**
 | [`polyml-runtime`](crates/polyml-runtime) | the bytecode interpreter, runtime system (RTS) calls, exceptions, and the copying GC — the Rust port of `vendor/polyml/libpolyml/` |
 | [`polyml-image`](crates/polyml-image)   | heap-image formats: the `pexport` text reader/writer and the compact binary `bicimage` format (endian-neutral, ~½ the size) |
 | [`polyml-jit`](crates/polyml-jit)       | the Cranelift-backed JIT (bytecode → Cranelift IR) — an **optional** (default-on) feature; drop it for interpreter-only builds |
-| [`polyml-bin`](crates/polyml-bin)       | the `poly` binary (`run` / `inspect` / `disasm` / `diff` / `bic`) + the HOL4 / Isabelle proof tests |
+| [`polyml-bin`](crates/polyml-bin)       | the `poly` binary (`run` / `load` / `inspect` / `disasm` / `diff` / `bic`) + the HOL4 / Isabelle proof tests |
 
 Upstream Poly/ML is obtained read-only under `vendor/polyml/` (git-ignored; see
 [`docs/REPRODUCING.md`](docs/REPRODUCING.md)); the interpreter cross-references

@@ -25,7 +25,6 @@ cd vendor/isabelle/mirror-isabelle && git apply ../../../patches/isabelle-<name>
   "Invalid string constant". Isabelle source (e.g. `library.ML`) embeds these in
   string literals and is loaded by raw PolyML before `ml_lex.ML`, so the converter
   must accept them. Takes the Isabelle/Pure load from 27/282 → 102/282 files.
-  See [[isabelle-go-signal]] in project memory.
 
 - **isabelle-options-stub.patch** — `src/Pure/System/options.ML`. There is no
   Isabelle system process to supply `ISABELLE_PROCESS_OPTIONS`, so the bootstrap

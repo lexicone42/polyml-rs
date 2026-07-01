@@ -32,6 +32,10 @@ echo "fun fact 0=1|fact n=n*fact(n-1); fact 10;" | \
 
 # binary image format (smaller, endian-neutral): convert + run (run auto-detects)
 ./target/release/poly bic <image> out.bic
+
+# memory-safe mode for FOREIGN/untrusted images (typed-deref validation; default
+# trusted path is byte-identical — see docs/correctness-and-safety.md)
+./target/release/poly run --untrusted <image>
 ```
 
 Tests: `tools/regression.sh fast` (always-on, ~2 min) / `full` (+ the HOL4 /
@@ -163,7 +167,7 @@ unrepresentative. **Verdict: the tight threaded interpreter wins on real workloa
 whole-region's honest value is the same as `--jit`'s — a correctness testbed**, now
 validated at self-bootstrap scale. Flag-gated, default-off, default byte-identical;
 stopped at the S5 kill-switch (no productionize). Full write-up: the
-`whole-region-jit-feasibility` memory + the `jit/whole-region:` commit series.
+`jit/whole-region:` commit series (git log).
 
 ## Portability
 
@@ -274,14 +278,23 @@ How it works:
 
 ## Open issues
 
-- **Untrusted-image type-confusion** (the one real safety residual): the pexport
-  format carries untyped refs; a malicious image can point a ref at a wrong-type
-  object. Not reachable on compiler-produced images; same exposure as upstream.
-  Fix = a typed-deref predicate in the interpreter. See
-  `docs/correctness-and-safety.md`.
+- ~~Untrusted-image type-confusion~~ **CLOSED (#96)**: `poly run --untrusted` is
+  the typed-deref safe mode (space-membership + header sanity + per-op shape,
+  across all three deref surfaces: opcode operands, PC-relative code-stream
+  reads, RTS-arg/export readers). The trusted default is byte-identical. Fenced
+  by `tools/malicious-corpus/` + `untrusted_corpus.rs`;
+  `tools/lint-image-deref.py` is the surface-completeness guard. NB it is
+  *memory* safety, not a sandbox (see `SECURITY.md`).
+- **RTS breadth**: ~103 of 228 registered entries are constant stubs (Posix,
+  sockets, C FFI, signal delivery, SaveState, Date local-time, ...); several
+  return *success-shaped* defaults instead of raising (`OS.Process.system`
+  "succeeds" without running anything) — de-fang = task #135. IO errors are
+  silently swallowed (failed write → "0 bytes written", read error ≡ EOF);
+  SysErr routing = task #136.
 - Real OS threads exist behind `POLY_REAL_THREADS=1` (giant lock + safepoint GC,
   see Architecture); a **preemptive scheduler** (beyond cooperative safepoint
-  yielding) and full `Thread` attribute fidelity are still open. Whole-region JIT
+  yielding) and full `Thread` attribute fidelity are still open (task #140,
+  stage 2 = breaking the giant lock for true parallelism). Whole-region JIT
   was BUILT + measured (sound but a net slowdown — see Performance & JIT); a real
   native *speedup* is now believed out of reach for this interpreter (the tight
   threaded loop wins). Windows remains unimplemented.

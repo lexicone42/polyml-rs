@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 description = "Cranelift-backed JIT for PolyML bytecode (bytecode → Cranelift IR)"
 
 [lints]
@@ -16,8 +17,8 @@ cranelift = "0.131"
 cranelift-jit = "0.131"
 cranelift-module = "0.131"
 cranelift-native = "0.131"
-polyml-runtime = { path = "../polyml-runtime" }
+polyml-runtime = { workspace = true }
 thiserror = "2"
 
 [dev-dependencies]
-polyml-image = { path = "../polyml-image" }
+polyml-image = { workspace = true }

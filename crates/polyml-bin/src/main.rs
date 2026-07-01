@@ -73,7 +73,7 @@ fn image_space_bounds(space: &MemorySpace) -> (*const PolyWord, usize) {
 #[command(
     name = "poly",
     version,
-    about = "polyml-rs runtime CLI (work in progress)"
+    about = "poly — the polyml-rs runtime: load and execute Poly/ML heap images (run / load / inspect / disasm / diff / bic)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -973,7 +973,7 @@ fn load(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("\n(execution not implemented yet — see PLAN.md Phase 2.1)");
+    println!("\n(load-only summary — use `poly run` to execute the image)");
     Ok(())
 }
 

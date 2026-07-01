@@ -5,9 +5,8 @@
 //!
 //! HISTORY (task #109). This harness originally SEGV'd deterministically
 //! under `POLYML_GC_AUDIT=1 POLYML_GC_THRESHOLD=50 ... 131072 2000000`,
-//! and the soak report (docs/gc-memory-soak-findings-2026-06-19.md)
-//! hypothesised the cause was stale below-sp stack pointers dangling
-//! after a collect. Forensics (gdb + a from-space tripwire) showed the
+//! and the GC-soak report (commit 77b6141) hypothesised the cause was
+//! stale below-sp stack pointers dangling after a collect. Forensics (gdb + a from-space tripwire) showed the
 //! ACTUAL proximate cause was different: this harness FAILED to register
 //! the image's MUTABLE space as a GC root. The bootstrap image's mutable
 //! objects (the global namespace hashtable, refs, arrays) hold pointers
