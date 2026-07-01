@@ -26,8 +26,8 @@ use std::time::Duration;
 fn workspace_root() -> PathBuf {
     let mut p: PathBuf = env!("CARGO_MANIFEST_DIR").into();
     loop {
-        let is_root = std::fs::read_to_string(p.join("Cargo.toml"))
-            .is_ok_and(|t| t.contains("[workspace]"));
+        let is_root =
+            std::fs::read_to_string(p.join("Cargo.toml")).is_ok_and(|t| t.contains("[workspace]"));
         if is_root {
             return p;
         }

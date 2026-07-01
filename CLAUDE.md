@@ -298,16 +298,23 @@ How it works:
   by `tools/malicious-corpus/` + `untrusted_corpus.rs`;
   `tools/lint-image-deref.py` is the surface-completeness guard. NB it is
   *memory* safety, not a sandbox (see `SECURITY.md`).
-- **RTS breadth**: many entries are stubs (Posix, sockets, C FFI, signal
-  delivery, SaveState, Date local-time, ...). The deceptive ones are
-  **DE-FANGED** (#135): they raise a catchable exception (SysErr for the
-  OS surface) instead of success-shaped defaults; A/B-proven byte-identical
-  on the 27.7B-step chain, fenced by `tests/rts_defang.rs`. Load-bearing
-  carve-outs (must NOT raise, measured): `getConst` (code 4) errno tables +
-  `PolyPosixCreatePersistentFD` (Posix stdin/stdout/stderr) at basis load,
-  `PolySetSignalHandler` at REPL startup, IO codes 17/18/20/22/27 (REPL
-  stdin). IO errors are still silently swallowed (failed write → "0 bytes
-  written", read error ≡ EOF); SysErr routing = task #136.
+- **RTS breadth**: much is now REAL (each ported from the cited upstream C,
+  differential-verified byte-for-byte): `OS.Process.system` (fork/exec sh -c,
+  #141), `Date` local-time (localtime/strftime, #141), IO-error SysErr (#136),
+  and **TCP/UDP sockets** over libc (Wave 1b — `mod socket_rts` in rts.rs; an
+  SML echo server round-trips through the kernel, `tests/sockets.rs`).
+  **Sockets are BLOCKING, not upstream's FIONBIO+ThreadPause** (the scheduler
+  is off by default; the one mutator just blocks — see the divergence note on
+  `mod socket_rts`). Still stubbed → raise catchable SysErr (never fake
+  success; #135, fenced by `tests/rts_defang.rs`): C FFI, Signal.signal
+  delivery, SaveState, Posix, socket IPv6/DNS. Load-bearing carve-outs that
+  must NOT raise (measured against the chain): `getConst` (OSSpecificGeneral
+  code 4) errno tables + `PolyPosixCreatePersistentFD` (Posix
+  stdin/stdout/stderr) at basis load, `PolySetSignalHandler` at REPL startup,
+  IO codes 17/18/20/22/27 (REPL stdin). **register() ORDER is frozen** — a
+  fingerprint unit test pins 228 entries; newly-activated stubs must have
+  their arity RE-DERIVED from the SML `rtsCallFullN` site (the old stub
+  arities were systematically wrong — latent, since unreachable).
 - Real OS threads exist behind `POLY_REAL_THREADS=1` (giant lock + safepoint GC,
   see Architecture); a **preemptive scheduler** (beyond cooperative safepoint
   yielding) and full `Thread` attribute fidelity are still open (task #140,

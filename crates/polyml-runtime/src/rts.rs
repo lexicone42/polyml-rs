@@ -1083,7 +1083,10 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkCloseSocket",
         RtsFn::Arity2(socket_rts::poly_network_close_socket),
     );
-    t.register("PolyNetworkGetAtMark", RtsFn::Arity2(socket_rts::poly_network_get_at_mark));
+    t.register(
+        "PolyNetworkGetAtMark",
+        RtsFn::Arity2(socket_rts::poly_network_get_at_mark),
+    );
     t.register(
         "PolyNetworkGetSocketError",
         RtsFn::Arity2(socket_rts::poly_network_get_socket_error),
@@ -1102,9 +1105,18 @@ fn register_builtins(t: &mut RtsTable) {
         RtsFn::Arity1(|ctx, _| syserr_unimpl(ctx, "sockets (getLinger)")),
     );
     // --- second stub group (Accept..IP6AddressToString) ---
-    t.register("PolyNetworkAccept", RtsFn::Arity2(socket_rts::poly_network_accept));
-    t.register("PolyNetworkBind", RtsFn::Arity3(socket_rts::poly_network_bind));
-    t.register("PolyNetworkConnect", RtsFn::Arity3(socket_rts::poly_network_connect));
+    t.register(
+        "PolyNetworkAccept",
+        RtsFn::Arity2(socket_rts::poly_network_accept),
+    );
+    t.register(
+        "PolyNetworkBind",
+        RtsFn::Arity3(socket_rts::poly_network_bind),
+    );
+    t.register(
+        "PolyNetworkConnect",
+        RtsFn::Arity3(socket_rts::poly_network_connect),
+    );
     // Still raising: NetProtDB / NetServDB / IPv6 / DNS / options.
     t.register(
         "PolyNetworkGetProtByName",
@@ -1114,12 +1126,18 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkGetProtByNo",
         RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "sockets (getProtByNo)")),
     );
-    t.register("PolyNetworkListen", RtsFn::Arity3(socket_rts::poly_network_listen));
+    t.register(
+        "PolyNetworkListen",
+        RtsFn::Arity3(socket_rts::poly_network_listen),
+    );
     t.register(
         "PolyNetworkSetLinger",
         RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "sockets (setLinger)")),
     );
-    t.register("PolyNetworkShutdown", RtsFn::Arity3(socket_rts::poly_network_shutdown));
+    t.register(
+        "PolyNetworkShutdown",
+        RtsFn::Arity3(socket_rts::poly_network_shutdown),
+    );
     t.register(
         "PolyNetworkGetServByName",
         RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "sockets (getServByName)")),
@@ -1174,8 +1192,14 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkSetOption",
         RtsFn::Arity3(|ctx, _, _, _| syserr_unimpl(ctx, "sockets (setOption)")),
     );
-    t.register("PolyNetworkReceive", RtsFn::Arity2(socket_rts::poly_network_receive));
-    t.register("PolyNetworkSend", RtsFn::Arity2(socket_rts::poly_network_send));
+    t.register(
+        "PolyNetworkReceive",
+        RtsFn::Arity2(socket_rts::poly_network_receive),
+    );
+    t.register(
+        "PolyNetworkSend",
+        RtsFn::Arity2(socket_rts::poly_network_send),
+    );
     t.register(
         "PolyNetworkGetServByNameAndProtocol",
         RtsFn::Arity3(|ctx, _, _, _| syserr_unimpl(ctx, "sockets (getServByNameAndProtocol)")),
@@ -1193,8 +1217,14 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkReceiveFrom",
         RtsFn::Arity2(socket_rts::poly_network_receive_from),
     );
-    t.register("PolyNetworkSendTo", RtsFn::Arity2(socket_rts::poly_network_send_to));
-    t.register("PolyNetworkSelect", RtsFn::Arity3(socket_rts::poly_network_select));
+    t.register(
+        "PolyNetworkSendTo",
+        RtsFn::Arity2(socket_rts::poly_network_send_to),
+    );
+    t.register(
+        "PolyNetworkSelect",
+        RtsFn::Arity3(socket_rts::poly_network_select),
+    );
     // process_env return values.
     t.register(
         "PolyProcessEnvFailureValue",
@@ -1950,833 +1980,431 @@ mod socket_rts {
     /// idiom used by `retry_eintr_read`/`write_array` in this file).
     #[cfg(unix)]
     pub(super) fn last_errno() -> i32 {
-    std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(libc::EIO)
-}
-
-/// Upstream `getStreamSocket` / `getStreamFileDescriptor`
-/// (network.cpp:633 → basicio.cpp): read the wrapped-fd object (a 1-word
-/// byte object holding `fd + 1`, created by [`wrap_file_descriptor`]) and
-/// return the raw fd. A word-0 of 0 means the socket was closed → raise
-/// `SysErr("Stream is closed", EBADF)` (`STREAMCLOSED`, network.cpp:502).
-/// Returns `None` (with `ctx.raised_exception` already set) on a closed /
-/// invalid handle so the caller bails to the exception path.
-pub(super) fn get_stream_socket(ctx: &mut RtsContext<'_>, sock: PolyWord) -> Option<libc::c_int> {
-    let Some(p) = safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), sock) else {
-        raise_syscall(ctx, "Stream is closed", libc::EBADF);
-        return None;
-    };
-    // SAFETY: `p` is space-validated (untrusted) / is_data_ptr (trusted); a
-    // wrapped-fd object is a 1-word byte box whose word 0 is `fd + 1`.
-    let fd_plus_one = unsafe { (*p).0 };
-    if fd_plus_one == 0 {
-        raise_syscall(ctx, "Stream is closed", libc::EBADF);
-        return None;
+        std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO)
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    Some((fd_plus_one - 1) as libc::c_int)
-}
 
-/// Read the RAW bytes of a `PolyStringObject` (a socket address is a
-/// string whose chars are raw `struct sockaddr` bytes — NOT UTF-8, so
-/// [`poly_string_to_rust`] would wrongly reject them). Same header-fit /
-/// byte-object / body-bound checks as [`poly_string_to_rust`].
-pub(super) fn poly_string_raw_bytes(spaces: Option<&RtsSafeSpaces>, s: PolyWord) -> Option<Vec<u8>> {
-    use crate::length_word::{is_byte_object, length_of};
-    let obj = safe_rts_arg_obj(spaces, s)?;
-    let p = obj.ptr;
-    // SAFETY: `p` is space-validated (untrusted) / is_data_ptr (trusted),
-    // so `p - 1` is a readable length word.
-    let lw = unsafe { crate::space::MemorySpace::length_word_of(p) };
-    if !is_byte_object(lw) {
-        return None;
-    }
-    let body_bytes = obj
-        .clamp_body_words(length_of(lw))
-        .saturating_mul(std::mem::size_of::<usize>());
-    // SAFETY: `p` is a byte object of >= 1 word (just checked), so word 0
-    // (the stored byte length) is in-bounds.
-    let len = unsafe { (*p).0 };
-    if len > 1_000_000 {
-        return None; // sanity bound (mirrors poly_string_to_rust)
-    }
-    if std::mem::size_of::<usize>().saturating_add(len) > body_bytes {
-        return None; // stored length over-runs the object body
-    }
-    // SAFETY: `len + size_of::<usize>() <= body_bytes`, so the `len` char
-    // bytes at body word 1 are in-bounds.
-    let chars = unsafe { p.add(1).cast::<u8>() };
-    Some(unsafe { std::slice::from_raw_parts(chars, len) }.to_vec())
-}
-
-/// Read a small ML int arg (`af`/`type`/`proto`/backlog/flags — always a
-/// tagged fixed-precision int at these sites) as an `i64`. Boxed values
-/// are handled too via [`ml_int_as_i64`].
-pub(super) fn socket_int_arg(spaces: Option<&RtsSafeSpaces>, w: PolyWord) -> i64 {
-    ml_int_as_i64(spaces, w).unwrap_or(0)
-}
-
-/// Allocate an ML pair `(a, b)` (a 2-word ordinary tuple/record object).
-pub(super) fn alloc_pair(ctx: &mut RtsContext<'_>, a: PolyWord, b: PolyWord) -> PolyWord {
-    let Some(space) = ctx.alloc_space.as_mut() else {
-        return PolyWord::tagged(0);
-    };
-    let p = space.alloc_or_exit(2);
-    // SAFETY: just allocated 2 words.
-    unsafe {
-        crate::space::set_length_word(p, 2, 0);
-        p.write(a);
-        p.add(1).write(b);
-        PolyWord::from_ptr(p.cast_const())
-    }
-}
-
-/// `PolyNetworkCreateSocket(threadId, af, st, prot)` — `socket(2)`.
-/// Port of network.cpp:1127. Leaves the socket BLOCKING (see the module
-/// note: upstream's FIONBIO block is intentionally skipped). Retries
-/// EINTR like upstream's `while (GETERROR == CALLINTERRUPTED)`.
-pub(super) fn poly_network_create_socket(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    family: PolyWord,
-    st: PolyWord,
-    prot: PolyWord,
-) -> PolyWord {
-    let af = socket_int_arg(ctx.safe_spaces.as_ref(), family) as libc::c_int;
-    let ty = socket_int_arg(ctx.safe_spaces.as_ref(), st) as libc::c_int;
-    let proto = socket_int_arg(ctx.safe_spaces.as_ref(), prot) as libc::c_int;
-    let skt = loop {
-        // SAFETY: plain libc socket(2); no pointers.
-        let s = unsafe { libc::socket(af, ty, proto) };
-        if s < 0 && last_errno() == libc::EINTR {
-            continue;
+    /// Upstream `getStreamSocket` / `getStreamFileDescriptor`
+    /// (network.cpp:633 → basicio.cpp): read the wrapped-fd object (a 1-word
+    /// byte object holding `fd + 1`, created by [`wrap_file_descriptor`]) and
+    /// return the raw fd. A word-0 of 0 means the socket was closed → raise
+    /// `SysErr("Stream is closed", EBADF)` (`STREAMCLOSED`, network.cpp:502).
+    /// Returns `None` (with `ctx.raised_exception` already set) on a closed /
+    /// invalid handle so the caller bails to the exception path.
+    pub(super) fn get_stream_socket(
+        ctx: &mut RtsContext<'_>,
+        sock: PolyWord,
+    ) -> Option<libc::c_int> {
+        let Some(p) = safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), sock) else {
+            raise_syscall(ctx, "Stream is closed", libc::EBADF);
+            return None;
+        };
+        // SAFETY: `p` is space-validated (untrusted) / is_data_ptr (trusted); a
+        // wrapped-fd object is a 1-word byte box whose word 0 is `fd + 1`.
+        let fd_plus_one = unsafe { (*p).0 };
+        if fd_plus_one == 0 {
+            raise_syscall(ctx, "Stream is closed", libc::EBADF);
+            return None;
         }
-        break s;
-    };
-    if skt < 0 {
-        return raise_syscall(ctx, "socket failed", last_errno());
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        Some((fd_plus_one - 1) as libc::c_int)
     }
-    #[allow(clippy::cast_sign_loss)]
-    wrap_file_descriptor(ctx, skt as u32)
-}
 
-/// `PolyNetworkBind(threadId, sock, addr)` — `bind(2)`. network.cpp:1474.
-/// `addr` is the raw-sockaddr-bytes PolyString. Returns unit.
-pub(super) fn poly_network_bind(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    sock: PolyWord,
-    addr: PolyWord,
-) -> PolyWord {
-    let Some(fd) = get_stream_socket(ctx, sock) else {
-        return PolyWord::tagged(0);
-    };
-    let Some(bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), addr) else {
-        return raise_syscall(ctx, "bind failed", libc::EINVAL);
-    };
-    // SAFETY: `bytes` holds a full `struct sockaddr` (its length is the
-    // sockaddr length); we pass ptr+len straight to bind(2).
-    let r = unsafe {
-        libc::bind(
-            fd,
-            bytes.as_ptr().cast::<libc::sockaddr>(),
-            bytes.len() as libc::socklen_t,
-        )
-    };
-    if r != 0 {
-        return raise_syscall(ctx, "bind failed", last_errno());
+    /// Read the RAW bytes of a `PolyStringObject` (a socket address is a
+    /// string whose chars are raw `struct sockaddr` bytes — NOT UTF-8, so
+    /// [`poly_string_to_rust`] would wrongly reject them). Same header-fit /
+    /// byte-object / body-bound checks as [`poly_string_to_rust`].
+    pub(super) fn poly_string_raw_bytes(
+        spaces: Option<&RtsSafeSpaces>,
+        s: PolyWord,
+    ) -> Option<Vec<u8>> {
+        use crate::length_word::{is_byte_object, length_of};
+        let obj = safe_rts_arg_obj(spaces, s)?;
+        let p = obj.ptr;
+        // SAFETY: `p` is space-validated (untrusted) / is_data_ptr (trusted),
+        // so `p - 1` is a readable length word.
+        let lw = unsafe { crate::space::MemorySpace::length_word_of(p) };
+        if !is_byte_object(lw) {
+            return None;
+        }
+        let body_bytes = obj
+            .clamp_body_words(length_of(lw))
+            .saturating_mul(std::mem::size_of::<usize>());
+        // SAFETY: `p` is a byte object of >= 1 word (just checked), so word 0
+        // (the stored byte length) is in-bounds.
+        let len = unsafe { (*p).0 };
+        if len > 1_000_000 {
+            return None; // sanity bound (mirrors poly_string_to_rust)
+        }
+        if std::mem::size_of::<usize>().saturating_add(len) > body_bytes {
+            return None; // stored length over-runs the object body
+        }
+        // SAFETY: `len + size_of::<usize>() <= body_bytes`, so the `len` char
+        // bytes at body word 1 are in-bounds.
+        let chars = unsafe { p.add(1).cast::<u8>() };
+        Some(unsafe { std::slice::from_raw_parts(chars, len) }.to_vec())
     }
-    PolyWord::tagged(0)
-}
 
-/// `PolyNetworkListen(threadId, sock, backlog)` — `listen(2)`.
-/// network.cpp:1496. Returns unit.
-pub(super) fn poly_network_listen(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    sock: PolyWord,
-    back: PolyWord,
-) -> PolyWord {
-    let Some(fd) = get_stream_socket(ctx, sock) else {
-        return PolyWord::tagged(0);
-    };
-    let backlog = socket_int_arg(ctx.safe_spaces.as_ref(), back) as libc::c_int;
-    // SAFETY: plain listen(2).
-    if unsafe { libc::listen(fd, backlog) } != 0 {
-        return raise_syscall(ctx, "listen failed", last_errno());
+    /// Read a small ML int arg (`af`/`type`/`proto`/backlog/flags — always a
+    /// tagged fixed-precision int at these sites) as an `i64`. Boxed values
+    /// are handled too via [`ml_int_as_i64`].
+    pub(super) fn socket_int_arg(spaces: Option<&RtsSafeSpaces>, w: PolyWord) -> i64 {
+        ml_int_as_i64(spaces, w).unwrap_or(0)
     }
-    PolyWord::tagged(0)
-}
 
-/// `PolyNetworkConnect(threadId, skt, addr)` — `connect(2)`.
-/// network.cpp:859. Blocking connect (see module note): the call blocks
-/// until the connection completes. Returns unit. Retries EINTR.
-pub(super) fn poly_network_connect(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    skt: PolyWord,
-    addr: PolyWord,
-) -> PolyWord {
-    let Some(fd) = get_stream_socket(ctx, skt) else {
-        return PolyWord::tagged(0);
-    };
-    let Some(bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), addr) else {
-        return raise_syscall(ctx, "connect failed", libc::EINVAL);
-    };
-    loop {
-        // SAFETY: `bytes` is a full sockaddr; ptr+len passed to connect(2).
+    /// Allocate an ML pair `(a, b)` (a 2-word ordinary tuple/record object).
+    pub(super) fn alloc_pair(ctx: &mut RtsContext<'_>, a: PolyWord, b: PolyWord) -> PolyWord {
+        let Some(space) = ctx.alloc_space.as_mut() else {
+            return PolyWord::tagged(0);
+        };
+        let p = space.alloc_or_exit(2);
+        // SAFETY: just allocated 2 words.
+        unsafe {
+            crate::space::set_length_word(p, 2, 0);
+            p.write(a);
+            p.add(1).write(b);
+            PolyWord::from_ptr(p.cast_const())
+        }
+    }
+
+    /// `PolyNetworkCreateSocket(threadId, af, st, prot)` — `socket(2)`.
+    /// Port of network.cpp:1127. Leaves the socket BLOCKING (see the module
+    /// note: upstream's FIONBIO block is intentionally skipped). Retries
+    /// EINTR like upstream's `while (GETERROR == CALLINTERRUPTED)`.
+    pub(super) fn poly_network_create_socket(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        family: PolyWord,
+        st: PolyWord,
+        prot: PolyWord,
+    ) -> PolyWord {
+        let af = socket_int_arg(ctx.safe_spaces.as_ref(), family) as libc::c_int;
+        let ty = socket_int_arg(ctx.safe_spaces.as_ref(), st) as libc::c_int;
+        let proto = socket_int_arg(ctx.safe_spaces.as_ref(), prot) as libc::c_int;
+        let skt = loop {
+            // SAFETY: plain libc socket(2); no pointers.
+            let s = unsafe { libc::socket(af, ty, proto) };
+            if s < 0 && last_errno() == libc::EINTR {
+                continue;
+            }
+            break s;
+        };
+        if skt < 0 {
+            return raise_syscall(ctx, "socket failed", last_errno());
+        }
+        #[allow(clippy::cast_sign_loss)]
+        wrap_file_descriptor(ctx, skt as u32)
+    }
+
+    /// `PolyNetworkBind(threadId, sock, addr)` — `bind(2)`. network.cpp:1474.
+    /// `addr` is the raw-sockaddr-bytes PolyString. Returns unit.
+    pub(super) fn poly_network_bind(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        sock: PolyWord,
+        addr: PolyWord,
+    ) -> PolyWord {
+        let Some(fd) = get_stream_socket(ctx, sock) else {
+            return PolyWord::tagged(0);
+        };
+        let Some(bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), addr) else {
+            return raise_syscall(ctx, "bind failed", libc::EINVAL);
+        };
+        // SAFETY: `bytes` holds a full `struct sockaddr` (its length is the
+        // sockaddr length); we pass ptr+len straight to bind(2).
         let r = unsafe {
-            libc::connect(
+            libc::bind(
                 fd,
                 bytes.as_ptr().cast::<libc::sockaddr>(),
                 bytes.len() as libc::socklen_t,
             )
         };
         if r != 0 {
-            let e = last_errno();
-            if e == libc::EINTR {
+            return raise_syscall(ctx, "bind failed", last_errno());
+        }
+        PolyWord::tagged(0)
+    }
+
+    /// `PolyNetworkListen(threadId, sock, backlog)` — `listen(2)`.
+    /// network.cpp:1496. Returns unit.
+    pub(super) fn poly_network_listen(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        sock: PolyWord,
+        back: PolyWord,
+    ) -> PolyWord {
+        let Some(fd) = get_stream_socket(ctx, sock) else {
+            return PolyWord::tagged(0);
+        };
+        let backlog = socket_int_arg(ctx.safe_spaces.as_ref(), back) as libc::c_int;
+        // SAFETY: plain listen(2).
+        if unsafe { libc::listen(fd, backlog) } != 0 {
+            return raise_syscall(ctx, "listen failed", last_errno());
+        }
+        PolyWord::tagged(0)
+    }
+
+    /// `PolyNetworkConnect(threadId, skt, addr)` — `connect(2)`.
+    /// network.cpp:859. Blocking connect (see module note): the call blocks
+    /// until the connection completes. Returns unit. Retries EINTR.
+    pub(super) fn poly_network_connect(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        skt: PolyWord,
+        addr: PolyWord,
+    ) -> PolyWord {
+        let Some(fd) = get_stream_socket(ctx, skt) else {
+            return PolyWord::tagged(0);
+        };
+        let Some(bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), addr) else {
+            return raise_syscall(ctx, "connect failed", libc::EINVAL);
+        };
+        loop {
+            // SAFETY: `bytes` is a full sockaddr; ptr+len passed to connect(2).
+            let r = unsafe {
+                libc::connect(
+                    fd,
+                    bytes.as_ptr().cast::<libc::sockaddr>(),
+                    bytes.len() as libc::socklen_t,
+                )
+            };
+            if r != 0 {
+                let e = last_errno();
+                if e == libc::EINTR {
+                    continue;
+                }
+                return raise_syscall(ctx, "connect failed", e);
+            }
+            break;
+        }
+        PolyWord::tagged(0)
+    }
+
+    /// `PolyNetworkAccept(threadId, skt)` — `accept(2)`. network.cpp:880.
+    /// Blocking accept: blocks until a peer connects. Returns a pair
+    /// `(newSocket, peerAddr)` where `peerAddr` is the raw-sockaddr-bytes
+    /// PolyString. Retries EINTR.
+    pub(super) fn poly_network_accept(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        skt: PolyWord,
+    ) -> PolyWord {
+        let Some(fd) = get_stream_socket(ctx, skt) else {
+            return PolyWord::tagged(0);
+        };
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        let new_fd = loop {
+            // SAFETY: `storage`/`addr_len` are valid out-params sized to
+            // sockaddr_storage; accept fills at most `addr_len` bytes.
+            let s = unsafe {
+                libc::accept(
+                    fd,
+                    (&raw mut storage).cast::<libc::sockaddr>(),
+                    &raw mut addr_len,
+                )
+            };
+            if s < 0 && last_errno() == libc::EINTR {
                 continue;
             }
-            return raise_syscall(ctx, "connect failed", e);
-        }
-        break;
-    }
-    PolyWord::tagged(0)
-}
-
-/// `PolyNetworkAccept(threadId, skt)` — `accept(2)`. network.cpp:880.
-/// Blocking accept: blocks until a peer connects. Returns a pair
-/// `(newSocket, peerAddr)` where `peerAddr` is the raw-sockaddr-bytes
-/// PolyString. Retries EINTR.
-pub(super) fn poly_network_accept(ctx: &mut RtsContext<'_>, _tid: PolyWord, skt: PolyWord) -> PolyWord {
-    let Some(fd) = get_stream_socket(ctx, skt) else {
-        return PolyWord::tagged(0);
-    };
-    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    let new_fd = loop {
-        // SAFETY: `storage`/`addr_len` are valid out-params sized to
-        // sockaddr_storage; accept fills at most `addr_len` bytes.
-        let s = unsafe {
-            libc::accept(
-                fd,
-                (&raw mut storage).cast::<libc::sockaddr>(),
-                &raw mut addr_len,
-            )
+            break s;
         };
-        if s < 0 && last_errno() == libc::EINTR {
-            continue;
+        if new_fd < 0 {
+            return raise_syscall(ctx, "accept failed", last_errno());
         }
-        break s;
-    };
-    if new_fd < 0 {
-        return raise_syscall(ctx, "accept failed", last_errno());
-    }
-    let cap = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    if addr_len > cap {
-        addr_len = cap;
-    }
-    // SAFETY: the first `addr_len` bytes of `storage` were filled by accept.
-    let addr_bytes = unsafe {
-        std::slice::from_raw_parts(
-            (&raw const storage).cast::<u8>(),
-            addr_len as usize,
-        )
-    };
-    let addr_str = alloc_poly_string(ctx, addr_bytes);
-    #[allow(clippy::cast_sign_loss)]
-    let res_skt = wrap_file_descriptor(ctx, new_fd as u32);
-    alloc_pair(ctx, res_skt, addr_str)
-}
-
-/// Shared reader for the `Send`/`Receive` byte-buffer argument: read
-/// `(base, offset, length)`, bound `offset + length` against `base`'s
-/// byte-object body, and return `(base_body_ptr, offset, length)`.
-/// Mirrors the write_array/read_array_from_stream bounds discipline.
-/// Returns `None` on any shape / bounds violation (the caller then raises
-/// `EINVAL`).
-pub(super) fn socket_buf_region(
-    spaces: Option<&RtsSafeSpaces>,
-    base: PolyWord,
-    offset: PolyWord,
-    length: PolyWord,
-) -> Option<(*mut u8, usize, usize)> {
-    use crate::length_word::{is_byte_object, length_of};
-    if !offset.is_tagged() || !length.is_tagged() {
-        return None;
-    }
-    let off = offset.untag();
-    let len = length.untag();
-    if off < 0 || len < 0 {
-        return None;
-    }
-    #[allow(clippy::cast_sign_loss)]
-    let (off, len) = (off as usize, len as usize);
-    let base_obj = safe_rts_arg_obj(spaces, base)?;
-    let base_p = base_obj.ptr;
-    // SAFETY: `base_p` is space-validated (untrusted) / is_data_ptr
-    // (trusted), so `base_p - 1` is a readable length word.
-    let lw = unsafe { crate::space::MemorySpace::length_word_of(base_p) };
-    let body_bytes = base_obj
-        .clamp_body_words(length_of(lw))
-        .saturating_mul(std::mem::size_of::<usize>());
-    if !is_byte_object(lw) || off.checked_add(len).is_none_or(|end| end > body_bytes) {
-        return None;
-    }
-    Some((base_p.cast::<u8>().cast_mut(), off, len))
-}
-
-/// `PolyNetworkSend(threadId, args)` — `send(2)`. network.cpp:911.
-/// `args` is the 6-tuple `(sock, base, offset, length, dontRoute,
-/// outOfBand)`. Returns `TAGGED(bytesSent)`. Retries EINTR.
-pub(super) fn poly_network_send(ctx: &mut RtsContext<'_>, _tid: PolyWord, args: PolyWord) -> PolyWord {
-    let Some(obj) = safe_rts_arg_obj(ctx.safe_spaces.as_ref(), args) else {
-        return raise_syscall(ctx, "send failed", libc::EINVAL);
-    };
-    if obj.n_words < 6 {
-        return raise_syscall(ctx, "send failed", libc::EINVAL);
-    }
-    // SAFETY: `obj` holds >= 6 words per the gate above.
-    let field = |i: usize| unsafe { *obj.ptr.add(i) };
-    let Some(fd) = get_stream_socket(ctx, field(0)) else {
-        return PolyWord::tagged(0);
-    };
-    let Some((base, off, len)) =
-        socket_buf_region(ctx.safe_spaces.as_ref(), field(1), field(2), field(3))
-    else {
-        return raise_syscall(ctx, "send failed", libc::EINVAL);
-    };
-    let mut flags = 0;
-    if socket_int_arg(ctx.safe_spaces.as_ref(), field(4)) != 0 {
-        flags |= libc::MSG_DONTROUTE;
-    }
-    if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
-        flags |= libc::MSG_OOB;
-    }
-    let sent = loop {
-        // SAFETY: `[base+off, base+off+len)` was bounds-checked to lie
-        // within the byte object's body by `socket_buf_region`.
-        let r = unsafe { libc::send(fd, base.add(off).cast::<libc::c_void>(), len, flags) };
-        if r < 0 && last_errno() == libc::EINTR {
-            continue;
+        let cap = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        if addr_len > cap {
+            addr_len = cap;
         }
-        break r;
-    };
-    if sent < 0 {
-        return raise_syscall(ctx, "send failed", last_errno());
-    }
-    #[allow(clippy::cast_possible_wrap)]
-    PolyWord::tagged(sent as isize)
-}
-
-/// `PolyNetworkReceive(threadId, args)` — `recv(2)`. network.cpp:992.
-/// `args` is the 6-tuple `(sock, base, offset, length, peek, outOfBand)`
-/// where `base` is a MUTABLE byte array written in place. Returns
-/// `TAGGED(bytesReceived)` (0 = orderly shutdown). Blocking; retries EINTR.
-pub(super) fn poly_network_receive(ctx: &mut RtsContext<'_>, _tid: PolyWord, args: PolyWord) -> PolyWord {
-    let Some(obj) = safe_rts_arg_obj(ctx.safe_spaces.as_ref(), args) else {
-        return raise_syscall(ctx, "recv failed", libc::EINVAL);
-    };
-    if obj.n_words < 6 {
-        return raise_syscall(ctx, "recv failed", libc::EINVAL);
-    }
-    // SAFETY: `obj` holds >= 6 words per the gate above.
-    let field = |i: usize| unsafe { *obj.ptr.add(i) };
-    let Some(fd) = get_stream_socket(ctx, field(0)) else {
-        return PolyWord::tagged(0);
-    };
-    let Some((base, off, len)) =
-        socket_buf_region(ctx.safe_spaces.as_ref(), field(1), field(2), field(3))
-    else {
-        return raise_syscall(ctx, "recv failed", libc::EINVAL);
-    };
-    let mut flags = 0;
-    if socket_int_arg(ctx.safe_spaces.as_ref(), field(4)) != 0 {
-        flags |= libc::MSG_PEEK;
-    }
-    if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
-        flags |= libc::MSG_OOB;
-    }
-    let recvd = loop {
-        // SAFETY: `[base+off, base+off+len)` was bounds-checked to lie
-        // within the byte object's body by `socket_buf_region`; recv
-        // writes at most `len` bytes there.
-        let r = unsafe { libc::recv(fd, base.add(off).cast::<libc::c_void>(), len, flags) };
-        if r < 0 && last_errno() == libc::EINTR {
-            continue;
-        }
-        break r;
-    };
-    if recvd < 0 {
-        return raise_syscall(ctx, "recv failed", last_errno());
-    }
-    #[allow(clippy::cast_possible_wrap)]
-    PolyWord::tagged(recvd as isize)
-}
-
-/// `PolyNetworkSendTo(threadId, args)` — `sendto(2)`. network.cpp:950.
-/// `args` is the 7-tuple `(sock, addr, base, offset, length, dontRoute,
-/// outOfBand)`. Returns `TAGGED(bytesSent)`. Retries EINTR.
-pub(super) fn poly_network_send_to(ctx: &mut RtsContext<'_>, _tid: PolyWord, args: PolyWord) -> PolyWord {
-    let Some(obj) = safe_rts_arg_obj(ctx.safe_spaces.as_ref(), args) else {
-        return raise_syscall(ctx, "sendto failed", libc::EINVAL);
-    };
-    if obj.n_words < 7 {
-        return raise_syscall(ctx, "sendto failed", libc::EINVAL);
-    }
-    // SAFETY: `obj` holds >= 7 words per the gate above.
-    let field = |i: usize| unsafe { *obj.ptr.add(i) };
-    let Some(fd) = get_stream_socket(ctx, field(0)) else {
-        return PolyWord::tagged(0);
-    };
-    let Some(addr_bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), field(1)) else {
-        return raise_syscall(ctx, "sendto failed", libc::EINVAL);
-    };
-    let Some((base, off, len)) =
-        socket_buf_region(ctx.safe_spaces.as_ref(), field(2), field(3), field(4))
-    else {
-        return raise_syscall(ctx, "sendto failed", libc::EINVAL);
-    };
-    let mut flags = 0;
-    if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
-        flags |= libc::MSG_DONTROUTE;
-    }
-    if socket_int_arg(ctx.safe_spaces.as_ref(), field(6)) != 0 {
-        flags |= libc::MSG_OOB;
-    }
-    let sent = loop {
-        // SAFETY: buffer region bounds-checked by `socket_buf_region`;
-        // `addr_bytes` is a full sockaddr passed by ptr+len.
-        let r = unsafe {
-            libc::sendto(
-                fd,
-                base.add(off).cast::<libc::c_void>(),
-                len,
-                flags,
-                addr_bytes.as_ptr().cast::<libc::sockaddr>(),
-                addr_bytes.len() as libc::socklen_t,
-            )
+        // SAFETY: the first `addr_len` bytes of `storage` were filled by accept.
+        let addr_bytes = unsafe {
+            std::slice::from_raw_parts((&raw const storage).cast::<u8>(), addr_len as usize)
         };
-        if r < 0 && last_errno() == libc::EINTR {
-            continue;
-        }
-        break r;
-    };
-    if sent < 0 {
-        return raise_syscall(ctx, "sendto failed", last_errno());
-    }
-    #[allow(clippy::cast_possible_wrap)]
-    PolyWord::tagged(sent as isize)
-}
-
-/// `PolyNetworkReceiveFrom(threadId, args)` — `recvfrom(2)`.
-/// network.cpp:1031. `args` is the 6-tuple `(sock, base, offset, length,
-/// peek, outOfBand)`; returns the pair `(bytesReceived, peerAddr)` where
-/// `peerAddr` is the raw-sockaddr-bytes PolyString. Blocking; retries EINTR.
-pub(super) fn poly_network_receive_from(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    args: PolyWord,
-) -> PolyWord {
-    let Some(obj) = safe_rts_arg_obj(ctx.safe_spaces.as_ref(), args) else {
-        return raise_syscall(ctx, "recvfrom failed", libc::EINVAL);
-    };
-    if obj.n_words < 6 {
-        return raise_syscall(ctx, "recvfrom failed", libc::EINVAL);
-    }
-    // SAFETY: `obj` holds >= 6 words per the gate above.
-    let field = |i: usize| unsafe { *obj.ptr.add(i) };
-    let Some(fd) = get_stream_socket(ctx, field(0)) else {
-        return PolyWord::tagged(0);
-    };
-    let Some((base, off, len)) =
-        socket_buf_region(ctx.safe_spaces.as_ref(), field(1), field(2), field(3))
-    else {
-        return raise_syscall(ctx, "recvfrom failed", libc::EINVAL);
-    };
-    let mut flags = 0;
-    if socket_int_arg(ctx.safe_spaces.as_ref(), field(4)) != 0 {
-        flags |= libc::MSG_PEEK;
-    }
-    if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
-        flags |= libc::MSG_OOB;
-    }
-    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    let recvd = loop {
-        // SAFETY: buffer region bounds-checked by `socket_buf_region`;
-        // `storage`/`addr_len` are valid out-params sized to sockaddr_storage.
-        let r = unsafe {
-            libc::recvfrom(
-                fd,
-                base.add(off).cast::<libc::c_void>(),
-                len,
-                flags,
-                (&raw mut storage).cast::<libc::sockaddr>(),
-                &raw mut addr_len,
-            )
-        };
-        if r < 0 && last_errno() == libc::EINTR {
-            continue;
-        }
-        break r;
-    };
-    if recvd < 0 {
-        return raise_syscall(ctx, "recvfrom failed", last_errno());
-    }
-    let cap = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    if addr_len > cap {
-        addr_len = cap;
-    }
-    // SAFETY: the first `addr_len` bytes of `storage` were filled by recvfrom.
-    let addr_bytes = unsafe {
-        std::slice::from_raw_parts((&raw const storage).cast::<u8>(), addr_len as usize)
-    };
-    let addr_str = alloc_poly_string(ctx, addr_bytes);
-    #[allow(clippy::cast_possible_wrap)]
-    let len_w = PolyWord::tagged(recvd as isize);
-    alloc_pair(ctx, len_w, addr_str)
-}
-
-/// `PolyNetworkShutdown(threadId, skt, how)` — `shutdown(2)`.
-/// network.cpp:1517. `how` maps 1/2/3 → `SHUT_RD`/`SHUT_WR`/`SHUT_RDWR`.
-/// Returns unit.
-pub(super) fn poly_network_shutdown(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    skt: PolyWord,
-    smode: PolyWord,
-) -> PolyWord {
-    let Some(fd) = get_stream_socket(ctx, skt) else {
-        return PolyWord::tagged(0);
-    };
-    let mode = match socket_int_arg(ctx.safe_spaces.as_ref(), smode) {
-        1 => libc::SHUT_RD,
-        2 => libc::SHUT_WR,
-        3 => libc::SHUT_RDWR,
-        _ => 0,
-    };
-    // SAFETY: plain shutdown(2).
-    if unsafe { libc::shutdown(fd, mode) } != 0 {
-        return raise_syscall(ctx, "shutdown failed", last_errno());
-    }
-    PolyWord::tagged(0)
-}
-
-/// `PolyNetworkCloseSocket(threadId, skt)` — `close(2)` on the socket fd.
-/// A socket IS an fd, so this is exactly [`close_file`]'s behaviour;
-/// wrapped for the `(threadId, skt)` arity. network.cpp routes socket
-/// close through the general IO close.
-pub(super) fn poly_network_close_socket(ctx: &mut RtsContext<'_>, _tid: PolyWord, skt: PolyWord) -> PolyWord {
-    close_file(ctx.safe_spaces.as_ref(), skt)
-}
-
-/// `PolyNetworkGetSockName(threadId, sock)` — `getsockname(2)`.
-/// network.cpp:1388. Returns the local address as a raw-sockaddr-bytes
-/// PolyString.
-pub(super) fn poly_network_get_sock_name(ctx: &mut RtsContext<'_>, _tid: PolyWord, sock: PolyWord) -> PolyWord {
-    get_name_common(ctx, sock, false)
-}
-
-/// `PolyNetworkGetPeerName(threadId, sock)` — `getpeername(2)`.
-/// network.cpp:1361. Returns the peer address as a raw-sockaddr-bytes
-/// PolyString.
-pub(super) fn poly_network_get_peer_name(ctx: &mut RtsContext<'_>, _tid: PolyWord, sock: PolyWord) -> PolyWord {
-    get_name_common(ctx, sock, true)
-}
-
-/// Shared body of getsockname/getpeername (`peer` selects which).
-pub(super) fn get_name_common(ctx: &mut RtsContext<'_>, sock: PolyWord, peer: bool) -> PolyWord {
-    let Some(fd) = get_stream_socket(ctx, sock) else {
-        return PolyWord::tagged(0);
-    };
-    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let mut size = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    // SAFETY: `storage`/`size` are valid out-params sized to sockaddr_storage.
-    let r = unsafe {
-        let sa = (&raw mut storage).cast::<libc::sockaddr>();
-        if peer {
-            libc::getpeername(fd, sa, &raw mut size)
-        } else {
-            libc::getsockname(fd, sa, &raw mut size)
-        }
-    };
-    if r != 0 {
-        let msg = if peer {
-            "getpeername failed"
-        } else {
-            "getsockname failed"
-        };
-        return raise_syscall(ctx, msg, last_errno());
-    }
-    let cap = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    if size > cap {
-        size = cap;
-    }
-    // SAFETY: the first `size` bytes of `storage` were filled by the call.
-    let bytes =
-        unsafe { std::slice::from_raw_parts((&raw const storage).cast::<u8>(), size as usize) };
-    alloc_poly_string(ctx, bytes)
-}
-
-/// `PolyNetworkCreateIP4Address(threadId, ip4Address, portNumber)` —
-/// build a `struct sockaddr_in` and return it as a raw-bytes PolyString.
-/// network.cpp:1981. `ip4Address` is a host-order IPv4 address (an ML
-/// int; `INADDR_ANY` = 0), `portNumber` a host-order port.
-pub(super) fn poly_network_create_ip4_address(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    ip4: PolyWord,
-    port: PolyWord,
-) -> PolyWord {
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let ip = socket_int_arg(ctx.safe_spaces.as_ref(), ip4) as u32;
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let p = socket_int_arg(ctx.safe_spaces.as_ref(), port) as u16;
-    let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-    sa.sin_family = libc::AF_INET as libc::sa_family_t;
-    sa.sin_port = p.to_be(); // htons
-    sa.sin_addr.s_addr = ip.to_be(); // htonl
-    // SAFETY: read the POD sockaddr_in as its raw bytes to build the
-    // address PolyString (the ML side treats it as an opaque byte string).
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            (&raw const sa).cast::<u8>(),
-            std::mem::size_of::<libc::sockaddr_in>(),
-        )
-    };
-    alloc_poly_string(ctx, bytes)
-}
-
-/// `PolyNetworkGetAddressAndPortFromIP4(threadId, sockAddress)` — parse a
-/// `struct sockaddr_in` PolyString into the pair `(hostOrderIp, port)`.
-/// network.cpp:1956. The IPv4 address is a `LargeInt.int`.
-pub(super) fn poly_network_get_address_and_port_from_ip4(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    sock_addr: PolyWord,
-) -> PolyWord {
-    let Some(bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), sock_addr) else {
-        return raise_syscall(ctx, "getAddressAndPortFromIP4 failed", libc::EINVAL);
-    };
-    if bytes.len() < std::mem::size_of::<libc::sockaddr_in>() {
-        return raise_syscall(ctx, "getAddressAndPortFromIP4 failed", libc::EINVAL);
-    }
-    // Read sin_addr / sin_port from the raw bytes (network byte order in
-    // the struct); convert to host order. Copy into an aligned local to
-    // avoid any alignment assumption on the PolyString body.
-    let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-    // SAFETY: `bytes` holds at least a full sockaddr_in (checked above);
-    // copy those bytes into a properly aligned local.
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            (&raw mut sa).cast::<u8>(),
-            std::mem::size_of::<libc::sockaddr_in>(),
-        );
-    }
-    let ip = u32::from_be(sa.sin_addr.s_addr); // ntohl
-    let port = u16::from_be(sa.sin_port); // ntohs
-    let ip_w = int_to_poly_word(ctx, i128::from(ip));
-    let port_w = PolyWord::tagged(port as isize);
-    alloc_pair(ctx, ip_w, port_w)
-}
-
-/// `PolyNetworkBytesAvailable(threadId, sock)` — `ioctl(FIONREAD)`.
-/// network.cpp:1414. Returns the number of bytes readable without blocking.
-pub(super) fn poly_network_bytes_available(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    sock: PolyWord,
-) -> PolyWord {
-    let Some(fd) = get_stream_socket(ctx, sock) else {
-        return PolyWord::tagged(0);
-    };
-    let mut readable: libc::c_int = 0;
-    // SAFETY: FIONREAD writes one int into `readable`.
-    if unsafe { libc::ioctl(fd, libc::FIONREAD, &raw mut readable) } < 0 {
-        return raise_syscall(ctx, "ioctl failed", last_errno());
-    }
-    int_to_poly_word(ctx, i128::from(readable))
-}
-
-/// `PolyNetworkGetAtMark(threadId, sock)` — the OOB-mark test
-/// (upstream uses `ioctl(SIOCATMARK)`; we use the POSIX `sockatmark(3)`
-/// wrapper, which is portable across Unixes and not exposed by the `libc`
-/// crate). network.cpp:1444. Returns the flag as a fixed-precision 0/1.
-pub(super) fn poly_network_get_at_mark(ctx: &mut RtsContext<'_>, _tid: PolyWord, sock: PolyWord) -> PolyWord {
-    // `sockatmark` is POSIX (glibc >= 2.2.4, macOS) but absent from the
-    // `libc` crate at this version; declare it directly.
-    unsafe extern "C" {
-        fn sockatmark(fd: libc::c_int) -> libc::c_int;
-    }
-    let Some(fd) = get_stream_socket(ctx, sock) else {
-        return PolyWord::tagged(0);
-    };
-    // SAFETY: `fd` is a live socket fd; sockatmark takes only the fd.
-    let at_mark = unsafe { sockatmark(fd) };
-    if at_mark < 0 {
-        return raise_syscall(ctx, "sockatmark failed", last_errno());
-    }
-    PolyWord::tagged(isize::from(at_mark != 0))
-}
-
-/// `PolyNetworkGetSocketError(threadId, skt)` — `getsockopt(SO_ERROR)`.
-/// network.cpp:745. Returns the pending socket error as a `SysWord.word`
-/// (a 1-word byte box holding the errno), matching upstream's `Make_sysword`.
-pub(super) fn poly_network_get_socket_error(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    skt: PolyWord,
-) -> PolyWord {
-    let Some(fd) = get_stream_socket(ctx, skt) else {
-        return PolyWord::tagged(0);
-    };
-    let mut val: libc::c_int = 0;
-    let mut size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-    // SAFETY: SO_ERROR writes one int into `val`; `size` is its byte length.
-    let r = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_ERROR,
-            (&raw mut val).cast::<libc::c_void>(),
-            &raw mut size,
-        )
-    };
-    if r != 0 {
-        return raise_syscall(ctx, "getsockopt failed", last_errno());
-    }
-    make_sysword(ctx, val)
-}
-
-/// Build a `SysWord.word` value: a 1-word MUTABLE byte box holding the
-/// raw value. Mirrors upstream `Make_sysword` (used by GetSocketError).
-pub(super) fn make_sysword(ctx: &mut RtsContext<'_>, v: libc::c_int) -> PolyWord {
-    use crate::length_word::F_BYTE_OBJ;
-    let Some(space) = ctx.alloc_space.as_mut() else {
-        return PolyWord::tagged(0);
-    };
-    let p = space.alloc_or_exit(1);
-    // SAFETY: just allocated 1 word (the SysWord byte box).
-    unsafe {
-        crate::space::set_length_word(p, 1, F_BYTE_OBJ);
+        let addr_str = alloc_poly_string(ctx, addr_bytes);
         #[allow(clippy::cast_sign_loss)]
-        p.write(PolyWord::from_bits(v as usize));
-        PolyWord::from_ptr(p.cast_const())
+        let res_skt = wrap_file_descriptor(ctx, new_fd as u32);
+        alloc_pair(ctx, res_skt, addr_str)
     }
-}
 
-/// `PolyNetworkCreateSocketPair(threadId, af, st, prot)` —
-/// `socketpair(2)`. network.cpp:1544. Returns a pair of wrapped sockets.
-/// Left BLOCKING (see module note). Retries EINTR.
-pub(super) fn poly_network_create_socket_pair(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    family: PolyWord,
-    st: PolyWord,
-    prot: PolyWord,
-) -> PolyWord {
-    let af = socket_int_arg(ctx.safe_spaces.as_ref(), family) as libc::c_int;
-    let ty = socket_int_arg(ctx.safe_spaces.as_ref(), st) as libc::c_int;
-    let proto = socket_int_arg(ctx.safe_spaces.as_ref(), prot) as libc::c_int;
-    let mut fds: [libc::c_int; 2] = [0, 0];
-    let rc = loop {
-        // SAFETY: socketpair fills the 2-element `fds` array.
-        let r = unsafe { libc::socketpair(af, ty, proto, fds.as_mut_ptr()) };
-        if r != 0 && last_errno() == libc::EINTR {
-            continue;
+    /// Shared reader for the `Send`/`Receive` byte-buffer argument: read
+    /// `(base, offset, length)`, bound `offset + length` against `base`'s
+    /// byte-object body, and return `(base_body_ptr, offset, length)`.
+    /// Mirrors the write_array/read_array_from_stream bounds discipline.
+    /// Returns `None` on any shape / bounds violation (the caller then raises
+    /// `EINVAL`).
+    pub(super) fn socket_buf_region(
+        spaces: Option<&RtsSafeSpaces>,
+        base: PolyWord,
+        offset: PolyWord,
+        length: PolyWord,
+    ) -> Option<(*mut u8, usize, usize)> {
+        use crate::length_word::{is_byte_object, length_of};
+        if !offset.is_tagged() || !length.is_tagged() {
+            return None;
         }
-        break r;
-    };
-    if rc != 0 {
-        return raise_syscall(ctx, "socketpair failed", last_errno());
+        let off = offset.untag();
+        let len = length.untag();
+        if off < 0 || len < 0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let (off, len) = (off as usize, len as usize);
+        let base_obj = safe_rts_arg_obj(spaces, base)?;
+        let base_p = base_obj.ptr;
+        // SAFETY: `base_p` is space-validated (untrusted) / is_data_ptr
+        // (trusted), so `base_p - 1` is a readable length word.
+        let lw = unsafe { crate::space::MemorySpace::length_word_of(base_p) };
+        let body_bytes = base_obj
+            .clamp_body_words(length_of(lw))
+            .saturating_mul(std::mem::size_of::<usize>());
+        if !is_byte_object(lw) || off.checked_add(len).is_none_or(|end| end > body_bytes) {
+            return None;
+        }
+        Some((base_p.cast::<u8>().cast_mut(), off, len))
     }
-    #[allow(clippy::cast_sign_loss)]
-    let a = wrap_file_descriptor(ctx, fds[0] as u32);
-    #[allow(clippy::cast_sign_loss)]
-    let b = wrap_file_descriptor(ctx, fds[1] as u32);
-    alloc_pair(ctx, a, b)
-}
 
-/// `PolyNetworkSelect(threadId, fdVecTriple, maxMillisecs)` — `poll(2)`.
-/// network.cpp:810. `fdVecTriple` is `(readVec, writeVec, excVec)`, each
-/// a vector of iodescs; `maxMillisecs` is a tagged timeout. Returns the
-/// triple of vectors holding only the ready iodescs. Under the default
-/// single-threaded model we do a real `poll` for up to `maxMillisecs`
-/// (upstream uses `ThreadPauseForIO`; the ML `select` wrapper already
-/// loops us to honour a longer/indefinite timeout).
-pub(super) fn poly_network_select(
-    ctx: &mut RtsContext<'_>,
-    _tid: PolyWord,
-    fd_vec_triple: PolyWord,
-    max_ms: PolyWord,
-) -> PolyWord {
-    use crate::length_word::{length_of, make_length_word};
-    let timeout_ms = if max_ms.is_tagged() {
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            max_ms.untag().max(0) as libc::c_int
-        }
-    } else {
-        0
-    };
-    let spaces = ctx.safe_spaces.clone();
-    let Some(triple) = safe_rts_arg_obj(spaces.as_ref(), fd_vec_triple) else {
-        return raise_syscall(ctx, "select failed", libc::EINVAL);
-    };
-    if triple.n_words < 3 {
-        return raise_syscall(ctx, "select failed", libc::EINVAL);
-    }
-    // Read the three vector words. Each vector is an ML word-object whose
-    // elements are iodesc (wrapped-fd) words.
-    // SAFETY: `triple` holds >= 3 words per the gate above.
-    let vec_words = [
-        unsafe { *triple.ptr },
-        unsafe { *triple.ptr.add(1) },
-        unsafe { *triple.ptr.add(2) },
-    ];
-    // Collect, per vector, the list of (element-word, fd). We keep the
-    // ORIGINAL element word so the result vectors contain the very same
-    // iodesc objects the ML side passed (upstream preserves them too).
-    let mut elems: [Vec<(PolyWord, libc::c_int)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    let mut pollfds: Vec<libc::pollfd> = Vec::new();
-    // Poll events per set: read→POLLIN, write→POLLOUT, exc→POLLPRI.
-    let events = [libc::POLLIN, libc::POLLOUT, libc::POLLPRI];
-    for (i, &vw) in vec_words.iter().enumerate() {
-        let Some(vec_obj) = safe_rts_arg_obj(spaces.as_ref(), vw) else {
-            // An empty vector is a valid word-object; a non-pointer here
-            // means the ML side passed `Vector.fromList []` shaped oddly —
-            // skip it (treated as no descriptors in this set).
-            continue;
+    /// `PolyNetworkSend(threadId, args)` — `send(2)`. network.cpp:911.
+    /// `args` is the 6-tuple `(sock, base, offset, length, dontRoute,
+    /// outOfBand)`. Returns `TAGGED(bytesSent)`. Retries EINTR.
+    pub(super) fn poly_network_send(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        args: PolyWord,
+    ) -> PolyWord {
+        let Some(obj) = safe_rts_arg_obj(ctx.safe_spaces.as_ref(), args) else {
+            return raise_syscall(ctx, "send failed", libc::EINVAL);
         };
-        // SAFETY: `vec_obj.ptr - 1` is the length word (validated / is_data_ptr).
-        let lw = unsafe { crate::space::MemorySpace::length_word_of(vec_obj.ptr) };
-        let n = vec_obj.clamp_body_words(length_of(lw));
-        for j in 0..n {
-            // SAFETY: j < n <= validated body word count.
-            let elem = unsafe { *vec_obj.ptr.add(j) };
-            let Some(fd) = get_stream_socket(ctx, elem) else {
-                // get_stream_socket set a raised exception (closed socket).
-                return PolyWord::tagged(0);
-            };
-            pollfds.push(libc::pollfd {
-                fd,
-                events: events[i],
-                revents: 0,
-            });
-            elems[i].push((elem, fd));
+        if obj.n_words < 6 {
+            return raise_syscall(ctx, "send failed", libc::EINVAL);
         }
+        // SAFETY: `obj` holds >= 6 words per the gate above.
+        let field = |i: usize| unsafe { *obj.ptr.add(i) };
+        let Some(fd) = get_stream_socket(ctx, field(0)) else {
+            return PolyWord::tagged(0);
+        };
+        let Some((base, off, len)) =
+            socket_buf_region(ctx.safe_spaces.as_ref(), field(1), field(2), field(3))
+        else {
+            return raise_syscall(ctx, "send failed", libc::EINVAL);
+        };
+        let mut flags = 0;
+        if socket_int_arg(ctx.safe_spaces.as_ref(), field(4)) != 0 {
+            flags |= libc::MSG_DONTROUTE;
+        }
+        if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
+            flags |= libc::MSG_OOB;
+        }
+        let sent = loop {
+            // SAFETY: `[base+off, base+off+len)` was bounds-checked to lie
+            // within the byte object's body by `socket_buf_region`.
+            let r = unsafe { libc::send(fd, base.add(off).cast::<libc::c_void>(), len, flags) };
+            if r < 0 && last_errno() == libc::EINTR {
+                continue;
+            }
+            break r;
+        };
+        if sent < 0 {
+            return raise_syscall(ctx, "send failed", last_errno());
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        PolyWord::tagged(sent as isize)
     }
-    if !pollfds.is_empty() {
-        let rc = loop {
-            // SAFETY: `pollfds` is a valid array of `len` pollfd entries.
+
+    /// `PolyNetworkReceive(threadId, args)` — `recv(2)`. network.cpp:992.
+    /// `args` is the 6-tuple `(sock, base, offset, length, peek, outOfBand)`
+    /// where `base` is a MUTABLE byte array written in place. Returns
+    /// `TAGGED(bytesReceived)` (0 = orderly shutdown). Blocking; retries EINTR.
+    pub(super) fn poly_network_receive(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        args: PolyWord,
+    ) -> PolyWord {
+        let Some(obj) = safe_rts_arg_obj(ctx.safe_spaces.as_ref(), args) else {
+            return raise_syscall(ctx, "recv failed", libc::EINVAL);
+        };
+        if obj.n_words < 6 {
+            return raise_syscall(ctx, "recv failed", libc::EINVAL);
+        }
+        // SAFETY: `obj` holds >= 6 words per the gate above.
+        let field = |i: usize| unsafe { *obj.ptr.add(i) };
+        let Some(fd) = get_stream_socket(ctx, field(0)) else {
+            return PolyWord::tagged(0);
+        };
+        let Some((base, off, len)) =
+            socket_buf_region(ctx.safe_spaces.as_ref(), field(1), field(2), field(3))
+        else {
+            return raise_syscall(ctx, "recv failed", libc::EINVAL);
+        };
+        let mut flags = 0;
+        if socket_int_arg(ctx.safe_spaces.as_ref(), field(4)) != 0 {
+            flags |= libc::MSG_PEEK;
+        }
+        if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
+            flags |= libc::MSG_OOB;
+        }
+        let recvd = loop {
+            // SAFETY: `[base+off, base+off+len)` was bounds-checked to lie
+            // within the byte object's body by `socket_buf_region`; recv
+            // writes at most `len` bytes there.
+            let r = unsafe { libc::recv(fd, base.add(off).cast::<libc::c_void>(), len, flags) };
+            if r < 0 && last_errno() == libc::EINTR {
+                continue;
+            }
+            break r;
+        };
+        if recvd < 0 {
+            return raise_syscall(ctx, "recv failed", last_errno());
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        PolyWord::tagged(recvd as isize)
+    }
+
+    /// `PolyNetworkSendTo(threadId, args)` — `sendto(2)`. network.cpp:950.
+    /// `args` is the 7-tuple `(sock, addr, base, offset, length, dontRoute,
+    /// outOfBand)`. Returns `TAGGED(bytesSent)`. Retries EINTR.
+    pub(super) fn poly_network_send_to(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        args: PolyWord,
+    ) -> PolyWord {
+        let Some(obj) = safe_rts_arg_obj(ctx.safe_spaces.as_ref(), args) else {
+            return raise_syscall(ctx, "sendto failed", libc::EINVAL);
+        };
+        if obj.n_words < 7 {
+            return raise_syscall(ctx, "sendto failed", libc::EINVAL);
+        }
+        // SAFETY: `obj` holds >= 7 words per the gate above.
+        let field = |i: usize| unsafe { *obj.ptr.add(i) };
+        let Some(fd) = get_stream_socket(ctx, field(0)) else {
+            return PolyWord::tagged(0);
+        };
+        let Some(addr_bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), field(1)) else {
+            return raise_syscall(ctx, "sendto failed", libc::EINVAL);
+        };
+        let Some((base, off, len)) =
+            socket_buf_region(ctx.safe_spaces.as_ref(), field(2), field(3), field(4))
+        else {
+            return raise_syscall(ctx, "sendto failed", libc::EINVAL);
+        };
+        let mut flags = 0;
+        if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
+            flags |= libc::MSG_DONTROUTE;
+        }
+        if socket_int_arg(ctx.safe_spaces.as_ref(), field(6)) != 0 {
+            flags |= libc::MSG_OOB;
+        }
+        let sent = loop {
+            // SAFETY: buffer region bounds-checked by `socket_buf_region`;
+            // `addr_bytes` is a full sockaddr passed by ptr+len.
             let r = unsafe {
-                libc::poll(
-                    pollfds.as_mut_ptr(),
-                    pollfds.len() as libc::nfds_t,
-                    timeout_ms,
+                libc::sendto(
+                    fd,
+                    base.add(off).cast::<libc::c_void>(),
+                    len,
+                    flags,
+                    addr_bytes.as_ptr().cast::<libc::sockaddr>(),
+                    addr_bytes.len() as libc::socklen_t,
                 )
             };
             if r < 0 && last_errno() == libc::EINTR {
@@ -2784,57 +2412,500 @@ pub(super) fn poly_network_select(
             }
             break r;
         };
-        if rc < 0 {
-            return raise_syscall(ctx, "select failed", last_errno());
+        if sent < 0 {
+            return raise_syscall(ctx, "sendto failed", last_errno());
         }
+        #[allow(clippy::cast_possible_wrap)]
+        PolyWord::tagged(sent as isize)
     }
-    // Build the result: for each set, the elements whose poll revents show
-    // the requested condition (or an error/hangup, which the ML side wants
-    // to observe too — matches select() semantics reporting exceptional fds).
-    let ready_mask = [
-        libc::POLLIN | libc::POLLHUP | libc::POLLERR,
-        libc::POLLOUT | libc::POLLERR,
-        libc::POLLPRI | libc::POLLERR,
-    ];
-    let mut result_vecs = [PolyWord::tagged(0); 3];
-    for i in 0..3 {
-        // Gather ready element words for set i.
-        let mut ready: Vec<PolyWord> = Vec::new();
-        for (elem, fd) in &elems[i] {
-            if let Some(pf) = pollfds.iter().find(|p| p.fd == *fd && p.events == events[i])
-                && pf.revents & ready_mask[i] != 0
-            {
-                ready.push(*elem);
-            }
+
+    /// `PolyNetworkReceiveFrom(threadId, args)` — `recvfrom(2)`.
+    /// network.cpp:1031. `args` is the 6-tuple `(sock, base, offset, length,
+    /// peek, outOfBand)`; returns the pair `(bytesReceived, peerAddr)` where
+    /// `peerAddr` is the raw-sockaddr-bytes PolyString. Blocking; retries EINTR.
+    pub(super) fn poly_network_receive_from(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        args: PolyWord,
+    ) -> PolyWord {
+        let Some(obj) = safe_rts_arg_obj(ctx.safe_spaces.as_ref(), args) else {
+            return raise_syscall(ctx, "recvfrom failed", libc::EINVAL);
+        };
+        if obj.n_words < 6 {
+            return raise_syscall(ctx, "recvfrom failed", libc::EINVAL);
         }
-        // Allocate a word-object vector of the ready elements.
+        // SAFETY: `obj` holds >= 6 words per the gate above.
+        let field = |i: usize| unsafe { *obj.ptr.add(i) };
+        let Some(fd) = get_stream_socket(ctx, field(0)) else {
+            return PolyWord::tagged(0);
+        };
+        let Some((base, off, len)) =
+            socket_buf_region(ctx.safe_spaces.as_ref(), field(1), field(2), field(3))
+        else {
+            return raise_syscall(ctx, "recvfrom failed", libc::EINVAL);
+        };
+        let mut flags = 0;
+        if socket_int_arg(ctx.safe_spaces.as_ref(), field(4)) != 0 {
+            flags |= libc::MSG_PEEK;
+        }
+        if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
+            flags |= libc::MSG_OOB;
+        }
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        let recvd = loop {
+            // SAFETY: buffer region bounds-checked by `socket_buf_region`;
+            // `storage`/`addr_len` are valid out-params sized to sockaddr_storage.
+            let r = unsafe {
+                libc::recvfrom(
+                    fd,
+                    base.add(off).cast::<libc::c_void>(),
+                    len,
+                    flags,
+                    (&raw mut storage).cast::<libc::sockaddr>(),
+                    &raw mut addr_len,
+                )
+            };
+            if r < 0 && last_errno() == libc::EINTR {
+                continue;
+            }
+            break r;
+        };
+        if recvd < 0 {
+            return raise_syscall(ctx, "recvfrom failed", last_errno());
+        }
+        let cap = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        if addr_len > cap {
+            addr_len = cap;
+        }
+        // SAFETY: the first `addr_len` bytes of `storage` were filled by recvfrom.
+        let addr_bytes = unsafe {
+            std::slice::from_raw_parts((&raw const storage).cast::<u8>(), addr_len as usize)
+        };
+        let addr_str = alloc_poly_string(ctx, addr_bytes);
+        #[allow(clippy::cast_possible_wrap)]
+        let len_w = PolyWord::tagged(recvd as isize);
+        alloc_pair(ctx, len_w, addr_str)
+    }
+
+    /// `PolyNetworkShutdown(threadId, skt, how)` — `shutdown(2)`.
+    /// network.cpp:1517. `how` maps 1/2/3 → `SHUT_RD`/`SHUT_WR`/`SHUT_RDWR`.
+    /// Returns unit.
+    pub(super) fn poly_network_shutdown(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        skt: PolyWord,
+        smode: PolyWord,
+    ) -> PolyWord {
+        let Some(fd) = get_stream_socket(ctx, skt) else {
+            return PolyWord::tagged(0);
+        };
+        let mode = match socket_int_arg(ctx.safe_spaces.as_ref(), smode) {
+            1 => libc::SHUT_RD,
+            2 => libc::SHUT_WR,
+            3 => libc::SHUT_RDWR,
+            _ => 0,
+        };
+        // SAFETY: plain shutdown(2).
+        if unsafe { libc::shutdown(fd, mode) } != 0 {
+            return raise_syscall(ctx, "shutdown failed", last_errno());
+        }
+        PolyWord::tagged(0)
+    }
+
+    /// `PolyNetworkCloseSocket(threadId, skt)` — `close(2)` on the socket fd.
+    /// A socket IS an fd, so this is exactly [`close_file`]'s behaviour;
+    /// wrapped for the `(threadId, skt)` arity. network.cpp routes socket
+    /// close through the general IO close.
+    pub(super) fn poly_network_close_socket(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        skt: PolyWord,
+    ) -> PolyWord {
+        close_file(ctx.safe_spaces.as_ref(), skt)
+    }
+
+    /// `PolyNetworkGetSockName(threadId, sock)` — `getsockname(2)`.
+    /// network.cpp:1388. Returns the local address as a raw-sockaddr-bytes
+    /// PolyString.
+    pub(super) fn poly_network_get_sock_name(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        sock: PolyWord,
+    ) -> PolyWord {
+        get_name_common(ctx, sock, false)
+    }
+
+    /// `PolyNetworkGetPeerName(threadId, sock)` — `getpeername(2)`.
+    /// network.cpp:1361. Returns the peer address as a raw-sockaddr-bytes
+    /// PolyString.
+    pub(super) fn poly_network_get_peer_name(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        sock: PolyWord,
+    ) -> PolyWord {
+        get_name_common(ctx, sock, true)
+    }
+
+    /// Shared body of getsockname/getpeername (`peer` selects which).
+    pub(super) fn get_name_common(
+        ctx: &mut RtsContext<'_>,
+        sock: PolyWord,
+        peer: bool,
+    ) -> PolyWord {
+        let Some(fd) = get_stream_socket(ctx, sock) else {
+            return PolyWord::tagged(0);
+        };
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        // SAFETY: `storage`/`size` are valid out-params sized to sockaddr_storage.
+        let r = unsafe {
+            let sa = (&raw mut storage).cast::<libc::sockaddr>();
+            if peer {
+                libc::getpeername(fd, sa, &raw mut size)
+            } else {
+                libc::getsockname(fd, sa, &raw mut size)
+            }
+        };
+        if r != 0 {
+            let msg = if peer {
+                "getpeername failed"
+            } else {
+                "getsockname failed"
+            };
+            return raise_syscall(ctx, msg, last_errno());
+        }
+        let cap = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        if size > cap {
+            size = cap;
+        }
+        // SAFETY: the first `size` bytes of `storage` were filled by the call.
+        let bytes =
+            unsafe { std::slice::from_raw_parts((&raw const storage).cast::<u8>(), size as usize) };
+        alloc_poly_string(ctx, bytes)
+    }
+
+    /// `PolyNetworkCreateIP4Address(threadId, ip4Address, portNumber)` —
+    /// build a `struct sockaddr_in` and return it as a raw-bytes PolyString.
+    /// network.cpp:1981. `ip4Address` is a host-order IPv4 address (an ML
+    /// int; `INADDR_ANY` = 0), `portNumber` a host-order port.
+    pub(super) fn poly_network_create_ip4_address(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        ip4: PolyWord,
+        port: PolyWord,
+    ) -> PolyWord {
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let ip = socket_int_arg(ctx.safe_spaces.as_ref(), ip4) as u32;
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let p = socket_int_arg(ctx.safe_spaces.as_ref(), port) as u16;
+        let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        sa.sin_family = libc::AF_INET as libc::sa_family_t;
+        sa.sin_port = p.to_be(); // htons
+        sa.sin_addr.s_addr = ip.to_be(); // htonl
+        // SAFETY: read the POD sockaddr_in as its raw bytes to build the
+        // address PolyString (the ML side treats it as an opaque byte string).
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&raw const sa).cast::<u8>(),
+                std::mem::size_of::<libc::sockaddr_in>(),
+            )
+        };
+        alloc_poly_string(ctx, bytes)
+    }
+
+    /// `PolyNetworkGetAddressAndPortFromIP4(threadId, sockAddress)` — parse a
+    /// `struct sockaddr_in` PolyString into the pair `(hostOrderIp, port)`.
+    /// network.cpp:1956. The IPv4 address is a `LargeInt.int`.
+    pub(super) fn poly_network_get_address_and_port_from_ip4(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        sock_addr: PolyWord,
+    ) -> PolyWord {
+        let Some(bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), sock_addr) else {
+            return raise_syscall(ctx, "getAddressAndPortFromIP4 failed", libc::EINVAL);
+        };
+        if bytes.len() < std::mem::size_of::<libc::sockaddr_in>() {
+            return raise_syscall(ctx, "getAddressAndPortFromIP4 failed", libc::EINVAL);
+        }
+        // Read sin_addr / sin_port from the raw bytes (network byte order in
+        // the struct); convert to host order. Copy into an aligned local to
+        // avoid any alignment assumption on the PolyString body.
+        let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        // SAFETY: `bytes` holds at least a full sockaddr_in (checked above);
+        // copy those bytes into a properly aligned local.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                (&raw mut sa).cast::<u8>(),
+                std::mem::size_of::<libc::sockaddr_in>(),
+            );
+        }
+        let ip = u32::from_be(sa.sin_addr.s_addr); // ntohl
+        let port = u16::from_be(sa.sin_port); // ntohs
+        let ip_w = int_to_poly_word(ctx, i128::from(ip));
+        let port_w = PolyWord::tagged(port as isize);
+        alloc_pair(ctx, ip_w, port_w)
+    }
+
+    /// `PolyNetworkBytesAvailable(threadId, sock)` — `ioctl(FIONREAD)`.
+    /// network.cpp:1414. Returns the number of bytes readable without blocking.
+    pub(super) fn poly_network_bytes_available(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        sock: PolyWord,
+    ) -> PolyWord {
+        let Some(fd) = get_stream_socket(ctx, sock) else {
+            return PolyWord::tagged(0);
+        };
+        let mut readable: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one int into `readable`.
+        if unsafe { libc::ioctl(fd, libc::FIONREAD, &raw mut readable) } < 0 {
+            return raise_syscall(ctx, "ioctl failed", last_errno());
+        }
+        int_to_poly_word(ctx, i128::from(readable))
+    }
+
+    /// `PolyNetworkGetAtMark(threadId, sock)` — the OOB-mark test
+    /// (upstream uses `ioctl(SIOCATMARK)`; we use the POSIX `sockatmark(3)`
+    /// wrapper, which is portable across Unixes and not exposed by the `libc`
+    /// crate). network.cpp:1444. Returns the flag as a fixed-precision 0/1.
+    pub(super) fn poly_network_get_at_mark(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        sock: PolyWord,
+    ) -> PolyWord {
+        // `sockatmark` is POSIX (glibc >= 2.2.4, macOS) but absent from the
+        // `libc` crate at this version; declare it directly.
+        unsafe extern "C" {
+            fn sockatmark(fd: libc::c_int) -> libc::c_int;
+        }
+        let Some(fd) = get_stream_socket(ctx, sock) else {
+            return PolyWord::tagged(0);
+        };
+        // SAFETY: `fd` is a live socket fd; sockatmark takes only the fd.
+        let at_mark = unsafe { sockatmark(fd) };
+        if at_mark < 0 {
+            return raise_syscall(ctx, "sockatmark failed", last_errno());
+        }
+        PolyWord::tagged(isize::from(at_mark != 0))
+    }
+
+    /// `PolyNetworkGetSocketError(threadId, skt)` — `getsockopt(SO_ERROR)`.
+    /// network.cpp:745. Returns the pending socket error as a `SysWord.word`
+    /// (a 1-word byte box holding the errno), matching upstream's `Make_sysword`.
+    pub(super) fn poly_network_get_socket_error(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        skt: PolyWord,
+    ) -> PolyWord {
+        let Some(fd) = get_stream_socket(ctx, skt) else {
+            return PolyWord::tagged(0);
+        };
+        let mut val: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: SO_ERROR writes one int into `val`; `size` is its byte length.
+        let r = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                (&raw mut val).cast::<libc::c_void>(),
+                &raw mut size,
+            )
+        };
+        if r != 0 {
+            return raise_syscall(ctx, "getsockopt failed", last_errno());
+        }
+        make_sysword(ctx, val)
+    }
+
+    /// Build a `SysWord.word` value: a 1-word MUTABLE byte box holding the
+    /// raw value. Mirrors upstream `Make_sysword` (used by GetSocketError).
+    pub(super) fn make_sysword(ctx: &mut RtsContext<'_>, v: libc::c_int) -> PolyWord {
+        use crate::length_word::F_BYTE_OBJ;
         let Some(space) = ctx.alloc_space.as_mut() else {
             return PolyWord::tagged(0);
         };
-        let p = space.alloc_or_exit(ready.len());
-        // SAFETY: just allocated `ready.len()` words.
+        let p = space.alloc_or_exit(1);
+        // SAFETY: just allocated 1 word (the SysWord byte box).
         unsafe {
-            p.sub(1).write(make_length_word(ready.len(), 0));
-            for (k, w) in ready.iter().enumerate() {
-                p.add(k).write(*w);
+            crate::space::set_length_word(p, 1, F_BYTE_OBJ);
+            #[allow(clippy::cast_sign_loss)]
+            p.write(PolyWord::from_bits(v as usize));
+            PolyWord::from_ptr(p.cast_const())
+        }
+    }
+
+    /// `PolyNetworkCreateSocketPair(threadId, af, st, prot)` —
+    /// `socketpair(2)`. network.cpp:1544. Returns a pair of wrapped sockets.
+    /// Left BLOCKING (see module note). Retries EINTR.
+    pub(super) fn poly_network_create_socket_pair(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        family: PolyWord,
+        st: PolyWord,
+        prot: PolyWord,
+    ) -> PolyWord {
+        let af = socket_int_arg(ctx.safe_spaces.as_ref(), family) as libc::c_int;
+        let ty = socket_int_arg(ctx.safe_spaces.as_ref(), st) as libc::c_int;
+        let proto = socket_int_arg(ctx.safe_spaces.as_ref(), prot) as libc::c_int;
+        let mut fds: [libc::c_int; 2] = [0, 0];
+        let rc = loop {
+            // SAFETY: socketpair fills the 2-element `fds` array.
+            let r = unsafe { libc::socketpair(af, ty, proto, fds.as_mut_ptr()) };
+            if r != 0 && last_errno() == libc::EINTR {
+                continue;
+            }
+            break r;
+        };
+        if rc != 0 {
+            return raise_syscall(ctx, "socketpair failed", last_errno());
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let a = wrap_file_descriptor(ctx, fds[0] as u32);
+        #[allow(clippy::cast_sign_loss)]
+        let b = wrap_file_descriptor(ctx, fds[1] as u32);
+        alloc_pair(ctx, a, b)
+    }
+
+    /// `PolyNetworkSelect(threadId, fdVecTriple, maxMillisecs)` — `poll(2)`.
+    /// network.cpp:810. `fdVecTriple` is `(readVec, writeVec, excVec)`, each
+    /// a vector of iodescs; `maxMillisecs` is a tagged timeout. Returns the
+    /// triple of vectors holding only the ready iodescs. Under the default
+    /// single-threaded model we do a real `poll` for up to `maxMillisecs`
+    /// (upstream uses `ThreadPauseForIO`; the ML `select` wrapper already
+    /// loops us to honour a longer/indefinite timeout).
+    pub(super) fn poly_network_select(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        fd_vec_triple: PolyWord,
+        max_ms: PolyWord,
+    ) -> PolyWord {
+        use crate::length_word::{length_of, make_length_word};
+        let timeout_ms = if max_ms.is_tagged() {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                max_ms.untag().max(0) as libc::c_int
+            }
+        } else {
+            0
+        };
+        let spaces = ctx.safe_spaces.clone();
+        let Some(triple) = safe_rts_arg_obj(spaces.as_ref(), fd_vec_triple) else {
+            return raise_syscall(ctx, "select failed", libc::EINVAL);
+        };
+        if triple.n_words < 3 {
+            return raise_syscall(ctx, "select failed", libc::EINVAL);
+        }
+        // Read the three vector words. Each vector is an ML word-object whose
+        // elements are iodesc (wrapped-fd) words.
+        // SAFETY: `triple` holds >= 3 words per the gate above.
+        let vec_words = [
+            unsafe { *triple.ptr },
+            unsafe { *triple.ptr.add(1) },
+            unsafe { *triple.ptr.add(2) },
+        ];
+        // Collect, per vector, the list of (element-word, fd). We keep the
+        // ORIGINAL element word so the result vectors contain the very same
+        // iodesc objects the ML side passed (upstream preserves them too).
+        let mut elems: [Vec<(PolyWord, libc::c_int)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        let mut pollfds: Vec<libc::pollfd> = Vec::new();
+        // Poll events per set: read→POLLIN, write→POLLOUT, exc→POLLPRI.
+        let events = [libc::POLLIN, libc::POLLOUT, libc::POLLPRI];
+        for (i, &vw) in vec_words.iter().enumerate() {
+            let Some(vec_obj) = safe_rts_arg_obj(spaces.as_ref(), vw) else {
+                // An empty vector is a valid word-object; a non-pointer here
+                // means the ML side passed `Vector.fromList []` shaped oddly —
+                // skip it (treated as no descriptors in this set).
+                continue;
+            };
+            // SAFETY: `vec_obj.ptr - 1` is the length word (validated / is_data_ptr).
+            let lw = unsafe { crate::space::MemorySpace::length_word_of(vec_obj.ptr) };
+            let n = vec_obj.clamp_body_words(length_of(lw));
+            for j in 0..n {
+                // SAFETY: j < n <= validated body word count.
+                let elem = unsafe { *vec_obj.ptr.add(j) };
+                let Some(fd) = get_stream_socket(ctx, elem) else {
+                    // get_stream_socket set a raised exception (closed socket).
+                    return PolyWord::tagged(0);
+                };
+                pollfds.push(libc::pollfd {
+                    fd,
+                    events: events[i],
+                    revents: 0,
+                });
+                elems[i].push((elem, fd));
             }
         }
-        result_vecs[i] = PolyWord::from_ptr(p.cast_const());
+        if !pollfds.is_empty() {
+            let rc = loop {
+                // SAFETY: `pollfds` is a valid array of `len` pollfd entries.
+                let r = unsafe {
+                    libc::poll(
+                        pollfds.as_mut_ptr(),
+                        pollfds.len() as libc::nfds_t,
+                        timeout_ms,
+                    )
+                };
+                if r < 0 && last_errno() == libc::EINTR {
+                    continue;
+                }
+                break r;
+            };
+            if rc < 0 {
+                return raise_syscall(ctx, "select failed", last_errno());
+            }
+        }
+        // Build the result: for each set, the elements whose poll revents show
+        // the requested condition (or an error/hangup, which the ML side wants
+        // to observe too — matches select() semantics reporting exceptional fds).
+        let ready_mask = [
+            libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+            libc::POLLOUT | libc::POLLERR,
+            libc::POLLPRI | libc::POLLERR,
+        ];
+        let mut result_vecs = [PolyWord::tagged(0); 3];
+        for i in 0..3 {
+            // Gather ready element words for set i.
+            let mut ready: Vec<PolyWord> = Vec::new();
+            for (elem, fd) in &elems[i] {
+                if let Some(pf) = pollfds
+                    .iter()
+                    .find(|p| p.fd == *fd && p.events == events[i])
+                    && pf.revents & ready_mask[i] != 0
+                {
+                    ready.push(*elem);
+                }
+            }
+            // Allocate a word-object vector of the ready elements.
+            let Some(space) = ctx.alloc_space.as_mut() else {
+                return PolyWord::tagged(0);
+            };
+            let p = space.alloc_or_exit(ready.len());
+            // SAFETY: just allocated `ready.len()` words.
+            unsafe {
+                p.sub(1).write(make_length_word(ready.len(), 0));
+                for (k, w) in ready.iter().enumerate() {
+                    p.add(k).write(*w);
+                }
+            }
+            result_vecs[i] = PolyWord::from_ptr(p.cast_const());
+        }
+        // Assemble the 3-tuple of result vectors.
+        let Some(space) = ctx.alloc_space.as_mut() else {
+            return PolyWord::tagged(0);
+        };
+        let p = space.alloc_or_exit(3);
+        // SAFETY: just allocated 3 words.
+        unsafe {
+            crate::space::set_length_word(p, 3, 0);
+            p.write(result_vecs[0]);
+            p.add(1).write(result_vecs[1]);
+            p.add(2).write(result_vecs[2]);
+            PolyWord::from_ptr(p.cast_const())
+        }
     }
-    // Assemble the 3-tuple of result vectors.
-    let Some(space) = ctx.alloc_space.as_mut() else {
-        return PolyWord::tagged(0);
-    };
-    let p = space.alloc_or_exit(3);
-    // SAFETY: just allocated 3 words.
-    unsafe {
-        crate::space::set_length_word(p, 3, 0);
-        p.write(result_vecs[0]);
-        p.add(1).write(result_vecs[1]);
-        p.add(2).write(result_vecs[2]);
-        PolyWord::from_ptr(p.cast_const())
-    }
-}
 } // mod socket_rts
 
 /// `PolySpecificGeneral(threadId, code, arg)` — dispatch various

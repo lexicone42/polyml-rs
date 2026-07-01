@@ -298,14 +298,14 @@ no fabricated axioms.**
   [`docs/tier-b-portable-images-design.md`](docs/tier-b-portable-images-design.md).
 - **OS / Basis-library breadth** — the RTS implements what the compiler, REPL,
   HOL4, and Isabelle workloads exercise (files, arithmetic, strings, time,
-  argv/env, ...). Beyond that, coverage is explicit stubs: the `Posix`
-  structure, sockets, the C FFI, signal *delivery* (Ctrl-C works;
-  `Signal.signal` handlers don't fire), `OS.Process.system`, SaveState, and
-  `Date` local-time. These raise a **catchable exception** (`SysErr` for the
-  OS-level surface) rather than faking success — proven byte-identical on the
-  27.7B-step self-bootstrap and fenced by `tests/rts_defang.rs`. Still open:
-  proper `SysErr` signaling for IO *errors* (a failed write currently reports
-  0 bytes written instead of raising).
+  argv/env, ...), plus a growing set of *real* OS surface: **`OS.Process.system`**
+  (real `sh -c`), **`Date`** local-time (real `localtime`/`strftime`), IO errors
+  as real `SysErr`, and **TCP/UDP sockets** over `std::net`/libc — an SML echo
+  server round-trips bytes through the kernel (`tests/sockets.rs`). All
+  differential-verified byte-for-byte against upstream. Still stubbed (they raise
+  a catchable `SysErr`, never fake success — fenced by `tests/rts_defang.rs`): the
+  C FFI, `Signal.signal` *delivery* (Ctrl-C itself works), SaveState, the `Posix`
+  structure, and IPv6 / DNS on the socket side.
 - **Windows** — not yet validated (the RTS/filesystem layer is Unix-oriented). The
   endianness gap is **closed**: s390x (big-endian) runs byte-identically (above).
 - **Full concurrency** — real OS threads (`Thread.fork` / `Thread.Mutex` /
