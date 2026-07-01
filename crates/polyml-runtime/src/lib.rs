@@ -10,6 +10,7 @@
 //! `docs/correctness-and-safety.md`; operational guide: the repo-root
 //! `CLAUDE.md`.
 
+pub mod env;
 pub mod export;
 pub mod gc;
 pub mod interpreter;
@@ -23,6 +24,7 @@ pub mod sched;
 pub mod session;
 pub mod space;
 
+pub use env::env_flag;
 pub use interpreter::{
     ExnCtxC, InterpError, Interpreter, JitEntry, RegionDispatchFn, RegionEntry, RegionRetC,
     StepResult, install_region_dispatch,

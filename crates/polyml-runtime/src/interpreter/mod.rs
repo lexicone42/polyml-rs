@@ -304,7 +304,7 @@ fn arbint_trace_on() -> bool {
         1 => true,
         2 => false,
         _ => {
-            let on = std::env::var("ARBINT_DEBUG").is_ok();
+            let on = crate::env::env_flag("ARBINT_DEBUG");
             F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
             on
         }
@@ -312,9 +312,10 @@ fn arbint_trace_on() -> bool {
 }
 
 /// Memoized read of `POLY_REAL_THREADS` (see [`arbint_trace_on`] for the
-/// cache discipline). When set, `Thread.fork`/`Mutex`/`ConditionVar`
+/// cache discipline). When enabled (`=1`; `=0`/unset is OFF — see
+/// [`crate::env::env_flag`]), `Thread.fork`/`Mutex`/`ConditionVar`
 /// dispatch to the genuine OS-thread implementation (concurrency
-/// increment 3d-3f); when unset (the default) they fall through to the
+/// increment 3d-3f); when disabled (the default) they fall through to the
 /// prior single-thread stubs, keeping every existing workload — the
 /// bootstrap, the self-bootstrapped REPL, HOL4, Isabelle — byte-identical.
 fn real_threads_enabled() -> bool {
@@ -324,7 +325,7 @@ fn real_threads_enabled() -> bool {
         1 => true,
         2 => false,
         _ => {
-            let on = std::env::var("POLY_REAL_THREADS").is_ok();
+            let on = crate::env::env_flag("POLY_REAL_THREADS");
             F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
             on
         }
@@ -345,7 +346,7 @@ fn jit_trace_returns_on() -> bool {
         1 => true,
         2 => false,
         _ => {
-            let on = std::env::var("JIT_TRACE_RETURNS").is_ok();
+            let on = crate::env::env_flag("JIT_TRACE_RETURNS");
             F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
             on
         }
@@ -363,7 +364,7 @@ fn jit_trace_stores_on() -> bool {
         1 => true,
         2 => false,
         _ => {
-            let on = std::env::var("JIT_TRACE_STORES").is_ok();
+            let on = crate::env::env_flag("JIT_TRACE_STORES");
             F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
             on
         }
@@ -381,7 +382,7 @@ fn jit_trace_calls_on() -> bool {
         1 => true,
         2 => false,
         _ => {
-            let on = std::env::var("JIT_TRACE_CALLS").is_ok();
+            let on = crate::env::env_flag("JIT_TRACE_CALLS");
             F.store(if on { 1 } else { 2 }, Ordering::Relaxed);
             on
         }
@@ -416,6 +417,20 @@ pub enum InterpError {
     NotAClosure(PolyWord),
     #[error("interpreter has no allocation space attached")]
     NoAllocator,
+    /// The runtime heap is full and the requested object doesn't fit.
+    /// Terminal BY DESIGN: GC-retry-on-full is deliberately NOT attempted
+    /// (`do_alloc_ref`/`ALLOC_WORD_MEMORY` cache the allocation pointer
+    /// across the call, so an in-call GC would corrupt the heap — see
+    /// `MemorySpace::try_alloc`). The GC already fires between steps at
+    /// the threshold; reaching this means the live set outgrew the heap.
+    #[error(
+        "heap exhausted: requested {requested_words} word(s), heap capacity \
+         {capacity_words} words — raise POLYML_HEAP_BYTES (a byte count) and rerun"
+    )]
+    HeapExhausted {
+        requested_words: usize,
+        capacity_words: usize,
+    },
     #[error("unhandled exception (no handler in scope)")]
     UnhandledException,
     #[error("CALL_FAST_RTS{n} on an unresolved entry point (token=0)")]
@@ -435,6 +450,20 @@ pub enum InterpError {
     /// would otherwise have caused. The `op` names the bytecode site.
     #[error("bad untrusted image: {op}: {why}")]
     BadImage { op: &'static str, why: DerefError },
+}
+
+impl InterpError {
+    /// Build the terminal heap-exhaustion error for a failed
+    /// `try_alloc`. `#[cold]`: this constructor only exists on the
+    /// already-failing branch — the bump-allocation fast path is
+    /// untouched.
+    #[cold]
+    fn heap_exhausted(requested_words: usize, space: &crate::space::MemorySpace) -> Self {
+        Self::HeapExhausted {
+            requested_words,
+            capacity_words: space.capacity_words(),
+        }
+    }
 }
 
 /// A bytecode interpreter operating on PolyML code objects.
@@ -1990,7 +2019,7 @@ impl Interpreter {
     ///
     /// Returns the child's ThreadObject (the SML `thread` value).
     fn fork_thread(&mut self, function: PolyWord) -> Result<PolyWord, InterpError> {
-        if std::env::var("POLY_THREAD_TRACE").is_ok() {
+        if crate::env::env_flag("POLY_THREAD_TRACE") {
             eprintln!("[parent] fork_thread function={function:?}");
         }
         // Allocate the child's ThreadObject in the shared heap (we hold ML
@@ -2074,7 +2103,7 @@ impl Interpreter {
             // SAFETY: exit_parked set this handle's parked_roots = None, so no
             // reader references the ForkRoots box; reclaim it.
             unsafe { drop(Box::from_raw(fork_raw_bits as *mut ForkRoots)) };
-            if std::env::var("POLY_THREAD_TRACE").is_ok() {
+            if crate::env::env_flag("POLY_THREAD_TRACE") {
                 eprintln!("[parent] fork_thread spawn FAILED: {e}; child deregistered");
             }
             return Err(InterpError::ThreadSpawnFailed(e.to_string()));
@@ -2093,7 +2122,7 @@ impl Interpreter {
         handle: Arc<crate::sched::ThreadHandle>,
         fork_raw: *mut ForkRoots,
     ) {
-        let trace = std::env::var("POLY_THREAD_TRACE").is_ok();
+        let trace = crate::env::env_flag("POLY_THREAD_TRACE");
         if trace {
             eprintln!("[child] spawned, fork_raw={fork_raw:p}");
         }
@@ -2406,7 +2435,7 @@ impl Interpreter {
                     img_objects_scanned += 1;
                 }
             }
-            if std::env::var("POLYML_GC_QUIET").is_err() {
+            if !crate::env::env_flag("POLYML_GC_QUIET") {
                 eprintln!(
                     "  GC roots: image-mut objects scanned = {img_objects_scanned}, total image-mut words = {}",
                     image_roots.iter().map(|(_, l)| l).sum::<usize>()
@@ -2476,7 +2505,7 @@ impl Interpreter {
         // ---- Audit: any pointer still in old from-space is a missed root.
         // Opt-in via POLYML_GC_AUDIT=1 — full audit is O(used+stack)
         // and meaningful overhead on the hot loop.
-        if std::env::var("POLYML_GC_AUDIT").is_ok() {
+        if crate::env::env_flag("POLYML_GC_AUDIT") {
             self.audit_no_residual_from_space_ptrs(from_lo, from_hi);
         }
         let _ = from_lo;
@@ -3276,7 +3305,7 @@ impl Interpreter {
             let before = used;
             let stack_depth = self.stack_height();
             let new_used = self.request_gc_collect().unwrap_or(before);
-            if std::env::var("POLYML_GC_QUIET").is_err() {
+            if !crate::env::env_flag("POLYML_GC_QUIET") {
                 eprintln!(
                     "  GC[region-safepoint]: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
                     if before > 0 {
@@ -3294,7 +3323,8 @@ impl Interpreter {
     /// THE GC-SAFE ALLOC TRAMPOLINE (S4d). Called by a native region at an
     /// allocation opcode (TUPLE / CLOSURE / ALLOC_* / etc.) BEFORE it
     /// bump-allocates, because the interpreter's `allocate` (mod.rs:5470)
-    /// NEVER triggers a GC — it bump-allocates and PANICS on exhaustion.
+    /// NEVER triggers a GC — it bump-allocates and fails clean (a terminal
+    /// `HeapExhausted`) on exhaustion.
     /// The ONLY GC in the interpreter is the top-of-step threshold check
     /// (mod.rs:3662). So a region alloc must go through THIS trampoline,
     /// which:
@@ -3324,7 +3354,7 @@ impl Interpreter {
     /// Returns the body pointer (bits) on success, or 0 on a NoAllocator /
     /// post-GC exhaustion error (the region treats 0 as a hard failure: the
     /// shim raises StackOverflow rather than let the region deref null —
-    /// matching the interpreter's panic-on-exhaustion as a trapped error).
+    /// matching the interpreter's fail-clean HeapExhausted as a trapped error).
     #[doc(hidden)]
     #[must_use]
     pub fn region_alloc(&mut self, live_sp: i64, n_words: i64, flags: i64) -> i64 {
@@ -3339,7 +3369,7 @@ impl Interpreter {
             let before = used;
             let stack_depth = self.stack_height();
             let new_used = self.request_gc_collect().unwrap_or(before);
-            if std::env::var("POLYML_GC_QUIET").is_err() {
+            if !crate::env::env_flag("POLYML_GC_QUIET") {
                 eprintln!(
                     "  GC[region-alloc]: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
                     if before > 0 {
@@ -3889,7 +3919,7 @@ impl Interpreter {
     fn acquire_running(&mut self) {
         let runtime = Arc::clone(&self.runtime);
         let handle = Arc::clone(&self.handle);
-        let trace = std::env::var("POLY_THREAD_TRACE").is_ok();
+        let trace = crate::env::env_flag("POLY_THREAD_TRACE");
         if trace {
             eprintln!("[thread] acquire_running: waiting for giant lock");
         }
@@ -4058,7 +4088,7 @@ impl Interpreter {
             let before = used;
             let stack_depth = self.stack_height();
             let new_used = self.request_gc_collect().unwrap_or(before);
-            if std::env::var("POLYML_GC_QUIET").is_err() {
+            if !crate::env::env_flag("POLYML_GC_QUIET") {
                 eprintln!(
                     "  GC: {before} -> {new_used} words ({}% retained), stack={stack_depth}",
                     if before > 0 {
@@ -5685,7 +5715,9 @@ impl Interpreter {
                 let x = self.pop()?;
                 let value = x.untag(); // isize, sign-preserving
                 let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
-                let p = space.alloc(1);
+                let p = space
+                    .try_alloc(1)
+                    .ok_or_else(|| InterpError::heap_exhausted(1, space))?;
                 // SAFETY: just allocated 1 word.
                 unsafe {
                     crate::space::set_length_word(p, 1, crate::length_word::F_BYTE_OBJ);
@@ -5702,7 +5734,9 @@ impl Interpreter {
                 let x = self.pop()?;
                 let value = x.0 >> 1; // untagged unsigned (drop tag bit)
                 let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
-                let p = space.alloc(1);
+                let p = space
+                    .try_alloc(1)
+                    .ok_or_else(|| InterpError::heap_exhausted(1, space))?;
                 // SAFETY: just allocated 1 word.
                 unsafe {
                     crate::space::set_length_word(p, 1, crate::length_word::F_BYTE_OBJ);
@@ -6164,12 +6198,17 @@ impl Interpreter {
 
     /// Bump-allocate `n_words` words plus a length word, setting the
     /// length word's flag byte to `flags`. Returns a `*mut` pointer
-    /// to the body's first slot.
+    /// to the body's first slot. Exhaustion is a clean terminal
+    /// [`InterpError::HeapExhausted`] — never a GC-retry (see
+    /// `MemorySpace::try_alloc` for the corruption-hazard rationale)
+    /// and never a Rust panic.
     fn allocate(&mut self, n_words: usize, flags: u8) -> Result<*mut PolyWord, InterpError> {
         use crate::space;
         let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
-        let p = space.alloc(n_words);
-        // SAFETY: alloc just returned the matching length-word slot
+        let p = space
+            .try_alloc(n_words)
+            .ok_or_else(|| InterpError::heap_exhausted(n_words, space))?;
+        // SAFETY: try_alloc just returned the matching length-word slot
         unsafe {
             space::set_length_word(p, n_words, flags);
         }
@@ -6670,7 +6709,9 @@ impl Interpreter {
 
     fn alloc_real(&mut self, v: f64) -> Result<PolyWord, InterpError> {
         let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
-        let p = space.alloc(1);
+        let p = space
+            .try_alloc(1)
+            .ok_or_else(|| InterpError::heap_exhausted(1, space))?;
         // SAFETY: just allocated 1 word (= 8 bytes), enough for f64.
         unsafe {
             crate::space::set_length_word(p, 1, crate::length_word::F_BYTE_OBJ);
@@ -6758,7 +6799,9 @@ impl Interpreter {
 
     fn alloc_lg_word(&mut self, word: usize) -> Result<PolyWord, InterpError> {
         let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
-        let p = space.alloc(1);
+        let p = space
+            .try_alloc(1)
+            .ok_or_else(|| InterpError::heap_exhausted(1, space))?;
         // SAFETY: just allocated 1 word.
         unsafe {
             crate::space::set_length_word(p, 1, crate::length_word::F_BYTE_OBJ);
@@ -7534,7 +7577,7 @@ impl Interpreter {
                     self.stack.len() - self.sp,
                     closure.0,
                 );
-                if std::env::var("JIT_TRACE_CALLS_BC").is_ok() {
+                if crate::env::env_flag("JIT_TRACE_CALLS_BC") {
                     let bc_ptr = code_obj_ptr_for_jit as *const u8;
                     let bc_len = 96usize;
                     let bytes: Vec<u8> = (0..bc_len).map(|i| unsafe { *bc_ptr.add(i) }).collect();

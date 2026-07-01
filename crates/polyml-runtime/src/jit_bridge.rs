@@ -421,7 +421,7 @@ pub fn jit_dispatch_closure_call(
     if cur_depth < MAX_JIT_DEPTH
         && let Some(entry) = interp.jit_lookup(code_obj_addr)
     {
-        if std::env::var("JIT_TRACE_CALLS").is_ok() {
+        if crate::env::env_flag("JIT_TRACE_CALLS") {
             eprintln!(
                 "  jit_dispatch_closure_call: JIT→JIT code_obj=0x{code_obj_addr:016x} arity={} depth={cur_depth}",
                 entry.sml_arity,
@@ -461,7 +461,7 @@ pub fn jit_dispatch_closure_call(
         return Ok(PolyWord::from_bits(result as usize));
     }
 
-    if std::env::var("JIT_TRACE_CALLS").is_ok() {
+    if crate::env::env_flag("JIT_TRACE_CALLS") {
         eprintln!(
             "  jit_dispatch_closure_call: JIT→interp code_obj=0x{code_obj_addr:016x} args={}",
             args.len(),
@@ -490,8 +490,8 @@ pub fn jit_dispatch_closure_call(
     interp.seed_push(closure);
     interp.jit_set_code_segment_to_closure(closure)?;
 
-    let trace_step = std::env::var("JIT_TRAMP_STEP_TRACE").is_ok();
-    let trace_each = std::env::var("JIT_TRAMP_STEP_ALL").is_ok();
+    let trace_step = crate::env::env_flag("JIT_TRAMP_STEP_TRACE");
+    let trace_each = crate::env::env_flag("JIT_TRAMP_STEP_ALL");
     let mut inner_steps = 0u64;
     if trace_step {
         use std::io::Write;

@@ -79,11 +79,20 @@ Stage1.sml`). Consequences:
   reordering `rts.rs` silently mis-dispatches stale checkpoints (e.g. copySign→pow).
   Rebuild all checkpoints after any table order/count change.
 - **Heap:** default 1.6 GB (200M words × 8). `with_default_alloc_space` takes a
-  *word* count (footgun). `POLYML_HEAP_BYTES` env overrides the default (set
-  6–8 GB for heavy proving drivers; a *larger* heap can postpone GC past the
-  working set and OOM around stage 6). The Cheney GC fires at 80% (override
-  `POLYML_GC_THRESHOLD`; `POLYML_GC_QUIET=1` silences the per-cycle log;
-  `POLYML_GC_AUDIT=1` checks for residual from-space pointers — slow, debug only).
+  *word* count (footgun). `POLYML_HEAP_BYTES` env overrides the default in every
+  heap-attaching subcommand (set 6–8 GB for heavy proving drivers; a *larger*
+  heap can postpone GC past the working set and OOM around stage 6). Malformed
+  values warn on stderr and fall back to the default; values under the 1 MB
+  sanity floor warn but are honored. Heap exhaustion halts CLEANLY (`InterpError::HeapExhausted`,
+  naming `POLYML_HEAP_BYTES`) — never a Rust panic, and never GC-retry-on-full
+  (alloc-pointer-caching hazard; see `MemorySpace::try_alloc`). The Cheney GC
+  fires at 80% (override `POLYML_GC_THRESHOLD`; `POLYML_GC_QUIET=1` silences the
+  per-cycle log; `POLYML_GC_AUDIT=1` checks for residual from-space pointers —
+  slow, debug only). Boolean env vars (`POLY_REAL_THREADS`, `POLYML_GC_QUIET`,
+  `POLYML_GC_AUDIT`, the `JIT_*`/`WHOLE_REGION_*` debug flags) parse their
+  *value* via `polyml_runtime::env_flag`: unset/empty/`0`/`false`/`off` = OFF,
+  anything else = ON — so `=1` enables as documented and `=0` really disables
+  (they used to be presence-only).
 - **Interrupts:** SIGINT raises the SML `Interrupt` exception (`crate::interrupt`
   + a coarse `run_until` poll).
 - **Real threads (`POLY_REAL_THREADS=1`, default OFF):** genuine `Thread.fork` /

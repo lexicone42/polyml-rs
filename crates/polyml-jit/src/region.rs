@@ -144,7 +144,7 @@ pub fn reset_native_tick() {
 /// default run when absent).
 #[must_use]
 pub fn whole_region_enabled() -> bool {
-    std::env::var("WHOLE_REGION_JIT").is_ok_and(|v| v != "0" && !v.is_empty())
+    polyml_runtime::env_flag("WHOLE_REGION_JIT")
 }
 
 /// Sentinel for "no handler in scope". The interpreter uses

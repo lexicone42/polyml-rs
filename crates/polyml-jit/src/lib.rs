@@ -413,7 +413,7 @@ pub fn install_all_jit_entries(
             .collect(),
         Err(_) => std::collections::HashSet::new(),
     };
-    let verbose = std::env::var("JIT_INSTALL_VERBOSE").is_ok();
+    let verbose = polyml_runtime::env_flag("JIT_INSTALL_VERBOSE");
     let mut install_idx = 0usize;
 
     fn walk_code_objects<F: FnMut(*const PolyWord, PolyWord)>(space: &MemorySpace, mut f: F) {
@@ -457,7 +457,7 @@ pub fn install_all_jit_entries(
             ) {
                 Ok(t) => t,
                 Err(e) => {
-                    if std::env::var("JIT_LOG_TRANSLATE_ERRORS").is_ok() {
+                    if polyml_runtime::env_flag("JIT_LOG_TRANSLATE_ERRORS") {
                         let dump_len: usize = std::env::var("JIT_LOG_BC_LEN")
                             .ok()
                             .and_then(|s| s.parse().ok())
@@ -567,7 +567,7 @@ pub fn install_all_jit_entries(
             // immediate-byte false positives), so the
             // boundary-aware-vs-legacy install sets can be A/B measured
             // without rebuilding. Default = the boundary-aware scan.
-            let use_legacy = std::env::var("JIT_LEGACY_BLOCKER_SCAN").is_ok();
+            let use_legacy = polyml_runtime::env_flag("JIT_LEGACY_BLOCKER_SCAN");
             let scan = if use_legacy {
                 scan_blockers_raw(bc)
             } else {
@@ -613,7 +613,7 @@ pub fn install_all_jit_entries(
             // JIT_INSTALL_SKIP). Trust-all SEGVs (823→2061 installs,
             // exit 139) on the simple bootstrap and ~3.77M steps into
             // the basis load.
-            let trust_call_const_addr = std::env::var("JIT_TRUST_CALL_CONST_ADDR").is_ok();
+            let trust_call_const_addr = polyml_runtime::env_flag("JIT_TRUST_CALL_CONST_ADDR");
             // EXPERIMENTAL (default-off): JIT_CCA_NO_CONTAINER=1 admits
             // CCA functions that contain NO container opcode
             // (STACK_CONTAINER_B / MOVE_TO_CONTAINER_B /
@@ -627,7 +627,7 @@ pub fn install_all_jit_entries(
             // verification — a no-container CCA still desyncs on a
             // post-call absolute-offset LOCAL read), so it ships
             // default-off and the tail-equivalent gate is authoritative.
-            let cca_no_container_experiment = std::env::var("JIT_CCA_NO_CONTAINER").is_ok();
+            let cca_no_container_experiment = polyml_runtime::env_flag("JIT_CCA_NO_CONTAINER");
             // A function with a CCA is BLOCKED unless (trust toggle) OR
             // (every CCA in it is tail-equivalent) OR (the experimental
             // no-container toggle accepts it). A function with NO CCA
@@ -642,7 +642,7 @@ pub fn install_all_jit_entries(
             let has_call_const_addr = scan.call_const_addr && !cca_safe;
             // Diagnostic: tally the CCA population vs how many pass the
             // tail-equivalent gate (JIT_CCA_STATS=1).
-            if std::env::var("JIT_CCA_STATS").is_ok() && scan.call_const_addr {
+            if polyml_runtime::env_flag("JIT_CCA_STATS") && scan.call_const_addr {
                 let tail = cca_all_tail_equivalent(bc);
                 let has_container = bc.iter().any(|&b| {
                     b == 0x0e /* STACK_CONTAINER_B */
@@ -732,7 +732,7 @@ pub fn install_all_jit_entries(
                 Some(cd) => cd.density() > gate_density_threshold,
                 None => false, // untrusted walk → never gate out
             };
-            if std::env::var("JIT_NET_GATE_DUMP").is_ok() {
+            if polyml_runtime::env_flag("JIT_NET_GATE_DUMP") {
                 let (ti, oc, dens) = match call_density {
                     Some(cd) => (cd.total_instrs, cd.outgoing_calls, cd.density()),
                     None => (0, 0, -1.0),
@@ -1139,7 +1139,7 @@ pub unsafe extern "C" fn closure_call_trampoline(
     // n_args the JIT-translator computed at compile time. If they
     // differ, the JIT'd code will push too many or too few args
     // → stack drift → eventually SEGV in unrelated code.
-    if std::env::var("JIT_TRAMP_VERIFY_ARITY").is_ok() {
+    if polyml_runtime::env_flag("JIT_TRAMP_VERIFY_ARITY") {
         let runtime_arity = unsafe { check_closure_arity(closure_word as u64) };
         if let Some(rt_arity) = runtime_arity
             && rt_arity != n
@@ -1150,7 +1150,7 @@ pub unsafe extern "C" fn closure_call_trampoline(
             std::process::abort();
         }
     }
-    if std::env::var("JIT_TRAMP_DUMP_ARGS").is_ok() {
+    if polyml_runtime::env_flag("JIT_TRAMP_DUMP_ARGS") {
         use std::io::Write;
         let _ = writeln!(
             std::io::stderr(),
@@ -1177,7 +1177,7 @@ pub unsafe extern "C" fn closure_call_trampoline(
     match polyml_runtime::jit_dispatch_closure_call(closure, &args) {
         Ok(v) => v.0 as i64,
         Err(e) => {
-            if std::env::var("JIT_TRAMP_PANIC_ON_ERR").is_ok() {
+            if polyml_runtime::env_flag("JIT_TRAMP_PANIC_ON_ERR") {
                 eprintln!(
                     "  closure_call_trampoline ERR: closure=0x{closure_word:016x} n_args={n} err={e:?}"
                 );
@@ -1345,7 +1345,7 @@ pub unsafe extern "C" fn dynamic_call_trampoline(
     } {
         Ok(v) => v.0 as i64,
         Err(e) => {
-            if std::env::var("JIT_TRAMP_PANIC_ON_ERR").is_ok() {
+            if polyml_runtime::env_flag("JIT_TRAMP_PANIC_ON_ERR") {
                 eprintln!(
                     "  dynamic_call_trampoline ERR: closure=0x{closure_word:016x} \
                      depth={args_depth} err={e:?}"

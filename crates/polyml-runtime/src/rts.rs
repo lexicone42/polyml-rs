@@ -1961,7 +1961,7 @@ fn build_string_list(ctx: &mut RtsContext<'_>, strs: &[String]) -> PolyWord {
         let Some(space) = ctx.alloc_space.as_mut() else {
             return PolyWord::tagged(0);
         };
-        let cons = space.alloc(2);
+        let cons = space.alloc_or_exit(2);
         // SAFETY: just allocated 2 words.
         unsafe {
             crate::space::set_length_word(cons, 2, 0);
@@ -2296,7 +2296,7 @@ fn bigint_to_poly_word(ctx: &mut RtsContext<'_>, n: &BigInt) -> PolyWord {
     let Some(space) = ctx.alloc_space.as_mut() else {
         return PolyWord::tagged(0);
     };
-    let p = space.alloc(n_words);
+    let p = space.alloc_or_exit(n_words);
     let mut flags = F_BYTE_OBJ;
     if sign == Sign::Minus {
         flags |= F_NEGATIVE_BIT;
@@ -2855,7 +2855,7 @@ fn poly_quot_rem_arbitrary_pair(
     let Some(space) = ctx.alloc_space.as_mut() else {
         return PolyWord::tagged(0);
     };
-    let p = space.alloc(2);
+    let p = space.alloc_or_exit(2);
     // SAFETY: just allocated 2 words.
     unsafe {
         crate::space::set_length_word(p, 2, 0);
@@ -2898,7 +2898,7 @@ fn poly_get_low_order_as_large_word(
     let Some(space) = ctx.alloc_space.as_mut() else {
         return PolyWord::tagged(0);
     };
-    let p = space.alloc(1);
+    let p = space.alloc_or_exit(1);
     // SAFETY: just allocated 1 word.
     unsafe {
         crate::space::set_length_word(p, 1, F_BYTE_OBJ);
@@ -2984,7 +2984,7 @@ fn poly_copy_byte_vec_to_closure(
         let Some(space) = ctx.alloc_space.as_mut() else {
             return PolyWord::tagged(0);
         };
-        let dst = space.alloc(n_words);
+        let dst = space.alloc_or_exit(n_words);
         // Copy the body words wholesale.
         std::ptr::copy_nonoverlapping(bv_ptr, dst, n_words);
         // New object is mutable code — SetCodeConstant will patch
@@ -3604,7 +3604,7 @@ fn box_real(ctx: &mut RtsContext<'_>, v: f64) -> PolyWord {
     let Some(space) = ctx.alloc_space.as_mut() else {
         return PolyWord::tagged(0);
     };
-    let p = space.alloc(1);
+    let p = space.alloc_or_exit(1);
     // SAFETY: just allocated 1 word.
     unsafe {
         crate::space::set_length_word(p, 1, F_BYTE_OBJ);
@@ -3627,14 +3627,14 @@ fn poly_real_frexp(ctx: &mut RtsContext<'_>, _tid: PolyWord, x: PolyWord) -> Pol
         return PolyWord::tagged(0);
     };
     // Allocate the mantissa (boxed Real, 1 word).
-    let m_ptr = space.alloc(1);
+    let m_ptr = space.alloc_or_exit(1);
     // SAFETY: just allocated 1 word.
     unsafe {
         crate::space::set_length_word(m_ptr, 1, F_BYTE_OBJ);
         m_ptr.cast::<f64>().write(mantissa);
     }
     // Allocate the tuple: 2 words, ordinary object.
-    let t_ptr = space.alloc(2);
+    let t_ptr = space.alloc_or_exit(2);
     // SAFETY: just allocated 2 words.
     unsafe {
         crate::space::set_length_word(t_ptr, 2, 0);
@@ -3673,7 +3673,7 @@ fn alloc_thread_object_stub(ctx: &mut RtsContext<'_>) -> PolyWord {
         return PolyWord::tagged(0);
     };
     let length = 9;
-    let p = space.alloc(length);
+    let p = space.alloc_or_exit(length);
     // SAFETY: just allocated 9 words
     unsafe {
         crate::space::set_length_word(p, length, F_MUTABLE_BIT);
@@ -4146,7 +4146,7 @@ fn make_simple_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
     let Some(space) = ctx.alloc_space.as_mut() else {
         return s;
     };
-    let p = space.alloc(4);
+    let p = space.alloc_or_exit(4);
     // SAFETY: just allocated 4 words.
     unsafe {
         crate::space::set_length_word(p, 4, 0);
@@ -4174,7 +4174,7 @@ fn make_syserr_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
         return msg_s;
     };
     // ex_arg = (msg, NONE) : 2-word tuple. NONE = TAGGED(0).
-    let pair = space.alloc(2);
+    let pair = space.alloc_or_exit(2);
     // SAFETY: just allocated 2 words.
     let pair_w = unsafe {
         crate::space::set_length_word(pair, 2, 0);
@@ -4182,7 +4182,7 @@ fn make_syserr_exception(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {
         pair.add(1).write(PolyWord::tagged(0)); // NONE
         PolyWord::from_ptr(pair.cast_const())
     };
-    let p = space.alloc(4);
+    let p = space.alloc_or_exit(4);
     // SAFETY: just allocated 4 words. The earlier `pair` pointer stays
     // valid (bump allocator only advances).
     unsafe {
@@ -4231,7 +4231,7 @@ fn make_pervasive_exn(ctx: &mut RtsContext<'_>, ex_id: isize, name: &[u8]) -> Po
     let Some(space) = ctx.alloc_space.as_mut() else {
         return PolyWord::ZERO;
     };
-    let p = space.alloc(4);
+    let p = space.alloc_or_exit(4);
     // SAFETY: just allocated 4 words.
     unsafe {
         crate::space::set_length_word(p, 4, 0);
@@ -4493,7 +4493,7 @@ fn alloc_poly_string(ctx: &mut RtsContext<'_>, bytes: &[u8]) -> PolyWord {
     // 1 word for the length prefix + ceil(len/8) words for chars.
     let body_words = bytes.len().div_ceil(std::mem::size_of::<usize>());
     let total_words = 1 + body_words;
-    let p = space.alloc(total_words);
+    let p = space.alloc_or_exit(total_words);
     // SAFETY: just allocated total_words words.
     unsafe {
         crate::space::set_length_word(p, total_words, F_BYTE_OBJ);
@@ -4549,7 +4549,7 @@ fn poly_create_entry_point_object(
     let name_bytes_total = name.len() + 1; // include NUL
     let body_words = name_bytes_total.div_ceil(std::mem::size_of::<usize>());
     let total = 1 + body_words;
-    let p = space.alloc(total);
+    let p = space.alloc_or_exit(total);
     // SAFETY: just allocated `total` words.
     unsafe {
         crate::space::set_length_word(
@@ -4577,7 +4577,7 @@ fn alloc_empty_string(ctx: &mut RtsContext<'_>) -> PolyWord {
     let Some(space) = ctx.alloc_space.as_mut() else {
         return PolyWord::tagged(0);
     };
-    let p = space.alloc(1);
+    let p = space.alloc_or_exit(1);
     // SAFETY: just allocated 1 word.
     unsafe {
         crate::space::set_length_word(p, 1, F_BYTE_OBJ);
@@ -4591,7 +4591,7 @@ fn wrap_file_descriptor(ctx: &mut RtsContext<'_>, fd: u32) -> PolyWord {
     let Some(space) = ctx.alloc_space.as_mut() else {
         return PolyWord::tagged(0);
     };
-    let p = space.alloc(1);
+    let p = space.alloc_or_exit(1);
     // SAFETY: just allocated 1 word
     unsafe {
         crate::space::set_length_word(
