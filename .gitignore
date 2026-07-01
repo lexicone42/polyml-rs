@@ -15,6 +15,10 @@ Thumbs.db
 /scratch/
 *.pexport
 *.bicimage
+*.bic
+# Release assets (built by tools/make-release-assets.sh; published to GitHub
+# Releases, never committed — the .bic derives from the LGPL upstream basis)
+/dist/
 
 # Local rust-toolchain override (don't leak local overrides)
 .rust-toolchain.toml.local
