@@ -90,9 +90,13 @@ impl MemorySpace {
     /// expected to overwrite it via [`set_length_word`].
     ///
     /// # Panics
-    /// Panics if the space is exhausted. In Monday-milestone code the
-    /// loader pre-sizes spaces; an exhaustion here is a sizing bug, not
-    /// a runtime condition.
+    /// Panics if the space is exhausted. Reserved for the PRE-SIZED
+    /// paths (loader/export/GC/tests size the space to fit up front),
+    /// where an exhaustion is a sizing bug, not a runtime condition.
+    /// Runtime-heap allocation — where exhaustion is a *user* condition
+    /// (the workload outgrew `POLYML_HEAP_BYTES`) — must go through
+    /// [`Self::try_alloc`] (the interpreter, → `InterpError::HeapExhausted`)
+    /// or [`Self::alloc_or_exit`] (the RTS helpers) instead.
     pub fn alloc(&mut self, n_words: usize) -> *mut PolyWord {
         self.try_alloc(n_words).unwrap_or_else(|| {
             panic!(
@@ -104,8 +108,38 @@ impl MemorySpace {
         })
     }
 
+    /// Bump-allocate like [`Self::alloc`], but on exhaustion fail CLEAN:
+    /// print one diagnostic naming `POLYML_HEAP_BYTES` to stderr and exit
+    /// non-zero — no Rust panic/backtrace. This is the RTS-helper path
+    /// (`rts.rs`): an RTS function returns a bare `PolyWord` with no error
+    /// channel, and it cannot even raise an SML exception here because the
+    /// exception packet itself would need heap. The interpreter's own
+    /// alloc path surfaces [`crate::InterpError::HeapExhausted`] through
+    /// `run_until` instead — same message, cleaner unwind.
+    pub fn alloc_or_exit(&mut self, n_words: usize) -> *mut PolyWord {
+        self.try_alloc(n_words).unwrap_or_else(|| {
+            eprintln!(
+                "poly: heap exhausted (RTS allocation): requested {n_words} word(s), \
+                 used {}/{} words — raise POLYML_HEAP_BYTES (a byte count) and rerun",
+                self.used,
+                self.storage.len()
+            );
+            std::process::exit(4);
+        })
+    }
+
     /// Non-panicking allocation. Returns `None` if `n_words` (plus its
-    /// length word) wouldn't fit.
+    /// length word) wouldn't fit. A failed attempt consumes nothing.
+    ///
+    /// Exhaustion is TERMINAL BY DESIGN — callers must NOT try
+    /// GC-then-retry here: RTS helpers like `do_alloc_ref` and the
+    /// `ALLOC_WORD_MEMORY` opcode cache the allocation pointer across the
+    /// call, so a GC in the middle of an allocation would leave them
+    /// holding stale from-space pointers (a known heap-corruption hazard;
+    /// see the foundation-audit notes in `docs/`). The normal GC already
+    /// fires *between* interpreter steps at the threshold, so reaching
+    /// exhaustion means the live set genuinely outgrew the heap — the
+    /// designed response is failing clean with a `POLYML_HEAP_BYTES` hint.
     pub fn try_alloc(&mut self, n_words: usize) -> Option<*mut PolyWord> {
         let length_idx = self.used;
         let body_idx = length_idx + 1;
@@ -204,5 +238,19 @@ mod tests {
     fn alloc_panics_on_overflow() {
         let mut space = MemorySpace::new(4, SpaceKind::Immutable);
         let _ = space.alloc(10);
+    }
+
+    #[test]
+    fn try_alloc_exhaustion_is_clean() {
+        let mut space = MemorySpace::new(4, SpaceKind::Immutable);
+        // Too big: fails without panicking and consumes nothing.
+        assert!(space.try_alloc(10).is_none());
+        assert_eq!(space.used_words(), 0);
+        // A fitting request still succeeds after a failed one.
+        assert!(space.try_alloc(2).is_some()); // 1 len + 2 body = 3
+        assert_eq!(space.used_words(), 3);
+        // 1 word left can't hold 1 len + 1 body.
+        assert!(space.try_alloc(1).is_none());
+        assert_eq!(space.used_words(), 3);
     }
 }

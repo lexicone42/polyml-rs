@@ -291,7 +291,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             // real run path. This is the S1-S3 mechanism check, not the
             // S3b milestone.
             #[cfg(feature = "jit")]
-            if std::env::var("WHOLE_REGION_DEMO").is_ok() {
+            if polyml_runtime::env_flag("WHOLE_REGION_DEMO") {
                 let s12_clean = polyml_jit::region::run_whole_region_demo();
                 println!();
                 let s3_clean = polyml_jit::boundary::run_real_region_demo();
@@ -415,6 +415,54 @@ fn parse_image_auto(bytes: &[u8]) -> Result<Image, Box<dyn std::error::Error>> {
     }
 }
 
+/// The sanity floor for `POLYML_HEAP_BYTES`: below 1 MB even the bare
+/// stage-0 REPL is at the mercy of the first allocation burst. Values
+/// under it are honored (they're parseable — the user asked for a tiny
+/// heap, e.g. to demo the clean heap-exhausted halt) but warned about.
+const MIN_HEAP_BYTES: usize = 1024 * 1024;
+
+/// Resolve the runtime-heap size for a subcommand: `POLYML_HEAP_BYTES`
+/// (a plain byte count) overrides `default_bytes`. EVERY subcommand that
+/// attaches an alloc space sizes it through this one helper, so the env
+/// var behaves identically across `run`/`diff`/`disasm`/`scan-isolated`.
+/// Malformed or overflowing values warn (once, to stderr) and fall back
+/// to the default; parseable-but-absurd values (< 1 MB) warn and are
+/// honored — the run then halts CLEANLY at the genuine exhaustion point
+/// (`InterpError::HeapExhausted`), never with a Rust panic.
+fn heap_bytes_from_env(default_bytes: usize) -> usize {
+    let Some(raw) = std::env::var_os("POLYML_HEAP_BYTES") else {
+        return default_bytes;
+    };
+    let (bytes, warning) = resolve_heap_bytes(&raw.to_string_lossy(), default_bytes);
+    if let Some(w) = warning {
+        eprintln!("poly: warning: {w}");
+    }
+    bytes
+}
+
+/// Pure core of [`heap_bytes_from_env`]: parse a *set* value, returning
+/// the size to use plus an optional warning message. Split out so the
+/// policy is unit-testable without touching the process environment.
+fn resolve_heap_bytes(raw: &str, default_bytes: usize) -> (usize, Option<String>) {
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n >= MIN_HEAP_BYTES => (n, None),
+        Ok(n) => (
+            n,
+            Some(format!(
+                "POLYML_HEAP_BYTES={n} is below the {MIN_HEAP_BYTES}-byte (1 MB) sanity \
+                 floor; expect a clean heap-exhausted halt"
+            )),
+        ),
+        Err(_) => (
+            default_bytes,
+            Some(format!(
+                "malformed POLYML_HEAP_BYTES={raw:?} (expected a plain byte count, \
+                 e.g. 8000000000); using the default {default_bytes} bytes"
+            )),
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_image(
     path: &PathBuf,
@@ -504,10 +552,7 @@ fn run_image(
     // POLYML_HEAP_BYTES overrides the default for heavy workloads (e.g.
     // the four-square / Isabelle proving drivers, which can saturate the
     // 1.6 GB heap to a GC death-spiral); set it to 6-8 GB for those.
-    let heap_bytes = std::env::var("POLYML_HEAP_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(1_600 * 1024 * 1024);
+    let heap_bytes = heap_bytes_from_env(1_600 * 1024 * 1024);
     let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
         .with_default_alloc_space_bytes(heap_bytes)
         .with_rts(rts);
@@ -562,11 +607,11 @@ fn run_image(
             candidates.len()
         );
         // Optional scan-only mode: report the candidates + exit (no run).
-        if std::env::var("WHOLE_REGION_SCAN").is_ok() {
+        if polyml_runtime::env_flag("WHOLE_REGION_SCAN") {
             // WHOLE_REGION_SCAN_ALL prints every candidate (provenance: e.g.
             // grep the dump for an opcode like 0xdc LOAD_ML_BYTE to confirm a
             // real heap region only compiles because of the S4a leaf opcodes).
-            let cap = if std::env::var("WHOLE_REGION_SCAN_ALL").is_ok() {
+            let cap = if polyml_runtime::env_flag("WHOLE_REGION_SCAN_ALL") {
                 candidates.len()
             } else {
                 20
@@ -1035,7 +1080,7 @@ fn diff_command(
     let image_mut_ptr = loaded.mutable.iter().next().map(|w| w as *const PolyWord);
     let image_mut_len = loaded.mutable.used_words();
     let mut interp = unsafe { Interpreter::from_code_object(1024 * 1024, code_obj_ptr) }
-        .with_default_alloc_space_bytes(1_600 * 1024 * 1024)
+        .with_default_alloc_space_bytes(heap_bytes_from_env(1_600 * 1024 * 1024))
         .with_rts(rts.clone());
     if let Some(p) = image_mut_ptr {
         interp = interp.with_image_mutable_root(p, image_mut_len);
@@ -1252,7 +1297,7 @@ fn disasm_command(
     {
         let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
         let mut interp = unsafe { Interpreter::from_code_object(64 * 1024, code_obj_ptr) }
-            .with_default_alloc_space_bytes(256 * 1024 * 1024)
+            .with_default_alloc_space_bytes(heap_bytes_from_env(256 * 1024 * 1024))
             .with_rts(rts.clone());
         let mut jit = polyml_jit::Jit::new()?;
         let _ = polyml_jit::install_all_jit_entries(&mut jit, &loaded, &mut interp);
@@ -1352,7 +1397,7 @@ fn scan_isolated_command(image_path: &PathBuf) -> Result<ExitCode, Box<dyn std::
     let _ = patch_entry_points(&mut loaded, &rts);
     let code_obj_ptr = unsafe { *loaded.root }.as_ptr::<PolyWord>();
     let mut interp = unsafe { Interpreter::from_code_object(64 * 1024, code_obj_ptr) }
-        .with_default_alloc_space_bytes(256 * 1024 * 1024)
+        .with_default_alloc_space_bytes(heap_bytes_from_env(256 * 1024 * 1024))
         .with_rts(rts.clone());
     let mut jit = polyml_jit::Jit::new()?;
     let _ = polyml_jit::install_all_jit_entries(&mut jit, &loaded, &mut interp);
@@ -1560,7 +1605,7 @@ fn run_scan(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(usize::MAX);
-    let verbose = std::env::var("DIFF_SCAN_VERBOSE").is_ok();
+    let verbose = polyml_runtime::env_flag("DIFF_SCAN_VERBOSE");
     let mut skipped_likely_deref = 0;
     for (i, (ptr, entry)) in entries.iter().enumerate() {
         if entry.sml_arity > 4 {
@@ -1632,5 +1677,54 @@ fn run_scan(
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::from(2))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_heap_bytes;
+
+    const DEFAULT: usize = 1_600 * 1024 * 1024;
+
+    #[test]
+    fn heap_bytes_valid_value_wins() {
+        assert_eq!(
+            resolve_heap_bytes("8000000000", DEFAULT),
+            (8_000_000_000, None)
+        );
+        // Whitespace-tolerant.
+        assert_eq!(
+            resolve_heap_bytes(" 2000000 \n", DEFAULT),
+            (2_000_000, None)
+        );
+    }
+
+    #[test]
+    fn heap_bytes_malformed_warns_and_defaults() {
+        for raw in ["abc", "", "1.5GB", "-1", "99999999999999999999999999"] {
+            let (bytes, warning) = resolve_heap_bytes(raw, DEFAULT);
+            assert_eq!(bytes, DEFAULT, "{raw:?} should fall back to the default");
+            let w = warning.expect("malformed value must warn");
+            assert!(
+                w.contains("POLYML_HEAP_BYTES"),
+                "warning names the var: {w}"
+            );
+            assert!(w.contains(raw), "warning names the value: {w}");
+        }
+    }
+
+    #[test]
+    fn heap_bytes_absurdly_small_warns_but_is_honored() {
+        for raw in ["0", "1", "200000"] {
+            let (bytes, warning) = resolve_heap_bytes(raw, DEFAULT);
+            // Honored as requested — the run then halts cleanly with
+            // InterpError::HeapExhausted at the real exhaustion point.
+            assert_eq!(bytes, raw.parse::<usize>().unwrap(), "{raw:?} is honored");
+            let w = warning.expect("absurd value must warn");
+            assert!(
+                w.contains("POLYML_HEAP_BYTES"),
+                "warning names the var: {w}"
+            );
+        }
     }
 }

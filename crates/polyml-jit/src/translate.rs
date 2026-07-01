@@ -2131,7 +2131,7 @@ fn compile_with_consts_impl(
     }
 
     let name = jit.fresh_name("polyml_jit_translated");
-    if std::env::var("JIT_DUMP_IR").is_ok() {
+    if polyml_runtime::env_flag("JIT_DUMP_IR") {
         let head: Vec<String> = full_body[..bytecode_end.min(full_body.len())]
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -3080,7 +3080,7 @@ fn scan_branch_targets(
     bytecode: &[u8],
     full_body: &[u8],
 ) -> Result<std::collections::BTreeMap<usize, usize>, TranslateError> {
-    let debug = std::env::var("JIT_DEBUG_SCAN").is_ok();
+    let debug = polyml_runtime::env_flag("JIT_DEBUG_SCAN");
     // depth_at[pc] = entry depth for a pc reached ONLY by sequential
     // fall-through (a non-block-target pc has exactly one predecessor).
     // `None` = not yet reached this way.

@@ -250,7 +250,7 @@ pub fn load_image(image: &Image) -> Result<LoadedImage, LoadError> {
         // and any latent word-size assumption in the bytecode/interpreter. Gated
         // behind an explicit opt-in; without it, reject (silent-corruption
         // hazard) as before.
-        if std::env::var_os("POLYML_ALLOW_WORD_SIZE_MISMATCH").is_none() {
+        if !crate::env::env_flag("POLYML_ALLOW_WORD_SIZE_MISMATCH") {
             return Err(LoadError::WordSizeMismatch {
                 image_bytes,
                 host_bytes,
