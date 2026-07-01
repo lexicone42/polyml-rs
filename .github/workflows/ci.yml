@@ -52,7 +52,7 @@ jobs:
       - name: JIT tests (data-free)
         run: cargo test --release -p polyml-jit
 
-      - name: Image-format tests
+      - name: Image-format tests (incl. bicimage reader fuzz — synthetic arm is data-free)
         run: cargo test --release -p polyml-image
 
       # Default-feature (JIT-enabled) polyml-bin tests: most skip without

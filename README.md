@@ -35,6 +35,21 @@ loads + runs identically, endian-neutral on the wire). Crossing *word size*
 
 ---
 
+## Try it in one command
+
+No build, no toolchain — download a prebuilt `poly` + the portable REPL image
+and start an SML session (from a [release](https://github.com/lexicone42/polyml-rs/releases)):
+
+```sh
+tools/try-polyml-rs.sh          # → an SML REPL
+tools/try-polyml-rs.sh --demo   # → the cross-arch portability probe (same step count everywhere)
+```
+
+Or by hand: grab `poly-<your-triple>` and `polyexport.bic` from the release, then
+`echo "1+1;" | ./poly run polyexport.bic`. Building from source is below.
+
+---
+
 ## What works today
 
 Everything below runs through the Rust runtime — no upstream `poly` involved.

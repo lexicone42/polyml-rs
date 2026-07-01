@@ -32,6 +32,9 @@ run cargo test --release -p polyml-runtime --lib
 # Each is cheap (~1 s) and data-free or self-skipping without vendor.
 run cargo test --release -p polyml-runtime --tests
 run cargo test --release -p polyml-jit
+# polyml-image incl. the bicimage reader-robustness fuzz (read_bic totality on
+# ~14K real-image mutants + synthetic hostile inputs; the real-image arm skips
+# without vendor, the synthetic arm always runs).
 run cargo test --release -p polyml-image
 run cargo test --release -p polyml-bin            # non-#[ignore]: cli_run, golden_sml, untrusted corpus
 # --untrusted deref-surface completeness lint (also a CI step): any new
