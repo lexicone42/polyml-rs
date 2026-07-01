@@ -192,8 +192,8 @@ fn jit_install_real_bootstrap_functions() {
     }
     eprintln!("installed {installed} JIT entries (mode: {install_jit:?})");
 
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(root_closure_word);
+    interp.seed_return_sentinel();
+    interp.seed_push(root_closure_word);
 
     // Phase C: run with the JIT-bridge thread-local set, so trampolines
     // can call back. Cap steps so we don't loop forever if there's a bug.

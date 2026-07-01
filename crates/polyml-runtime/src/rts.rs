@@ -4008,7 +4008,7 @@ fn open_file_input(ctx: &mut RtsContext<'_>, name_arg: PolyWord) -> PolyWord {
 /// allocated object's own pointer as a stand-in (each call produces
 /// a fresh address, so identity comparison treats each raise as a
 /// new exception kind).
-/// Public version of [`make_simple_exception`] used by the
+/// Public version of `make_simple_exception` used by the
 /// interpreter when raising an exception for an unresolved RTS
 /// entry point.
 pub fn make_simple_exception_pub(ctx: &mut RtsContext<'_>, msg: &str) -> PolyWord {

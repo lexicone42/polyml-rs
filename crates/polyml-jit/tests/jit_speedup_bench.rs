@@ -29,10 +29,10 @@ fn untag(t: i64) -> i64 {
 fn run_interp(bytecode: &[u8], arg0: i64) -> (i64, u128) {
     let start = Instant::now();
     let mut interp = Interpreter::from_bytes(64, bytecode.to_vec());
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(PolyWord::from_bits(arg0 as usize));
-    interp.test_seed_top(PolyWord::from_bits(0)); // retPC
-    interp.test_seed_top(PolyWord::from_bits(0)); // closure
+    interp.seed_return_sentinel();
+    interp.seed_push(PolyWord::from_bits(arg0 as usize));
+    interp.seed_push(PolyWord::from_bits(0)); // retPC
+    interp.seed_push(PolyWord::from_bits(0)); // closure
     let result = loop {
         match interp.step() {
             Ok(StepResult::Continue) => continue,

@@ -53,15 +53,15 @@ fn run_interp_arity1(bytecode: &[u8], arg0: i64) -> i64 {
     let mut interp = Interpreter::from_bytes(64, bytecode.to_vec());
     // Use raw test seeders so the stack matches the JIT shape.
     // Build the stack from below: arg_0 first, then retPC, then closure.
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(PolyWord::from_bits(arg0 as usize));
+    interp.seed_return_sentinel();
+    interp.seed_push(PolyWord::from_bits(arg0 as usize));
     // For the interpreter, LOCAL_0 reads sp[0], so the interp expects
     // sp[0] = arg_0 if we want LOCAL_2 to read past retPC + closure.
     // We need to also push placeholders for retPC and closure ABOVE the arg.
-    // Actually `test_seed_top` puts arg at sp[0]; we want it at sp[2].
+    // Actually `seed_push` puts arg at sp[0]; we want it at sp[2].
     // Push two placeholders above it (= more recent pushes).
-    interp.test_seed_top(PolyWord::from_bits(0)); // retPC slot at sp[1]
-    interp.test_seed_top(PolyWord::from_bits(0)); // closure slot at sp[0]
+    interp.seed_push(PolyWord::from_bits(0)); // retPC slot at sp[1]
+    interp.seed_push(PolyWord::from_bits(0)); // closure slot at sp[0]
     // Now run until RETURN_1 fires. The interp's RETURN_1 expects to
     // pop closure + retPC + 1 arg, leaving the result on top.
     loop {

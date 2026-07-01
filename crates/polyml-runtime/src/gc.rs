@@ -37,7 +37,7 @@
 //!   region holds PolyWord constants (located via the last-word
 //!   offset trick — see `length_word::const_segment_for_code`).
 //!   Only the constants are scanned for pointers.
-//! - **`F_CLOSURE_OBJ`**: word[0] is a *raw* code-object byte
+//! - **`F_CLOSURE_OBJ`**: word\[0\] is a *raw* code-object byte
 //!   pointer (NOT a tagged PolyWord). Forward by treating it as a
 //!   pointer-to-code-object and updating to the new code-obj
 //!   location. Words[1..] are ordinary PolyWords.
@@ -117,7 +117,7 @@ impl<'a> Collector<'a> {
     /// the from-space range check plus the object-map lookup.
     ///
     /// # Safety
-    /// Same as [`forward`].
+    /// Same as [`Self::forward`].
     pub unsafe fn forward_stack_slot(&mut self, slot: *mut PolyWord) {
         unsafe {
             self.forward_impl(slot, /*tagged_filter=*/ false)

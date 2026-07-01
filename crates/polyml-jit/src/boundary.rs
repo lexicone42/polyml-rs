@@ -933,10 +933,10 @@ pub fn run_hashfold_both_ways(bytes: &[u8]) -> RealRegionResult {
         let f_addr = f.code_addr;
         let f_closure = f.closure;
         let mut interp = Interpreter::from_bytes(256, vec![]).with_alloc_space(space);
-        interp.test_seed_top(buf); // arg buf (deepest, LOCAL_3)
-        interp.test_seed_top(PolyWord::tagged(len)); // arg len (top, LOCAL_2)
-        interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
-        interp.test_seed_top(f_closure); // closure (LOCAL_0)
+        interp.seed_push(buf); // arg buf (deepest, LOCAL_3)
+        interp.seed_push(PolyWord::tagged(len)); // arg len (top, LOCAL_2)
+        interp.seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+        interp.seed_push(f_closure); // closure (LOCAL_0)
         // SAFETY: f_addr is a live code object now owned by `interp`.
         unsafe { interp.set_code_segment_to_code_obj(f_addr as usize) };
         let r = match interp.run() {
@@ -1025,11 +1025,11 @@ pub fn run_sum3_both_ways(a: isize, b: isize, c: isize) -> RealRegionResult {
     // what the native boundary builds.
     let interp_result = {
         let mut interp = Interpreter::from_bytes(256, vec![]).with_alloc_space(space);
-        interp.test_seed_top(PolyWord::tagged(a)); // deepest arg (LOCAL_4)
-        interp.test_seed_top(PolyWord::tagged(b)); // LOCAL_3
-        interp.test_seed_top(PolyWord::tagged(c)); // top arg (LOCAL_2)
-        interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
-        interp.test_seed_top(root_closure); // closure (LOCAL_0)
+        interp.seed_push(PolyWord::tagged(a)); // deepest arg (LOCAL_4)
+        interp.seed_push(PolyWord::tagged(b)); // LOCAL_3
+        interp.seed_push(PolyWord::tagged(c)); // top arg (LOCAL_2)
+        interp.seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+        interp.seed_push(root_closure); // closure (LOCAL_0)
         // SAFETY: root_addr is a live code object in `space`, now owned by
         // `interp`.
         unsafe { interp.set_code_segment_to_code_obj(root_addr as usize) };
@@ -1120,9 +1120,9 @@ pub fn run_sumto_both_ways(n: isize) -> RealRegionResult {
         let f_addr = f.code_addr;
         let f_closure = f.closure;
         let mut interp = Interpreter::from_bytes(4096, vec![]).with_alloc_space(space);
-        interp.test_seed_top(PolyWord::tagged(n)); // arg n (LOCAL_2)
-        interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
-        interp.test_seed_top(f_closure); // closure (LOCAL_0)
+        interp.seed_push(PolyWord::tagged(n)); // arg n (LOCAL_2)
+        interp.seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+        interp.seed_push(f_closure); // closure (LOCAL_0)
         // SAFETY: f_addr is a live code object now owned by `interp`.
         unsafe { interp.set_code_segment_to_code_obj(f_addr as usize) };
         let r = match interp.run() {
@@ -1412,10 +1412,10 @@ pub fn run_callloop_both_ways(n: isize) -> RealRegionResult {
         let root_closure = root.closure;
         let leaf_closure = leaf.closure;
         let mut interp = Interpreter::from_bytes(8192, vec![]).with_alloc_space(space);
-        interp.test_seed_top(leaf_closure); // deepest arg (LOCAL_3 = leafClo)
-        interp.test_seed_top(PolyWord::tagged(n)); // top arg (LOCAL_2 = n)
-        interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
-        interp.test_seed_top(root_closure); // closure (LOCAL_0)
+        interp.seed_push(leaf_closure); // deepest arg (LOCAL_3 = leafClo)
+        interp.seed_push(PolyWord::tagged(n)); // top arg (LOCAL_2 = n)
+        interp.seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+        interp.seed_push(root_closure); // closure (LOCAL_0)
         // SAFETY: root_addr is a live code object now owned by interp.
         unsafe { interp.set_code_segment_to_code_obj(root_addr as usize) };
         let r = match interp.run() {
@@ -1487,9 +1487,9 @@ pub fn run_tuplesum_both_ways(n: isize) -> RealRegionResult {
         // The code object lives in `space`; the interp must be able to reach
         // it. set_code_segment_to_code_obj points the PC at it directly.
         std::mem::forget(space); // keep the code object alive for the run
-        interp.test_seed_top(PolyWord::tagged(n)); // arg n (top, LOCAL_2)
-        interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
-        interp.test_seed_top(root_closure); // closure (LOCAL_0)
+        interp.seed_push(PolyWord::tagged(n)); // arg n (top, LOCAL_2)
+        interp.seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+        interp.seed_push(root_closure); // closure (LOCAL_0)
         // SAFETY: root_addr is a live code object (leaked code space).
         unsafe { interp.set_code_segment_to_code_obj(root_addr as usize) };
         let r = match interp.run() {
@@ -1560,7 +1560,7 @@ fn run_region_on_interp(
     // Seed the args on the interp's own stack (deepest first), then capture
     // sp at the top arg.
     for &a in args {
-        interp.test_seed_top(a);
+        interp.seed_push(a);
     }
     let sp_top_arg = interp.test_sp() as i64;
     let stack_base = interp.jit_stack_base_mut().cast::<i64>();
@@ -1841,8 +1841,8 @@ fn run_wired_arith(
     }
 
     // Top-level entry: arity-0 caller. Frame = [closure, retPC=0].
-    interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
-    interp.test_seed_top(caller.closure); // closure (LOCAL_0)
+    interp.seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+    interp.seed_push(caller.closure); // closure (LOCAL_0)
     // SAFETY: caller_addr is a live code object now owned by `interp`.
     unsafe { interp.set_code_segment_to_code_obj(caller_addr as usize) };
 
@@ -2124,8 +2124,8 @@ fn run_wired_dyncall_raise(register_region: bool, x: i64) -> WiredOutcome {
     }
 
     // Top-level entry: arity-0 caller. Frame = [closure, retPC=0].
-    interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
-    interp.test_seed_top(caller.closure); // closure (LOCAL_0)
+    interp.seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+    interp.seed_push(caller.closure); // closure (LOCAL_0)
     // SAFETY: caller_addr is a live code object now owned by interp.
     unsafe { interp.set_code_segment_to_code_obj(caller_addr as usize) };
 
@@ -2268,10 +2268,10 @@ mod tests {
             let f_addr = f.code_addr;
             let f_closure = f.closure;
             let mut interp = Interpreter::from_bytes(256, vec![]).with_alloc_space(space);
-            interp.test_seed_top(buf);
-            interp.test_seed_top(PolyWord::tagged(len));
-            interp.test_seed_return_sentinel();
-            interp.test_seed_top(f_closure);
+            interp.seed_push(buf);
+            interp.seed_push(PolyWord::tagged(len));
+            interp.seed_return_sentinel();
+            interp.seed_push(f_closure);
             // SAFETY: f_addr is a live code object owned by `interp`.
             unsafe { interp.set_code_segment_to_code_obj(f_addr as usize) };
             let r = match interp.run() {
@@ -2328,8 +2328,8 @@ mod tests {
         // call do_call directly). At do_call entry the args are on top with
         // sp at the top arg; the hook pushes retPC + closure internally and
         // invokes the native region, leaving the single result at self.sp.
-        interp.test_seed_top(buf); // arg buf (deepest, LOCAL_3)
-        interp.test_seed_top(PolyWord::tagged(len)); // arg len (top, LOCAL_2)
+        interp.seed_push(buf); // arg buf (deepest, LOCAL_3)
+        interp.seed_push(PolyWord::tagged(len)); // arg len (top, LOCAL_2)
         reset_native_tick();
         interp
             .test_invoke_do_call(f_closure)
@@ -2420,7 +2420,7 @@ mod tests {
         };
         let addr_before = buf.0;
         // Put buf on the shared stack (the GC root range [sp,len)).
-        interp.test_seed_top(buf);
+        interp.seed_push(buf);
         // Force GC threshold low and collect once.
         interp.test_set_gc_trigger_words(1);
         let audit_before = interp.test_gc_audit_residual();
@@ -2538,9 +2538,9 @@ mod tests {
             std::mem::forget(code);
             let heap = MemorySpace::new(1 << 16, SpaceKind::Mutable);
             let mut interp = Interpreter::from_bytes(4096, vec![]).with_alloc_space(heap);
-            interp.test_seed_top(PolyWord::tagged(n));
-            interp.test_seed_return_sentinel();
-            interp.test_seed_top(f_closure);
+            interp.seed_push(PolyWord::tagged(n));
+            interp.seed_return_sentinel();
+            interp.seed_push(f_closure);
             // SAFETY: f_addr is a live code object (leaked code space).
             unsafe { interp.set_code_segment_to_code_obj(f_addr as usize) };
             let r = match interp.run() {
@@ -2590,7 +2590,7 @@ mod tests {
 
         // Dispatch the ROOT through the REAL do_call so the region hook fires
         // (it sets ctx.interp_ptr + the gc fields the alloc trampoline reads).
-        interp.test_seed_top(PolyWord::tagged(n)); // arg n (top, LOCAL_2)
+        interp.seed_push(PolyWord::tagged(n)); // arg n (top, LOCAL_2)
         reset_native_tick();
         interp
             .test_invoke_do_call(f_closure)
@@ -2672,7 +2672,7 @@ mod tests {
         // path the region uses), with sp published. Seed it onto the stack.
         // We drive region_alloc directly (no native code) to isolate the
         // relocation claim.
-        interp.test_seed_top(PW::tagged(0)); // a dummy bottom so sp is valid
+        interp.seed_push(PW::tagged(0)); // a dummy bottom so sp is valid
         let live_sp = interp.test_sp() as i64;
         let body = interp.region_alloc(live_sp, 2, 0);
         assert_ne!(body, 0, "alloc must succeed");
@@ -2683,7 +2683,7 @@ mod tests {
             p.add(0).write(PW::tagged(7));
             p.add(1).write(PW::tagged(9));
         }
-        interp.test_seed_top(PW::from_bits(body as usize));
+        interp.seed_push(PW::from_bits(body as usize));
         let addr_before = body as usize;
         // Force a collection.
         interp.test_set_gc_trigger_words(1);
@@ -2873,10 +2873,10 @@ mod tests {
             let f_closure = f.closure;
             let f_addr = f.code_addr;
             let mut interp = Interpreter::from_bytes(256, vec![]).with_alloc_space(space);
-            interp.test_seed_top(buf);
-            interp.test_seed_top(PolyWord::tagged(bytes.len() as isize));
-            interp.test_seed_return_sentinel();
-            interp.test_seed_top(f_closure);
+            interp.seed_push(buf);
+            interp.seed_push(PolyWord::tagged(bytes.len() as isize));
+            interp.seed_return_sentinel();
+            interp.seed_push(f_closure);
             // SAFETY: f_addr is a live code object now owned by interp.
             unsafe { interp.set_code_segment_to_code_obj(f_addr as usize) };
             let r = match interp.run() {
@@ -3033,10 +3033,10 @@ mod tests {
             let root_closure = root.closure;
             let leaf_closure = leaf.closure;
             let mut interp = Interpreter::from_bytes(1 << 14, vec![]).with_alloc_space(space);
-            interp.test_seed_top(leaf_closure);
-            interp.test_seed_top(PolyWord::tagged(n));
-            interp.test_seed_return_sentinel();
-            interp.test_seed_top(root_closure);
+            interp.seed_push(leaf_closure);
+            interp.seed_push(PolyWord::tagged(n));
+            interp.seed_return_sentinel();
+            interp.seed_push(root_closure);
             // SAFETY: root_addr is a live code object now owned by interp.
             unsafe { interp.set_code_segment_to_code_obj(root_addr as usize) };
             let r = match interp.run() {
@@ -3485,10 +3485,10 @@ fn run_wired_overflow_large(register_region: bool) -> WiredOutcome {
         _jit_keep = Some(jit);
     }
     // Arity-2 caller: frame = [closure, retPC=0, b, a] (a deepest).
-    interp.test_seed_top(PolyWord::tagged(a as isize)); // arg a (LOCAL_3)
-    interp.test_seed_top(PolyWord::tagged(b as isize)); // arg b (LOCAL_2)
-    interp.test_seed_return_sentinel(); // retPC = 0 (LOCAL_1)
-    interp.test_seed_top(caller.closure); // closure (LOCAL_0)
+    interp.seed_push(PolyWord::tagged(a as isize)); // arg a (LOCAL_3)
+    interp.seed_push(PolyWord::tagged(b as isize)); // arg b (LOCAL_2)
+    interp.seed_return_sentinel(); // retPC = 0 (LOCAL_1)
+    interp.seed_push(caller.closure); // closure (LOCAL_0)
     // SAFETY: caller_addr is a live code object owned by interp.
     unsafe { interp.set_code_segment_to_code_obj(caller_addr as usize) };
 

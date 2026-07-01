@@ -121,8 +121,8 @@ fn read_pc_const_reads_past_object_end() {
     );
 
     let mut interp = unsafe { Interpreter::from_code_object(64, code) };
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(PolyWord::ZERO);
+    interp.seed_return_sentinel();
+    interp.seed_push(PolyWord::ZERO);
 
     match interp.run() {
         Ok(StepResult::Returned(v)) => {
@@ -266,8 +266,8 @@ unsafe fn crash_in_guard_page() {
     }
 
     let mut interp = unsafe { Interpreter::from_code_object(64, obj_ptr.cast_const()) };
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(PolyWord::ZERO);
+    interp.seed_return_sentinel();
+    interp.seed_push(PolyWord::ZERO);
 
     // This run drives CONST_ADDR16_8 -> read_pc_const into the guard page.
     let _ = interp.run();

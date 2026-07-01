@@ -110,12 +110,12 @@ fn tail_caller_full_body(callee_closure_ptr: usize) -> (Vec<u8>, usize) {
 /// raw result word.
 fn run_interp_caller(caller_code_obj: usize) -> i64 {
     let mut interp = Interpreter::from_bytes(64, vec![INSTR_RETURN_1]);
-    interp.test_seed_return_sentinel();
+    interp.seed_return_sentinel();
     // Seed the caller's top-level frame: arg_0 (unused by the tail
     // caller, which pushes its own const), retPC=0, closure=0.
-    interp.test_seed_top(PolyWord::from_bits(0)); // arg_0
-    interp.test_seed_top(PolyWord::from_bits(0)); // retPC
-    interp.test_seed_top(PolyWord::from_bits(0)); // closure
+    interp.seed_push(PolyWord::from_bits(0)); // arg_0
+    interp.seed_push(PolyWord::from_bits(0)); // retPC
+    interp.seed_push(PolyWord::from_bits(0)); // closure
     // SAFETY: caller_code_obj is a valid heap-style code object.
     unsafe {
         interp.set_code_segment_to_code_obj(caller_code_obj);

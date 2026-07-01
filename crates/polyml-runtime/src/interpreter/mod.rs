@@ -523,7 +523,7 @@ pub struct Interpreter {
     /// Current exception packet (set by RAISE_EX, read by LDEXC).
     /// `None` means no exception has been raised yet.
     exception_packet: Option<PolyWord>,
-    /// RTS function table — used to dispatch CALL_FAST_RTS<N> opcodes.
+    /// RTS function table — used to dispatch `CALL_FAST_RTS<N>` opcodes.
     /// `Arc` so it can be shared between interpreter instances (e.g.
     /// threads).
     rts: Arc<RtsTable>,
@@ -2247,7 +2247,7 @@ impl Interpreter {
     ///
     /// Precondition (3c): the caller is the collector — it holds the
     /// giant lock and every OTHER thread is parked with roots published.
-    /// Reached via [`request_gc_collect`](Self::request_gc_collect).
+    /// Reached via `Self::request_gc_collect`.
     pub fn gc(&mut self) -> Option<usize> {
         // ---- Build the per-thread root-set REGISTRY.
         //
@@ -2770,10 +2770,20 @@ impl Interpreter {
         (lo, hi, hex)
     }
 
-    /// Test/debug API: push a value onto the stack.
-    #[doc(hidden)]
-    pub fn test_seed_top(&mut self, w: PolyWord) {
+    /// Push one word onto the ML stack while hand-building the entry
+    /// call frame ("seeding"). Every run entry point uses it to
+    /// simulate the post-CALL state the root function expects: args
+    /// (deepest first), then [`Self::seed_return_sentinel`], then the
+    /// closure word on top.
+    pub fn seed_push(&mut self, w: PolyWord) {
         let _ = self.push(w);
+    }
+
+    /// Renamed: use [`Self::seed_push`].
+    #[doc(hidden)]
+    #[deprecated(note = "renamed to `seed_push`")]
+    pub fn test_seed_top(&mut self, w: PolyWord) {
+        self.seed_push(w);
     }
 
     /// Reset the stack to empty (sp = stack.len()). Used by the
@@ -2997,18 +3007,23 @@ impl Interpreter {
         unsafe { drop(Box::from_raw(raw)) };
     }
 
-    /// Test/debug API: push a synthetic return-to-top sentinel onto
-    /// the stack so the interpreter can be used inside a hand-built
-    /// call frame.
+    /// Push the synthetic return-to-top sentinel onto the stack so the
+    /// interpreter can be used inside a hand-built call frame.
     ///
-    /// Use this after `test_seed_top`s for args + closure to simulate
-    /// being called: the stack layout becomes `[closure, retPC=null,
+    /// Use this after [`Self::seed_push`]es for the args and before the
+    /// closure, so the stack layout becomes `[closure, retPC=null,
     /// args...]`. When the callee's RETURN fires, it'll find
     /// retPC=null and yield `Returned`.
-    #[doc(hidden)]
-    pub fn test_seed_return_sentinel(&mut self) {
+    pub fn seed_return_sentinel(&mut self) {
         // retPC = null pointer encoded as a PolyWord bit pattern.
         let _ = self.push(PolyWord::from_bits(0));
+    }
+
+    /// Renamed: use [`Self::seed_return_sentinel`].
+    #[doc(hidden)]
+    #[deprecated(note = "renamed to `seed_return_sentinel`")]
+    pub fn test_seed_return_sentinel(&mut self) {
+        self.seed_return_sentinel();
     }
 
     /// Test/debug API: invoke `do_call` from outside the crate. Used
@@ -7971,8 +7986,8 @@ mod tests {
         // For from_bytes tests we don't have a real call frame, so we
         // seed retPC=null + a dummy closure beneath any args, mimicking
         // the entry-from-top-level shape.
-        interp.test_seed_return_sentinel();
-        interp.test_seed_top(PolyWord::ZERO); // dummy "closure" placeholder
+        interp.seed_return_sentinel();
+        interp.seed_push(PolyWord::ZERO); // dummy "closure" placeholder
         // NB: this means our test bytecode runs as if it's the
         // top-level function — its RETURN_N will see retPC=null and
         // yield Returned(result).
@@ -8031,7 +8046,7 @@ mod tests {
             let mut i = Interpreter::from_bytes(64, code);
             // 1-word "mutex" cell, Box-backed (heap, word-aligned, no allocator).
             let p = Box::into_raw(Box::new([PolyWord::tagged(old)])).cast::<PolyWord>();
-            i.test_seed_top(PolyWord::from_ptr(p.cast_const()));
+            i.seed_push(PolyWord::from_ptr(p.cast_const()));
             let _ = i.step().unwrap();
             let res = i.peek(0).unwrap();
             assert_eq!(
@@ -8058,8 +8073,8 @@ mod tests {
         let code = vec![INSTR_ESCAPE, opcodes::ext::EXTINSTR_ATOMIC_EXCH_ADD];
         let mut i = Interpreter::from_bytes(64, code);
         let p = Box::into_raw(Box::new([PolyWord::tagged(10)])).cast::<PolyWord>();
-        i.test_seed_top(PolyWord::from_ptr(p.cast_const())); // object (deeper)
-        i.test_seed_top(PolyWord::tagged(5)); // addend (top)
+        i.seed_push(PolyWord::from_ptr(p.cast_const())); // object (deeper)
+        i.seed_push(PolyWord::tagged(5)); // addend (top)
         let sp_before = i.test_sp();
         let _ = i.step().unwrap();
         assert_eq!(i.peek(0).unwrap().untag(), 10, "returns old word0");
@@ -8211,9 +8226,9 @@ mod tests {
         let mut interp = unsafe { Interpreter::from_code_object(64, caller_code) };
         // Seed top-of-stack with: [closure_for_caller=dummy,
         // retPC=null, callee_closure_ptr_to_pop_in_CALL]
-        interp.test_seed_return_sentinel();
-        interp.test_seed_top(PolyWord::ZERO); // caller's "self" closure
-        interp.test_seed_top(PolyWord::from_ptr(callee_closure)); // top: callee closure to call
+        interp.seed_return_sentinel();
+        interp.seed_push(PolyWord::ZERO); // caller's "self" closure
+        interp.seed_push(PolyWord::from_ptr(callee_closure)); // top: callee closure to call
 
         match interp.run() {
             Ok(StepResult::Returned(v)) => assert_eq!(v.untag(), 7),
@@ -8254,8 +8269,8 @@ mod tests {
         let code = make_code_object(&mut code_space, &code_bytes, &[PolyWord::tagged(42)]);
 
         let mut interp = unsafe { Interpreter::from_code_object(64, code) };
-        interp.test_seed_return_sentinel();
-        interp.test_seed_top(PolyWord::ZERO);
+        interp.seed_return_sentinel();
+        interp.seed_push(PolyWord::ZERO);
 
         match interp.run() {
             Ok(StepResult::Returned(v)) => assert_eq!(v.untag(), 42),

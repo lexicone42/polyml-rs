@@ -84,8 +84,8 @@ fn main() {
     if let Some(p) = image_mut_ptr {
         interp = interp.with_image_mutable_root(p, image_mut_len);
     }
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(root_closure_word);
+    interp.seed_return_sentinel();
+    interp.seed_push(root_closure_word);
 
     let (steps, outcome) = interp.run_until(max_steps);
     match outcome {

@@ -484,10 +484,10 @@ pub fn jit_dispatch_closure_call(
     // first-pushed by the caller). We push them in order, so arg_0
     // ends up deepest as upstream's calling convention expects.
     for arg in args {
-        interp.test_seed_top(*arg);
+        interp.seed_push(*arg);
     }
-    interp.test_seed_top(PolyWord::from_bits(0)); // retPC sentinel
-    interp.test_seed_top(closure);
+    interp.seed_push(PolyWord::from_bits(0)); // retPC sentinel
+    interp.seed_push(closure);
     interp.jit_set_code_segment_to_closure(closure)?;
 
     let trace_step = std::env::var("JIT_TRAMP_STEP_TRACE").is_ok();

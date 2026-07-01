@@ -138,10 +138,10 @@ fn run_interp(caller_code_obj: usize, arg: i64) -> i64 {
     // Seed the caller's top-level frame: sentinel retPC, arg_0, retPC=0,
     // closure. RETURN at the END (after the tail-callee returns) pops
     // down to the sentinel and yields Returned.
-    interp.test_seed_return_sentinel();
-    interp.test_seed_top(PolyWord::from_bits(arg as usize)); // arg_0
-    interp.test_seed_top(PolyWord::from_bits(0)); // retPC = 0
-    interp.test_seed_top(PolyWord::from_bits(0)); // caller closure (unused)
+    interp.seed_return_sentinel();
+    interp.seed_push(PolyWord::from_bits(arg as usize)); // arg_0
+    interp.seed_push(PolyWord::from_bits(0)); // retPC = 0
+    interp.seed_push(PolyWord::from_bits(0)); // caller closure (unused)
     // SAFETY: caller_code_obj is a valid heap-style code object.
     unsafe {
         interp.set_code_segment_to_code_obj(caller_code_obj);
