@@ -100,9 +100,13 @@ enum Cmd {
     Run {
         /// Path to a pexport (text) image.
         image: PathBuf,
-        /// Cap on bytecode instructions to execute. Default 5,000,000
-        /// is plenty for the standard bootstrap (~1.1M steps).
-        #[arg(long, default_value_t = 5_000_000)]
+        /// Cap on bytecode instructions to execute — a backstop against a
+        /// runaway image (an interactive REPL is also interruptible with
+        /// Ctrl-C). The default (1 billion ≈ 11 s of compute) covers
+        /// interactive sessions; raise it for heavy batch work (the
+        /// 7-stage self-bootstrap needs ~200e9). The counter is
+        /// whole-session, not per-command.
+        #[arg(long, default_value_t = 1_000_000_000)]
         max_steps: u64,
         /// Print an execution profile (hot code objects + PCs) after
         /// the run. Adds a small per-step cost.
@@ -127,6 +131,11 @@ enum Cmd {
         /// file's parent directory is automatically added as `-I`,
         /// so the script doesn't need an explicit `--`-separated arg.
         /// Mutually exclusive with reading SML from stdin.
+        ///
+        /// TARGETS THE STAGE-0 image (bootstrap/bootstrap64.txt), which
+        /// provides `Bootstrap.use`. Against a self-bootstrapped REPL
+        /// image (polyexport) `Bootstrap` is not in scope — pipe SML on
+        /// stdin instead (`echo '1+1;' | poly run polyexport`).
         #[arg(long, value_name = "FILE")]
         r#use: Option<PathBuf>,
         /// Install every JIT-translatable code object from the image
@@ -473,7 +482,8 @@ fn run_image(
     #[cfg(feature = "jit")] whole_region: bool,
     untrusted: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let bytes = std::fs::read(path)?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("cannot read image {}: {e}", path.display()))?;
     let image = parse_image_auto(&bytes)?;
     let mut loaded = load_image(&image)?;
     ensure_runnable(&loaded)?;
@@ -726,7 +736,11 @@ fn run_image(
             }
         }
         Ok(StepResult::Continue) => {
-            println!("Hit step cap of {max_steps}. Bootstrap was still running.");
+            println!(
+                "Hit the --max-steps cap of {max_steps} (still running). \
+                 Re-run with a larger --max-steps (e.g. --max-steps {}).",
+                max_steps.saturating_mul(20)
+            );
             2
         }
         Ok(StepResult::Unimplemented { op, extended }) => {

@@ -94,9 +94,15 @@ cd vendor/polyml
 
 ### 3. Run an SML script one-shot
 
+`--use FILE` targets the **stage-0** image (it provides `Bootstrap.use`), with
+the script's directory auto-added as an include path:
+
 ```sh
 ./target/release/poly run vendor/polyml/bootstrap/bootstrap64.txt --use script.sml
 ```
+
+To run a script against the full-basis REPL instead, pipe it on stdin:
+`./target/release/poly run vendor/polyml/polyexport < script.sml`.
 
 ### 4. Inspect / disassemble / diff images
 
