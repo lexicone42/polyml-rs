@@ -63,7 +63,7 @@ fn quadratic_reciprocity_full_law() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &driver,
+        &common::with_sound_audit(&driver, "quadratic_reciprocity", &["qr_law"]),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -115,5 +115,10 @@ fn quadratic_reciprocity_full_law() {
     assert!(
         !out.contains(": error:") && !out.contains("Static Errors"),
         "a compile error slipped through:\n{out}"
+    );
+    // The shared soundness audit (stronger allowlist + oracle-free check).
+    assert!(
+        out.contains("SOUND_AUDIT_OK quadratic_reciprocity"),
+        "soundness audit did not certify quadratic_reciprocity:\n{out}"
     );
 }

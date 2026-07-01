@@ -43,7 +43,11 @@ fn division_theorem_existence_and_uniqueness() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_nt_helpers(&driver),
+        &common::with_sound_audit(
+            &common::with_nt_helpers(&driver),
+            "division",
+            &["div_mod_exists", "div_mod_unique"],
+        ),
         200_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -70,5 +74,9 @@ fn division_theorem_existence_and_uniqueness() {
     assert!(
         !out.contains("Exception-"),
         "exception during proof:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK division"),
+        "soundness audit did not certify division:\n{out}"
     );
 }

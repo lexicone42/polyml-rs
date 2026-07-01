@@ -140,7 +140,7 @@ fn pythagorean_characterization() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_gcd(&driver),
+        &common::with_sound_audit(&common::with_gcd(&driver), "pyth", &["char_meta"]),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -195,6 +195,10 @@ fn pythagorean_characterization() {
     assert!(
         !out.contains("PYTH_CHAR_FAILED"),
         "PYTH_CHAR_FAILED fired:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK pyth"),
+        "soundness audit did not certify pyth:\n{out}"
     );
 }
 

@@ -46,7 +46,11 @@ fn sqrt2_is_irrational_by_infinite_descent() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_nt_helpers(&driver),
+        &common::with_sound_audit(
+            &common::with_nt_helpers(&driver),
+            "sqrt2",
+            &["sqrt2_irrational"],
+        ),
         300_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -79,5 +83,10 @@ fn sqrt2_is_irrational_by_infinite_descent() {
     assert!(
         !out.contains("UNSOUND"),
         "a soundness probe fired UNSOUND:\n{out}"
+    );
+    // Shared soundness audit: oracle-free + axiom allowlist (classical == 1) + 0-hyp.
+    assert!(
+        out.contains("SOUND_AUDIT_OK sqrt2"),
+        "soundness audit did not certify sqrt2:\n{out}"
     );
 }

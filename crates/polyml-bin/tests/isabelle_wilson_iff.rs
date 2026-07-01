@@ -52,7 +52,7 @@ fn wilson_iff_primality_criterion() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &with_wilson(&driver),
+        &common::with_sound_audit(&with_wilson(&driver), "wilson_iff", &["wilson_iff"]),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -96,5 +96,9 @@ fn wilson_iff_primality_criterion() {
     assert!(
         !out.contains("PROBE_FAIL") && !out.contains("WILSON_IFF_FAILED"),
         "a probe or the iff fired FAILED:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK wilson_iff"),
+        "soundness audit did not certify wilson_iff:\n{out}"
     );
 }

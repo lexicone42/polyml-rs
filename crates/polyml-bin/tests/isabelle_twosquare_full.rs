@@ -807,7 +807,12 @@ fn full_iff_unconditional() {
         return;
     };
     let driver = merged_full_iff_unconditional_driver();
-    let Some((out, _)) = run_image_env(&image, &driver, 990_000_000_000, ENV) else {
+    let Some((out, _)) = run_image_env(
+        &image,
+        &common::with_sound_audit(&driver, "twosquare_full", &["twosquare_full"]),
+        990_000_000_000,
+        ENV,
+    ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
@@ -891,5 +896,9 @@ fn full_iff_unconditional() {
     assert!(
         !out.contains("Static Errors") && !out.contains(": error:"),
         "compile error during proof:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK twosquare_full"),
+        "soundness audit did not certify twosquare_full:\n{out}"
     );
 }

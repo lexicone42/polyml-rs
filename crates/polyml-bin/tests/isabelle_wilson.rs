@@ -44,7 +44,7 @@ fn wilsons_theorem() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_wilson_inverse(&driver),
+        &common::with_sound_audit(&common::with_wilson_inverse(&driver), "wilson", &["wilson"]),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -77,4 +77,8 @@ fn wilsons_theorem() {
         "a soundness probe fired UNSOUND:\n{out}"
     );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
+    assert!(
+        out.contains("SOUND_AUDIT_OK wilson"),
+        "soundness audit did not certify wilson:\n{out}"
+    );
 }

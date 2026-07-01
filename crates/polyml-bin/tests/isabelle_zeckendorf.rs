@@ -50,7 +50,11 @@ fn zeckendorf_existence_and_uniqueness() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &with_nt_helpers(&driver),
+        &common::with_sound_audit(
+            &with_nt_helpers(&driver),
+            "zeckendorf",
+            &["existence", "uniqueness_meta"],
+        ),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -100,5 +104,9 @@ fn zeckendorf_existence_and_uniqueness() {
     assert!(
         !out.contains(": error:") && !out.contains("Static Errors"),
         "a compile error slipped through:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK zeckendorf"),
+        "soundness audit did not certify zeckendorf:\n{out}"
     );
 }

@@ -73,7 +73,12 @@ fn euclid_euler_unconditional() {
         ("ML_PLATFORM", "x86_64-linux"),
         ("ISABELLE_HOME", "/tmp/isa"),
     ];
-    let Some((out, _)) = run_image_env(&image, &driver, 300_000_000_000, env) else {
+    let Some((out, _)) = run_image_env(
+        &image,
+        &common::with_sound_audit(&driver, "euclid_euler", &["euclid_euler"]),
+        300_000_000_000,
+        env,
+    ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
@@ -104,5 +109,9 @@ fn euclid_euler_unconditional() {
     assert!(
         !out.contains("Exception-"),
         "exception during proof:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK euclid_euler"),
+        "soundness audit did not certify euclid_euler:\n{out}"
     );
 }

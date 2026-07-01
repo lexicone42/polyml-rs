@@ -40,7 +40,11 @@ fn central_binomial_identity() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_combinatorics(&driver),
+        &common::with_sound_audit(
+            &common::with_combinatorics(&driver),
+            "central_binomial",
+            &["central_binomial"],
+        ),
         800_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -75,4 +79,8 @@ fn central_binomial_identity() {
         "a soundness probe fired UNSOUND:\n{out}"
     );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
+    assert!(
+        out.contains("SOUND_AUDIT_OK central_binomial"),
+        "soundness audit did not certify central_binomial:\n{out}"
+    );
 }

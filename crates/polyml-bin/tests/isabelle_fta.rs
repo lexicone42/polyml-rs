@@ -47,7 +47,7 @@ fn fundamental_theorem_of_arithmetic_existence() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_nt_helpers(&driver),
+        &common::with_sound_audit(&common::with_nt_helpers(&driver), "fta", &["fta_existence"]),
         300_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -82,5 +82,9 @@ fn fundamental_theorem_of_arithmetic_existence() {
     assert!(
         !out.contains("UNSOUND"),
         "a soundness probe fired UNSOUND:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK fta"),
+        "soundness audit did not certify fta:\n{out}"
     );
 }

@@ -43,7 +43,11 @@ fn fibonacci_sum_addition_cassini() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &with_nt_helpers(&driver),
+        &common::with_sound_audit(
+            &with_nt_helpers(&driver),
+            "fibonacci",
+            &["fib_sum", "fib_add2", "cassini_a", "cassini_b"],
+        ),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -78,5 +82,9 @@ fn fibonacci_sum_addition_cassini() {
     assert!(
         !out.contains("PROBE_UNSOUND") && !out.contains("_FAILED"),
         "a soundness probe fired / an identity FAILED:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK fibonacci"),
+        "soundness audit did not certify fibonacci:\n{out}"
     );
 }

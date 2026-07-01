@@ -43,7 +43,11 @@ fn closed_form_summations() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_binom_thm(&driver),
+        &common::with_sound_audit(
+            &common::with_binom_thm(&driver),
+            "summation_forms",
+            &["gauss2", "nicomachus", "faulhaber_sq", "pronic_sum"],
+        ),
         800_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -79,4 +83,8 @@ fn closed_form_summations() {
         "a soundness probe fired UNSOUND:\n{out}"
     );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
+    assert!(
+        out.contains("SOUND_AUDIT_OK summation_forms"),
+        "soundness audit did not certify summation_forms:\n{out}"
+    );
 }

@@ -54,7 +54,7 @@ fn infinitely_many_primes_1_mod_4() {
     // Self-contained driver (embeds the merged FLT + euclid/factorial base) — run directly.
     let Some((out, _)) = run_image_env(
         &image,
-        &driver,
+        &common::with_sound_audit(&driver, "primes_1mod4", &["p1m4_inf"]),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -92,5 +92,9 @@ fn infinitely_many_primes_1_mod_4() {
     assert!(
         !out.contains("PROBE_UNSOUND") && !out.contains("FAIL"),
         "a soundness probe fired / a check FAILed:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK primes_1mod4"),
+        "soundness audit did not certify primes_1mod4:\n{out}"
     );
 }

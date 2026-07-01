@@ -86,7 +86,8 @@ fn bertrands_postulate() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &driver,
+        // `bertrand` is a `thm option` (SOME th); unwrap it for the audit.
+        &common::with_sound_audit(&driver, "bertrand", &["Option.valOf bertrand"]),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -135,5 +136,10 @@ fn bertrands_postulate() {
     assert!(
         !out.contains("Exception-"),
         "exception during the proof:\n{out}"
+    );
+    // The shared soundness audit (stronger allowlist + oracle-free check).
+    assert!(
+        out.contains("SOUND_AUDIT_OK bertrand"),
+        "soundness audit did not certify bertrand:\n{out}"
     );
 }

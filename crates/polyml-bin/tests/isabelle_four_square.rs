@@ -110,7 +110,7 @@ fn four_square_full_theorem() {
     // discharge lagrange_assembly. proofs:=0 is set by the driver to bound RAM.
     let Some((out, _)) = run_image_env(
         &image,
-        &driver,
+        &common::with_sound_audit(&driver, "four_square", &["lagrange_four_square"]),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -152,5 +152,9 @@ fn four_square_full_theorem() {
     assert!(
         !out.contains(": error:") && !out.contains("Static Errors"),
         "a compile error slipped through:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK four_square"),
+        "soundness audit did not certify four_square:\n{out}"
     );
 }

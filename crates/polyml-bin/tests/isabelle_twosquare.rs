@@ -58,7 +58,7 @@ fn fermat_two_square() {
     // Self-contained driver (embeds Wilson + QR + Thue) — run directly.
     let Some((out, _)) = run_image_env(
         &image,
-        &driver,
+        &common::with_sound_audit(&driver, "twosquare", &["twosquare"]),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -92,5 +92,9 @@ fn fermat_two_square() {
     assert!(
         !out.contains("Static Errors") && !out.contains(": error:"),
         "compile error during proof:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK twosquare"),
+        "soundness audit did not certify twosquare:\n{out}"
     );
 }

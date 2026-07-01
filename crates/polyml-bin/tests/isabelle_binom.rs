@@ -46,7 +46,11 @@ fn prime_divides_inner_binomial_coefficients() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_nt_helpers(&driver),
+        &common::with_sound_audit(
+            &common::with_nt_helpers(&driver),
+            "binom",
+            &["absorption", "p_dvd_binom"],
+        ),
         280_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -77,5 +81,9 @@ fn prime_divides_inner_binomial_coefficients() {
     assert!(
         !out.contains("UNSOUND"),
         "a soundness probe fired UNSOUND:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK binom"),
+        "soundness audit did not certify binom:\n{out}"
     );
 }

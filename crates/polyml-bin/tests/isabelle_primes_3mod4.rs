@@ -51,7 +51,11 @@ fn primes_three_mod_four() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_euclid(&driver),
+        &common::with_sound_audit(
+            &common::with_euclid(&driver),
+            "primes_3mod4",
+            &["p3mod4_all"],
+        ),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -91,5 +95,9 @@ fn primes_three_mod_four() {
     assert!(
         !out.contains("Static Errors") && !out.contains(": error:"),
         "compile error during proof:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK primes_3mod4"),
+        "soundness audit did not certify primes_3mod4:\n{out}"
     );
 }

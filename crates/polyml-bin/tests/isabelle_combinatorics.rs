@@ -43,7 +43,11 @@ fn combinatorial_identities() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_binom_thm(&driver),
+        &common::with_sound_audit(
+            &common::with_binom_thm(&driver),
+            "combinatorics",
+            &["pascal_row_sum", "hockey_stick", "vandermonde"],
+        ),
         800_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -81,4 +85,8 @@ fn combinatorial_identities() {
         "a soundness probe fired UNSOUND:\n{out}"
     );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
+    assert!(
+        out.contains("SOUND_AUDIT_OK combinatorics"),
+        "soundness audit did not certify combinatorics:\n{out}"
+    );
 }

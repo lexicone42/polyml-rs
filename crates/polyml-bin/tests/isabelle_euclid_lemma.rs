@@ -42,7 +42,11 @@ fn euclids_lemma_prime_divides_product() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_nt_helpers(&driver),
+        &common::with_sound_audit(
+            &common::with_nt_helpers(&driver),
+            "euclid_lemma",
+            &["euclid_lemma"],
+        ),
         250_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -73,5 +77,9 @@ fn euclids_lemma_prime_divides_product() {
     assert!(
         !out.contains("UNSOUND"),
         "a soundness probe fired UNSOUND:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK euclid_lemma"),
+        "soundness audit did not certify euclid_lemma:\n{out}"
     );
 }

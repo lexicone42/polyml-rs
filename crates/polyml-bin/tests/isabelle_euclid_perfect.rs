@@ -80,7 +80,12 @@ fn euclid_perfect() {
             .join("tests/isabelle_support/isabelle_euclid_perfect.sml"),
     )
     .expect("read isabelle_euclid_perfect.sml");
-    let Some((out, _)) = run_image_env(&image, &driver, 300_000_000_000, ENV) else {
+    let Some((out, _)) = run_image_env(
+        &image,
+        &common::with_sound_audit(&driver, "euclid_perfect", &["euclid_perfect"]),
+        300_000_000_000,
+        ENV,
+    ) else {
         eprintln!("SKIP: poly could not spawn");
         return;
     };
@@ -118,5 +123,9 @@ fn euclid_perfect() {
     assert!(
         !out.contains("EUCLID_PERFECT_INCOMPLETE"),
         "euclid_perfect incomplete:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK euclid_perfect"),
+        "soundness audit did not certify euclid_perfect:\n{out}"
     );
 }

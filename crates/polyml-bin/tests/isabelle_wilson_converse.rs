@@ -54,7 +54,11 @@ fn wilsons_converse() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_wilson_inverse(&driver),
+        &common::with_sound_audit(
+            &common::with_wilson_inverse(&driver),
+            "wilson_converse",
+            &["wc_converse"],
+        ),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -90,5 +94,9 @@ fn wilsons_converse() {
     assert!(
         !out.contains("Static Errors") && !out.contains(": error:"),
         "compile error during proof:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK wilson_converse"),
+        "soundness audit did not certify wilson_converse:\n{out}"
     );
 }

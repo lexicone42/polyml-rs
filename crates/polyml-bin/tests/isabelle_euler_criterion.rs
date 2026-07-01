@@ -57,7 +57,7 @@ fn eulers_criterion() {
     // Self-contained driver (embeds its flt-based foundation) — run directly.
     let Some((out, _)) = run_image_env(
         &image,
-        &driver,
+        &common::with_sound_audit(&driver, "euler_criterion", &["dichotomy", "qr_forward"]),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -100,5 +100,9 @@ fn eulers_criterion() {
     assert!(
         !out.contains("Exception-"),
         "exception during proof:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK euler_criterion"),
+        "soundness audit did not certify euler_criterion:\n{out}"
     );
 }

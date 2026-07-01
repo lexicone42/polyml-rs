@@ -45,7 +45,7 @@ fn gcd_bezout_modular_inverse() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_ntbase(&driver),
+        &common::with_sound_audit(&common::with_ntbase(&driver), "gcd", &["mod_inverse"]),
         600_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -85,4 +85,8 @@ fn gcd_bezout_modular_inverse() {
         "a soundness probe fired UNSOUND:\n{out}"
     );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
+    assert!(
+        out.contains("SOUND_AUDIT_OK gcd"),
+        "soundness audit did not certify gcd (mod_inverse):\n{out}"
+    );
 }

@@ -60,7 +60,7 @@ fn eulers_theorem() {
     // directly — no `with_*` splice.
     let Some((out, _)) = run_image_env(
         &image,
-        &driver,
+        &common::with_sound_audit(&driver, "euler", &["euler"]),
         990_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -103,4 +103,8 @@ fn eulers_theorem() {
         "exception during proof:\n{out}"
     );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
+    assert!(
+        out.contains("SOUND_AUDIT_OK euler"),
+        "soundness audit did not certify euler:\n{out}"
+    );
 }

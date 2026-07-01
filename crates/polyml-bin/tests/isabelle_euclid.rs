@@ -49,7 +49,7 @@ fn euclid_infinitude_of_primes() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_nt_helpers(&driver),
+        &common::with_sound_audit(&common::with_nt_helpers(&driver), "euclid", &["euclid"]),
         300_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -84,5 +84,9 @@ fn euclid_infinitude_of_primes() {
     assert!(
         !out.contains("UNSOUND"),
         "a soundness probe fired UNSOUND:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK euclid"),
+        "soundness audit did not certify euclid:\n{out}"
     );
 }

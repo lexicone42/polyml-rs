@@ -45,7 +45,11 @@ fn chinese_remainder_theorem() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_gcd(&driver),
+        &common::with_sound_audit(
+            &common::with_gcd(&driver),
+            "crt",
+            &["crt_exists", "crt_unique"],
+        ),
         700_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -87,4 +91,8 @@ fn chinese_remainder_theorem() {
         "a soundness probe fired UNSOUND:\n{out}"
     );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
+    assert!(
+        out.contains("SOUND_AUDIT_OK crt"),
+        "soundness audit did not certify crt:\n{out}"
+    );
 }

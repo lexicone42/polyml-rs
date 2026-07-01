@@ -44,7 +44,11 @@ fn multiplicative_group_mod_p() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_gcd(&driver),
+        &common::with_sound_audit(
+            &common::with_gcd(&driver),
+            "mult_group",
+            &["lagrange_roots"],
+        ),
         700_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -81,4 +85,8 @@ fn multiplicative_group_mod_p() {
         "a soundness probe fired UNSOUND:\n{out}"
     );
     assert!(!out.contains("UNSOUND"), "an UNSOUND marker fired:\n{out}");
+    assert!(
+        out.contains("SOUND_AUDIT_OK mult_group"),
+        "soundness audit did not certify mult_group:\n{out}"
+    );
 }

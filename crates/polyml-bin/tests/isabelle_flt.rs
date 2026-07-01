@@ -50,7 +50,7 @@ fn fermats_little_theorem() {
 
     let Some((out, _)) = run_image_env(
         &image,
-        &common::with_nt_helpers(&driver),
+        &common::with_sound_audit(&common::with_nt_helpers(&driver), "flt", &["flt"]),
         320_000_000_000,
         &[
             ("ML_SYSTEM", "polyml"),
@@ -83,5 +83,9 @@ fn fermats_little_theorem() {
     assert!(
         !out.contains("UNSOUND"),
         "a soundness probe fired UNSOUND:\n{out}"
+    );
+    assert!(
+        out.contains("SOUND_AUDIT_OK flt"),
+        "soundness audit did not certify flt:\n{out}"
     );
 }

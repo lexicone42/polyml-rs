@@ -188,6 +188,42 @@ pub fn with_combinatorics(delta: &str) -> String {
     with_binom_thm(&format!("{comb}\n{delta}"))
 }
 
+/// The shared soundness-audit epilogue (`isabelle_support/sound_audit.sml`):
+/// the CONSERVATIVE axiom allowlist + the `sound_audit` routine that certifies
+/// a theorem is oracle-free, axiom-allowlisted (classical == 1), and 0-hyp /
+/// 0-extra-shyps — emitting one machine marker `SOUND_AUDIT_OK <name>` (or
+/// `SOUND_AUDIT_FAIL <name> …`).
+pub fn sound_audit_prelude() -> String {
+    std::fs::read_to_string(
+        workspace_root().join("crates/polyml-bin/tests/isabelle_support/sound_audit.sml"),
+    )
+    .expect("read sound_audit.sml")
+}
+
+/// Append the shared soundness audit to a fully-assembled Isabelle theorem
+/// driver. It (1) strips any trailing/interior `OS.Process.exit` lines so the
+/// epilogue actually runs, (2) splices in the `sound_audit.sml` routine (which
+/// depends only on Isabelle/Pure structures, so it runs uniformly on both the
+/// `with_nt_helpers`-spliced drivers and the big self-contained ones), and
+/// (3) calls `sound_audit "<label>" [<thm bindings>]` on the driver's final
+/// theorem(s) — the top-level `val` bindings the driver already established.
+///
+/// The audit runs AFTER the proof and only INSPECTS; it never touches the proof
+/// itself. `thms` are the SML expressions naming the headline theorem(s)
+/// (e.g. `&["flt"]`, or `&["div_mod_exists", "div_mod_unique"]`).
+pub fn with_sound_audit(driver: &str, label: &str, thms: &[&str]) -> String {
+    let prelude = sound_audit_prelude();
+    // Drop `OS.Process.exit` calls: they would terminate the REPL before the
+    // appended epilogue runs. (The heavy Bertrand driver ends with one.)
+    let body: String = driver
+        .lines()
+        .filter(|l| !l.contains("OS.Process.exit"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let thm_list = thms.join(", ");
+    format!("{body}\n{prelude}\nval () = sound_audit \"{label}\" [{thm_list}];\n")
+}
+
 /// Basis-only warm checkpoint (`tools/build-hol4-checkpoints.sh basis`).
 pub fn basis_checkpoint_path() -> Option<PathBuf> {
     let p = PathBuf::from("/tmp/basis_loaded");
