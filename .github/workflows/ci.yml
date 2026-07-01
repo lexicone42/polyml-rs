@@ -6,16 +6,24 @@ on:
   pull_request:
   workflow_dispatch:
 
-# The headline HOL4 / Isabelle / bootstrap demos need obtained data
-# (vendor/polyml, vendor/hol4, vendor/isabelle) and warm /tmp checkpoints,
-# so they are NOT run here — see docs/REPRODUCING.md to run them locally.
-# This workflow is the vendor-free gate: formatting, lints, a full workspace
-# build (which compiles every crate + test target), and the data-free unit
-# tests for the runtime and JIT.
+# The headline HOL4 / Isabelle demos need warm /tmp checkpoints that take
+# tens of minutes to build, so they are NOT run here — see docs/REPRODUCING.md
+# (tools/regression.sh full is the local gate for those). This workflow is:
+#   check           — formatting, lints, full workspace build, all data-free
+#                     tests (runtime/JIT/image units + integration + the
+#                     malicious-image corpus), and the deref-surface lint.
+#   bootstrap-smoke — obtains upstream Poly/ML pinned at the last-validated
+#                     SHA and actually RUNS the stage-0 bootstrap image
+#                     (asserting the byte-identical step count), which also
+#                     un-skips the vendor-gated test suites (cli_run,
+#                     golden_sml, untrusted byte-identity, the GC-UAF fence).
+#   interp-only     — the no-default-features (Cranelift-free) gate.
+# The 7-stage self-bootstrap + cross-target checks run in nightly.yml.
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -38,8 +46,69 @@ jobs:
       - name: Runtime unit tests (data-free)
         run: cargo test --release -p polyml-runtime --lib
 
-      - name: JIT unit tests (data-free)
-        run: cargo test --release -p polyml-jit --lib
+      - name: Runtime integration tests (data-free; vendor-gated ones self-skip)
+        run: cargo test --release -p polyml-runtime --tests
+
+      - name: JIT tests (data-free)
+        run: cargo test --release -p polyml-jit
+
+      - name: Image-format tests
+        run: cargo test --release -p polyml-image
+
+      # Default-feature (JIT-enabled) polyml-bin tests: most skip without
+      # vendor data, but the malicious-image --untrusted corpus runs here in
+      # the shipped configuration (interp-only re-runs it without Cranelift).
+      - name: CLI + untrusted-corpus tests (default features)
+        run: cargo test --release -p polyml-bin
+
+      # The --untrusted deref-surface completeness lint: any new
+      # image-controlled-operand deref that isn't behind the untrusted gate
+      # fails CI instead of shipping.
+      - name: Deref-surface lint
+        run: python3 tools/lint-image-deref.py
+
+  # Runs the stage-0 bootstrap image for real. vendor/polyml is git-ignored,
+  # so CI obtains it directly from upstream, PINNED to the last-validated
+  # commit (docs/REPRODUCING.md) — a blobless sparse clone keeps it to a few MB.
+  bootstrap-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Obtain upstream Poly/ML (pinned, blobless sparse clone)
+        run: |
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/polyml/polyml vendor/polyml
+          git -C vendor/polyml sparse-checkout set bootstrap
+          git -C vendor/polyml checkout c27c2953efe79189ad9d92f736d64e14cf90f078
+
+      - name: Build poly (release)
+        run: cargo build --release -p polyml-bin
+
+      - name: Stage-0 bootstrap runs byte-identically (1,110,805 steps → Tagged(0))
+        run: |
+          out=$(./target/release/poly run vendor/polyml/bootstrap/bootstrap64.txt)
+          echo "$out"
+          echo "$out" | grep -q "Executed 1110805 bytecode step(s)"
+          echo "$out" | grep -q "Result: Tagged(0)"
+
+      - name: Same image under --untrusted (safe mode, byte-identical)
+        run: |
+          out=$(./target/release/poly run --untrusted vendor/polyml/bootstrap/bootstrap64.txt)
+          echo "$out"
+          echo "$out" | grep -q "Executed 1110805 bytecode step(s)"
+
+      - name: Vendor-gated suites (cli_run, golden_sml, GC-UAF fence, …)
+        run: |
+          cargo test --release -p polyml-bin
+          cargo test --release -p polyml-runtime --tests
 
   # Interpreter-only gate: `poly` built with `--no-default-features` drops the
   # Cranelift JIT (polyml-jit) from the dependency tree entirely. This is the
@@ -48,6 +117,7 @@ jobs:
   # green so the JIT stays genuinely optional.
   interp-only:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 

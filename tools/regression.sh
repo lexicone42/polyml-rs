@@ -26,17 +26,17 @@ run cargo build --release -p polyml-bin -p polyml-jit
 
 echo; echo "--- always-on unit + integration tests ---"
 run cargo test --release -p polyml-runtime --lib
-# Export round-trip integration targets (memory-layer image writer/reader).
-# They live in tests/*.rs so `--lib` skips them; wire them explicitly. Both are
-# cheap (~1 s) and cover the export-after-GC fixpoint + adversarial graphs.
-run cargo test --release -p polyml-runtime --test export_roundtrip --test export_roundtrip_fuzz
-# Tiny-heap GC use-after-free fence (task #109): drives the bootstrap under a
-# 1 MB alloc space so the Cheney collector fires on nearly every burst; a
-# below-sp dangling pointer / unforwarded root makes it SIGSEGV in-process
-# (cargo reports the binary as failed). ~0.1 s; SKIPs if the image is absent.
-run cargo test --release -p polyml-runtime --test gc_tiny_heap_uaf
+# ALL runtime integration targets (tests/*.rs — `--lib` skips them): the export
+# round-trip + adversarial fuzz, the tiny-heap GC use-after-free fence (#109),
+# the real-threads GC-handshake soundness controls, and the loader-OOB repros.
+# Each is cheap (~1 s) and data-free or self-skipping without vendor.
+run cargo test --release -p polyml-runtime --tests
 run cargo test --release -p polyml-jit
-run cargo test --release -p polyml-bin            # non-#[ignore]: cli_run, golden_sml
+run cargo test --release -p polyml-image
+run cargo test --release -p polyml-bin            # non-#[ignore]: cli_run, golden_sml, untrusted corpus
+# --untrusted deref-surface completeness lint (also a CI step): any new
+# image-controlled-operand deref not behind the untrusted gate fails here.
+run python3 tools/lint-image-deref.py
 
 if [ "$MODE" = "full" ]; then
   echo; echo "--- building checkpoints (if missing) ---"
@@ -47,6 +47,9 @@ if [ "$MODE" = "full" ]; then
   # tools/persist-ckpts.sh on the dev box).
   [ -f /tmp/hol4_datatype ] || run tools/build-hol4-checkpoints.sh datatype
   [ -f /tmp/arbint_image ]  || run tools/intflip-bootstrap.sh
+  # Lagrange-four-square base checkpoint — without it four_square_full_theorem
+  # silently self-skips and the flagship theorem goes UNVERIFIED on a green run.
+  [ -f /tmp/l4_foursq_star ] || run tools/build-l4-checkpoint.sh
   run tools/isabelle-pure-probe.sh >/dev/null   # applies isabelle patches idempotently
   # warm Isabelle/Pure checkpoint (load the 261 logical-Pure files + export);
   # needed by isabelle_proving. Built when absent (persists on the dev box).
@@ -58,8 +61,9 @@ if [ "$MODE" = "full" ]; then
   # pieces) are the two most expensive Isabelle workloads.
   # Both now carry the shared SOUND_AUDIT_OK certification (oracle-free + axiom
   # allowlist, classical == 1). They dominate the full-tier wall clock.
-  ipass=0; ifail=0
-  for t in export_roundtrip_live real_math parsetree_introspect isabelle_pure isabelle_pure_arbint \
+  ipass=0; ifail=0; iskip=0
+  for t in export_roundtrip_live real_math parsetree_introspect overflow isabelle_pure isabelle_pure_arbint \
+           isabelle_gauss concurrency_mutex_demo \
            isabelle_kernel isabelle_theorem_kernel isabelle_proving isabelle_sound_audit_negative isabelle_object_logic isabelle_arithmetic isabelle_number_theory isabelle_summation isabelle_ordering isabelle_divisibility isabelle_primes isabelle_classical_primes isabelle_euclid isabelle_primes_3mod4 isabelle_primes_1mod4 isabelle_sqrt2 isabelle_list_theory isabelle_fta isabelle_division isabelle_euclid_lemma isabelle_euclid_list isabelle_fta_unique isabelle_modular isabelle_power isabelle_ntbase isabelle_binom isabelle_sum isabelle_binom_thm isabelle_flt isabelle_gcd isabelle_crt isabelle_combinatorics isabelle_summation_forms isabelle_prodf isabelle_mult_group isabelle_central_binomial isabelle_wilson_pairing isabelle_wilson_inverse isabelle_wilson isabelle_wilson_converse isabelle_wilson_iff isabelle_neg1_qr isabelle_thue isabelle_twosquare isabelle_euler_foundations isabelle_euler isabelle_euler_criterion isabelle_zeckendorf isabelle_four_square isabelle_pyth isabelle_fibonacci isabelle_sigma isabelle_euclid_perfect isabelle_euclid_euler isabelle_twosquare_full isabelle_bertrand isabelle_quadratic_reciprocity intflip_basis \
            hol4_taut hol4_meson hol4_metis hol4_pelletier hol4_num_prover \
            hol4_arith hol4_order hol4_induction hol4_list hol4_simp hol4_fancy \
@@ -72,9 +76,14 @@ if [ "$MODE" = "full" ]; then
     ipass=$((ipass + ${p:-0})); ifail=$((ifail + ${f:-0}))
     printf "  %-26s %s\n" "$t" "${r:-NO RESULT}"
     [ "${f:-0}" != "0" ] && fail=1
-    [ -z "$r" ] && { echo "    (no result — likely skipped: missing checkpoint/vendor)"; }
+    [ -z "$r" ] && { iskip=$((iskip+1)); echo "    (NO RESULT — missing checkpoint/vendor; this target is NOT verified)"; }
   done
-  echo "  headline integration: $ipass passed, $ifail failed"
+  echo "  headline integration: $ipass passed, $ifail failed, $iskip target(s) with no result"
+  if [ "$iskip" != "0" ]; then
+    echo "  !!! $iskip headline target(s) produced NO RESULT — a green run does NOT cover them."
+    echo "  !!! (Set REGRESSION_STRICT=1 to make that a failure.)"
+    [ "${REGRESSION_STRICT:-0}" = "1" ] && fail=1
+  fi
 
   echo; echo "--- differential vs upstream PolyML (if oracle built) ---"
   if [ -x /tmp/polybuild/poly ] && [ -f /tmp/basis_loaded ]; then

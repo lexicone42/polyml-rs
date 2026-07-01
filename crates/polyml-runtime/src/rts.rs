@@ -4491,6 +4491,39 @@ mod tests {
         assert!(t.token_for("DoesNotExist").is_none());
     }
 
+    /// Fingerprint of the registration ORDER. Dispatch tokens are baked into
+    /// warm /tmp checkpoints by `register()` order, so a silent reorder
+    /// mis-dispatches every stale checkpoint (the historical copySign→pow
+    /// bug) while every other test stays green — this is the fence.
+    #[test]
+    fn registration_order_fingerprint() {
+        let t = RtsTable::new();
+        let names: Vec<&str> = t.entries.iter().map(|e| e.name).collect();
+        // djb2 over the ordered names (order-sensitive by construction).
+        let mut h: u64 = 5381;
+        for n in &names {
+            for b in n.bytes() {
+                h = h.wrapping_mul(33) ^ u64::from(b);
+            }
+            h = h.wrapping_mul(33) ^ u64::from(b'\n');
+        }
+        assert_eq!(
+            (names.len(), h),
+            (228usize, 3_770_104_743_555_170_908u64),
+            "RTS registration ORDER or COUNT changed (first: {:?}…, last: {:?}).\n\
+             - APPEND-only additions are checkpoint-safe: just update the two\n\
+               expected values above.\n\
+             - Any REORDER or REMOVAL invalidates every warm checkpoint:\n\
+               rebuild them all (tools/build-*.sh; see CLAUDE.md \"RTS calling\n\
+               conventions\") before updating this fingerprint.",
+            &names[..4.min(names.len())],
+            names.last(),
+        );
+        // Positional sentinels: catch a partial reorder with a readable message.
+        assert_eq!(names.first().copied(), Some("PolyIsBigEndian"));
+        assert_eq!(names.last().copied(), Some("PolyCreateEntryPointObject"));
+    }
+
     #[test]
     fn arity_call_through_dispatch() {
         let t = RtsTable::new();

@@ -1,0 +1,107 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+# The expensive CI-viable fences that don't belong on every push:
+#   self-bootstrap — the FULL 7-stage compiler self-compilation (~28B bytecode
+#                    steps, the canonical heavy workload) + the resulting
+#                    polyexport image driven as a REPL.
+#   cross-check    — compile-level fence under the 5-arch portability claim
+#                    (aarch64 with JIT; big-endian s390x/ppc64 + riscv64
+#                    interpreter-only, mirroring the shipped configurations).
+#   macos          — the arm64 macOS build + data-free tests (the Tier B
+#                    cross-OS target runs the lib suites natively).
+# The HOL4 / Isabelle theorem workloads still need warm /tmp checkpoints and
+# remain local-only (tools/regression.sh full).
+
+jobs:
+  self-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Obtain upstream Poly/ML (pinned, blobless sparse clone)
+        run: |
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/polyml/polyml vendor/polyml
+          git -C vendor/polyml sparse-checkout set bootstrap basis mlsource
+          git -C vendor/polyml checkout c27c2953efe79189ad9d92f736d64e14cf90f078
+
+      - name: Build poly (release)
+        run: cargo build --release -p polyml-bin
+
+      - name: Run the 7-stage self-bootstrap chain
+        run: |
+          cd vendor/polyml
+          ../../target/release/poly run --max-steps 200000000000 \
+            bootstrap/bootstrap64.txt < bootstrap/Stage1.sml | tee /tmp/chain.log
+          grep -q "Writing object code" /tmp/chain.log
+          grep -q "Result: Tagged(0)" /tmp/chain.log
+          test -f polyexport
+
+      - name: The self-bootstrapped image is a working REPL
+        run: |
+          out=$(echo "fun fact 0 = 1 | fact n = n * fact (n-1); fact 10;" \
+            | ./target/release/poly run vendor/polyml/polyexport)
+          echo "$out"
+          echo "$out" | grep -q "3628800"
+
+  cross-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain + cross targets
+        run: |
+          rustup show
+          rustup target add aarch64-unknown-linux-gnu s390x-unknown-linux-gnu \
+            powerpc64-unknown-linux-gnu riscv64gc-unknown-linux-gnu
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: aarch64 (full, with JIT)
+        run: cargo check --release -p polyml-bin --target aarch64-unknown-linux-gnu
+
+      - name: s390x big-endian (interpreter-only, the shipped config)
+        run: cargo check --release -p polyml-bin --no-default-features --target s390x-unknown-linux-gnu
+
+      - name: ppc64 big-endian (interpreter-only)
+        run: cargo check --release -p polyml-bin --no-default-features --target powerpc64-unknown-linux-gnu
+
+      - name: riscv64 (interpreter-only)
+        run: cargo check --release -p polyml-bin --no-default-features --target riscv64gc-unknown-linux-gnu
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build poly (release)
+        run: cargo build --release -p polyml-bin
+
+      - name: Data-free tests (runtime, JIT, image, CLI)
+        run: |
+          cargo test --release -p polyml-runtime --lib
+          cargo test --release -p polyml-runtime --tests
+          cargo test --release -p polyml-jit
+          cargo test --release -p polyml-image
+          cargo test --release -p polyml-bin
