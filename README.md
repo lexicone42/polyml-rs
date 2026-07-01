@@ -167,6 +167,20 @@ evidence here is unusually strong — and it was earned by finding real bugs.
 These also double as the most demanding regression tests imaginable for the
 runtime.
 
+### How fast is it? (honest numbers)
+
+A 12-program classic-SML benchmark corpus (`tools/diff-corpus/bench_*.sml`,
+timed by `tools/bench.sh`) gives the first wall-clock comparison against upstream
+Poly/ML. All 12 compute **byte-identical results** to upstream at both small and
+large inputs (so they double as a real-program faithfulness net). On CPU time,
+our interpreter is a geometric-mean **~4× slower than upstream's own bytecode
+interpreter** (range 1.4–6.8×) and **~32× slower than upstream native codegen** —
+but the interpreter gap narrows to **1.4–2.3× on allocation/GC-bound workloads**
+(merge sort, matrix multiply, Life), where the copying GC, not dispatch,
+dominates. Raw throughput is ~145M bytecode steps/s; the residual is upstream's
+more mature C++ dispatch loop and, above it, real native compilation. Full
+methodology + the measured table: [`docs/benchmarks.md`](docs/benchmarks.md).
+
 ---
 
 ## It runs real theorem provers

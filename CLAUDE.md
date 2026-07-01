@@ -140,7 +140,11 @@ byte-for-byte (not ours). Full methodology + the memory-safety audits:
 ## Performance & JIT
 
 Interpreter: ~92M steps/sec single-core (basis load 1.8B steps ~19s; the 7-stage
-chain 27.7B steps ~5 min). Most of the ~8× gain: caching the GC threshold in an
+chain 27.7B steps ~5 min). **Honest vs-upstream numbers (`tools/bench.sh`, 12
+classic-SML benchmarks): geomean ~4× slower than upstream's OWN bytecode
+interpreter, ~32× vs native codegen — but only 1.4–2.3× on GC/alloc-bound work
+(the GC is competitive; the dispatch loop is the headroom). All 12 byte-identical
+to upstream. Full table: `docs/benchmarks.md`.** Most of the ~8× gain: caching the GC threshold in an
 `AtomicUsize` (was an env read per step), pre-computing `gc_trigger_words`, and an
 in-crate `run_until` loop that picks the fast (non-instrumented)
 `step_impl::<false>` monomorphisation once. `poly run --profile` dumps hot
