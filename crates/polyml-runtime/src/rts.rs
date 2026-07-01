@@ -893,19 +893,22 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyTimingBaseYear",
         RtsFn::Arity1(|_, _| PolyWord::tagged(1970)),
     );
-    // mktime for Date.toTime — a tagged(0) return here read as "the epoch"
-    // (silently wrong for every local date), so it raises instead.
+    // REAL strftime for Date.fmt (timing.cpp:399-460; upstream's spelling).
     t.register(
         "PolyTimingConvertDateStuct",
-        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "Date.toTime (mktime)")),
+        RtsFn::Arity2(poly_timing_convert_date_struct),
     );
+    // REAL local-time conversions. NB the old tagged(0) "we are UTC" stubs
+    // were also registered at the WRONG ARITY (Arity1 for rtsCallFull1 call
+    // sites, which pass threadId + arg = Arity2) — a latent stack
+    // corruption on any Date.fromTimeLocal/toString call.
     t.register(
         "PolyTimingLocalOffset",
-        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+        RtsFn::Arity2(poly_timing_local_offset),
     );
     t.register(
         "PolyTimingSummerApplies",
-        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+        RtsFn::Arity2(poly_timing_summer_applies),
     );
     t.register(
         "PolyTimingYearOffset",
@@ -1137,20 +1140,22 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyProcessEnvSuccessValue",
         RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
     );
+    // REAL strerror (was an empty-string stub, which made every SysErr
+    // print without its reason).
     t.register(
         "PolyProcessEnvErrorMessage",
-        RtsFn::Arity2(|ctx, _, _| alloc_empty_string(ctx)),
+        RtsFn::Arity2(poly_process_env_error_message),
     );
     t.register(
         "PolyProcessEnvErrorFromString",
         RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)),
     );
-    // De-fanged: this returned tagged(0) — which is ALSO the registered
-    // success value — so `OS.Process.system "cmd"` reported success
-    // without running anything (the worst silent-lie in the table).
+    // REAL (was the worst silent-lie in the table — returned tagged(0),
+    // which is ALSO the registered success value, so it reported success
+    // without running anything; then briefly de-fanged to raise).
     t.register(
         "PolyProcessEnvSystem",
-        RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "OS.Process.system")),
+        RtsFn::Arity2(poly_process_env_system),
     );
     t.register("PolyTerminate", RtsFn::Arity2(poly_terminate));
     t.register("PolyPollIODescriptors", RtsFn::Arity4(zero4));
@@ -2136,17 +2141,31 @@ fn poly_basic_io_general(
         7 => close_file(io_spaces, strm),
         // 8/9: read text/binary into an array. arg is a 3-tuple
         //      (buffer, offset, length). Returns # bytes read
-        //      (0 = EOF).
-        8 | 9 => read_array_from_stream(io_spaces, strm, arg),
+        //      (0 = EOF). A REAL read error (≠ EOF) raises SysErr —
+        //      upstream basicio.cpp:308.
+        8 | 9 => {
+            let r = read_array_from_stream(io_spaces, strm, arg);
+            match io_sentinel_errno(r) {
+                None => r,
+                Some(errno) => raise_syscall(ctx, "Error while reading", errno),
+            }
+        }
         // 10/26: read text/binary as a (PolyML) string. Route to
         // std::io::stdin for fd 0 so the bootstrap can actually
         // consume input from a pipe; everything else returns
         // an empty string (= EOF) which is safe.
         10 | 26 => read_string_from_stream(ctx, strm, arg),
-        // 11/12: write array — actually attempt to write to the fd
-        // and return the byte count. Empty-pretend wasn't tested
-        // yet but full write support makes future REPL output work.
-        11 | 12 => write_array(io_spaces, strm, arg),
+        // 11/12: write array — write to the fd and return the byte
+        // count. A REAL write error raises SysErr instead of reporting
+        // "0 bytes written" (which livelocked the basis write-all loop
+        // on persistent EPIPE/ENOSPC) — upstream basicio.cpp:363.
+        11 | 12 => {
+            let r = write_array(io_spaces, strm, arg);
+            match io_sentinel_errno(r) {
+                None => r,
+                Some(errno) => raise_syscall(ctx, "Error while writing", errno),
+            }
+        }
         // 15: return recommended buffer size (4096)
         15 => PolyWord::tagged(4096),
         // 16: input available? Pretend yes.
@@ -3778,24 +3797,71 @@ fn write_array(spaces: Option<&RtsSafeSpaces>, strm: PolyWord, arg: PolyWord) ->
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = (fd_plus_one - 1) as i32;
     let n = match fd {
-        1 => std::io::stdout().write(slice).unwrap_or(0),
-        2 => std::io::stderr().write(slice).unwrap_or(0),
-        0 => 0,
+        1 => retry_eintr_write(&mut std::io::stdout(), slice),
+        2 => retry_eintr_write(&mut std::io::stderr(), slice),
+        0 => Ok(0),
         _ => {
             use std::os::fd::FromRawFd;
             // SAFETY: fd is a live fd opened by open_file_output. We
             // reconstruct a File to call write, then leak it back via
             // into_raw_fd so Drop does NOT close the still-in-use fd.
             let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
-            let n = f.write(slice).unwrap_or(0);
+            let n = retry_eintr_write(&mut f, slice);
             use std::os::fd::IntoRawFd;
             let _ = f.into_raw_fd();
             n
         }
     };
+    match n {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        Ok(n) => PolyWord::tagged(n as isize),
+        // A real write error. Reporting "0 bytes written" here (the old
+        // behaviour) livelocks the basis write-all loop on persistent
+        // EPIPE/ENOSPC. The dispatcher turns this sentinel into
+        // SysErr("Error while writing", errno) — upstream basicio.cpp:363.
+        Err(errno) => io_error_sentinel(errno),
+    }
+}
+
+/// Write with EINTR retry (upstream loops on EINTR); other errors carry
+/// their errno out.
+fn retry_eintr_write(w: &mut impl Write, slice: &[u8]) -> Result<usize, i32> {
+    loop {
+        match w.write(slice) {
+            Ok(n) => return Ok(n),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.raw_os_error().unwrap_or(libc::EIO)),
+        }
+    }
+}
+
+/// Read with EINTR retry; other errors carry their errno out.
+fn retry_eintr_read(r: &mut impl std::io::Read, buf: &mut [u8]) -> Result<usize, i32> {
+    loop {
+        match r.read(buf) {
+            Ok(n) => return Ok(n),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.raw_os_error().unwrap_or(libc::EIO)),
+        }
+    }
+}
+
+/// In-band error sentinel for the fd-IO helpers whose callers (the
+/// `poly_basic_io_general` dispatcher) hold the `ctx` needed to raise:
+/// `TAGGED(-(errno + 1))` — impossible as a genuine byte count (those
+/// are always >= 0), decoded by [`io_sentinel_errno`].
+fn io_error_sentinel(errno: i32) -> PolyWord {
+    PolyWord::tagged(-(isize::try_from(errno).unwrap_or(0) + 1))
+}
+
+/// Decode [`io_error_sentinel`]; `None` for genuine (non-negative) counts.
+fn io_sentinel_errno(w: PolyWord) -> Option<i32> {
+    if !w.is_tagged() {
+        return None;
+    }
+    let v = w.untag();
     #[allow(clippy::cast_possible_truncation)]
-    #[allow(clippy::cast_possible_wrap)]
-    PolyWord::tagged(n as isize)
+    if v < 0 { Some((-v - 1) as i32) } else { None }
 }
 
 /// Global state for open directories. Each entry is a Vec of
@@ -4112,15 +4178,13 @@ fn open_file_input(ctx: &mut RtsContext<'_>, name_arg: PolyWord) -> PolyWord {
             if RTS_TRACE.load(Ordering::Relaxed) {
                 eprintln!("  open_file_input: {name:?} → {e}");
             }
-            // SML's `TextIO.openIn` chains via `handle IO.Io _ =>
-            // ...` to try alternate filenames. We need to actually
-            // raise an exception for that fallback to fire. The
-            // minimal exception packet is a TAGGED int that won't
-            // match `IO.Io` precisely but propagates as an
-            // unhandled exception until SOMETHING catches it (the
-            // handle is the outermost ` handle _ =>`).
-            ctx.raised_exception = Some(make_simple_exception(ctx, "Cannot open"));
-            PolyWord::tagged(0)
+            // Upstream basicio.cpp:242: raise_syscall("Cannot open", errno).
+            // A REAL SysErr (ex_id = TAGGED(2), errno in the payload) so the
+            // basis wraps it into `IO.Io {cause = SysErr ...}` and both the
+            // openIn alternate-filename fallback (`handle IO.Io _`) and
+            // `OS.errorMsg` on the cause work. (This used to be a
+            // fresh-identity packet only a wildcard handler could match.)
+            raise_syscall(ctx, "Cannot open", e.raw_os_error().unwrap_or(libc::EINVAL))
         }
     }
 }
@@ -4218,6 +4282,265 @@ fn fail_unimpl(ctx: &mut RtsContext<'_>, what: &str) -> PolyWord {
     PolyWord::tagged(0)
 }
 
+/// strerror text for an errno — upstream `errorMsg`
+/// (`run_time.cpp:133-153`, the Unix branch: `strerror(err)`).
+fn strerror_string(errno: i32) -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: buf is a valid writable buffer of buf.len() bytes; XSI
+    // strerror_r writes a NUL-terminated message into it on success.
+    let r = unsafe { libc::strerror_r(errno, buf.as_mut_ptr().cast(), buf.len()) };
+    if r == 0 {
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..len]).into_owned()
+    } else {
+        format!("Unknown error {errno}")
+    }
+}
+
+/// Raise `SysErr` exactly as upstream `raise_syscall`
+/// (`run_time.cpp:238-262` `raiseSycallWithLocation`):
+/// - `errno != 0` → `SysErr(strerror(errno), SOME errno)` — the label
+///   `msg` is DISCARDED (upstream generates the message from the errno)
+///   and the errno rides as a boxed SysWord (`Make_sysword` — a 1-word
+///   byte object), so `OS.errorMsg`/`errorName`/SysWord ops on the
+///   payload behave exactly as on upstream.
+/// - `errno == 0` → `SysErr(msg, NONE)`.
+fn raise_syscall(ctx: &mut RtsContext<'_>, msg: &str, errno: i32) -> PolyWord {
+    use crate::length_word::F_BYTE_OBJ;
+    let name = alloc_poly_string(ctx, b"SysErr");
+    let msg_s = if errno == 0 {
+        alloc_poly_string(ctx, msg.as_bytes())
+    } else {
+        alloc_poly_string(ctx, strerror_string(errno).as_bytes())
+    };
+    let Some(space) = ctx.alloc_space.as_mut() else {
+        return PolyWord::tagged(0);
+    };
+    let opt_w = if errno == 0 {
+        PolyWord::tagged(0) // NONE
+    } else {
+        let sysword = space.alloc_or_exit(1);
+        // SAFETY: just allocated 1 word (the SysWord byte box).
+        let sysword_w = unsafe {
+            crate::space::set_length_word(sysword, 1, F_BYTE_OBJ);
+            #[allow(clippy::cast_sign_loss)]
+            sysword.write(PolyWord::from_bits(errno as usize));
+            PolyWord::from_ptr(sysword.cast_const())
+        };
+        let some_cell = space.alloc_or_exit(1);
+        // SAFETY: just allocated 1 word (the SOME box); earlier pointers
+        // stay valid (bump allocator only advances).
+        unsafe {
+            crate::space::set_length_word(some_cell, 1, 0);
+            some_cell.write(sysword_w);
+            PolyWord::from_ptr(some_cell.cast_const())
+        }
+    };
+    let pair = space.alloc_or_exit(2);
+    // SAFETY: just allocated 2 words.
+    let pair_w = unsafe {
+        crate::space::set_length_word(pair, 2, 0);
+        pair.write(msg_s);
+        pair.add(1).write(opt_w);
+        PolyWord::from_ptr(pair.cast_const())
+    };
+    let p = space.alloc_or_exit(4);
+    // SAFETY: just allocated 4 words.
+    unsafe {
+        crate::space::set_length_word(p, 4, 0);
+        p.write(PolyWord::tagged(2)); // ex_id = EXC_syserr
+        p.add(1).write(name);
+        p.add(2).write(pair_w); // ex_arg = (msg, SOME errno | NONE)
+        p.add(3).write(PolyWord::tagged(0)); // ex_location = NONE
+    }
+    ctx.raised_exception = Some(PolyWord::from_ptr(p.cast_const()));
+    PolyWord::tagged(0)
+}
+
+/// Raise the pervasive `Size` exception (`EXC_size` = 4, sys.h) —
+/// upstream `raise_exception0(taskData, EXC_size)`.
+fn raise_size(ctx: &mut RtsContext<'_>) -> PolyWord {
+    let pkt = make_pervasive_exn(ctx, 4, b"Size");
+    ctx.raised_exception = Some(pkt);
+    PolyWord::tagged(0)
+}
+
+/// Read an ML int (tagged or boxed arbitrary-precision) as i64 —
+/// upstream `get_C_long`.
+fn ml_int_as_i64(spaces: Option<&RtsSafeSpaces>, w: PolyWord) -> Option<i64> {
+    let n = poly_word_to_bigint(spaces, w)?;
+    num_traits::ToPrimitive::to_i64(&n)
+}
+
+/// `OS.Process.system` — REAL. Port of `process_env.cpp:522-640`
+/// (`PolyProcessEnvSystem`): fork/exec `/bin/sh -c cmd`, wait, and
+/// return the RAW waitpid status word as an ML int
+/// (`Make_fixed_precision(res)` — so `exit 1` yields 256, which the
+/// basis compares against `PolyProcessEnvSuccessValue` = 0). Failures
+/// raise `SysErr("Function system failed", SOME errno)` like upstream's
+/// `raise_syscall`. Blocks the calling ML thread for the child's
+/// duration (upstream pauses it too; under the default single-threaded
+/// runtime that is the whole interpreter — same as upstream's
+/// interpreter mode running one mutator).
+fn poly_process_env_system(ctx: &mut RtsContext<'_>, _tid: PolyWord, cmd: PolyWord) -> PolyWord {
+    let Some(cmd) = poly_string_to_rust(ctx.safe_spaces.as_ref(), cmd) else {
+        return raise_syscall(ctx, "Function system failed", libc::EINVAL);
+    };
+    match std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&cmd)
+        .status()
+    {
+        Ok(status) => {
+            #[cfg(unix)]
+            let raw = {
+                use std::os::unix::process::ExitStatusExt;
+                i128::from(status.into_raw())
+            };
+            #[cfg(not(unix))]
+            let raw = i128::from(status.code().unwrap_or(1));
+            int_to_poly_word(ctx, raw)
+        }
+        Err(e) => raise_syscall(
+            ctx,
+            "Function system failed",
+            e.raw_os_error().unwrap_or(libc::EINVAL),
+        ),
+    }
+}
+
+/// `OS.errorMsg` — REAL strerror. Port of `process_env.cpp`
+/// (`PolyProcessEnvErrorMessage`): map an errno to its message text.
+fn poly_process_env_error_message(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    err: PolyWord,
+) -> PolyWord {
+    let Some(e) = ml_int_as_i64(ctx.safe_spaces.as_ref(), err) else {
+        return alloc_empty_string(ctx);
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let msg = strerror_string(e as i32);
+    alloc_poly_string(ctx, msg.as_bytes())
+}
+
+/// UTC-vs-local offset in seconds at time `t` — REAL localtime. Port of
+/// `timing.cpp:283-352` (`PolyTimingLocalOffset`): wall-clock seconds of
+/// `gmtime(t)` minus `localtime(t)`, with the at-most-one-day `tm_yday`
+/// correction; conversion failure raises `Size` like upstream's
+/// `raise_exception0(EXC_size)`. (Was a tagged(0) "we are UTC" stub —
+/// and registered at the WRONG ARITY: Arity1 for an rtsCallFull1 site,
+/// a latent stack-corruption on any call.)
+fn poly_timing_local_offset(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg: PolyWord) -> PolyWord {
+    let Some(t) = ml_int_as_i64(ctx.safe_spaces.as_ref(), arg) else {
+        return raise_size(ctx);
+    };
+    let t = t as libc::time_t;
+    // SAFETY: valid out-pointers; the _r variants are thread-safe.
+    let (gm, loc) = unsafe {
+        let mut gm: libc::tm = std::mem::zeroed();
+        let mut loc: libc::tm = std::mem::zeroed();
+        if libc::gmtime_r(&t, &raw mut gm).is_null()
+            || libc::localtime_r(&t, &raw mut loc).is_null()
+        {
+            return raise_size(ctx);
+        }
+        (gm, loc)
+    };
+    let mut off = (gm.tm_hour * 60 + gm.tm_min) * 60 + gm.tm_sec;
+    off -= (loc.tm_hour * 60 + loc.tm_min) * 60 + loc.tm_sec;
+    if loc.tm_yday != gm.tm_yday {
+        // Different day — at most one day of correction (timing.cpp:334-339).
+        if gm.tm_yday == loc.tm_yday + 1 || (gm.tm_yday == 0 && loc.tm_yday >= 364) {
+            off += 24 * 60 * 60;
+        } else {
+            off -= 24 * 60 * 60;
+        }
+    }
+    int_to_poly_word(ctx, i128::from(off))
+}
+
+/// Daylight-saving flag at time `t` — REAL localtime. Port of
+/// `timing.cpp:354-397` (`PolyTimingSummerApplies`): `tm_isdst`
+/// (>0 DST, 0 not, <0 unknown). (Was a tagged(0) stub, wrong-arity.)
+fn poly_timing_summer_applies(ctx: &mut RtsContext<'_>, _tid: PolyWord, arg: PolyWord) -> PolyWord {
+    let Some(t) = ml_int_as_i64(ctx.safe_spaces.as_ref(), arg) else {
+        return raise_size(ctx);
+    };
+    let t = t as libc::time_t;
+    let mut loc: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: valid out-pointer; localtime_r is thread-safe.
+    if unsafe { libc::localtime_r(&t, &raw mut loc).is_null() } {
+        return raise_size(ctx);
+    }
+    int_to_poly_word(ctx, i128::from(loc.tm_isdst))
+}
+
+/// `Date.fmt` — REAL strftime. Port of `timing.cpp:399-460`
+/// (`PolyTimingConvertDateStuct` — sic, upstream's spelling): arg is the
+/// 10-tuple (format, year, month, mday, hour, min, sec, wday, yday,
+/// isdst); strftime under the current LC_TIME locale; empty/failed
+/// formatting raises `Size` like upstream.
+fn poly_timing_convert_date_struct(
+    ctx: &mut RtsContext<'_>,
+    _tid: PolyWord,
+    arg: PolyWord,
+) -> PolyWord {
+    let Some(obj) = safe_rts_arg_obj(ctx.safe_spaces.as_ref(), arg) else {
+        return raise_size(ctx);
+    };
+    // Untrusted: the tuple must genuinely hold 10 fields (trusted:
+    // n_words == usize::MAX, so this is byte-identical no-op).
+    if obj.n_words < 10 {
+        return raise_size(ctx);
+    }
+    // SAFETY: obj is space-validated (untrusted) / is_data_ptr (trusted)
+    // and holds >= 10 words per the gate above.
+    let field = |i: usize| unsafe { *obj.ptr.add(i) };
+    let Some(format) = poly_string_to_rust(ctx.safe_spaces.as_ref(), field(0)) else {
+        return raise_size(ctx);
+    };
+    let Ok(cfmt) = std::ffi::CString::new(format) else {
+        return raise_size(ctx);
+    };
+    let mut ints = [0i64; 9];
+    for (i, slot) in ints.iter_mut().enumerate() {
+        let Some(v) = ml_int_as_i64(ctx.safe_spaces.as_ref(), field(i + 1)) else {
+            return raise_size(ctx);
+        };
+        *slot = v;
+    }
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        tm.tm_year = (ints[0] - 1900) as i32; // field 1 is the full year
+        tm.tm_mon = ints[1] as i32;
+        tm.tm_mday = ints[2] as i32;
+        tm.tm_hour = ints[3] as i32;
+        tm.tm_min = ints[4] as i32;
+        tm.tm_sec = ints[5] as i32;
+        tm.tm_wday = ints[6] as i32;
+        tm.tm_yday = ints[7] as i32;
+        tm.tm_isdst = ints[8] as i32;
+    }
+    let mut buff = [0u8; 2048];
+    // SAFETY: setlocale with a valid C string (upstream does the same each
+    // call); strftime writes at most buff.len() bytes into the valid buffer.
+    let n = unsafe {
+        libc::setlocale(libc::LC_TIME, c"".as_ptr());
+        libc::strftime(
+            buff.as_mut_ptr().cast(),
+            buff.len(),
+            cfmt.as_ptr(),
+            &raw const tm,
+        )
+    };
+    if n == 0 {
+        return raise_size(ctx); // upstream: strftime <= 0 → EXC_size
+    }
+    alloc_poly_string(ctx, &buff[..n])
+}
+
 /// Build a nullary pervasive-exception packet: a 4-word ordinary object
 /// `[ex_id, ex_name, arg=(), ex_location=NoLocation]` where `ex_id =
 /// TAGGED(ex_id)` is the handler match key (sys.h) and `name` is for
@@ -4307,14 +4630,17 @@ fn open_file_output(ctx: &mut RtsContext<'_>, name_arg: PolyWord, append: bool) 
     } else {
         opts.truncate(true);
     }
-    opts.open(&name).map_or_else(
-        |_| PolyWord::tagged(0),
-        |f| {
+    match opts.open(&name) {
+        Ok(f) => {
             let fd = f.into_raw_fd();
             #[allow(clippy::cast_sign_loss)]
             wrap_file_descriptor(ctx, fd as u32)
-        },
-    )
+        }
+        // Upstream basicio.cpp:242: raise_syscall("Cannot open", errno).
+        // (This used to return a silent tagged(0) "stream", making every
+        // downstream write a no-op on an unopenable file.)
+        Err(e) => raise_syscall(ctx, "Cannot open", e.raw_os_error().unwrap_or(libc::EINVAL)),
+    }
 }
 
 /// IO subcode 7: close the file. Skips stdio (fds 0/1/2). After
@@ -4352,7 +4678,6 @@ fn read_array_from_stream(
     strm: PolyWord,
     arg: PolyWord,
 ) -> PolyWord {
-    use std::io::Read;
     // UNTRUSTED MODE (task #96/#132): `strm` is a single-word wrapped-fd read
     // (safe_rts_arg_ptr); `arg` is a 3-tuple read at p[0..3], so gate it on
     // header-fit and bound the three word reads on its validated length.
@@ -4416,20 +4741,27 @@ fn read_array_from_stream(
     let n = if fd == 0 {
         let syn = read_synthetic_stdin(slice);
         if syn > 0 {
-            syn
+            Ok(syn)
         } else {
-            std::io::stdin().read(slice).unwrap_or(0)
+            retry_eintr_read(&mut std::io::stdin(), slice)
         }
     } else {
         // For non-stdio fds, reconstruct a File to read, then
         // immediately forget it so we don't close the fd.
         use std::os::fd::{FromRawFd, IntoRawFd};
         let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
-        let r = f.read(slice).unwrap_or(0);
+        let r = retry_eintr_read(&mut f, slice);
         let _kept = f.into_raw_fd();
         r
     };
-    PolyWord::tagged(n as isize)
+    match n {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(n) => PolyWord::tagged(n as isize),
+        // A real read error is NOT end-of-stream (the old conflation made
+        // errors read as silent EOF). Sentinel → the dispatcher raises
+        // SysErr("Error while reading", errno) — upstream basicio.cpp:308.
+        Err(errno) => io_error_sentinel(errno),
+    }
 }
 
 /// IO subcode 10/26: read a chunk of bytes from a stream into a
@@ -4440,7 +4772,6 @@ fn read_array_from_stream(
 /// empty string (= EOF) for now — extending to real file fds will
 /// require a real file-open path (subcodes 3/4) first.
 fn read_string_from_stream(ctx: &mut RtsContext<'_>, strm: PolyWord, arg: PolyWord) -> PolyWord {
-    use std::io::Read;
     // UNTRUSTED MODE: gate the strm deref on space-membership.
     let Some(strm_p) = safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), strm) else {
         return alloc_empty_string(ctx);
@@ -4465,22 +4796,25 @@ fn read_string_from_stream(ctx: &mut RtsContext<'_>, strm: PolyWord, arg: PolyWo
     let n = if fd == 0 {
         let syn = read_synthetic_stdin(&mut buf);
         if syn > 0 {
-            syn
+            Ok(syn)
         } else {
-            std::io::stdin().read(&mut buf).unwrap_or(0)
+            retry_eintr_read(&mut std::io::stdin(), &mut buf)
         }
     } else {
         // Borrow the fd without taking ownership (= no close).
         use std::os::fd::{FromRawFd, IntoRawFd};
         let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
-        let r = f.read(&mut buf).unwrap_or(0);
+        let r = retry_eintr_read(&mut f, &mut buf);
         let _kept = f.into_raw_fd();
         r
     };
-    if n == 0 {
-        return alloc_empty_string(ctx);
+    match n {
+        Ok(0) => alloc_empty_string(ctx),
+        Ok(n) => alloc_poly_string(ctx, &buf[..n]),
+        // Real error ≠ EOF (upstream basicio.cpp:346). This fn holds ctx,
+        // so raise directly.
+        Err(errno) => raise_syscall(ctx, "Error while reading", errno),
     }
-    alloc_poly_string(ctx, &buf[..n])
 }
 
 /// Allocate a `PolyStringObject` (length-prefix word + chars +

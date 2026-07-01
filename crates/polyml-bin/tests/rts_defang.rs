@@ -68,22 +68,75 @@ fn repl(sml: &str) -> Option<String> {
 }
 
 #[test]
-fn process_system_raises_catchable_syserr() {
-    let Some(out) = repl(
-        r#"(OS.Process.system "echo LEAKED_EXECUTION") handle OS.SysErr (m, _) => (print ("CAUGHT: " ^ m ^ "\n"); OS.Process.failure);"#,
-    ) else {
+fn process_system_really_runs() {
+    // Wave 1a upgraded OS.Process.system from de-fanged-raise to REAL
+    // (fork/exec sh -c + raw wait status). The fence flips accordingly:
+    // the command must actually execute and the status must map honestly.
+    let Some(out) = repl(concat!(
+        r#"val st = OS.Process.system "echo REALLY_RAN"; print ("ok=" ^ Bool.toString (OS.Process.isSuccess st) ^ "\n");"#,
+        "\n",
+        r#"print ("fail3=" ^ Bool.toString (OS.Process.isSuccess (OS.Process.system "exit 3")) ^ "\n");"#,
+        "\n",
+    )) else {
         eprintln!("SKIP: vendor/polyml/polyexport missing (build it: README example #2)");
         return;
     };
     assert!(
-        out.contains("CAUGHT: OS.Process.system: not implemented"),
-        "OS.Process.system did not raise a catchable SysErr:\n{out}"
+        out.contains("REALLY_RAN"),
+        "OS.Process.system did not actually execute the command:\n{out}"
     );
-    // The command must NOT have actually run (it never did; the old stub
-    // only pretended) — and must NOT report silent success.
     assert!(
-        !out.contains("LEAKED_EXECUTION"),
-        "OS.Process.system executed a real command:\n{out}"
+        out.contains("ok=true"),
+        "a successful command did not map to isSuccess=true:\n{out}"
+    );
+    assert!(
+        out.contains("fail3=false"),
+        "exit 3 mapped to success (the OLD silent-lie behaviour!):\n{out}"
+    );
+}
+
+#[test]
+fn date_local_time_is_real() {
+    // Wave 1a: LocalOffset/SummerApplies/ConvertDateStuct (strftime) are
+    // real (and at the CORRECT arity — the old stubs were Arity1 on
+    // rtsCallFull1 sites). Pin the deterministic half: strftime of a
+    // fixed UTC date; and that fromTimeLocal survives a round trip.
+    let Some(out) = repl(concat!(
+        r#"print (Date.fmt "%Y-%m-%d %H:%M:%S" (Date.fromTimeUniv (Time.fromReal 86400.0)) ^ "\n");"#,
+        "\n",
+        r#"print (Bool.toString (Date.year (Date.fromTimeLocal (Time.now ())) >= 2026) ^ "\n");"#,
+        "\n",
+    )) else {
+        eprintln!("SKIP: vendor/polyml/polyexport missing");
+        return;
+    };
+    assert!(
+        out.contains("1970-01-02 00:00:00"),
+        "strftime of epoch+1day is wrong:\n{out}"
+    );
+    assert!(
+        out.contains("true"),
+        "Date.fromTimeLocal(now) gave a bogus year:\n{out}"
+    );
+}
+
+#[test]
+fn io_open_error_carries_errno_and_message() {
+    // Tier 3b: a failed open raises a REAL SysErr carrying the errno, which
+    // the basis wraps into IO.Io. Upstream's raise_syscall DISCARDS the C
+    // label when errno != 0 and uses strerror(errno) as the message (we
+    // match byte-for-byte — see tools/diff-corpus/os_process_date.sml), so
+    // both the message AND OS.errorMsg decode to the strerror text.
+    let Some(out) = repl(concat!(
+        r#"(TextIO.openIn "/nonexistent_polyml_probe") handle IO.Io {cause = OS.SysErr (m, SOME e), ...} => (print ("IOIO: " ^ m ^ " / " ^ OS.errorMsg e ^ "\n"); TextIO.openIn "/dev/null");"#,
+        "\n",
+    )) else {
+        eprintln!("SKIP: vendor/polyml/polyexport missing");
+        return;
+    };
+    assert!(
+        out.contains("IOIO: No such file or directory / No such file or directory"),
+        "open failure did not raise the errno-carrying SysErr chain:\n{out}"
     );
 }
 
