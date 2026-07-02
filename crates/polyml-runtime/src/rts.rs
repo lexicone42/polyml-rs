@@ -1579,9 +1579,16 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyInterpretedGetAbiList",
         RtsFn::Arity1(|_, _| poly_interpreted_get_abi_list_inner()),
     );
+    // PolyThreadMaxStackSize — rtsCallFull1 (Thread.sml:430) → threadId +
+    // newSize = Arity2. (In-place arity fix, re-derived from the SML site:
+    // was Arity1, which arity-mismatch-halted any
+    // `setAttributes [MaximumMLStack ...]` in every mode.) The
+    // single-threaded stub stores nothing (no enforced limit); the real
+    // attribute store + immediate over-limit check (upstream
+    // processes.cpp:700-731) is in `try_thread_rts`.
     t.register(
         "PolyThreadMaxStackSize",
-        RtsFn::Arity1(poly_thread_max_stack_size),
+        RtsFn::Arity2(poly_thread_max_stack_size),
     );
     t.register(
         "PolyGetCommandlineArguments",
@@ -1682,13 +1689,34 @@ fn register_builtins(t: &mut RtsTable) {
     );
     // Single-threaded mode: no other thread exists to wake / interrupt /
     // broadcast to, so these are no-ops.
-    t.register("PolyThreadCondVarWake", RtsFn::Arity2(noop2));
+    //
+    // PolyThreadCondVarWake(thread) — rtsCallFast1 (Thread.sml:679) → 1
+    // arg, NO threadId → Arity1. (In-place arity fix, re-derived from the
+    // SML site: was Arity2, which arity-mismatch-HALTED any
+    // ConditionVar.signal/broadcast before the real-threads interceptor
+    // could even see the call.) Single-threaded stub: report the target
+    // woken (true) so the SML `wakeOne` prunes its wait list; the real
+    // per-target semantics (upstream WakeThread) live in `try_thread_rts`.
+    t.register(
+        "PolyThreadCondVarWake",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(1)),
+    );
     // PolyThreadForkThread takes (threadId, function, attrs, stack) — 4 args.
     t.register(
         "PolyThreadForkThread",
         RtsFn::Arity4(poly_thread_fork_thread),
     );
-    t.register("PolyThreadInterruptThread", RtsFn::Arity2(noop2));
+    // PolyThreadInterruptThread(thread) — rtsCallFast1 (Thread.sml:493) →
+    // Arity1. (In-place arity fix: was Arity2 — the same latent halt as
+    // CondVarWake.) Single-threaded stub: no other thread exists to
+    // interrupt, so report "thread does not exist" (false → the SML
+    // wrapper raises the catchable `Thread` exception), matching the
+    // KillThread stub. Real targeting (upstream MakeRequest) is in
+    // `try_thread_rts`.
+    t.register(
+        "PolyThreadInterruptThread",
+        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
+    );
     t.register("PolyThreadBroadcastInterrupt", RtsFn::Arity1(noop1));
 
     // Compiler / code-object helpers
@@ -3193,11 +3221,13 @@ fn poly_interpreted_get_abi_list_inner() -> PolyWord {
     PolyWord::from_bits(addr)
 }
 
-/// Returns the maximum stack size for the thread. Pass through (no-op
-/// stub returning the requested value).
+/// `PolyThreadMaxStackSize(threadId, newSize)` — single-threaded no-op
+/// stub (returns unit; the SML wrapper is `int -> unit`, Thread.sml:430).
+/// The real attribute store + immediate over-limit check is intercepted
+/// in `try_thread_rts` under `POLY_REAL_THREADS=1`.
 #[allow(clippy::needless_pass_by_value)]
-fn poly_thread_max_stack_size(_: &mut RtsContext<'_>, arg: PolyWord) -> PolyWord {
-    arg
+fn poly_thread_max_stack_size(_: &mut RtsContext<'_>, _tid: PolyWord, _size: PolyWord) -> PolyWord {
+    PolyWord::tagged(0)
 }
 
 /// `PolyGetCommandlineArguments(threadId)` — returns a list of cmd-line

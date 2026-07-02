@@ -318,6 +318,28 @@ fn arbint_trace_on() -> bool {
 /// increment 3d-3f); when disabled (the default) they fall through to the
 /// prior single-thread stubs, keeping every existing workload — the
 /// bootstrap, the self-bootstrapped REPL, HOL4, Isabelle — byte-identical.
+/// Thread-attribute flag bits, stored (tagged) in the ML thread object's
+/// FLAGS word (word 1, `threadIdFlags`). The encoding is shared between
+/// upstream C (`processes.h:154-160`) and the SML basis, which reads and
+/// writes the word directly (`Thread.sml:309-344`, `setIstateBits`):
+/// bit 0 = accept broadcast interrupts; bits 1-2 = the interrupt state.
+mod pflag {
+    /// If set, accepts a broadcast interrupt (`EnableBroadcastInterrupt`).
+    pub const BROADCAST: usize = 1;
+    /// Ignore interrupts completely (`InterruptDefer`).
+    pub const IGNORE: usize = 0;
+    /// Handle synchronously (`InterruptSynch`) — delivered only at
+    /// interruption points (`testInterrupt`, the condvar waits).
+    pub const SYNCH: usize = 2;
+    /// Handle asynchronously (`InterruptAsynch`) — delivered at safepoints.
+    pub const ASYNCH: usize = 4;
+    /// First handle asynchronously then switch to synch
+    /// (`InterruptAsynchOnce`).
+    pub const ASYNCH_ONCE: usize = 6;
+    /// Mask of the interrupt-state bits.
+    pub const INTMASK: usize = 6;
+}
+
 pub(crate) fn real_threads_enabled() -> bool {
     use std::sync::atomic::{AtomicU8, Ordering};
     static F: AtomicU8 = AtomicU8::new(0);
@@ -730,6 +752,14 @@ struct ThreadRoots {
     thread_obj_present: bool,
     /// Recent-call ring buffer to clear post-GC (not worth forwarding).
     recent_call_targets_dst: *mut [usize; 16],
+    /// The owning thread's scheduler handle, so `forward` can refresh the
+    /// handle's `thread_obj_addr` MIRROR (the handle→ML-thread-object
+    /// direction, upstream `TaskData::threadObject`) with the FORWARDED
+    /// address on every collection. An `Arc` clone (not a raw pointer) so
+    /// the handle provably outlives the capture. The store is an atomic
+    /// usize write — race-free even for a QUIESCED capture whose owning
+    /// thread runs lock-free driver code (it never reads the mirror there).
+    mirror_handle: Arc<crate::sched::ThreadHandle>,
     /// True when this capture was taken from a QUIESCED interpreter (a
     /// thread that left `run_until` with a TERMINAL result and emptied its
     /// transient roots before publishing — see `quiesce_roots`). A quiesced
@@ -820,6 +850,7 @@ impl ThreadRoots {
             bootstrap_tail_dst: std::ptr::addr_of_mut!(interp.bootstrap_tail_call),
             thread_obj_present: interp.thread_object.is_some(),
             recent_call_targets_dst: std::ptr::addr_of_mut!(interp.recent_call_targets),
+            mirror_handle: Arc::clone(&interp.handle),
             quiesced,
         }
     }
@@ -858,6 +889,21 @@ impl ThreadRoots {
         }
         // 4b. Cached Thread.self() object.
         unsafe { c.forward(std::ptr::addr_of_mut!(self.thread_obj_slot)) };
+        // 4b'. Refresh the handle's thread-object address MIRROR with the
+        // forwarded address (or 0 when the object was never materialized).
+        // The mirror is a plain usize (never traced by the GC) that is
+        // re-derived here on EVERY collection, so it can never dangle
+        // across one; readers (`PolyThreadBroadcastInterrupt`) only deref
+        // it as the running mutator under the giant lock, mutually
+        // exclusive with any collection.
+        self.mirror_handle.thread_obj_addr.store(
+            if self.thread_obj_present {
+                self.thread_obj_slot.0
+            } else {
+                0
+            },
+            std::sync::atomic::Ordering::SeqCst,
+        );
         // 4c. Bootstrap tail-call slot (PolyEndBootstrapMode arg). PER-THREAD.
         unsafe { c.forward(std::ptr::addr_of_mut!(self.bootstrap_tail_slot)) };
     }
@@ -1076,6 +1122,12 @@ impl ThreadRoots {
 struct ForkRoots {
     function: PolyWord,
     thread_obj: PolyWord,
+    /// The child's scheduler handle, so `forward_thunk` can refresh its
+    /// `thread_obj_addr` MIRROR with the forwarded thread-object address
+    /// (a GC can move the object between fork and the child's first
+    /// acquire; a targeted interrupt/broadcast in that window must not
+    /// read a stale address).
+    handle: Arc<crate::sched::ThreadHandle>,
 }
 
 impl ForkRoots {
@@ -1092,6 +1144,13 @@ impl ForkRoots {
         unsafe {
             (*c).forward(std::ptr::addr_of_mut!((*roots).function));
             (*c).forward(std::ptr::addr_of_mut!((*roots).thread_obj));
+            // Refresh the child handle's thread-object address mirror (see
+            // the field doc): atomic usize store, re-derived every GC.
+            // (Explicit reference per `dangerous_implicit_autorefs`.)
+            let handle: &Arc<crate::sched::ThreadHandle> = &(*roots).handle;
+            handle
+                .thread_obj_addr
+                .store((*roots).thread_obj.0, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -1862,18 +1921,230 @@ impl Interpreter {
         }
     }
 
-    /// Check + act on this thread's pending interrupt/kill request (3f),
-    /// set by `Thread.interrupt`/`Thread.kill` via the handle. INTERRUPT
-    /// raises the SML `Interrupt` exception; KILL ends the run by
-    /// returning a sentinel.
+    /// Check + act on this thread's pending interrupt/kill request (3f) at
+    /// a SAFEPOINT, honoring the thread's `InterruptState` attribute —
+    /// i.e. exactly upstream's asynchronous-request check
+    /// (`Processes::ProcessAsynchRequests`, processes.cpp:1622-1683,
+    /// reached via the `InterruptCode`-poisoned stack-limit trap,
+    /// interpreter.cpp:149). KILL ends the run by returning a sentinel
+    /// (regardless of the flags word, like upstream's `KillException`);
+    /// INTERRUPT is delivered only when the state is Asynch/AsynchOnce,
+    /// and left PENDING (not consumed) under Defer/Synch.
     fn check_thread_requests(&mut self) -> Result<StepResult, InterpError> {
+        Ok(self
+            .process_asynch_requests()?
+            .unwrap_or(StepResult::Continue))
+    }
+
+    /// Read word `idx` of an ML thread object, defensively (and validated
+    /// in untrusted mode, mirroring `reset_mutex_word`'s posture — the
+    /// object word can be image-controlled under the experimental
+    /// real-threads + `--untrusted` combo). `None` = not a plausible
+    /// thread object.
+    fn thread_obj_read(&self, obj: PolyWord, idx: usize) -> Option<PolyWord> {
+        if !obj.is_data_ptr() || obj.0 & (std::mem::size_of::<usize>() - 1) != 0 {
+            return None;
+        }
+        if self.untrusted {
+            let vo = self.validate_obj(obj, "THREAD_OBJ").ok()?;
+            vo.check_word_index(idx).ok()?;
+        }
+        // SAFETY: data-pointer + aligned; trusted (runtime/compiler-built
+        // thread object, >= 5 words on both the 8-word stub and the 9-word
+        // fork layout) OR untrusted-validated in-space with idx in bounds.
+        Some(unsafe { *obj.as_ptr::<PolyWord>().add(idx) })
+    }
+
+    /// Write word `idx` of an ML thread object (same guards as
+    /// [`Self::thread_obj_read`]). The caller must be the running mutator
+    /// (giant lock held) — thread-object words are ML-mutable shared heap
+    /// state, and the lock is their mutual exclusion.
+    fn thread_obj_write(&self, obj: PolyWord, idx: usize, w: PolyWord) {
+        if !obj.is_data_ptr() || obj.0 & (std::mem::size_of::<usize>() - 1) != 0 {
+            return;
+        }
+        if self.untrusted {
+            let Ok(vo) = self.validate_obj(obj, "THREAD_OBJ") else {
+                return;
+            };
+            if vo.check_word_index(idx).is_err() {
+                return;
+            }
+        }
+        // SAFETY: as in `thread_obj_read`, plus the giant-lock discipline
+        // makes the mutable write race-free.
+        unsafe { obj.as_ptr::<PolyWord>().cast_mut().add(idx).write(w) };
+    }
+
+    /// The untagged FLAGS word of an ML thread object (word 1,
+    /// `threadIdFlags`), or `None` if unreadable.
+    fn thread_obj_flags(&self, obj: PolyWord) -> Option<usize> {
+        let w = self.thread_obj_read(obj, 1)?;
+        #[allow(clippy::cast_sign_loss)]
+        w.is_tagged().then(|| w.untag() as usize)
+    }
+
+    /// THIS thread's current attribute flags, read FRESH from its ML
+    /// thread object each time (the SML `setAttributes` writes the word
+    /// directly via `RunCall.storeWord`, so no cached copy can be
+    /// trusted). A thread with no materialized object (only the root can
+    /// be in that state — forked children get theirs at fork) defaults to
+    /// upstream's root-thread attributes, `PFLAG_BROADCAST|PFLAG_ASYNCH`
+    /// (processes.cpp:1313).
+    fn own_thread_flags(&self) -> usize {
+        self.thread_object
+            .and_then(|t| self.thread_obj_flags(t))
+            .unwrap_or(pflag::BROADCAST | pflag::ASYNCH)
+    }
+
+    /// Overwrite THIS thread's flags word (the AsynchOnce → Synch
+    /// downgrade, `ProcessAsynchRequests` processes.cpp:1644-1650).
+    fn set_own_thread_flags(&self, flags: usize) {
+        if let Some(t) = self.thread_object {
+            #[allow(clippy::cast_possible_wrap)]
+            self.thread_obj_write(t, 1, PolyWord::tagged(flags as isize));
+        }
+    }
+
+    /// Clear THIS thread's ML-visible `requestCopy` word (word 3,
+    /// `threadIdIntRequest`) after consuming a request — upstream's
+    /// `threadObject->requestCopy = TAGGED(0)`.
+    fn clear_own_request_copy(&self) {
+        if let Some(t) = self.thread_object {
+            self.thread_obj_write(t, 3, PolyWord::tagged(0));
+        }
+    }
+
+    /// Map an ML thread OBJECT to its scheduler handle via the tagged
+    /// thread id stored in the object's word 0 — upstream's `threadRef`
+    /// C-identity slot ("Not used by ML", processes.h:84) read by
+    /// `TaskForIdentifier` (processes.cpp:257). A tagged id is GC-immune
+    /// (it moves with the object; an address would not survive a
+    /// collection). `None` = no such live thread (the id is 0/absent, or
+    /// the thread exited and left the registry — upstream zeroes the
+    /// `threadRef` cell on exit, processes.cpp:1398, with the same
+    /// observable result: `interrupt`/`kill` return false, `isActive`
+    /// false).
+    fn handle_for_thread_object(&self, obj: PolyWord) -> Option<Arc<crate::sched::ThreadHandle>> {
+        let id_w = self.thread_obj_read(obj, 0)?;
+        if !id_w.is_tagged() || id_w.untag() <= 0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let id = id_w.untag() as u64;
+        self.runtime
+            .registry_snapshot()
+            .into_iter()
+            .find(|h| h.thread_id == id)
+    }
+
+    /// Port of `Processes::MakeRequest` (processes.cpp:813-826): set the
+    /// target's request flag ("we don't override a request to kill by an
+    /// interrupt request" → `fetch_max`), mirror it into the ML-visible
+    /// `requestCopy` word so the SML `testInterrupt` fast-path sees it,
+    /// and wake the target if it is blocked (upstream
+    /// `p->threadLock.Signal()` + `InterruptCode()`; our blocked waits sit
+    /// on the block-event condvar, and the safepoint poll is the
+    /// `InterruptCode` analogue). Caller must be the running mutator.
+    fn make_thread_request(
+        &self,
+        target: &Arc<crate::sched::ThreadHandle>,
+        target_obj: PolyWord,
+        req: u8,
+    ) {
+        use std::sync::atomic::Ordering;
+        let prev = target.requests.fetch_max(req, Ordering::SeqCst);
+        if prev < req {
+            self.thread_obj_write(target_obj, 3, PolyWord::tagged(isize::from(req)));
+            self.runtime.notify_block_event();
+        }
+    }
+
+    /// Port of `Processes::ProcessAsynchRequests` (processes.cpp:1622-1683)
+    /// for THIS thread: deliver a pending KILL unconditionally; deliver a
+    /// pending INTERRUPT only when the current interrupt state is
+    /// Asynch/AsynchOnce (AsynchOnce downgrades the state to Synch before
+    /// delivery); leave it PENDING (do not consume!) under Defer/Synch.
+    /// Returns `Some(step)` when a request was delivered (the raise already
+    /// unwound the stack to the handler, or the KILL sentinel ends the
+    /// run) — the caller must NOT push an RTS result in that case — and
+    /// `None` when nothing was delivered.
+    fn process_asynch_requests(&mut self) -> Result<Option<StepResult>, InterpError> {
         use crate::sched::request;
         use std::sync::atomic::Ordering;
-        let req = self.handle.requests.swap(request::NONE, Ordering::SeqCst);
-        match req {
-            request::INTERRUPT => self.raise_interrupt(),
-            request::KILL => Ok(StepResult::Returned(PolyWord::tagged(0))),
-            _ => Ok(StepResult::Continue),
+        match self.handle.requests.load(Ordering::SeqCst) {
+            // kRequestKill → KillException, regardless of the flags word.
+            request::KILL => {
+                self.handle.requests.store(request::NONE, Ordering::SeqCst);
+                Ok(Some(StepResult::Returned(PolyWord::tagged(0))))
+            }
+            request::INTERRUPT => {
+                let flags = self.own_thread_flags();
+                let intbits = flags & pflag::INTMASK;
+                // Defer (PFLAG_IGNORE) / Synch: not deliverable here —
+                // leave the request pending (do NOT consume it).
+                if intbits == pflag::ASYNCH || intbits == pflag::ASYNCH_ONCE {
+                    if intbits == pflag::ASYNCH_ONCE {
+                        // "Set this so from now on it's synchronous."
+                        self.set_own_thread_flags((flags & !pflag::INTMASK) | pflag::SYNCH);
+                    }
+                    // Consume the request — CAS so a racing escalation to
+                    // KILL (upstream holds schedLock here; we don't) is
+                    // never lost: if it fires between the load above and
+                    // here, skip delivery and let the next poll see KILL.
+                    if self
+                        .handle
+                        .requests
+                        .compare_exchange(
+                            request::INTERRUPT,
+                            request::NONE,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        self.clear_own_request_copy();
+                        return self.raise_interrupt().map(Some);
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Port of `Processes::TestSynchronousRequests` (processes.cpp:1688-
+    /// 1722) for THIS thread: deliver a pending KILL unconditionally;
+    /// deliver a pending INTERRUPT only when the state is exactly Synch.
+    /// Same `Some`/`None` contract as [`Self::process_asynch_requests`].
+    fn test_synchronous_requests(&mut self) -> Result<Option<StepResult>, InterpError> {
+        use crate::sched::request;
+        use std::sync::atomic::Ordering;
+        match self.handle.requests.load(Ordering::SeqCst) {
+            request::KILL => {
+                self.handle.requests.store(request::NONE, Ordering::SeqCst);
+                Ok(Some(StepResult::Returned(PolyWord::tagged(0))))
+            }
+            request::INTERRUPT => {
+                let intbits = self.own_thread_flags() & pflag::INTMASK;
+                if intbits == pflag::SYNCH
+                    && self
+                        .handle
+                        .requests
+                        .compare_exchange(
+                            request::INTERRUPT,
+                            request::NONE,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                {
+                    self.clear_own_request_copy();
+                    return self.raise_interrupt().map(Some);
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
         }
     }
 
@@ -1881,6 +2152,7 @@ impl Interpreter {
     /// Returns `Ok(Some(result))` if handled here, `Ok(None)` to fall
     /// through to the generic single-thread stub. `args` excludes the
     /// stub; for `rtsCallFullN` calls `args[0]` is the threadId.
+    #[allow(clippy::too_many_lines)] // one arm per upstream RTS entry, each cited
     fn try_thread_rts(
         &mut self,
         name: &str,
@@ -1905,10 +2177,22 @@ impl Interpreter {
         match name {
             // ForkThread(threadId, function, attrs, stack): actually spawn
             // an OS thread running `function` (a `unit -> unit` closure)
-            // over a fresh ThreadContext sharing this Arc<Runtime>.
+            // over a fresh ThreadContext sharing this Arc<Runtime>. The
+            // ML-passed `attrs` word and `stack` size are stored into the
+            // child's thread object (flags word 1, mlStackSize word 4),
+            // exactly as upstream ForkThread (processes.cpp:1515-1517).
             "PolyThreadForkThread" => {
                 let function = args.get(1).copied().unwrap_or(PolyWord::tagged(0));
-                let thread_obj = self.fork_thread(function)?;
+                // Defensive defaults mirror the SML fork wrapper's own
+                // (Thread.sml:471-472): no broadcast + InterruptSynch,
+                // unlimited stack.
+                #[allow(clippy::cast_possible_wrap)]
+                let attrs = args
+                    .get(2)
+                    .copied()
+                    .unwrap_or(PolyWord::tagged(pflag::SYNCH as isize));
+                let stack = args.get(3).copied().unwrap_or(PolyWord::tagged(0));
+                let thread_obj = self.fork_thread(function, attrs, stack)?;
                 Ok(Some(self.push_continue(thread_obj)?))
             }
             // MutexBlock(threadId, mutex): the SML lock() couldn't acquire
@@ -1926,7 +2210,30 @@ impl Interpreter {
                 if self.runtime.registry_len() <= 1 {
                     return Ok(None);
                 }
-                self.block_on_event();
+                // Upstream MutexBlock (processes.cpp:397-438): "We mustn't
+                // block if we have been interrupted, and are processing
+                // interrupts asynchronously, or we've been killed." (A
+                // pending SYNCH/Deferred interrupt does NOT skip the wait.)
+                let req = self
+                    .handle
+                    .requests
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let intbits = self.own_thread_flags() & pflag::INTMASK;
+                let skip_wait = req == crate::sched::request::KILL
+                    || (req == crate::sched::request::INTERRUPT
+                        && (intbits == pflag::ASYNCH || intbits == pflag::ASYNCH_ONCE));
+                if !skip_wait {
+                    self.block_on_event();
+                }
+                // Upstream delivers the pending asynch interrupt/kill right
+                // after MutexBlock returns, via the InterruptCode-poisoned
+                // stack-limit trap → HandleStackOverflow →
+                // ProcessAsynchRequests (interpreter.cpp:141-156). Deliver
+                // it here — the SML caller sees the exception INSTEAD of a
+                // unit return, exactly like upstream.
+                if let Some(sr) = self.process_asynch_requests()? {
+                    return Ok(Some(sr));
+                }
                 Ok(Some(self.push_continue(PolyWord::tagged(0))?))
             }
             // MutexUnlock(threadId, mutex): a contended unlock — reset the
@@ -1938,9 +2245,16 @@ impl Interpreter {
                 self.runtime.notify_block_event();
                 Ok(Some(self.push_continue(PolyWord::tagged(0))?))
             }
-            // CondVarWait(threadId, mutex): block until a wake event. The
-            // SML wrapper already unlocked the external mutex and added
-            // itself to the wait list; we just park until woken.
+            // CondVarWait(threadId, mutex): ATOMICALLY RELEASE the condvar's
+            // internal mutex, then block until a wake event. The mutex
+            // release is load-bearing (upstream WaitInfinite,
+            // processes.cpp:533-560: `AtomicallyReleaseMutex` + waking any
+            // threads blocked on that mutex): the SML `waitAgain` holds
+            // `lock` across this call and RE-LOCKS it after we return
+            // (Thread.sml:592-594) — without the release it would deadlock
+            // against ITSELF on the re-lock (found by the condvar-interrupt
+            // test; latent before, since nothing exercised ConditionVar
+            // under real threads).
             //
             // SINGLE-THREADED fallback as for MutexBlock: with no peer to
             // wake us, defer to the generic noop stub (return immediately)
@@ -1949,7 +2263,37 @@ impl Interpreter {
                 if self.runtime.registry_len() <= 1 {
                     return Ok(None);
                 }
-                self.block_on_event();
+                if let Some(mutex) = args.get(1) {
+                    self.reset_mutex_word(*mutex)?;
+                }
+                // Wake any thread blocked (in MutexBlock) on the mutex we
+                // just released — upstream signals each such waiter's
+                // threadLock; ours re-check on the global block event. This
+                // bump happens BEFORE we sample our own wait generation, so
+                // we cannot wake ourselves with it.
+                self.runtime.notify_block_event();
+                // Upstream WaitInfinite: "Wait until we're woken up. Don't
+                // block if we have been interrupted or killed" — ANY
+                // pending request skips the wait; the exception is NOT
+                // raised here (the SML `innerWait` calls `testInterrupt()`
+                // after every return, which delivers the pending Synch
+                // interrupt — that is how `Thread.interrupt` cancels a
+                // ConditionVar.wait).
+                if self
+                    .handle
+                    .requests
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    == crate::sched::request::NONE
+                {
+                    self.block_on_event();
+                }
+                // The InterruptCode-poisoned trap right after the RTS
+                // return (see the MutexBlock arm): delivers only when the
+                // raw caller runs Asynch (the basis' doWait switched to
+                // Synch first, so its path defers to testInterrupt).
+                if let Some(sr) = self.process_asynch_requests()? {
+                    return Ok(Some(sr));
+                }
                 Ok(Some(self.push_continue(PolyWord::tagged(0))?))
             }
             // CondVarWaitUntil(threadId, mutex, absTime): the TIMED variant —
@@ -1962,6 +2306,13 @@ impl Interpreter {
                 if self.runtime.registry_len() <= 1 {
                     return Ok(None);
                 }
+                // Atomically release the condvar's internal mutex + wake its
+                // blocked waiters, exactly as the untimed arm above
+                // (upstream WaitUntilTime has the same preamble).
+                if let Some(mutex) = args.get(1) {
+                    self.reset_mutex_word(*mutex)?;
+                }
+                self.runtime.notify_block_event();
                 let abs_us = args
                     .get(2)
                     .and_then(|w| crate::rts::ml_int_as_i64_pub(None, *w))
@@ -1975,15 +2326,155 @@ impl Interpreter {
                 .unwrap_or(i64::MAX);
                 #[allow(clippy::cast_sign_loss)]
                 let millis = (abs_us.saturating_sub(now_us).max(0) as u64).div_ceil(1000);
-                self.block_on_event_timeout(millis);
+                // Upstream WaitUntilTime has the same requests guard as
+                // WaitInfinite (processes.cpp:577-588): any pending request
+                // skips the wait; delivery is the SML testInterrupt's job.
+                if self
+                    .handle
+                    .requests
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    == crate::sched::request::NONE
+                {
+                    self.block_on_event_timeout(millis);
+                }
+                if let Some(sr) = self.process_asynch_requests()? {
+                    return Ok(Some(sr));
+                }
                 Ok(Some(self.push_continue(PolyWord::tagged(0))?))
             }
-            // CondVarWake(thread): wake blocked waiters; return true. We use
-            // a global broadcast (the SML side re-checks its wait list), so
-            // we always report success.
+            // CondVarWake(thread): wake the TARGET thread if it can still
+            // consume the signal. Port of Processes::WakeThread
+            // (processes.cpp:590-611): succeed only when the target exists
+            // AND (has no pending request, OR its pending interrupt is
+            // being IGNOREd) — "we define that if a thread is interrupted
+            // before it is signalled then it raises Interrupt", so an
+            // interrupted waiter reports false and the SML wakeOne moves on
+            // to the next waiter. Our wake is a global block-event
+            // broadcast (waiters re-check their SML wait list; spurious
+            // wakes are benign), so only the RETURN VALUE is per-target.
             "PolyThreadCondVarWake" => {
-                self.runtime.notify_block_event();
-                Ok(Some(self.push_continue(PolyWord::tagged(1))?))
+                let target = args.first().copied().unwrap_or(PolyWord::ZERO);
+                let ok = match self.handle_for_thread_object(target) {
+                    Some(h) => {
+                        let req = h.requests.load(std::sync::atomic::Ordering::SeqCst);
+                        let intbits = self.thread_obj_flags(target).unwrap_or(0) & pflag::INTMASK;
+                        if req == crate::sched::request::NONE
+                            || (req == crate::sched::request::INTERRUPT && intbits == pflag::IGNORE)
+                        {
+                            self.runtime.notify_block_event();
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    None => false,
+                };
+                Ok(Some(self.push_continue(PolyWord::tagged(isize::from(ok)))?))
+            }
+            // InterruptThread(thread): targeted `Thread.interrupt`. Port of
+            // PolyThreadInterruptThread (processes.cpp:628-641): map the ML
+            // thread object to its handle (word-0 tagged id, upstream's
+            // threadRef identity slot) and MakeRequest(kRequestInterrupt).
+            // Returns false ("Thread does not exist" in SML) when the
+            // thread already exited — upstream zeroes threadRef on exit.
+            "PolyThreadInterruptThread" => {
+                let target = args.first().copied().unwrap_or(PolyWord::ZERO);
+                let ok = self.handle_for_thread_object(target).is_some_and(|h| {
+                    self.make_thread_request(&h, target, crate::sched::request::INTERRUPT);
+                    true
+                });
+                Ok(Some(self.push_continue(PolyWord::tagged(isize::from(ok)))?))
+            }
+            // KillThread(thread): targeted `Thread.kill`. Port of
+            // PolyThreadKillThread (processes.cpp:643-652); the KILL is
+            // delivered at the target's next safepoint / interruption point
+            // regardless of its interrupt state (upstream KillException).
+            "PolyThreadKillThread" => {
+                let target = args.first().copied().unwrap_or(PolyWord::ZERO);
+                let ok = self.handle_for_thread_object(target).is_some_and(|h| {
+                    self.make_thread_request(&h, target, crate::sched::request::KILL);
+                    true
+                });
+                Ok(Some(self.push_continue(PolyWord::tagged(isize::from(ok)))?))
+            }
+            // IsActive(thread): true iff the thread is still registered
+            // (upstream PolyThreadIsActive, processes.cpp:617-625 — a
+            // thread leaves TaskForIdentifier's reach on exit, exactly as
+            // exit removes ours from the registry).
+            "PolyThreadIsActive" => {
+                let target = args.first().copied().unwrap_or(PolyWord::ZERO);
+                let active = self
+                    .handle_for_thread_object(target)
+                    .is_some_and(|h| !h.exited.load(std::sync::atomic::Ordering::SeqCst));
+                Ok(Some(
+                    self.push_continue(PolyWord::tagged(isize::from(active)))?,
+                ))
+            }
+            // BroadcastInterrupt(threadId): interrupt every thread whose
+            // flags word has the PFLAG_BROADCAST bit — including the
+            // caller. Port of Processes::BroadcastInterrupt
+            // (processes.cpp:795-811). The handle→object direction uses the
+            // `thread_obj_addr` mirror (upstream TaskData::threadObject),
+            // refreshed by the collector on every GC; we are the running
+            // mutator (giant lock held, peers parked, no GC in flight), so
+            // reading each peer's flags word / writing its requestCopy is
+            // race-free. A thread whose object was never materialized
+            // (mirror == 0: only the root before its first Thread.self())
+            // is skipped — it cannot have set EnableBroadcastInterrupt.
+            "PolyThreadBroadcastInterrupt" => {
+                for h in self.runtime.registry_snapshot() {
+                    let addr = h.thread_obj_addr.load(std::sync::atomic::Ordering::SeqCst);
+                    if addr == 0 {
+                        continue;
+                    }
+                    let obj = PolyWord(addr);
+                    if self.thread_obj_flags(obj).unwrap_or(0) & pflag::BROADCAST != 0 {
+                        self.make_thread_request(&h, obj, crate::sched::request::INTERRUPT);
+                    }
+                }
+                Ok(Some(self.push_continue(PolyWord::tagged(0))?))
+            }
+            // TestInterrupt(threadId): the explicit interruption point
+            // (`Thread.testInterrupt`). Port of PolyThreadTestInterrupt
+            // (processes.cpp:667-692): TestSynchronousRequests (delivers a
+            // pending interrupt iff the state is Synch; Kill always), then
+            // ProcessAsynchRequests ("if we have just switched from
+            // deferring interrupts this guarantees that any deferred
+            // interrupts will be handled now" — but only once the state was
+            // switched OUT of Defer: under Defer/IGNORE neither test
+            // delivers and the request stays pending).
+            "PolyThreadTestInterrupt" => {
+                if let Some(sr) = self.test_synchronous_requests()? {
+                    return Ok(Some(sr));
+                }
+                if let Some(sr) = self.process_asynch_requests()? {
+                    return Ok(Some(sr));
+                }
+                Ok(Some(self.push_continue(PolyWord::tagged(0))?))
+            }
+            // MaxStackSize(threadId, newSize): store the attribute and
+            // enforce the immediate over-limit case. Port of
+            // PolyThreadMaxStackSize (processes.cpp:700-731): store into
+            // mlStackSize (word 4); if the new limit is non-zero and the
+            // CURRENT stack usage already exceeds it, raise the Interrupt
+            // exception (upstream raise_exception0(EXC_interrupt)).
+            // ENFORCEMENT GAP (documented, not overreached): upstream also
+            // re-checks the cap on every later stack GROWTH via the
+            // stack-limit trap; our per-thread stack is a fixed-capacity
+            // buffer that never grows, so the only ongoing "limit" is that
+            // fixed capacity — the attribute round-trips (get/setAttributes)
+            // and the immediate check is faithful.
+            "PolyThreadMaxStackSize" => {
+                let new_size = args.get(1).copied().unwrap_or(PolyWord::tagged(0));
+                if let Some(t) = self.thread_object {
+                    self.thread_obj_write(t, 4, new_size);
+                }
+                let new_words = crate::rts::ml_int_as_i64_pub(None, new_size).unwrap_or(0);
+                let current_words = i64::try_from(self.stack.len() - self.sp).unwrap_or(i64::MAX);
+                if new_words > 0 && current_words > new_words {
+                    return self.raise_interrupt().map(Some);
+                }
+                Ok(Some(self.push_continue(PolyWord::tagged(0))?))
             }
             // KillSelf(threadId): the thread function finished (Thread.exit).
             // End this thread's run loop by returning to its driver, which
@@ -2080,17 +2571,43 @@ impl Interpreter {
     /// `Thread.exit` (→ PolyThreadKillSelf) at the end, ending the run.
     ///
     /// Returns the child's ThreadObject (the SML `thread` value).
-    fn fork_thread(&mut self, function: PolyWord) -> Result<PolyWord, InterpError> {
+    fn fork_thread(
+        &mut self,
+        function: PolyWord,
+        attrs: PolyWord,
+        stack: PolyWord,
+    ) -> Result<PolyWord, InterpError> {
         if crate::env::env_flag("POLY_THREAD_TRACE") {
             eprintln!("[parent] fork_thread function={function:?}");
         }
         // Allocate the child's ThreadObject in the shared heap (we hold ML
-        // memory). 9-word mutable object per processes.h:83-95.
-        let thread_obj = self.alloc_thread_object_value()?;
+        // memory). 9-word mutable object per processes.h:83-95, with the
+        // ML-passed attribute flags + max-stack words stored exactly as
+        // upstream ForkThread (processes.cpp:1515-1517).
+        let thread_obj = self.alloc_thread_object_value(attrs, stack)?;
 
         // The child shares the Runtime; build its handle.
         let runtime = Arc::clone(&self.runtime);
         let child_handle = crate::sched::ThreadHandle::new();
+
+        // Thread IDENTITY, both directions (see the ThreadHandle field
+        // docs): word 0 of the thread object (upstream's threadRef
+        // C-identity slot, "Not used by ML") gets the tagged handle id —
+        // GC-immune, so `PolyThreadInterruptThread`/`KillThread`/`IsActive`
+        // can map the object back to the handle across collections; and
+        // the handle's `thread_obj_addr` mirror gets the object's current
+        // address (refreshed by every GC via ForkRoots/ThreadRoots) so
+        // `PolyThreadBroadcastInterrupt` can reach the object from the
+        // handle.
+        #[allow(clippy::cast_possible_wrap)]
+        self.thread_obj_write(
+            thread_obj,
+            0,
+            PolyWord::tagged(child_handle.thread_id as isize),
+        );
+        child_handle
+            .thread_obj_addr
+            .store(thread_obj.0, std::sync::atomic::Ordering::SeqCst);
 
         // ---- Close the fork TOCTOU (B1): publish the child's INITIAL
         // roots BEFORE registering, so the invariant "registered AND
@@ -2108,6 +2625,7 @@ impl Interpreter {
         let fork_roots = Box::new(ForkRoots {
             function,
             thread_obj,
+            handle: Arc::clone(&child_handle),
         });
         let fork_raw = Box::into_raw(fork_roots);
         let fork_send = crate::sched::SendRoots {
@@ -2283,18 +2801,25 @@ impl Interpreter {
     }
 
     /// Allocate a ThreadObject value (9-word mutable object) in the shared
-    /// heap. Same layout as `rts::alloc_thread_object_stub`.
-    fn alloc_thread_object_value(&mut self) -> Result<PolyWord, InterpError> {
+    /// heap, seeding the ML-passed attribute flags + max-stack size.
+    /// Layout per processes.h:83-95 / upstream ForkThread
+    /// (processes.cpp:1512-1519); word 0 (threadRef, the identity slot) is
+    /// written by the caller.
+    fn alloc_thread_object_value(
+        &mut self,
+        attrs: PolyWord,
+        stack: PolyWord,
+    ) -> Result<PolyWord, InterpError> {
         use crate::length_word::F_MUTABLE_BIT;
         let length = 9;
         let p = self.allocate(length, F_MUTABLE_BIT)?;
         // SAFETY: just allocated 9 words.
         unsafe {
-            p.add(0).write(PolyWord::tagged(0)); // threadRef
-            p.add(1).write(PolyWord::tagged(2)); // flags = PFLAG_SYNCH
+            p.add(0).write(PolyWord::tagged(0)); // threadRef (id written by caller)
+            p.add(1).write(attrs); // flags — the ML attrs word, as passed
             p.add(2).write(PolyWord::tagged(0)); // threadLocal
             p.add(3).write(PolyWord::tagged(0)); // requestCopy
-            p.add(4).write(PolyWord::tagged(0)); // mlStackSize
+            p.add(4).write(stack); // mlStackSize — the ML stack word, as passed
             for i in 5..length {
                 p.add(i).write(PolyWord::tagged(0)); // debuggerSlots
             }
@@ -2972,7 +3497,16 @@ impl Interpreter {
     /// If `fork_thread` fails (e.g. no alloc space).
     #[doc(hidden)]
     pub fn test_fork_child(&mut self, function: PolyWord) -> PolyWord {
-        self.fork_thread(function).expect("fork_thread")
+        // Default attributes = the SML fork wrapper's defaults
+        // (Thread.sml:471-472): no broadcast + InterruptSynch, unlimited
+        // stack.
+        #[allow(clippy::cast_possible_wrap)]
+        self.fork_thread(
+            function,
+            PolyWord::tagged(pflag::SYNCH as isize),
+            PolyWord::tagged(0),
+        )
+        .expect("fork_thread")
     }
 
     /// Test-only: force a stop-the-world collection right now (the caller is
@@ -6993,6 +7527,30 @@ impl Interpreter {
             }
         }
         let t = PolyWord::from_ptr(p.cast_const());
+        // REAL-THREADS ONLY (default stays all-zero = byte-identical):
+        // this lazily-materialized object belongs to a thread that was NOT
+        // forked — i.e. the ROOT thread (children get theirs eagerly in
+        // `fork_thread`). Give it upstream's root-thread identity + flags:
+        // word 0 = the tagged handle id (threadRef identity slot, so
+        // `Thread.interrupt`/`kill`/`isActive` can target the root), word 1
+        // = PFLAG_BROADCAST|PFLAG_ASYNCH ("the initial thread is set to
+        // accept broadcast interrupt requests", processes.cpp:1311-1313),
+        // and refresh the handle's address mirror.
+        if real_threads_enabled() {
+            // SAFETY: same fresh allocation as above.
+            unsafe {
+                #[allow(clippy::cast_possible_wrap)]
+                p.add(0)
+                    .write(PolyWord::tagged(self.handle.thread_id as isize));
+                #[allow(clippy::cast_possible_wrap)]
+                p.add(1).write(PolyWord::tagged(
+                    (pflag::BROADCAST | pflag::ASYNCH) as isize,
+                ));
+            }
+            self.handle
+                .thread_obj_addr
+                .store(t.0, std::sync::atomic::Ordering::SeqCst);
+        }
         self.thread_object = Some(t);
         Ok(t)
     }
