@@ -42,7 +42,7 @@
 #![allow(clippy::significant_drop_tightening)]
 #![allow(clippy::significant_drop_in_scrutinee)]
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::poly_word::PolyWord;
@@ -139,7 +139,33 @@ pub struct ThreadHandle {
     /// published roots), so this flag only governs join/shutdown, never
     /// collection safety.
     pub is_daemon: AtomicBool,
+    /// Process-unique thread identity (never 0). The interpreter stores
+    /// `Tagged(thread_id)` in the ML thread object's word 0 — upstream's
+    /// `threadRef` slot ("the address of the thread data. Not used by ML",
+    /// processes.h:84) — so the targeted thread RTS calls
+    /// (`PolyThreadInterruptThread`/`KillThread`/`IsActive`/`CondVarWake`)
+    /// can map an ML thread OBJECT back to its handle. A tagged int is
+    /// GC-immune (it moves WITH the object, and its value never changes),
+    /// unlike the raw C pointer upstream stores.
+    pub thread_id: u64,
+    /// MIRROR of the current address of this thread's ML thread object
+    /// (0 = not yet materialized). This is the handle→object direction
+    /// (upstream `TaskData::threadObject`), needed by
+    /// `PolyThreadBroadcastInterrupt` to read each peer's flags word and
+    /// by `MakeRequest` to set its `requestCopy`. The GC MOVES the object,
+    /// so the mirror is refreshed by the collector on every collection
+    /// (in `ThreadRoots::forward` / `ForkRoots::forward_thunk`, right
+    /// after the thread-object slot is forwarded) and (re)set by the owner
+    /// at object creation. It is only ever DEREFERENCED by the running
+    /// mutator under the giant lock (peers parked, no GC in flight), so it
+    /// can never be read while stale.
+    pub thread_obj_addr: AtomicUsize,
 }
+
+/// Monotonic source for [`ThreadHandle::thread_id`] (0 is reserved for
+/// "no thread" — a thread object whose word 0 is `Tagged(0)` maps to no
+/// handle, like upstream's zeroed `threadRef` after thread exit).
+static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(1);
 
 impl ThreadHandle {
     #[must_use]
@@ -151,6 +177,8 @@ impl ThreadHandle {
             requests: AtomicU8::new(request::NONE),
             parked_roots: Mutex::new(None),
             is_daemon: AtomicBool::new(false),
+            thread_id: NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed),
+            thread_obj_addr: AtomicUsize::new(0),
         })
     }
 }
@@ -382,6 +410,14 @@ impl Runtime {
         *handle.parked_roots.lock().unwrap() = None;
         inner.running = true;
         handle.in_ml.store(true, Ordering::SeqCst);
+        // Announce the take: a yielder blocked in its forced-hand-off loop
+        // (yield_ml_memory) waits for `running` to become true, and without
+        // this notify a PURE-COMPUTE taker (which never blocks or notifies
+        // again) would leave it asleep until some unrelated event — the
+        // yielder is not yet counted in `waiters` there, so the taker's own
+        // later yields early-return and the yielder starves (found by the
+        // preemption-fairness test).
+        self.sched.mutator_wake.notify_all();
     }
 
     /// Atomically REGISTER a previously-unregistered thread handle AND
@@ -437,6 +473,9 @@ impl Runtime {
         *handle.parked_roots.lock().unwrap() = None;
         inner.running = true;
         handle.in_ml.store(true, Ordering::SeqCst);
+        // Announce the take (see `acquire_ml_memory`): wake any yielder
+        // blocked in its forced-hand-off loop.
+        self.sched.mutator_wake.notify_all();
     }
 
     /// Acquire the giant mutator lock for a thread whose roots are ALREADY
@@ -473,6 +512,10 @@ impl Runtime {
         *handle.parked_roots.lock().unwrap() = None;
         inner.running = true;
         handle.in_ml.store(true, Ordering::SeqCst);
+        // Announce the take (see `acquire_ml_memory`): the forking parent
+        // may be blocked in its yield's forced-hand-off loop waiting for
+        // this exact take — and a pure-compute child never notifies again.
+        self.sched.mutator_wake.notify_all();
     }
 
     /// Release the giant mutator lock when LEAVING the interpreter loop
@@ -614,6 +657,9 @@ impl Runtime {
         *handle.parked_roots.lock().unwrap() = None;
         inner.running = true;
         handle.in_ml.store(true, Ordering::SeqCst);
+        // Announce the take (see `acquire_ml_memory`): wake any yielder
+        // blocked in its forced-hand-off loop.
+        self.sched.mutator_wake.notify_all();
     }
 
     /// Park at a safepoint because a GC was requested by a peer. Publishes
@@ -639,6 +685,9 @@ impl Runtime {
         *handle.parked_roots.lock().unwrap() = None;
         inner.running = true;
         handle.in_ml.store(true, Ordering::SeqCst);
+        // Announce the take (see `acquire_ml_memory`): wake any yielder
+        // blocked in its forced-hand-off loop.
+        self.sched.mutator_wake.notify_all();
     }
 
     /// Cooperatively yield the giant lock so a waiting peer can run, then
@@ -681,6 +730,9 @@ impl Runtime {
         *handle.parked_roots.lock().unwrap() = None;
         inner.running = true;
         handle.in_ml.store(true, Ordering::SeqCst);
+        // Announce the take (see `acquire_ml_memory`): wake any OTHER
+        // yielder blocked in its forced-hand-off loop.
+        self.sched.mutator_wake.notify_all();
     }
 
     /// Request a stop-the-world GC and run it as the collector. Port of
