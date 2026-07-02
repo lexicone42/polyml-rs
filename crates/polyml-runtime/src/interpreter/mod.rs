@@ -2007,10 +2007,17 @@ impl Interpreter {
             let vo = self.validate_obj(obj, "THREAD_OBJ").ok()?;
             vo.check_word_index(idx).ok()?;
         }
+        // ATOMIC load (P3): thread-object protocol words (flags word 1,
+        // requestCopy word 3) are read cross-thread (BroadcastInterrupt/
+        // CondVarWake/testInterrupt), so a plain read races the owner's
+        // write. Relaxed is right — the request-delivery happens-before is
+        // carried by the handle's AtomicU8 `requests` + the sched block_gen,
+        // not by this ML-visible mirror. Not a hot path (safepoint reads).
         // SAFETY: data-pointer + aligned; trusted (runtime/compiler-built
-        // thread object, >= 5 words on both the 8-word stub and the 9-word
-        // fork layout) OR untrusted-validated in-space with idx in bounds.
-        Some(unsafe { *obj.as_ptr::<PolyWord>().add(idx) })
+        // thread object, >= 5 words) OR untrusted-validated in-space.
+        let p = unsafe { obj.as_ptr::<PolyWord>().cast_mut().add(idx) };
+        let bits = unsafe { Self::atomic_word(p).load(std::sync::atomic::Ordering::Relaxed) };
+        Some(PolyWord::from_bits(bits))
     }
 
     /// Write word `idx` of an ML thread object (same guards as
@@ -2029,9 +2036,11 @@ impl Interpreter {
                 return;
             }
         }
-        // SAFETY: as in `thread_obj_read`, plus the giant-lock discipline
-        // makes the mutable write race-free.
-        unsafe { obj.as_ptr::<PolyWord>().cast_mut().add(idx).write(w) };
+        // ATOMIC store (P3): the mirror of `thread_obj_read` — a plain
+        // store would race a cross-thread read. Relaxed (see the read).
+        // SAFETY: as in `thread_obj_read`.
+        let p = unsafe { obj.as_ptr::<PolyWord>().cast_mut().add(idx) };
+        unsafe { Self::atomic_word(p).store(w.0, std::sync::atomic::Ordering::Relaxed) };
     }
 
     /// The untagged FLAGS word of an ML thread object (word 1,
@@ -2952,24 +2961,57 @@ impl Interpreter {
     /// non-pointer "mutex".
     fn reset_mutex_word(&self, mutex: PolyWord) -> Result<(), InterpError> {
         if mutex.is_data_ptr() && mutex.0 & (std::mem::size_of::<usize>() - 1) == 0 {
-            if self.untrusted {
-                // The mutex pointer is image-controlled (reachable only via
-                // PolyThreadMutexUnlock under POLY_REAL_THREADS=1 + --untrusted
-                // — the experimental real-threads + untrusted combo). Validate
-                // in-space + >= 1 word before the OOB-prone write. (#96
-                // secondary finding from the adversarial re-verify: this static
-                // fn could not consult self.untrusted; now a &self method.)
-                let vo = self.validate_obj(mutex, "MUTEX_UNLOCK")?;
-                vo.check_word_index(0)
-                    .map_err(|why| InterpError::BadImage {
-                        op: "MUTEX_UNLOCK",
-                        why,
-                    })?;
-            }
-            let p = mutex.as_ptr::<PolyWord>().cast_mut();
-            // SAFETY: trusted (compiler-emitted mutex) OR untrusted-validated
-            // in-space object >= 1 word.
-            unsafe { p.write(PolyWord::tagged(0)) };
+            self.reset_mutex_word_atomic(mutex)?;
+        }
+        Ok(())
+    }
+
+    /// View a validated, word-aligned heap word as an `AtomicUsize`
+    /// (parallelism P3). `PolyWord` is `repr(transparent)` over `usize`, so
+    /// this is a plain reinterpret of the same location. The atomic RMW /
+    /// store ops on the SML `Thread.Mutex` protocol word mirror upstream's
+    /// interlocked ops (native x86 `XCHG` / arm64 `LDXR/STXR`; the
+    /// interpreter serialises with a global `mutexLock`), so two parallel
+    /// mutators inside one critical section can't both "acquire" (the TOCTOU
+    /// the plain read-modify-write had). Single-threaded the atomic op
+    /// yields the identical numerical result — byte-identical.
+    ///
+    /// # Safety
+    /// `p` must be a valid, word-aligned, writable `PolyWord` slot (callers
+    /// gate on `word0_deref_ok` / `is_data_ptr` + alignment, and in
+    /// untrusted mode on `validate_obj`).
+    #[inline]
+    unsafe fn atomic_word<'p>(p: *mut PolyWord) -> &'p std::sync::atomic::AtomicUsize {
+        // SAFETY: caller guarantees `p` is a valid aligned usize-sized slot.
+        unsafe { &*std::sync::atomic::AtomicUsize::from_ptr(p.cast::<usize>()) }
+    }
+
+    /// The word-aligned, (untrusted-)validated ATOMIC store of `TAGGED(0)`
+    /// into the mutex word — split out so [`Self::reset_mutex_word`] keeps
+    /// its guard shape. Upstream releases the mutex with an interlocked op;
+    /// a plain store could erase a peer's just-taken lock (two threads
+    /// inside one critical section).
+    fn reset_mutex_word_atomic(&self, mutex: PolyWord) -> Result<(), InterpError> {
+        if self.untrusted {
+            // The mutex pointer is image-controlled (reachable only via
+            // PolyThreadMutexUnlock under POLY_REAL_THREADS=1 + --untrusted
+            // — the experimental real-threads + untrusted combo). Validate
+            // in-space + >= 1 word before the OOB-prone write. (#96
+            // secondary finding from the adversarial re-verify: this static
+            // fn could not consult self.untrusted; now a &self method.)
+            let vo = self.validate_obj(mutex, "MUTEX_UNLOCK")?;
+            vo.check_word_index(0)
+                .map_err(|why| InterpError::BadImage {
+                    op: "MUTEX_UNLOCK",
+                    why,
+                })?;
+        }
+        let p = mutex.as_ptr::<PolyWord>().cast_mut();
+        // ATOMIC store (P3): a plain store could erase a peer's just-taken
+        // lock. SAFETY: trusted (compiler-emitted mutex) OR untrusted-
+        // validated in-space object >= 1 word; word-aligned (caller checks).
+        unsafe {
+            Self::atomic_word(p).store(PolyWord::tagged(0).0, std::sync::atomic::Ordering::Release);
         }
         Ok(())
     }
@@ -6298,16 +6340,14 @@ impl Interpreter {
                 let mutex = self.peek(0)?;
                 let acquired = if self.word0_deref_ok(mutex) {
                     let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                    // ATOMIC fetch-add-2 (P3): the counter bump is one
+                    // interlocked op, so two threads can't both read
+                    // TAGGED(0) and both believe they acquired.
                     // SAFETY: pointer-aligned & is_data_ptr ⇒ valid mutex slot
-                    let old = unsafe { *p };
-                    let was_unlocked = old.0 == PolyWord::tagged(0).0;
-                    // Bump counter by 2 (PolyML convention; we don't
-                    // need the count in single-thread but preserve it
-                    // for round-trips with unlockMutex).
-                    let new_bits = old.0.wrapping_add(2);
-                    // SAFETY: same
-                    unsafe { p.write(PolyWord::from_bits(new_bits)) };
-                    was_unlocked
+                    let old = unsafe {
+                        Self::atomic_word(p).fetch_add(2, std::sync::atomic::Ordering::AcqRel)
+                    };
+                    old == PolyWord::tagged(0).0
                 } else {
                     true
                 };
@@ -6322,14 +6362,19 @@ impl Interpreter {
                 let mutex = self.peek(0)?;
                 let acquired = if self.word0_deref_ok(mutex) {
                     let p = mutex.as_ptr::<PolyWord>().cast_mut();
-                    // SAFETY: same as above
-                    let old = unsafe { *p };
-                    let was_unlocked = old.0 == PolyWord::tagged(0).0;
-                    if was_unlocked {
-                        // SAFETY: same
-                        unsafe { p.write(PolyWord::tagged(1)) };
+                    // ATOMIC compare-exchange (P3): claim the lock only if
+                    // it was TAGGED(0), atomically — no read-then-write race.
+                    // SAFETY: pointer-aligned & is_data_ptr ⇒ valid mutex slot
+                    unsafe {
+                        Self::atomic_word(p)
+                            .compare_exchange(
+                                PolyWord::tagged(0).0,
+                                PolyWord::tagged(1).0,
+                                std::sync::atomic::Ordering::AcqRel,
+                                std::sync::atomic::Ordering::Acquire,
+                            )
+                            .is_ok()
                     }
-                    was_unlocked
                 } else {
                     true
                 };
@@ -6354,11 +6399,16 @@ impl Interpreter {
                 let mutex = self.pop()?;
                 let was_sole_locker = if self.word0_deref_ok(mutex) {
                     let p = mutex.as_ptr::<PolyWord>().cast_mut();
+                    // ATOMIC swap (P3): read-old-and-store-TAGGED(0) in one
+                    // interlocked op — upstream's AtomicallyReleaseMutex
+                    // (native XCHG). The "was I sole locker" answer must be
+                    // atomic with the reset or it can lie under contention.
                     // SAFETY: pointer-aligned & is_data_ptr
-                    let old = unsafe { *p };
-                    // SAFETY: same
-                    unsafe { p.write(PolyWord::tagged(0)) };
-                    old.0 == PolyWord::tagged(1).0
+                    let old = unsafe {
+                        Self::atomic_word(p)
+                            .swap(PolyWord::tagged(0).0, std::sync::atomic::Ordering::AcqRel)
+                    };
+                    old == PolyWord::tagged(1).0
                 } else {
                     // Non-pointer/misaligned defensive case (no upstream
                     // analogue). False = conservative "contended" path,
@@ -6387,12 +6437,15 @@ impl Interpreter {
                 let obj = self.peek(0)?;
                 let old = if self.word0_deref_ok(obj) {
                     let p = obj.as_ptr::<PolyWord>().cast_mut();
+                    // ATOMIC fetch-add (P3): new = old + addend - 1 (raw-tag
+                    // arithmetic collapses the doubled tag bit), done in one
+                    // interlocked op. Returns the OLD word0.
                     // SAFETY: pointer-aligned & is_data_ptr
-                    let old = unsafe { *p };
-                    let new_bits = old.0.wrapping_add(addend.0).wrapping_sub(1);
-                    // SAFETY: same
-                    unsafe { p.write(PolyWord::from_bits(new_bits)) };
-                    old
+                    let delta = addend.0.wrapping_sub(1);
+                    let old_bits = unsafe {
+                        Self::atomic_word(p).fetch_add(delta, std::sync::atomic::Ordering::AcqRel)
+                    };
+                    PolyWord::from_bits(old_bits)
                 } else {
                     PolyWord::tagged(0)
                 };
@@ -6960,17 +7013,24 @@ impl Interpreter {
                 })?;
         }
         let p = cell.as_ptr::<PolyWord>().cast_mut();
-        // SAFETY: cell is a heap-allocated mutable ref cell.
+        // ATOMIC fetch_add/sub-2 (P3): Thread.Atomic incr/decr must be a
+        // single interlocked op so concurrent bumps don't lose an update.
+        // Returns the NEW value (fetch_* returns old; add the delta back).
+        // SAFETY: cell is a heap-allocated mutable ref cell (validated in
+        // untrusted mode above; word-aligned by allocation).
         let new_word = unsafe {
-            let cur = (*p).0;
-            let new = if incr {
-                cur.wrapping_add(2)
+            let a = Self::atomic_word(p);
+            let old = if incr {
+                a.fetch_add(2, std::sync::atomic::Ordering::AcqRel)
             } else {
-                cur.wrapping_sub(2)
+                a.fetch_sub(2, std::sync::atomic::Ordering::AcqRel)
             };
-            let nw = PolyWord::from_bits(new);
-            p.write(nw);
-            nw
+            let new = if incr {
+                old.wrapping_add(2)
+            } else {
+                old.wrapping_sub(2)
+            };
+            PolyWord::from_bits(new)
         };
         // Replace top with the new value.
         self.pop()?;

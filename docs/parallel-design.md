@@ -237,9 +237,26 @@ hangs:
   the change and passing on both sides of it), a 2 MB-child-nursery variant
   (264 s of continuous child-triggered pool collections, total intact),
   all six concurrency demos, stage-0 + chain byte-identity.
-- **P3 — atomics + statics.** Protocol words atomic (upstream-faithful,
-  global-mutexLock shape first); RTS statics behind per-subsystem locks;
-  `gc_requested` a real atomic with explicit ordering. Still giant-locked.
+- **P3 — protocol-word atomics. ✅ (mutex + thread-object words LANDED).**
+  The SML `Thread.Mutex` protocol word is now manipulated with GENUINE
+  atomics via `Interpreter::atomic_word` (an `AtomicUsize` view of the
+  `repr(transparent)` PolyWord): lockMutex → `fetch_add(2, AcqRel)`,
+  tryLockMutex → `compare_exchange`, atomicReset → `swap` (upstream's
+  `AtomicallyReleaseMutex`/XCHG), atomicExchAdd → `fetch_add`, the legacy
+  `atomic_incr_decr` → `fetch_add/sub`, and `reset_mutex_word` → atomic
+  `store` (the plain store that could erase a peer's lock is GONE — the
+  recon's verified not-upstream-faithful bug). Thread-object protocol words
+  (flags word 1, requestCopy word 3, cross-read by BroadcastInterrupt/
+  CondVarWake/testInterrupt) → Relaxed atomic load/store in
+  `thread_obj_read`/`write` (request-delivery happens-before is carried by
+  the handle's AtomicU8 + block_gen, not this ML mirror). All byte-identical
+  single-threaded (an atomic op yields the identical value; not the hot
+  path). PROOF: `concurrency_mutex_hammer` — two threads hammer ONE mutex
+  400,000 lock/incr/unlock cycles, EXACT count (a lost update = wrong
+  total). Remaining P3 (with P4): `gc_requested` → real atomic with explicit
+  release-on-publish/acquire-on-collect ordering; per-subsystem RTS-static
+  locks (audited already thread-safe by the shared-state recon — mostly
+  Mutex/Atomic/OnceLock today).
 - **P4 — drop the lock (`POLY_PARALLEL=1`).** Gated on the fifth map's
   plain-store inventory + the measured atomics decision. Mutators run
   free; safepoint poll = STW check; `running`/yield deleted on this path.
