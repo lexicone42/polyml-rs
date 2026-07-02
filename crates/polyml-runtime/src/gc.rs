@@ -76,15 +76,30 @@ pub struct Collector<'a> {
     to_storage: &'a mut [PolyWord],
     /// Bump pointer into `to_storage`.
     to_used: usize,
-    /// Pre-built map of from-space object body ranges, sorted by
-    /// start address. Used by `forward` to detect mid-object PC
-    /// pointers (handler PCs, retPC values pushed on stack) and
-    /// translate them to the corresponding mid-object address in
-    /// to-space.
-    from_objects: Vec<(usize, usize)>, // (body_start_addr, n_words)
+    /// Object-start BITMAP over the union of from-space ranges: bit i of
+    /// the space starting at `from_ranges[k]` (bit base `range_bit_base[k]`)
+    /// is set iff word i is an object BODY START. Consumed only by
+    /// `forward_stack_slot` (mid-body PC translation + the
+    /// integer-aliasing canary) — ML slots forward via the header
+    /// directly. Replaces the old `(body, len)` Vec: the walk writes a
+    /// cache-resident ~Σwords/8-byte bitmap instead of a 16-bytes-per-
+    /// object table (measured: the table build dominated the pause).
+    start_bits: Vec<u64>,
+    /// Per-range starting bit index into `start_bits` (parallel to
+    /// `from_ranges`).
+    range_bit_base: Vec<usize>,
     /// Addresses that fell in from-space but didn't match any tracked
     /// object — usually a pre-pass bug. Logged at end of collect.
     untracked_addrs: Vec<usize>,
+    /// PARALLEL COLLECTION (P6): when `Some(n)`, the linear Cheney scan
+    /// is replaced by an n-worker queue-driven scan, and the serial
+    /// root-forwarding phase records every object it copies here (the
+    /// workers' seed queue — to-space body addresses). `None` (default)
+    /// = the exact pre-P6 serial path, byte-identical.
+    par_workers: Option<usize>,
+    /// Seed queue for the parallel scan (to-space body addresses copied
+    /// during the serial roots phase). Unused when `par_workers` is None.
+    par_seeds: Vec<usize>,
 }
 
 impl<'a> Collector<'a> {
@@ -148,10 +163,13 @@ impl<'a> Collector<'a> {
         if !self.in_from_space(addr) {
             return;
         }
-        // Look up which from-space object contains this address.
-        // Body-start matches → ordinary forward. Otherwise it's a
-        // mid-body pointer (PC value) and we keep the offset.
-        let Some((body_start, _n_words)) = self.find_object(addr) else {
+        // Resolve the containing object via the start bitmap. The exact-bit
+        // hit is O(1) and covers ~every ML slot; the backward scan handles
+        // MID-BODY pointers — stack PC values, AND closure word-0 code
+        // pointers, which can point at an entry offset INSIDE the code
+        // object, not its body start (the chain fence caught a
+        // body-start-assumption version of this reading garbage headers).
+        let Some(body_start) = self.find_body_start(addr) else {
             self.untracked_addrs.push(addr);
             return;
         };
@@ -162,30 +180,75 @@ impl<'a> Collector<'a> {
         unsafe { slot.write(PolyWord::from_bits(new_addr)) };
     }
 
-    /// Binary-search the from-objects table for the object body
-    /// whose range covers `addr` (in bytes). Returns
-    /// `Some((body_start_addr, n_words))` if found, else `None`.
-    /// A zero-length object's body is a single-point range — the
-    /// body address itself, useful as an identity.
-    fn find_object(&self, addr: usize) -> Option<(usize, usize)> {
+    /// Length of the object whose BODY starts at `body` — reading through
+    /// a tombstone if the object was already forwarded (the from-space
+    /// header then holds the to-pointer; the real length word lives on
+    /// the to-space copy).
+    fn object_len_via_header(&self, body: usize) -> usize {
+        let lw = unsafe { *(body as *const PolyWord).sub(1) };
+        if (flags_of(lw) & F_TOMBSTONE_BIT) != 0 {
+            let to = lw.0 & !((F_TOMBSTONE_BIT as usize) << FLAGS_SHIFT);
+            let to_lw = unsafe { *(to as *const PolyWord).sub(1) };
+            length_of(to_lw)
+        } else {
+            length_of(lw)
+        }
+    }
+
+    /// Find the BODY START of the from-space object containing `addr` via
+    /// the object-start bitmap. Exact-bit hit (the overwhelmingly common
+    /// case — every ML body-start pointer) is O(1); otherwise scan the
+    /// bitmap backwards for the containing object (mid-body pointers:
+    /// stack PC values, closure word-0 entry offsets) and validate the
+    /// offset against the object's length (read via the header,
+    /// tombstone-indirected). A zero-length object matches only its exact
+    /// body address.
+    fn find_body_start(&self, addr: usize) -> Option<usize> {
+        // Which range?
         let idx = self
-            .from_objects
-            .partition_point(|(start, _)| *start <= addr);
-        if idx == 0 {
+            .from_ranges
+            .partition_point(|&(start, _)| start <= addr);
+        if idx == 0 || addr >= self.from_ranges[idx - 1].1 {
             return None;
         }
-        let (start, n) = self.from_objects[idx - 1];
-        // Saturating arithmetic: a corrupt length word (flag bits leaking
-        // into the length field) could make `n` huge and wrap `start +
-        // n*8`, which would silently mis-forward or drop a live pointer —
-        // the worst class of GC bug. For all valid (non-overflowing) `n`
-        // the result is identical to the plain computation.
-        let end = start.saturating_add(n.saturating_mul(std::mem::size_of::<usize>()));
-        if addr < end || (n == 0 && addr == start) {
-            Some((start, n))
-        } else {
-            None
+        let (range_start, _) = self.from_ranges[idx - 1];
+        let bit_base = self.range_bit_base[idx - 1];
+        let word_idx = bit_base + (addr - range_start) / std::mem::size_of::<usize>();
+        let is_start = |i: usize| self.start_bits[i / 64] & (1u64 << (i % 64)) != 0;
+        if is_start(word_idx) {
+            // Return the ALIGNED word address, not `addr`: an unaligned PC
+            // pointing into an object's FIRST word must keep its byte
+            // offset (the caller computes offset = addr − body_start).
+            let start = range_start + (word_idx - bit_base) * std::mem::size_of::<usize>();
+            return Some(start);
         }
+        // Mid-body: scan back to a start bit; validate; on a miss (e.g. a
+        // zero-length object between us and the true container) keep
+        // scanning.
+        let mut i = word_idx;
+        while i > bit_base {
+            i -= 1;
+            if !is_start(i) {
+                continue;
+            }
+            let start = range_start + (i - bit_base) * std::mem::size_of::<usize>();
+            let n = self.object_len_via_header(start);
+            // Saturating arithmetic: a corrupt length word could make `n`
+            // huge and wrap the end bound, silently mis-forwarding — the
+            // worst class of GC bug.
+            let end = start.saturating_add(n.saturating_mul(std::mem::size_of::<usize>()));
+            if addr < end {
+                return Some(start);
+            }
+            // A start bit whose object ends before `addr` means `addr` is
+            // in header/no-man's land (an aliasing integer) — but keep
+            // scanning past zero-length objects, whose body point IS the
+            // next header.
+            if n > 0 {
+                return None;
+            }
+        }
+        None
     }
 
     /// Forward an object that's known to be in from-space. Returns
@@ -218,6 +281,11 @@ impl<'a> Collector<'a> {
         let fwd_word =
             PolyWord::from_bits((to_ptr as usize) | ((F_TOMBSTONE_BIT as usize) << FLAGS_SHIFT));
         unsafe { obj_ptr.cast::<PolyWord>().cast_mut().sub(1).write(fwd_word) };
+        // P6: the parallel scan is queue-driven — every object copied
+        // during the (serial) roots phase seeds the workers.
+        if self.par_workers.is_some() {
+            self.par_seeds.push(to_ptr as usize);
+        }
         to_ptr
     }
 
@@ -303,6 +371,372 @@ impl<'a> Collector<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P6: parallel queue-driven scan (docs/parallel-design.md § P6).
+//
+// The linear Cheney scan is inherently sequential (the scan pointer chases
+// the alloc pointer). The parallel replacement is a work-stealing drain:
+// the claiming copier of each object pushes it (exactly once) onto a
+// worker-local deque; workers pop locally, steal when dry, and exit when
+// the shared pending counter hits zero. The from-space header is the
+// synchronization point: NORMAL -> BUSY (claim CAS) -> TOMBSTONE(to-ptr)
+// (Release publish after the body copy), so exactly one worker copies each
+// object and every reader observes a fully-copied body (Acquire).
+mod par {
+    use super::{
+        F_BYTE_OBJ, F_CLOSURE_OBJ, F_CODE_OBJ, F_TOMBSTONE_BIT, FLAGS_SHIFT, PolyWord, flags_of,
+        length_of, length_word, type_of,
+    };
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// BUSY claim sentinel: the tombstone bit with a NULL forward pointer —
+    /// an otherwise-impossible header (`bump_to` never returns null).
+    const BUSY: usize = (F_TOMBSTONE_BIT as usize) << FLAGS_SHIFT;
+
+    /// `Send`+`Sync` wrapper for the raw to-space base pointer. Workers
+    /// write disjoint reserved regions (the atomic bump cursor is the
+    /// arbiter) and scan each object exactly once (deque transfer).
+    struct SendBase(*mut PolyWord);
+    unsafe impl Send for SendBase {}
+    unsafe impl Sync for SendBase {}
+
+    /// Work-batch size: locals spill to the shared injector (and thieves
+    /// take) in batches, so shared-lock traffic is per-BATCH, not
+    /// per-object. A worker spills only when its local queue exceeds
+    /// 2×BATCH — a chain-shaped graph (local queue depth ~1) never touches
+    /// the injector at all and degrades to ~serial cost.
+    const BATCH: usize = 256;
+
+    /// Shared state of one parallel scan.
+    pub(super) struct Shared<'a> {
+        pub from_ranges: &'a [(usize, usize)],
+        /// Object-start bitmap + per-range bit bases (see
+        /// `Collector::find_body_start`) — read-only during the drain.
+        start_bits: &'a [u64],
+        range_bit_base: &'a [usize],
+        base: SendBase,
+        to_len: usize,
+        /// Atomic bump cursor (word index into to-space).
+        pub to_used: AtomicUsize,
+        /// Objects pushed-but-not-fully-scanned. A worker decrements only
+        /// AFTER scanning an object (its children already pushed), so
+        /// `pending == 0` really means "no work anywhere".
+        pending: AtomicUsize,
+        /// Shared injector of work BATCHES (to-space body addresses).
+        /// Workers keep an owner-local lock-free Vec and only exchange
+        /// batches here.
+        injector: Mutex<Vec<Vec<usize>>>,
+        /// From-space pointers matching no tracked object (collector-bug
+        /// canary, merged into `Collector::untracked_addrs` after the drain).
+        pub untracked: Mutex<Vec<usize>>,
+    }
+
+    impl<'a> Shared<'a> {
+        pub fn new(
+            from_ranges: &'a [(usize, usize)],
+            start_bits: &'a [u64],
+            range_bit_base: &'a [usize],
+            to_storage: &mut [PolyWord],
+            to_used: usize,
+            seeds: &[usize],
+            workers: usize,
+        ) -> Self {
+            // Split the seeds into ~worker-count batches so everyone can
+            // start immediately.
+            let chunk = seeds.len().div_ceil(workers).max(1);
+            let batches: Vec<Vec<usize>> = seeds.chunks(chunk).map(<[usize]>::to_vec).collect();
+            Self {
+                from_ranges,
+                start_bits,
+                range_bit_base,
+                base: SendBase(to_storage.as_mut_ptr()),
+                to_len: to_storage.len(),
+                to_used: AtomicUsize::new(to_used),
+                pending: AtomicUsize::new(seeds.len()),
+                injector: Mutex::new(batches),
+                untracked: Mutex::new(Vec::new()),
+            }
+        }
+
+        #[inline]
+        fn in_from_space(&self, addr: usize) -> bool {
+            let idx = self
+                .from_ranges
+                .partition_point(|&(start, _)| start <= addr);
+            idx > 0 && addr < self.from_ranges[idx - 1].1
+        }
+
+        /// Length of the object whose body starts at `body`, read
+        /// ATOMICALLY (a peer may CAS the header concurrently): a NORMAL
+        /// header gives the length directly (lengths never change, so a
+        /// concurrent claim can't invalidate it); BUSY spins for the
+        /// publish; a tombstone reads the (stable) to-space header.
+        fn object_len_via_header_atomic(&self, body: usize) -> usize {
+            let header_ptr = (body as *const PolyWord).cast_mut().wrapping_sub(1);
+            let header = unsafe { AtomicUsize::from_ptr(header_ptr.cast::<usize>()) };
+            let mut bits = header.load(Ordering::Acquire);
+            loop {
+                if (flags_of(PolyWord::from_bits(bits)) & F_TOMBSTONE_BIT) == 0 {
+                    return length_of(PolyWord::from_bits(bits));
+                }
+                if bits != BUSY {
+                    let to = bits & !BUSY;
+                    let to_lw = unsafe { *(to as *const PolyWord).sub(1) };
+                    return length_of(to_lw);
+                }
+                std::hint::spin_loop();
+                bits = header.load(Ordering::Acquire);
+            }
+        }
+
+        /// Parallel mirror of `Collector::find_body_start` (keep in sync):
+        /// exact-bit O(1) hit, else backward scan with BUSY-safe length
+        /// validation.
+        fn find_body_start(&self, addr: usize) -> Option<usize> {
+            let idx = self
+                .from_ranges
+                .partition_point(|&(start, _)| start <= addr);
+            if idx == 0 || addr >= self.from_ranges[idx - 1].1 {
+                return None;
+            }
+            let (range_start, _) = self.from_ranges[idx - 1];
+            let bit_base = self.range_bit_base[idx - 1];
+            let word_size = std::mem::size_of::<usize>();
+            let word_idx = bit_base + (addr - range_start) / word_size;
+            let is_start = |i: usize| self.start_bits[i / 64] & (1u64 << (i % 64)) != 0;
+            if is_start(word_idx) {
+                return Some(range_start + (word_idx - bit_base) * word_size);
+            }
+            let mut i = word_idx;
+            while i > bit_base {
+                i -= 1;
+                if !is_start(i) {
+                    continue;
+                }
+                let start = range_start + (i - bit_base) * word_size;
+                let n = self.object_len_via_header_atomic(start);
+                let end = start.saturating_add(n.saturating_mul(word_size));
+                if addr < end {
+                    return Some(start);
+                }
+                if n > 0 {
+                    return None;
+                }
+            }
+            None
+        }
+
+        /// Atomically reserve `1 + n_words` in to-space; returns the body
+        /// pointer. The assert mirrors `bump_to` (Σ-capacity can never
+        /// overflow because the claim CAS guarantees one copy per object).
+        fn bump(&self, n_words: usize) -> *mut PolyWord {
+            let len_idx = self.to_used.fetch_add(1 + n_words, Ordering::Relaxed);
+            let new_used = len_idx + 1 + n_words;
+            assert!(
+                new_used <= self.to_len,
+                "GC to-space overflow (parallel): requested {n_words}, at {len_idx}/{}",
+                self.to_len
+            );
+            // SAFETY: reserved region is exclusively ours per the fetch_add.
+            unsafe { self.base.0.add(len_idx + 1) }
+        }
+
+        /// Push newly-copied work: owner-local (lock-free); spill a batch
+        /// to the shared injector when the local queue grows past 2×BATCH.
+        fn push_work(&self, local: &mut Vec<usize>, body: usize) {
+            self.pending.fetch_add(1, Ordering::Relaxed);
+            local.push(body);
+            // Share half once we clearly have surplus. A chain-shaped graph
+            // keeps the local depth ~1 and never pays the injector lock; a
+            // wide graph spills early so idle peers get fed.
+            if local.len() > BATCH {
+                let spill = local.split_off(local.len() / 2);
+                self.injector.lock().unwrap().push(spill);
+            }
+        }
+
+        /// Parallel forward of one object known to start at `body_start`:
+        /// claim via header CAS, copy, publish. Returns the to-space body.
+        ///
+        /// # Safety
+        /// `body_start` must be the body address of a well-formed
+        /// from-space object (came from `find_object`).
+        unsafe fn forward_object(&self, body_start: usize, local: &mut Vec<usize>) -> usize {
+            let header_ptr = (body_start as *const PolyWord).cast_mut().wrapping_sub(1);
+            // SAFETY: PolyWord is repr(transparent) over usize; the header
+            // word is shared mutable state, accessed atomically only.
+            let header = unsafe { AtomicUsize::from_ptr(header_ptr.cast::<usize>()) };
+            let mut lw_bits = header.load(Ordering::Acquire);
+            loop {
+                if (flags_of(PolyWord::from_bits(lw_bits)) & F_TOMBSTONE_BIT) != 0 {
+                    if lw_bits == BUSY {
+                        // Another worker is mid-copy: wait for the publish.
+                        std::hint::spin_loop();
+                        lw_bits = header.load(Ordering::Acquire);
+                        continue;
+                    }
+                    // Real tombstone: to-space body pointer in the low bits.
+                    return lw_bits & !BUSY;
+                }
+                // NORMAL: try to claim.
+                match header.compare_exchange_weak(
+                    lw_bits,
+                    BUSY,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(cur) => lw_bits = cur,
+                }
+            }
+            // We hold the claim; lw_bits is the original length word.
+            let lw = PolyWord::from_bits(lw_bits);
+            let n_words = length_of(lw);
+            let flags = flags_of(lw);
+            let to_ptr = self.bump(n_words);
+            let new_lw = length_word::make_length_word(n_words, flags);
+            // SAFETY: to_ptr-1..to_ptr+n_words is our exclusive reservation;
+            // the source body is frozen (all mutators parked, we hold the claim).
+            unsafe {
+                to_ptr.sub(1).write(new_lw);
+                std::ptr::copy_nonoverlapping(body_start as *const PolyWord, to_ptr, n_words);
+            }
+            // Publish: Release makes the copied body visible to any reader
+            // that Acquire-loads this tombstone.
+            header.store((to_ptr as usize) | BUSY, Ordering::Release);
+            // Exactly-once push: we won the claim, so we are the sole pusher.
+            self.push_work(local, to_ptr as usize);
+            to_ptr as usize
+        }
+
+        /// Parallel mirror of `Collector::forward_impl` for one slot.
+        ///
+        /// # Safety
+        /// `slot` must be a valid, writable pointer to a PolyWord in a
+        /// to-space object owned (being scanned) by this worker.
+        unsafe fn forward_slot(&self, slot: *mut PolyWord, local: &mut Vec<usize>) {
+            let w = unsafe { *slot };
+            if w.is_tagged() {
+                return;
+            }
+            let addr = w.0;
+            if !self.in_from_space(addr) {
+                return;
+            }
+            // Resolve the containing object via the start bitmap — O(1)
+            // exact hit for body-start pointers; the backward scan covers
+            // mid-body values (closure word-0 entry offsets point INSIDE
+            // code objects — the body-start-assumption version of this
+            // read garbage headers, caught by the chain fence).
+            let Some(body_start) = self.find_body_start(addr) else {
+                self.untracked.lock().unwrap().push(addr);
+                return;
+            };
+            let new_body = unsafe { self.forward_object(body_start, local) };
+            let offset_bytes = addr.wrapping_sub(body_start);
+            unsafe { slot.write(PolyWord::from_bits(new_body.wrapping_add(offset_bytes))) };
+        }
+
+        /// Scan one to-space object — the parallel mirror of
+        /// `Collector::scan_object` (same shape rules; keep in sync).
+        ///
+        /// # Safety
+        /// `body` must be a fully-copied to-space object body address that
+        /// this worker popped from a queue (sole scanner).
+        unsafe fn scan_object(&self, body: usize, local: &mut Vec<usize>) {
+            let obj_ptr = body as *mut PolyWord;
+            // SAFETY: header written before the queue push (program order
+            // of the copier + the Mutex transfer / local ownership).
+            let lw = unsafe { *obj_ptr.sub(1) };
+            let n_words = length_of(lw);
+            match type_of(lw) {
+                F_BYTE_OBJ => {}
+                F_CODE_OBJ => {
+                    let (cp, count) = unsafe { length_word::const_segment_for_code(obj_ptr) };
+                    let cp_mut = cp.cast_mut();
+                    for i in 0..count {
+                        unsafe { self.forward_slot(cp_mut.add(i), local) };
+                    }
+                }
+                F_CLOSURE_OBJ => {
+                    for i in 0..n_words {
+                        unsafe { self.forward_slot(obj_ptr.add(i), local) };
+                    }
+                }
+                _ => {
+                    for i in 0..n_words {
+                        unsafe { self.forward_slot(obj_ptr.add(i), local) };
+                    }
+                }
+            }
+        }
+
+        /// One worker's drain loop: pop the owner-local queue (lock-free),
+        /// refill from the shared batch injector when dry, back off (spin
+        /// then yield) when the injector is empty too, exit on quiescence.
+        pub(super) fn drain(&self) {
+            let mut local: Vec<usize> = Vec::with_capacity(4 * BATCH);
+            let mut idle_spins = 0u32;
+            loop {
+                if let Some(body) = local.pop() {
+                    idle_spins = 0;
+                    // SAFETY: popped exactly once; copy completed before the
+                    // push (copier program order / Mutex batch transfer).
+                    unsafe { self.scan_object(body, &mut local) };
+                    // Decrement AFTER the scan (children already pushed), so
+                    // pending==0 is a true quiescence signal.
+                    self.pending.fetch_sub(1, Ordering::Release);
+                    continue;
+                }
+                // Local dry: grab a whole batch from the injector.
+                if let Some(batch) = self.injector.lock().unwrap().pop() {
+                    idle_spins = 0;
+                    local = batch;
+                    continue;
+                }
+                if self.pending.load(Ordering::Acquire) == 0 {
+                    return;
+                }
+                // Idle backoff, three tiers: spin (latency) → yield → SLEEP.
+                // An idle worker must not burn CPU while a peer chases a
+                // long chain — the first cut measured 2.3× SLOWDOWN from
+                // exactly this (spinners at full burn); yield-only still
+                // cost ~14s of sys-time context-switch churn. The 100µs
+                // sleep caps wake-latency at a negligible fraction of any
+                // collection big enough to matter.
+                idle_spins += 1;
+                if idle_spins < 64 {
+                    std::hint::spin_loop();
+                } else if idle_spins < 80 {
+                    std::thread::yield_now();
+                } else {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+            }
+        }
+    }
+}
+
+/// P6 gate: `Some(n)` iff `POLYML_PARALLEL_GC=1` and the effective worker
+/// count (`POLYML_GC_THREADS` override, else `available_parallelism`) is
+/// at least 2. `None` = the exact serial path (default; byte-identical).
+fn parallel_gc_workers() -> Option<usize> {
+    if !crate::env::env_flag("POLYML_PARALLEL_GC") {
+        return None;
+    }
+    let n = std::env::var("POLYML_GC_THREADS")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1)
+        })
+        .min(64);
+    (n >= 2).then_some(n)
+}
+
 /// Run a Cheney-style collection on `alloc`. The `visit_roots` closure
 /// is called once with a `&mut Collector` it can use to forward each
 /// root pointer slot. After it returns, the collector performs the
@@ -334,25 +768,69 @@ pub fn collect_pool<F>(spaces: &mut [&mut MemorySpace], visit_roots: F) -> usize
 where
     F: FnOnce(&mut Collector<'_>),
 {
+    // P6: parallel scan gate. Read fresh per collection (collections are
+    // rare; no memoization hazard for tests).
+    collect_pool_with_workers(spaces, parallel_gc_workers(), visit_roots)
+}
+
+/// [`collect_pool`] with an explicit parallel-worker override (`None` /
+/// `Some(0|1)` = serial). Unit tests drive the parallel drain through this
+/// without process-global env manipulation.
+pub fn collect_pool_with_workers<F>(
+    spaces: &mut [&mut MemorySpace],
+    par_workers: Option<usize>,
+    visit_roots: F,
+) -> usize
+where
+    F: FnOnce(&mut Collector<'_>),
+{
     assert!(
         !spaces.is_empty(),
         "collect_pool needs at least one nursery"
     );
 
+    // POLYML_GC_PHASES=1: per-phase pause timing on stderr (pre-pass /
+    // scratch / roots / scan / promote) — the instrument that tells you
+    // WHICH term dominates a pause before optimizing the wrong one.
+    let phases = crate::env::env_flag("POLYML_GC_PHASES");
+    let t0 = std::time::Instant::now();
+
     // from-space ranges (full storage capacity per space, as the old
-    // single-space code used `as_ptr_range`) + the union object pre-pass
-    // over each space's USED region. Ranges are sorted for binary-search
-    // membership; from_objects sorted by body start for `find_object`.
-    let mut from_ranges: Vec<(usize, usize)> = Vec::with_capacity(spaces.len());
-    let mut from_objects: Vec<(usize, usize)> = Vec::new();
+    // single-space code used `as_ptr_range`), sorted for binary-search
+    // membership, + the object-start BITMAP pre-pass over each space's
+    // USED region (consumed only by stack-slot forwarding — see
+    // `Collector::find_object`).
+    let mut ranges_unsorted: Vec<(usize, usize, usize)> = Vec::with_capacity(spaces.len()); // (start, end, capacity)
     let mut total_capacity = 0usize;
     for space in spaces.iter() {
         let range = space.as_ptr_range();
-        from_ranges.push((range.start as usize, range.end as usize));
+        ranges_unsorted.push((
+            range.start as usize,
+            range.end as usize,
+            space.capacity_words(),
+        ));
         total_capacity += space.capacity_words();
-        // Pre-pass: object body ranges in this space's live region.
-        let storage_start = range.start;
+    }
+    ranges_unsorted.sort_unstable();
+    let from_ranges: Vec<(usize, usize)> =
+        ranges_unsorted.iter().map(|&(s, e, _)| (s, e)).collect();
+    // Bit bases: each (sorted) range gets a contiguous bit run sized to
+    // its capacity.
+    let mut range_bit_base = Vec::with_capacity(ranges_unsorted.len());
+    let mut bits_total = 0usize;
+    for &(_, _, cap) in &ranges_unsorted {
+        range_bit_base.push(bits_total);
+        bits_total += cap;
+    }
+    let mut start_bits = vec![0u64; bits_total.div_ceil(64)];
+    for (k, &(start, _, _)) in ranges_unsorted.iter().enumerate() {
+        let space = spaces
+            .iter()
+            .find(|s| s.as_ptr_range().start as usize == start)
+            .expect("sorted range must correspond to a space");
+        let storage_start = space.as_ptr_range().start;
         let used_words = space.used_words();
+        let bit_base = range_bit_base[k];
         let mut i = 0usize;
         while i < used_words {
             // SAFETY: i is in-bounds of this space's storage slice.
@@ -362,28 +840,74 @@ where
                 i += 1;
                 continue;
             }
-            let body_addr = unsafe { storage_start.add(i + 1) } as usize;
-            from_objects.push((body_addr, n));
+            let body_bit = bit_base + i + 1;
+            start_bits[body_bit / 64] |= 1u64 << (body_bit % 64);
             i += 1 + n;
         }
     }
-    from_ranges.sort_unstable();
-    from_objects.sort_unstable_by_key(|&(start, _)| start);
 
-    // Σ-capacity to-space (never overflows).
-    let mut scratch = vec![PolyWord::ZERO; total_capacity].into_boxed_slice();
+    let t_prepass = t0.elapsed();
+
+    // Σ-capacity to-space (never overflows). Allocate as `Vec<usize>` —
+    // that hits the `IsZero` → `alloc_zeroed` (calloc) specialization, so
+    // the kernel hands us LAZY zero pages and only live pages ever fault
+    // in. `vec![PolyWord::ZERO; n]` (a custom struct) misses the
+    // specialization and explicitly memsets the whole capacity — measured
+    // ~175 ms per collection on a 512 MB heap, the second-largest pause
+    // term. PolyWord is repr(transparent) over usize, so the box transmute
+    // is layout-identical.
+    let scratch_raw: Box<[usize]> = vec![0usize; total_capacity].into_boxed_slice();
+    let mut scratch: Box<[PolyWord]> =
+        // SAFETY: PolyWord is repr(transparent) over usize (same layout,
+        // any bit pattern valid); Box<[usize]> and Box<[PolyWord]> are
+        // interchangeable.
+        unsafe { Box::from_raw(Box::into_raw(scratch_raw) as *mut [PolyWord]) };
+
+    let t_scratch = t0.elapsed();
+
+    // Worker count None/0/1 = the exact serial path.
+    let par_workers = par_workers.filter(|&n| n >= 2);
 
     let mut col = Collector {
         from_ranges,
         to_storage: &mut scratch,
         to_used: 0,
-        from_objects,
+        start_bits,
+        range_bit_base,
         untracked_addrs: Vec::new(),
+        par_workers,
+        par_seeds: Vec::new(),
     };
 
     visit_roots(&mut col);
-    // SAFETY: collector invariants upheld.
-    unsafe { col.cheney_scan() };
+    let t_roots = t0.elapsed();
+    if let Some(workers) = col.par_workers {
+        // P6 parallel queue-driven drain (docs/parallel-design.md § P6).
+        // The roots phase above ran serially and seeded `par_seeds`.
+        let shared = par::Shared::new(
+            &col.from_ranges,
+            &col.start_bits,
+            &col.range_bit_base,
+            col.to_storage,
+            col.to_used,
+            &col.par_seeds,
+            workers,
+        );
+        std::thread::scope(|s| {
+            for _ in 1..workers {
+                let sh = &shared;
+                s.spawn(move || sh.drain());
+            }
+            shared.drain();
+        });
+        col.to_used = shared.to_used.load(std::sync::atomic::Ordering::Acquire);
+        col.untracked_addrs
+            .extend(shared.untracked.lock().unwrap().iter().copied());
+    } else {
+        // SAFETY: collector invariants upheld.
+        unsafe { col.cheney_scan() };
+    }
+    let t_scan = t0.elapsed();
 
     let new_used = col.to_used;
     if !col.untracked_addrs.is_empty() {
@@ -428,6 +952,20 @@ where
     spaces[0].replace_storage(scratch, new_used);
     for space in spaces.iter_mut().take(n_spaces).skip(1) {
         space.reset_empty();
+    }
+    if phases {
+        let total = t0.elapsed();
+        eprintln!(
+            "  GC phases: pre-pass {:.1}ms | scratch {:.1}ms | roots {:.1}ms | scan {:.1}ms | promote {:.1}ms | total {:.1}ms ({} live words, workers={:?})",
+            t_prepass.as_secs_f64() * 1e3,
+            (t_scratch - t_prepass).as_secs_f64() * 1e3,
+            (t_roots - t_scratch).as_secs_f64() * 1e3,
+            (t_scan - t_roots).as_secs_f64() * 1e3,
+            (total - t_scan).as_secs_f64() * 1e3,
+            total.as_secs_f64() * 1e3,
+            new_used,
+            par_workers,
+        );
     }
     new_used
 }
@@ -607,6 +1145,170 @@ mod tests {
         assert!(
             (new_leaf as usize) >= a_lo && (new_leaf as usize) < a_hi,
             "promoted leaf must be in the primary"
+        );
+    }
+
+    /// P6: the PARALLEL drain preserves the same cross-nursery graph the
+    /// serial collector does (4 workers, explicit override — no env).
+    #[test]
+    fn parallel_collect_pool_forwards_cross_nursery_pointer() {
+        let mut a = MemorySpace::new(64, SpaceKind::Mutable);
+        let mut b = MemorySpace::new(64, SpaceKind::Mutable);
+        let leaf = b.alloc(1);
+        unsafe {
+            set_length_word(leaf, 1, F_BYTE_OBJ);
+            leaf.write(PolyWord::from_bits(0xcafe_f00d));
+        }
+        let parent = a.alloc(2);
+        unsafe {
+            set_length_word(parent, 2, 0);
+            parent.write(PolyWord::from_ptr(leaf.cast_const()));
+            parent.add(1).write(PolyWord::tagged(7));
+        }
+
+        let mut root = PolyWord::from_ptr(parent.cast_const());
+        let new_used = collect_pool_with_workers(&mut [&mut a, &mut b], Some(4), |c| {
+            unsafe { c.forward(&mut root as *mut _) };
+        });
+
+        assert_eq!(b.used_words(), 0);
+        assert!(new_used >= 4);
+        let new_parent = root.as_ptr::<PolyWord>();
+        let new_leaf = unsafe { *new_parent }.as_ptr::<PolyWord>();
+        assert_eq!(unsafe { (*new_leaf).0 }, 0xcafe_f00d);
+        assert_eq!(unsafe { (*new_parent.add(1)).0 }, PolyWord::tagged(7).0);
+    }
+
+    /// P6 stress: a wide shared DAG across two nurseries — 2,000 parents
+    /// that ALL point at the same two leaves plus a long chain, drained by
+    /// 4 workers. The shared leaves force claim-CAS races (many scanners
+    /// reach them concurrently); the chain forces steal traffic (all depth
+    /// initially on one worker). Verifies: exact live word count (no
+    /// duplicate copies — the Σ-capacity bound's soundness), every parent's
+    /// leaf pointers point at ONE shared copy each (sharing preserved), and
+    /// chain integrity end-to-end.
+    #[test]
+    fn parallel_collect_shared_dag_stress() {
+        const PARENTS: usize = 2000;
+        const CHAIN: usize = 1000;
+        let mut a = MemorySpace::new((PARENTS + CHAIN) * 8, SpaceKind::Mutable);
+        let mut b = MemorySpace::new((PARENTS + CHAIN) * 8, SpaceKind::Mutable);
+
+        // Two shared leaves in B.
+        let leaf1 = b.alloc(1);
+        let leaf2 = b.alloc(1);
+        unsafe {
+            set_length_word(leaf1, 1, F_BYTE_OBJ);
+            leaf1.write(PolyWord::from_bits(0x1111_1111));
+            set_length_word(leaf2, 1, F_BYTE_OBJ);
+            leaf2.write(PolyWord::from_bits(0x2222_2222));
+        }
+        // A chain of CHAIN cons cells in B (tail-linked), ending at leaf2.
+        let mut chain_head = PolyWord::from_ptr(leaf2.cast_const());
+        for i in 0..CHAIN {
+            let cell = b.alloc(2);
+            unsafe {
+                set_length_word(cell, 2, 0);
+                cell.write(PolyWord::tagged(i as isize));
+                cell.add(1).write(chain_head);
+            }
+            chain_head = PolyWord::from_ptr(cell.cast_const());
+        }
+        // PARENTS parents in A, each pointing at BOTH leaves + the chain.
+        let mut parents = Vec::with_capacity(PARENTS);
+        for i in 0..PARENTS {
+            let p = a.alloc(4);
+            unsafe {
+                set_length_word(p, 4, 0);
+                p.write(PolyWord::from_ptr(leaf1.cast_const()));
+                p.add(1).write(PolyWord::from_ptr(leaf2.cast_const()));
+                p.add(2).write(chain_head);
+                p.add(3).write(PolyWord::tagged(i as isize));
+            }
+            parents.push(PolyWord::from_ptr(p.cast_const()));
+        }
+
+        // Live words: parents (1+4 each) + chain (1+2 each) + 2 leaves (1+1).
+        let expected_live = PARENTS * 5 + CHAIN * 3 + 2 * 2;
+
+        let new_used = collect_pool_with_workers(&mut [&mut a, &mut b], Some(4), |c| {
+            for r in &mut parents {
+                unsafe { c.forward(r as *mut _) };
+            }
+        });
+        assert_eq!(
+            new_used, expected_live,
+            "live word count must be EXACT — a duplicate copy (claim race) \
+             or a dropped object (lost work) shows here"
+        );
+
+        // Sharing preserved: every parent sees the SAME forwarded leaves.
+        let p0 = parents[0].as_ptr::<PolyWord>();
+        let (l1, l2, ch) = unsafe { ((*p0).0, (*p0.add(1)).0, (*p0.add(2)).0) };
+        for (i, r) in parents.iter().enumerate() {
+            let p = r.as_ptr::<PolyWord>();
+            unsafe {
+                assert_eq!((*p).0, l1, "parent {i}: leaf1 sharing broken");
+                assert_eq!((*p.add(1)).0, l2, "parent {i}: leaf2 sharing broken");
+                assert_eq!((*p.add(2)).0, ch, "parent {i}: chain sharing broken");
+                assert_eq!((*p.add(3)).0, PolyWord::tagged(i as isize).0);
+            }
+        }
+        unsafe {
+            assert_eq!((*(l1 as *const PolyWord)).0, 0x1111_1111);
+            assert_eq!((*(l2 as *const PolyWord)).0, 0x2222_2222);
+        }
+        // Chain integrity: walk all CHAIN cells to the shared leaf2.
+        let mut cur = ch;
+        for step in 0..CHAIN {
+            let cell = cur as *const PolyWord;
+            unsafe {
+                assert_eq!(
+                    (*cell).0,
+                    PolyWord::tagged((CHAIN - 1 - step) as isize).0,
+                    "chain payload corrupted at depth {step}"
+                );
+                cur = (*cell.add(1)).0;
+            }
+        }
+        assert_eq!(cur, l2, "chain must terminate at the shared leaf2");
+    }
+
+    /// P6 determinism floor: 1 worker (or None) takes the EXACT serial
+    /// path — identical layout, identical used count.
+    #[test]
+    fn parallel_one_worker_is_exactly_serial() {
+        let build = |space: &mut MemorySpace| {
+            let leaf = space.alloc(1);
+            unsafe {
+                set_length_word(leaf, 1, F_BYTE_OBJ);
+                leaf.write(PolyWord::from_bits(0xfeed));
+            }
+            let parent = space.alloc(2);
+            unsafe {
+                set_length_word(parent, 2, 0);
+                parent.write(PolyWord::from_ptr(leaf.cast_const()));
+                parent.add(1).write(PolyWord::tagged(9));
+            }
+            PolyWord::from_ptr(parent.cast_const())
+        };
+        let mut s1 = MemorySpace::new(64, SpaceKind::Mutable);
+        let mut r1 = build(&mut s1);
+        let u1 = collect_pool_with_workers(&mut [&mut s1], None, |c| unsafe {
+            c.forward(&mut r1 as *mut _);
+        });
+        let mut s2 = MemorySpace::new(64, SpaceKind::Mutable);
+        let mut r2 = build(&mut s2);
+        let u2 = collect_pool_with_workers(&mut [&mut s2], Some(1), |c| unsafe {
+            c.forward(&mut r2 as *mut _);
+        });
+        assert_eq!(u1, u2);
+        // Layout identity: same word-index of the root object in to-space.
+        let off1 = r1.0 - s1.as_ptr_range().start as usize;
+        let off2 = r2.0 - s2.as_ptr_range().start as usize;
+        assert_eq!(
+            off1, off2,
+            "Some(1) must take the byte-identical serial path"
         );
     }
 }

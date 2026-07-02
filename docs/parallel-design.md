@@ -360,7 +360,94 @@ hangs:
   default OFF keeps the giant-lock model byte-identical.
 - **P5 — capstone + docs.** Multi-connection web server under load;
   README/CLAUDE/SECURITY/correctness-doc updates; the honest performance
-  table.
+  table. ✅ LANDED (4-connection compute server at 0.24×, 4-way ideal
+  0.25, exact-oracle-verified responses; `concurrency_server.rs`).
+- **P6 — PARALLEL COLLECTION (`POLYML_PARALLEL_GC=1`, default OFF) —
+  BUILT + MEASURED. VERDICT: the parallel drain is SOUND but LOSES to a
+  well-tuned serial sweep at every scale tested; the campaign's real
+  yield was making the SERIAL collector ~3.7× faster (default-on).**
+
+  What landed default-on (measured on a 512 MB heap, ~115 MB live tree,
+  `POLYML_GC_PHASES=1` per-phase timing — also new):
+  * **Pre-pass: 148 → 46 ms.** The per-object `(body, len)` table
+    (~16 B/object, ~300 MB on a churny heap, built EVERY pause) became
+    an object-start BITMAP (Σwords/8 bytes, cache-resident).
+  * **Scratch: 175 → 0 ms.** `vec![PolyWord::ZERO; n]` missed Rust's
+    `IsZero`→calloc specialization (custom struct) and explicitly
+    memset the whole capacity; allocating as `Vec<usize>` + a
+    repr(transparent) box transmute gets LAZY kernel zero pages — only
+    live pages ever fault.
+  * **Scan: 307 → 98 ms.** Slot forwarding no longer binary-searches
+    the object table per slot (memory-bound, the dominant cost); the
+    bitmap's exact-bit test resolves body-start pointers O(1), with the
+    backward bitmap scan only for genuine mid-body values.
+    **The chain fence caught a wrong first cut here**: ML slots are NOT
+    always body starts — closure word-0 can hold an entry offset INSIDE
+    a code object (a mid-body code pointer). The bitmap-exact-hit
+    design handles both without heuristics. Total pause 680 → 185 ms;
+    the Isabelle parallel-kernel benchmark dropped 4.6 → 1.4 s with
+    DEFAULT nurseries (ratio vs giant-lock 0.78 → 0.31 — the
+    big-nursery tuning knob is now much less needed).
+
+  The parallel drain itself (flag-gated, default OFF): claim-then-copy
+  CAS + atomic bump + batched work-stealing queues with idle backoff.
+  Proven sound (shared-DAG claim-race stress with EXACT live-word
+  count, 90+ runs; one-worker = byte-identical serial layout; the full
+  fence ladder). Measured SLOWER than the optimized serial scan at
+  every live size (115 MB: 168 vs 98 ms; 900 MB: ~1.4 s vs ~0.7 s):
+  the linear Cheney sweep's sequential prefetch beats 6 workers doing
+  random-order queue visits with atomic claim traffic — copying GC
+  here is memory-bound and the sweep is already near bandwidth. The
+  credible parallel design is CHUNKED Cheney (per-worker to-space
+  segments, each swept linearly — upstream's task-farm shape); that
+  requires multi-segment space accounting and is deferred with bounded
+  expectations (the whole-region-JIT lesson: measure the representative
+  workload before productionizing). Original design notes below:
+
+  *Claim protocol.* From-space header states: NORMAL → BUSY →
+  TOMBSTONE(to-ptr). A copier CASes NORMAL→BUSY (BUSY = the tombstone
+  bit with a NULL pointer — an otherwise-impossible encoding, since
+  `bump_to` never returns null); the winner copies the body, then
+  publishes the real tombstone with a Release store. A racing reader
+  finding BUSY spins (`hint::spin_loop`) until the Acquire-loaded
+  header becomes a real tombstone — the Release/Acquire pair makes the
+  copied body visible. Exactly ONE copy per object, so the Σ-capacity
+  to-space bound is preserved (no duplicate-copy waste).
+
+  *Allocation.* One shared to-space, `to_used` becomes an atomic bump
+  cursor (`fetch_add`, Relaxed — reservation is the only claim).
+
+  *Scan.* The linear Cheney scan is REPLACED in parallel mode by a
+  queue-driven scan: the claiming copier pushes each newly-copied
+  object exactly once onto its worker-local deque; workers pop locally
+  and steal from peers when dry. This sidesteps the
+  scan-past-incomplete-copy hazard by construction (an object is only
+  reachable via a queue AFTER its copy completed). Termination: a
+  shared `pending` counter — incremented on push, decremented only
+  AFTER an object's scan (including its child pushes) completes;
+  workers exit when `pending == 0`.
+
+  *What stays serial.* Root forwarding (seeds the queues; runs before
+  workers spawn), the from-objects pre-pass, the untracked-address
+  check, the promote/reset swap, per-thread fixup thunks, and the
+  POLYML_GC_AUDIT pass.
+
+  *Gating + identity.* Flag OFF (default) takes the exact pre-P6 serial
+  path — stage-0 and the 27.7B-step chain stay byte-identical. Flag ON
+  changes to-space LAYOUT nondeterministically (copy order races) —
+  semantically invisible to SML (addresses are unobservable; pointerEq
+  sharing is preserved by any copy order; upstream's parallel GC has
+  the same property), but the byte-identity fences are therefore
+  flag-off only. Worker count: `POLYML_GC_THREADS` override, default
+  `available_parallelism`.
+
+  Fences: all existing GC unit tests + the cross-nursery pool test run
+  under the flag; alloc-storm + audit + the Isabelle kernel benchmark
+  flag-on; the honest measurement is the Isabelle parallel-kernel ratio
+  (0.37 serial-GC baseline) plus a single-mutator GC-heavy workload
+  (the STW pause shrinks in EVERY mode, not just POLY_PARALLEL). Kill
+  switch: if the measured win is noise (the whole-region-JIT
+  precedent), flag stays off and the code is documented as a testbed.
 
 ## Fence plan
 
