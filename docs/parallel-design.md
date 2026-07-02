@@ -137,7 +137,21 @@ Our position, staged:
   word there) and can erase a peer's just-taken lock — it must go atomic
   or go away; the CondVarWait preamble resets ARE upstream-faithful
   (`AtomicallyReleaseMutex`) and just need the atomic port.
-- **User data — LEANING Position 2 (abstract-machine clean).** The recon's
+- **User data — Position 2 ADOPTED (measured free-to-faster).** The
+  measurement gate ran (drift-cancelled A/B, the heap-heavy bench corpus on
+  the self-bootstrapped REPL): converting the hot heap-word accessors
+  (LOAD/STORE_ML_WORD, the INDIRECT family) to relaxed `AtomicUsize` was
+  **~9.5% FASTER**, not slower (sort 6590→5928ms, and deriv/nbody/mmult all
+  6–10% faster) — reproducible across interleaved iterations, so real, not
+  noise. Mechanism: the atomic gives LLVM cleaner aliasing information than
+  a raw `*p` deref (which may alias anything), so it keeps values in
+  registers better across adjacent heap ops. So the abstract-machine-clean
+  memory model that removes the data-race UB is ALSO a modest speedup — the
+  decision is unambiguous. Landed for the hot word accessors (byte accesses
+  stay plain: they carry no pointers, and a sub-word atomic would need RMW);
+  byte-identical (the chain is unchanged). Historical context below.
+
+- **User data — Position 2 (abstract-machine clean), the reasoning:** The recon's
   decisive argument is identity, not physics: this project's whole
   differentiator is "faithful port with **stronger** memory safety," and
   Position 1 (plain raw-pointer racy accesses, upstream's C model) embeds a
@@ -257,12 +271,55 @@ hangs:
   release-on-publish/acquire-on-collect ordering; per-subsystem RTS-static
   locks (audited already thread-safe by the shared-state recon — mostly
   Mutex/Atomic/OnceLock today).
-- **P4 — drop the lock (`POLY_PARALLEL=1`).** Gated on the fifth map's
-  plain-store inventory + the measured atomics decision. Mutators run
-  free; safepoint poll = STW check; `running`/yield deleted on this path.
-  Fences: everything + N-thread compute-scaling (must beat the giant lock
-  wall-clock) + racy-ref probe (must not crash; values unspecified) +
-  Mutex-hammer exactness + the sockets/stdin demos under `POLY_PARALLEL`.
+- **P4 — drop the lock (`POLY_PARALLEL=1`). GATE PASSED (memory model
+  measured + adopted). The invariant contract for the surgery:**
+
+  *States.* Each thread is in exactly one of: RUNNING (`in_ml == true`,
+  executing bytecode, may touch the heap), PARKED (`in_ml == false` AND
+  `parked_roots == Some` — blocked wait / safepoint park / quiesced), or
+  EXITED. The old giant-lock state (`running: bool`, `waiters`, the yield
+  hand-off, `mutator_wake`-on-acquire) is BYPASSED under `POLY_PARALLEL`
+  — mutators transition themselves without mutual exclusion.
+
+  *H1′ (root reachability).* At every instant, a thread that is not
+  RUNNING and not EXITED has published roots. Structural: every path that
+  clears `in_ml` publishes FIRST (the existing publish-before-release
+  helpers already enforce this order; the parallel path reuses them
+  verbatim, minus the lock wake).
+
+  *STW handshake.* `gc_requested` becomes a real `AtomicBool`
+  (release-store by the requester, acquire-load at safepoints — the
+  happens-before that makes published roots visible to the collector).
+  Collector ELECTION: CAS on an `AtomicBool` owner token; the winner
+  becomes collector, losers PARK at their safepoint like any peer (their
+  own nursery-full condition re-checks after the collection — likely
+  satisfied by the reset). The collector waits until every registered,
+  non-exited peer is PARKED (in_ml false + roots published — the
+  conjunctive check, per the fork-TOCTOU lesson), collects, clears
+  `gc_requested`, then wakes parked peers. A thread blocked on the POOL
+  LOCK during a pending STW must count as parked (it publishes before
+  taking the pool mutex on the refill path — refill is a park-shaped
+  operation).
+
+  *Safepoint poll.* The 65536-step poll (+ every blocking park) checks
+  `gc_requested` (acquire). Under `POLY_PARALLEL` the cooperative yield
+  disappears (threads just run); the poll's only job is the STW check +
+  request delivery. Bare `step()` loops (CLI checkpoint, diff drivers,
+  embedder API) remain single-threaded-only — documented, unchanged.
+
+  *What still serializes.* The sched registry mutex (registration /
+  snapshots — cold); the nursery-pool mutex (install/refill — cold); the
+  RTS statics' own locks (already in place); the protocol-word atomics
+  (P3); `block_gen`/condvar machinery for blocking waits (unchanged).
+
+  Fences: everything so far + N-thread compute-SCALING (two compute-bound
+  threads under `POLY_PARALLEL` must approach 2× the giant-lock
+  wall-clock — the honest headline number) + racy-ref probe (two threads
+  hammering an unprotected ref: must not crash, values unspecified) +
+  mutex-hammer exactness under `POLY_PARALLEL` + the alloc-storm +
+  sockets/stdin demos under `POLY_PARALLEL` + the GC-audit soak with N
+  threads. `POLY_PARALLEL` without `POLY_REAL_THREADS` is a no-op;
+  default OFF keeps the giant-lock model byte-identical.
 - **P5 — capstone + docs.** Multi-connection web server under load;
   README/CLAUDE/SECURITY/correctness-doc updates; the honest performance
   table.
