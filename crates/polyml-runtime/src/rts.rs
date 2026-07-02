@@ -176,6 +176,129 @@ pub struct RtsContext<'a> {
     pub safe_spaces: Option<RtsSafeSpaces>,
 }
 
+/// Blocking-syscall park: releases the GIANT LOCK (publishing this
+/// thread's GC roots) across a blocking syscall, so peers can run and
+/// collect while this thread waits in the kernel — the equivalent of
+/// upstream's `ThreadPauseForIO` for our blocking-IO design. Installed in
+/// a thread-local by the interpreter's `rts_call` ONLY in multi-threaded
+/// sessions (`POLY_REAL_THREADS=1` with peers registered); the
+/// single-threaded default never constructs one, keeping every existing
+/// workload byte-identical and paying zero hot-path cost.
+pub(crate) struct RtsPark {
+    runtime: std::sync::Arc<crate::sched::Runtime>,
+    handle: std::sync::Arc<crate::sched::ThreadHandle>,
+    /// The leaked, type-erased `ThreadRoots` box the published `SendRoots`
+    /// references. Freed after the park's re-acquire retracts the slot
+    /// (or by `free_unused` if the RTS call never parked).
+    raw: *mut (),
+    send: Option<crate::sched::SendRoots>,
+    /// Type-erased free thunk for `raw` (the interpreter side knows the
+    /// concrete `ThreadRoots` type).
+    free: unsafe fn(*mut ()),
+}
+
+impl RtsPark {
+    pub(crate) fn new(
+        runtime: std::sync::Arc<crate::sched::Runtime>,
+        handle: std::sync::Arc<crate::sched::ThreadHandle>,
+        raw: *mut (),
+        send: crate::sched::SendRoots,
+        free: unsafe fn(*mut ()),
+    ) -> Self {
+        Self {
+            runtime,
+            handle,
+            raw,
+            send: Some(send),
+            free,
+        }
+    }
+
+    /// Run `f` with the giant lock released and roots published. `f` MUST
+    /// touch only NATIVE data (Rust locals/Vecs/fds) — a peer GC may move
+    /// heap objects while we wait, so any heap pointer captured across the
+    /// park dangles. Copy heap data out before, and back in after.
+    /// One-shot: a second call on the same park runs `f` inline (holding
+    /// the lock) — RTS functions do at most one blocking syscall, with any
+    /// EINTR retry INSIDE the closure.
+    fn park_while<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        let Some(send) = self.send.take() else {
+            return f();
+        };
+        // SAFETY: `send` aliases the (dormant) interpreter state exactly as
+        // in `block_on_event`; roots are published under the giant lock
+        // before `running` clears, so a peer collector scans (and forwards)
+        // this thread's stack while we wait. The interpreter's `ctx` stays
+        // dormant across the window (the closure cannot reach it).
+        unsafe {
+            self.runtime
+                .release_ml_memory_publishing(&self.handle, send);
+        }
+        let r = f();
+        self.runtime.reacquire_ml_memory(&self.handle);
+        // SAFETY: re-acquire retracted the published slot; no live alias to
+        // the box remains.
+        unsafe {
+            (self.free)(self.raw);
+        }
+        self.raw = std::ptr::null_mut();
+        r
+    }
+
+    /// Free the roots box if the RTS call finished without parking.
+    fn free_unused(mut self) {
+        if !self.raw.is_null() {
+            // SAFETY: never published (send still present) or already
+            // retracted; either way no alias remains.
+            unsafe {
+                (self.free)(self.raw);
+            }
+            self.raw = std::ptr::null_mut();
+        }
+    }
+}
+
+std::thread_local! {
+    /// The current RTS call's park, when the session is multi-threaded.
+    /// Per OS thread — exactly one mutator per thread, and only one RTS
+    /// call is active on it at a time.
+    static CURRENT_PARK: std::cell::RefCell<Option<RtsPark>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install the park for the RTS call about to be dispatched (interpreter
+/// side). Returns any previously-installed park (must be `None` — one RTS
+/// call at a time per thread; `debug_assert`ed at the call site).
+pub(crate) fn install_park(park: RtsPark) {
+    CURRENT_PARK.with(|slot| {
+        let prev = slot.borrow_mut().replace(park);
+        debug_assert!(prev.is_none(), "nested RTS park install");
+    });
+}
+
+/// Remove + free the park after the RTS call returns (no-op if the call
+/// consumed it by parking, or none was installed).
+pub(crate) fn clear_park() {
+    CURRENT_PARK.with(|slot| {
+        if let Some(p) = slot.borrow_mut().take() {
+            p.free_unused();
+        }
+    });
+}
+
+/// Run a blocking syscall with the giant lock released (when this session
+/// is multi-threaded — otherwise just run it). See [`RtsPark::park_while`]
+/// for the NATIVE-DATA-ONLY contract on `f`.
+pub(crate) fn park_while_blocking<T>(f: impl FnOnce() -> T) -> T {
+    CURRENT_PARK.with(|slot| {
+        let mut b = slot.borrow_mut();
+        match b.as_mut() {
+            Some(p) => p.park_while(f),
+            None => f(),
+        }
+    })
+}
+
 /// A snapshot of the live spaces handed to an RTS function in untrusted
 /// mode so the code-constant family can validate a resolved code-object
 /// pointer. A small, copyable bundle (≤ 4 ranges). Built by the
@@ -558,13 +681,18 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyGetUserStatsCount",
         RtsFn::Arity0(|_| PolyWord::tagged(0)),
     );
+    // Report the REAL core count when real threads are on (upstream
+    // behaviour; programs size worker pools from it — under the giant lock
+    // they interleave rather than parallelize, but they work). The
+    // single-threaded default keeps the historical 1 so every existing
+    // workload stays byte-identical.
     t.register(
         "PolyThreadNumPhysicalProcessors",
-        RtsFn::Arity0(|_| PolyWord::tagged(1)),
+        RtsFn::Arity0(|_| PolyWord::tagged(num_processors())),
     );
     t.register(
         "PolyThreadNumProcessors",
-        RtsFn::Arity0(|_| PolyWord::tagged(1)),
+        RtsFn::Arity0(|_| PolyWord::tagged(num_processors())),
     );
     // Real / float RTS stubs (basis layer uses these).
     t.register(
@@ -1162,9 +1290,12 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkGetAddressAndPortFromIP6",
         RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "sockets (IPv6)")),
     );
+    // rtsCallFull2 = threadId + 2 args = Arity3 (was mis-registered Arity2 —
+    // the latent wrong-stub-arity class: harmless while unreachable, but a
+    // clean SysErr beats an arity-mismatch halt once DNS is actually called).
     t.register(
         "PolyNetworkGetAddrInfo",
-        RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "sockets (getAddrInfo)")),
+        RtsFn::Arity3(|ctx, _, _, _| syserr_unimpl(ctx, "sockets (getAddrInfo/DNS)")),
     );
     t.register(
         "PolyNetworkGetNameInfo",
@@ -1962,6 +2093,20 @@ fn poly_network_get_sock_type_list_inner() -> PolyWord {
 // writability/readability); our `PolyNetworkSelect` is a real `poll`, so
 // that path also works. We DO keep upstream's EINTR retry loop on every
 // blocking syscall (network.cpp `while (... == CALLINTERRUPTED)`).
+//
+// GIANT-LOCK RELEASE (multi-threaded sessions, POLY_REAL_THREADS=1):
+// `accept` and `connect` release the giant lock across their blocking wait
+// via `park_while_blocking` — they extract everything to NATIVE data (an
+// fd, a copied sockaddr Vec) BEFORE the wait and allocate results AFTER
+// re-acquiring, so a peer GC moving heap objects while they wait can touch
+// nothing they hold. That is what lets a multi-threaded SML server's
+// accept-loop thread coexist with worker threads rather than freezing them.
+// `recv`/`send` are NOT parked — their buffer is a live HEAP pointer a
+// moving collector would dangle; the basis' `select` (bounded ~1s/poll,
+// re-looped in ML at a cooperative-yield point) covers the readiness wait,
+// so recv/send run on a ready fd and return promptly. Parking recv/send/
+// select soundly needs the GC to forward RTS-local heap refs across the
+// wait — the next concurrency increment.
 mod socket_rts {
     // The cast-heavy socklen_t / c_int / sockaddr conversions below are all
     // intentional (fixed C-ABI widths and pointer-to-sockaddr casts that the
@@ -2160,25 +2305,33 @@ mod socket_rts {
         let Some(bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), addr) else {
             return raise_syscall(ctx, "connect failed", libc::EINVAL);
         };
-        loop {
-            // SAFETY: `bytes` is a full sockaddr; ptr+len passed to connect(2).
-            let r = unsafe {
-                libc::connect(
-                    fd,
-                    bytes.as_ptr().cast::<libc::sockaddr>(),
-                    bytes.len() as libc::socklen_t,
-                )
-            };
-            if r != 0 {
-                let e = last_errno();
-                if e == libc::EINTR {
-                    continue;
+        // `bytes` is a NATIVE Vec (copied out of the heap already), so we can
+        // park the giant lock across the blocking connect (multi-threaded
+        // sessions) — a peer may run/GC while we wait; nothing heap is
+        // touched inside. Returns Ok(()) or Err(errno).
+        let res = park_while_blocking(|| {
+            loop {
+                // SAFETY: `bytes` is a full sockaddr; ptr+len passed to connect(2).
+                let r = unsafe {
+                    libc::connect(
+                        fd,
+                        bytes.as_ptr().cast::<libc::sockaddr>(),
+                        bytes.len() as libc::socklen_t,
+                    )
+                };
+                if r == 0 {
+                    return Ok(());
                 }
-                return raise_syscall(ctx, "connect failed", e);
+                let e = last_errno();
+                if e != libc::EINTR {
+                    return Err(e);
+                }
             }
-            break;
+        });
+        match res {
+            Ok(()) => PolyWord::tagged(0),
+            Err(e) => raise_syscall(ctx, "connect failed", e),
         }
-        PolyWord::tagged(0)
     }
 
     /// `PolyNetworkAccept(threadId, skt)` — `accept(2)`. network.cpp:880.
@@ -2195,24 +2348,35 @@ mod socket_rts {
         };
         let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-        let new_fd = loop {
-            // SAFETY: `storage`/`addr_len` are valid out-params sized to
-            // sockaddr_storage; accept fills at most `addr_len` bytes.
-            let s = unsafe {
-                libc::accept(
-                    fd,
-                    (&raw mut storage).cast::<libc::sockaddr>(),
-                    &raw mut addr_len,
-                )
-            };
-            if s < 0 && last_errno() == libc::EINTR {
-                continue;
+        // Park the giant lock across the blocking accept (multi-threaded
+        // sessions): `storage`/`addr_len` are NATIVE stack locals, so a peer
+        // GC while we wait touches nothing we hold. This is what lets an SML
+        // accept-loop thread coexist with worker threads. Returns Ok(fd) or
+        // Err(errno).
+        let new_fd = park_while_blocking(|| {
+            loop {
+                // SAFETY: `storage`/`addr_len` are valid out-params sized to
+                // sockaddr_storage; accept fills at most `addr_len` bytes.
+                let s = unsafe {
+                    libc::accept(
+                        fd,
+                        (&raw mut storage).cast::<libc::sockaddr>(),
+                        &raw mut addr_len,
+                    )
+                };
+                if s >= 0 {
+                    return Ok(s);
+                }
+                let e = last_errno();
+                if e != libc::EINTR {
+                    return Err(e);
+                }
             }
-            break s;
+        });
+        let new_fd = match new_fd {
+            Ok(s) => s,
+            Err(e) => return raise_syscall(ctx, "accept failed", e),
         };
-        if new_fd < 0 {
-            return raise_syscall(ctx, "accept failed", last_errno());
-        }
         let cap = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
         if addr_len > cap {
             addr_len = cap;
@@ -2343,6 +2507,13 @@ mod socket_rts {
         if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
             flags |= libc::MSG_OOB;
         }
+        // NB: recv is NOT parked — `base` is a live HEAP pointer (into the
+        // caller's byte array), and a peer GC during a park would move that
+        // object and dangle it. The basis calls PolyNetworkSelect (which IS
+        // effectively yield-bounded) before recv, so by the time we get here
+        // the fd is ready and recv returns promptly. Parking recv/send
+        // soundly needs the GC to forward RTS-local heap refs across the
+        // wait — deferred (see the module-level concurrency note).
         let recvd = loop {
             // SAFETY: `[base+off, base+off+len)` was bounds-checked to lie
             // within the byte object's body by `socket_buf_region`; recv
@@ -2806,10 +2977,15 @@ mod socket_rts {
             unsafe { *triple.ptr.add(1) },
             unsafe { *triple.ptr.add(2) },
         ];
-        // Collect, per vector, the list of (element-word, fd). We keep the
-        // ORIGINAL element word so the result vectors contain the very same
-        // iodesc objects the ML side passed (upstream preserves them too).
-        let mut elems: [Vec<(PolyWord, libc::c_int)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        // Collect the NATIVE fds per set (with each fd's index within its
+        // vector, for a stable order). We record ONLY native data — no heap
+        // element pointers — so the poll below can PARK the giant lock: a
+        // peer GC while we wait may move the iodesc objects, but we hold none
+        // of them. The basis `select` wrapper (Socket.sml `getResults`)
+        // re-wraps whatever iodescs we return without matching them against
+        // the inputs by identity, so returning FRESH wrapped-fd iodescs for
+        // the ready fds (allocated after re-acquire) is correct.
+        let mut set_fds: [Vec<libc::c_int>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         let mut pollfds: Vec<libc::pollfd> = Vec::new();
         // Poll events per set: read→POLLIN, write→POLLOUT, exc→POLLPRI.
         let events = [libc::POLLIN, libc::POLLOUT, libc::POLLPRI];
@@ -2835,31 +3011,45 @@ mod socket_rts {
                     events: events[i],
                     revents: 0,
                 });
-                elems[i].push((elem, fd));
+                set_fds[i].push(fd);
             }
         }
         if !pollfds.is_empty() {
-            let rc = loop {
-                // SAFETY: `pollfds` is a valid array of `len` pollfd entries.
-                let r = unsafe {
-                    libc::poll(
-                        pollfds.as_mut_ptr(),
-                        pollfds.len() as libc::nfds_t,
-                        timeout_ms,
-                    )
-                };
-                if r < 0 && last_errno() == libc::EINTR {
-                    continue;
+            // PARK the giant lock across the blocking poll (multi-threaded
+            // sessions): `pollfds` is native; nothing heap is held. This is
+            // the primary blocking point — the basis funnels every socket
+            // recv/send readiness wait through here — so parking it is what
+            // stops a blocked reader/writer from freezing its peers (the
+            // step-based cooperative yield cannot rescue a step that blocks
+            // on a wall-clock syscall). Returns Ok(()) or Err(errno).
+            let res = park_while_blocking(|| {
+                loop {
+                    // SAFETY: `pollfds` is a valid array of `len` pollfd entries.
+                    let r = unsafe {
+                        libc::poll(
+                            pollfds.as_mut_ptr(),
+                            pollfds.len() as libc::nfds_t,
+                            timeout_ms,
+                        )
+                    };
+                    if r >= 0 {
+                        return Ok(());
+                    }
+                    let e = last_errno();
+                    if e != libc::EINTR {
+                        return Err(e);
+                    }
                 }
-                break r;
-            };
-            if rc < 0 {
-                return raise_syscall(ctx, "select failed", last_errno());
+            });
+            if let Err(e) = res {
+                return raise_syscall(ctx, "select failed", e);
             }
         }
-        // Build the result: for each set, the elements whose poll revents show
-        // the requested condition (or an error/hangup, which the ML side wants
-        // to observe too — matches select() semantics reporting exceptional fds).
+        // Build the result: for each set, a FRESH iodesc for each fd whose
+        // poll revents show the requested condition (or an error/hangup,
+        // which the ML side wants to observe too — matching select()
+        // reporting exceptional fds). Fresh allocation is sound (we re-hold
+        // the giant lock) and identity-independent (see the note above).
         let ready_mask = [
             libc::POLLIN | libc::POLLHUP | libc::POLLERR,
             libc::POLLOUT | libc::POLLERR,
@@ -2867,26 +3057,34 @@ mod socket_rts {
         ];
         let mut result_vecs = [PolyWord::tagged(0); 3];
         for i in 0..3 {
-            // Gather ready element words for set i.
-            let mut ready: Vec<PolyWord> = Vec::new();
-            for (elem, fd) in &elems[i] {
-                if let Some(pf) = pollfds
-                    .iter()
-                    .find(|p| p.fd == *fd && p.events == events[i])
-                    && pf.revents & ready_mask[i] != 0
-                {
-                    ready.push(*elem);
-                }
+            // The ready native fds for set i (poll preserves pollfds order,
+            // and we pushed sets 0,1,2 contiguously, so match by fd+events).
+            let ready_fds: Vec<libc::c_int> = set_fds[i]
+                .iter()
+                .filter(|&&fd| {
+                    pollfds
+                        .iter()
+                        .find(|p| p.fd == fd && p.events == events[i])
+                        .is_some_and(|pf| pf.revents & ready_mask[i] != 0)
+                })
+                .copied()
+                .collect();
+            // Allocate a fresh iodesc per ready fd (wrap_file_descriptor
+            // allocates, so it must run here — lock re-held).
+            let mut ready_iodescs: Vec<PolyWord> = Vec::with_capacity(ready_fds.len());
+            for fd in ready_fds {
+                #[allow(clippy::cast_sign_loss)]
+                ready_iodescs.push(wrap_file_descriptor(ctx, fd as u32));
             }
-            // Allocate a word-object vector of the ready elements.
+            // Allocate the word-object vector of the ready iodescs.
             let Some(space) = ctx.alloc_space.as_mut() else {
                 return PolyWord::tagged(0);
             };
-            let p = space.alloc_or_exit(ready.len());
-            // SAFETY: just allocated `ready.len()` words.
+            let p = space.alloc_or_exit(ready_iodescs.len());
+            // SAFETY: just allocated `ready_iodescs.len()` words.
             unsafe {
-                p.sub(1).write(make_length_word(ready.len(), 0));
-                for (k, w) in ready.iter().enumerate() {
+                p.sub(1).write(make_length_word(ready_iodescs.len(), 0));
+                for (k, w) in ready_iodescs.iter().enumerate() {
                     p.add(k).write(*w);
                 }
             }
@@ -5435,6 +5633,27 @@ fn raise_size(ctx: &mut RtsContext<'_>) -> PolyWord {
 fn ml_int_as_i64(spaces: Option<&RtsSafeSpaces>, w: PolyWord) -> Option<i64> {
     let n = poly_word_to_bigint(spaces, w)?;
     num_traits::ToPrimitive::to_i64(&n)
+}
+
+/// Crate-visible [`ml_int_as_i64`] for interpreter-side thread RTS
+/// handlers (e.g. `PolyThreadCondVarWaitUntil`'s absolute-time arg).
+pub(crate) fn ml_int_as_i64_pub(spaces: Option<&RtsSafeSpaces>, w: PolyWord) -> Option<i64> {
+    ml_int_as_i64(spaces, w)
+}
+
+/// `Thread.numProcessors`: the real core count under real threads
+/// (`POLY_REAL_THREADS=1`), the historical 1 on the single-threaded
+/// default (byte-identity for every existing workload).
+fn num_processors() -> isize {
+    if crate::interpreter::real_threads_enabled() {
+        let n = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            n as isize
+        }
+    } else {
+        1
+    }
 }
 
 /// `OS.Process.system` — REAL. Port of `process_env.cpp:522-640`

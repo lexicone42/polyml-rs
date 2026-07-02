@@ -312,12 +312,18 @@ no fabricated axioms.**
   `ConditionVar` over a shared heap) work behind **`POLY_REAL_THREADS=1`** (default
   OFF): a giant-lock + safepoint stop-the-world GC model — *concurrency, not
   parallelism* (one mutator runs bytecode at a time, matching upstream's
-  interpreter-mode semantics). A 2-thread mutex demo runs end-to-end on the REPL
-  (counter → 200000). Default OFF keeps the bootstrap/REPL/HOL4/Isabelle paths
-  byte-identical single-threaded. Still open: a *preemptive* scheduler (beyond the
-  cooperative safepoint yield) and full `Thread.Thread` attribute fidelity.
-  **Interrupts are done**: Ctrl-C (SIGINT) raises the SML `Interrupt` exception, so
-  a runaway loop is interruptible instead of hard-killed.
+  interpreter-mode semantics). A 2-thread mutex demo runs end-to-end (counter →
+  200000), and — since blocking socket syscalls (`accept`/`connect`/`select`)
+  now **release the giant lock** across their wait — an **in-process concurrent
+  socket server + client** round-trips a payload between two SML threads
+  (`concurrency_sockets`), which would deadlock if a blocked thread held the
+  lock. `ConditionVar` timed wait and `Thread.numProcessors` are real too.
+  Default OFF keeps the bootstrap/REPL/HOL4/Isabelle paths byte-identical
+  single-threaded. Still open: a *preemptive* scheduler (beyond the cooperative
+  safepoint yield), releasing the lock across `recv`/`send`/stdin blocking too
+  (needs GC forwarding of RTS-local heap refs), and breaking the giant lock for
+  true parallelism. **Interrupts are done**: Ctrl-C (SIGINT) raises the SML
+  `Interrupt` exception, so a runaway loop is interruptible instead of hard-killed.
 - **JIT as a big speedup** — it's correct and a *modest* (~2%) win. Whole-region
   native compilation was built end-to-end and measured: **byte-identical across the
   full 27.7-billion-step self-bootstrap (a deep soundness result) but a net

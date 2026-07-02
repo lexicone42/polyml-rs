@@ -66,7 +66,7 @@ if [ "$MODE" = "full" ]; then
   # allowlist, classical == 1). They dominate the full-tier wall clock.
   ipass=0; ifail=0; iskip=0
   for t in export_roundtrip_live real_math parsetree_introspect overflow isabelle_pure isabelle_pure_arbint \
-           isabelle_gauss concurrency_mutex_demo \
+           isabelle_gauss concurrency_mutex_demo concurrency_sockets \
            isabelle_kernel isabelle_theorem_kernel isabelle_proving isabelle_sound_audit_negative isabelle_object_logic isabelle_arithmetic isabelle_number_theory isabelle_summation isabelle_ordering isabelle_divisibility isabelle_primes isabelle_classical_primes isabelle_euclid isabelle_primes_3mod4 isabelle_primes_1mod4 isabelle_sqrt2 isabelle_list_theory isabelle_fta isabelle_division isabelle_euclid_lemma isabelle_euclid_list isabelle_fta_unique isabelle_modular isabelle_power isabelle_ntbase isabelle_binom isabelle_sum isabelle_binom_thm isabelle_flt isabelle_gcd isabelle_crt isabelle_combinatorics isabelle_summation_forms isabelle_prodf isabelle_mult_group isabelle_central_binomial isabelle_wilson_pairing isabelle_wilson_inverse isabelle_wilson isabelle_wilson_converse isabelle_wilson_iff isabelle_neg1_qr isabelle_thue isabelle_twosquare isabelle_euler_foundations isabelle_euler isabelle_euler_criterion isabelle_zeckendorf isabelle_four_square isabelle_pyth isabelle_fibonacci isabelle_sigma isabelle_euclid_perfect isabelle_euclid_euler isabelle_twosquare_full isabelle_bertrand isabelle_quadratic_reciprocity intflip_basis \
            hol4_taut hol4_meson hol4_metis hol4_pelletier hol4_num_prover \
            hol4_arith hol4_order hol4_induction hol4_list hol4_simp hol4_fancy \

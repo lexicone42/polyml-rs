@@ -316,9 +316,20 @@ How it works:
   their arity RE-DERIVED from the SML `rtsCallFullN` site (the old stub
   arities were systematically wrong — latent, since unreachable).
 - Real OS threads exist behind `POLY_REAL_THREADS=1` (giant lock + safepoint GC,
-  see Architecture); a **preemptive scheduler** (beyond cooperative safepoint
-  yielding) and full `Thread` attribute fidelity are still open (task #140,
-  stage 2 = breaking the giant lock for true parallelism). Whole-region JIT
+  see Architecture). Attribute fidelity improved (task #140): `ConditionVar`
+  timed wait (`PolyThreadCondVarWaitUntil`) and `Thread.numProcessors` are real;
+  **blocking syscalls release the giant lock** — `accept`/`connect`/`select`
+  publish roots + release across their wait (`park_while_blocking` in rts.rs),
+  so a blocked SML thread no longer freezes peers (proven: an in-process
+  concurrent socket server+client, `concurrency_sockets`, which deadlocks
+  without the park — the step-based cooperative yield can't rescue a step that
+  blocks on a wall-clock syscall). Sound because those calls carry only NATIVE
+  data across the wait (fd/sockaddr Vec/fd-sets); `recv`/`send` are NOT parked
+  (their buffer is a live heap pointer) — the basis' `select` covers their
+  readiness wait. Still open: a *preemptive* scheduler (beyond cooperative
+  safepoint yielding), parking recv/send/stdin-read + `OS.Process.system`'s
+  wait (needs the GC to forward RTS-local heap refs across a park), and
+  breaking the giant lock for true parallelism. Whole-region JIT
   was BUILT + measured (sound but a net slowdown — see Performance & JIT); a real
   native *speedup* is now believed out of reach for this interpreter (the tight
   threaded loop wins). Windows remains unimplemented.

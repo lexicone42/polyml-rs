@@ -318,7 +318,7 @@ fn arbint_trace_on() -> bool {
 /// increment 3d-3f); when disabled (the default) they fall through to the
 /// prior single-thread stubs, keeping every existing workload — the
 /// bootstrap, the self-bootstrapped REPL, HOL4, Isabelle — byte-identical.
-fn real_threads_enabled() -> bool {
+pub(crate) fn real_threads_enabled() -> bool {
     use std::sync::atomic::{AtomicU8, Ordering};
     static F: AtomicU8 = AtomicU8::new(0);
     match F.load(Ordering::Relaxed) {
@@ -640,6 +640,18 @@ pub struct JitEntry {
     /// the closure + retPC the CALL opcode pushes). RETURN_N pops
     /// this many args after popping the result.
     pub sml_arity: usize,
+}
+
+/// Type-erased `ThreadRoots` free thunk for the blocking-syscall park
+/// (`crate::rts::RtsPark`), which cannot name the private type.
+///
+/// # Safety
+/// `p` must be a pointer produced by `Box::into_raw` on a
+/// `Box<ThreadRoots>` (i.e. `make_send_roots`'s `raw`), with no live
+/// published alias remaining.
+unsafe fn free_thread_roots_erased(p: *mut ()) {
+    // SAFETY: per the contract above.
+    unsafe { drop(Box::from_raw(p.cast::<ThreadRoots>())) }
 }
 
 /// The complete GC root-set of a *single* interpreter thread, captured
@@ -1940,6 +1952,32 @@ impl Interpreter {
                 self.block_on_event();
                 Ok(Some(self.push_continue(PolyWord::tagged(0))?))
             }
+            // CondVarWaitUntil(threadId, mutex, absTime): the TIMED variant —
+            // upstream processes.cpp WaitUntil. `absTime` is an absolute
+            // Time.time (microseconds, tagged or boxed). Returns unit either
+            // way (wake vs timeout is indistinguishable to the caller; the
+            // SML wrapper re-checks its wait list). Was a zero3 stub, which
+            // made ConditionVar.waitUntil spin-hang under real threads.
+            "PolyThreadCondVarWaitUntil" => {
+                if self.runtime.registry_len() <= 1 {
+                    return Ok(None);
+                }
+                let abs_us = args
+                    .get(2)
+                    .and_then(|w| crate::rts::ml_int_as_i64_pub(None, *w))
+                    .unwrap_or(0);
+                let now_us = i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_micros())
+                        .unwrap_or(0),
+                )
+                .unwrap_or(i64::MAX);
+                #[allow(clippy::cast_sign_loss)]
+                let millis = (abs_us.saturating_sub(now_us).max(0) as u64).div_ceil(1000);
+                self.block_on_event_timeout(millis);
+                Ok(Some(self.push_continue(PolyWord::tagged(0))?))
+            }
             // CondVarWake(thread): wake blocked waiters; return true. We use
             // a global broadcast (the SML side re-checks its wait list), so
             // we always report success.
@@ -1976,6 +2014,30 @@ impl Interpreter {
                 }
             }
             _ => Ok(None),
+        }
+    }
+
+    /// Timed sibling of [`Self::block_on_event`]: wait for an event OR the
+    /// millisecond deadline, whichever first, with the giant lock released
+    /// (roots published) across the wait. The caller (ConditionVar's
+    /// `waitUntil`) does not need to distinguish wake from timeout — the
+    /// SML side re-checks its own wait list either way.
+    fn block_on_event_timeout(&mut self, millis: u64) {
+        let since = self.runtime.block_gen();
+        let runtime = Arc::clone(&self.runtime);
+        let handle = Arc::clone(&self.handle);
+        let (raw, send) = self.make_send_roots();
+        // SAFETY: exactly as in `block_on_event` — `send` aliases live
+        // `self`; the box outlives the wait; roots are published under the
+        // giant lock BEFORE `running` clears.
+        unsafe {
+            runtime.release_ml_memory_publishing(&handle, send);
+        }
+        runtime.block_until_event_timeout(since, millis);
+        runtime.reacquire_ml_memory(&handle);
+        // SAFETY: reacquire set parked_roots = None; no live alias remains.
+        unsafe {
+            drop(Box::from_raw(raw));
         }
     }
 
@@ -7030,6 +7092,26 @@ impl Interpreter {
             return Ok(r);
         }
         let rts_ref = self.rts.clone(); // Arc clone, cheap
+        // MULTI-THREADED sessions only: arm the blocking-syscall park so an
+        // RTS function that blocks in the kernel (socket accept/recv/send,
+        // a stdin read, OS.Process.system's wait) can release the giant
+        // lock — publishing this thread's roots — instead of freezing every
+        // peer. The single-threaded default (all existing workloads) never
+        // takes this branch: zero cost, byte-identical. NB the park's
+        // published roots make this thread's stack GC-scannable while it
+        // waits; the `ctx` below stays dormant across the window (the
+        // parked closure is native-data-only by contract).
+        let armed_park = real_threads_enabled() && self.runtime.registry_len() > 1;
+        if armed_park {
+            let (raw, send) = self.make_send_roots();
+            crate::rts::install_park(crate::rts::RtsPark::new(
+                Arc::clone(&self.runtime),
+                Arc::clone(&self.handle),
+                raw.cast::<()>(),
+                send,
+                free_thread_roots_erased,
+            ));
+        }
         // Read the per-thread tail-call slot into a local BEFORE the
         // `alloc_space_mut()` borrow (which now borrows all of `self`,
         // since the heap moved behind `runtime.heap_mut()`).
@@ -7060,6 +7142,11 @@ impl Interpreter {
         // interpreter field before we drop `ctx` (it borrows `self`).
         let raised = ctx.raised_exception;
         self.bootstrap_tail_call = ctx.bootstrap_tail_call;
+        // Disarm the blocking-syscall park (frees the roots box if the call
+        // never parked; no-op if it parked, or single-threaded).
+        if armed_park {
+            crate::rts::clear_park();
+        }
         // If the RTS function asked to raise an exception, push the
         // packet onto the stack and unwind to the registered handler.
         // Matches upstream's CALL_FAST_RTS<N> dispatch:
