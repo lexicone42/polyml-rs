@@ -235,6 +235,13 @@ Isabelle's logical core (`Pure`) loads — 261/285 files; the remaining 24 are t
 Scala/PIDE frontend, which genuinely needs Scala/sockets, not logic — and
 *proves*. On top of it, we built up elementary number theory **from first
 principles** and machine-checked the landmark theorems by the **real LCF kernel**.
+
+**Isabelle's own parallelism runs too**: its futures scheduler
+(`Pure/Concurrent/future.ML`, `Par_List`) forks real worker threads on our
+runtime, and under `POLY_PARALLEL=1` they use real cores — measured **6.5×**
+on Par_List compute and **3.2×** on parallel LCF kernel inference (six
+workers, 600k certified inferences, every theorem audited sound, GC-audit
+clean under constant collections). Fences: `isabelle_parallel.rs`.
 The proofs are original ML-on-`Pure` (constructed via `Thm.*`/`Drule.*`/tactics),
 **not lifted** from Isabelle's `HOL-Number_Theory` or the AFP (only `Pure` itself is
 vendored, so there is nothing upstream to copy).

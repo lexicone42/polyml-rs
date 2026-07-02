@@ -307,6 +307,19 @@ s=35 case + the small-n chain to 631; `tests/isabelle_support/bertrand_resume/`,
 is a test in `crates/polyml-bin/tests/isabelle_*.rs` plus a `.sml` driver, fenced by
 `regression.sh full`. The number-theory tower has no open partials.
 
+**Isabelle's OWN parallelism runs on our runtime** (`isabelle_parallel.rs`):
+`Future.fork`/`Par_List` fork real workers under `POLY_REAL_THREADS=1`; with
+`POLY_PARALLEL=1` they scale on real cores (6.5× Par_List compute; 3.2× on
+6-worker LCF kernel inference, sound + GC-audit-clean). Keystones:
+`Multithreading.max_threads_update 0` (the bare ML load leaves
+`max_threads = 1`); each worker must `Context.put_generic_context (SOME
+Pure_context)` itself (Thread_Data is per-thread — the checkpoint's restored
+context does NOT propagate to workers); allocation-heavy parallel work needs
+`POLYML_CHILD_NURSERY_BYTES=268435456` (default 32 MB → GC-frequency-bound,
+ratio 0.78 vs 0.31). `Thread.self()` identity is per-`Interpreter`
+(`thread_object` field) so `Thread_Data`/`Synchronized`/serial() are
+genuinely thread-safe.
+
 How it works:
 - Warm checkpoint `/tmp/isabelle_pure` (`tools/build-isabelle-pure.sh`): reloads
   in ~2s. A driver's **first line must be `val () = restore_pure_context ();`**
