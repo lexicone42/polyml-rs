@@ -5700,26 +5700,33 @@ fn poly_process_env_system(ctx: &mut RtsContext<'_>, _tid: PolyWord, cmd: PolyWo
     let Some(cmd) = poly_string_to_rust(ctx.safe_spaces.as_ref(), cmd) else {
         return raise_syscall(ctx, "Function system failed", libc::EINVAL);
     };
-    match std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(&cmd)
-        .status()
-    {
-        Ok(status) => {
-            #[cfg(unix)]
-            let raw = {
-                use std::os::unix::process::ExitStatusExt;
-                i128::from(status.into_raw())
-            };
-            #[cfg(not(unix))]
-            let raw = i128::from(status.code().unwrap_or(1));
-            int_to_poly_word(ctx, raw)
-        }
-        Err(e) => raise_syscall(
-            ctx,
-            "Function system failed",
-            e.raw_os_error().unwrap_or(libc::EINVAL),
-        ),
+    // The command string is now a NATIVE String and the result is a native
+    // ExitStatus, so the child-wait carries no heap pointer — PARK the giant
+    // lock across it (multi-threaded sessions), exactly like `connect`: a
+    // thread shelling out no longer freezes its peers for the child's whole
+    // lifetime. Upstream pauses the calling thread here too (process_env.cpp
+    // ThreadPause around waitpid). Returns Ok(raw waitpid status) or Err(errno).
+    let res = park_while_blocking(|| {
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&cmd)
+            .status()
+            .map(|status| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    i128::from(status.into_raw())
+                }
+                #[cfg(not(unix))]
+                {
+                    i128::from(status.code().unwrap_or(1))
+                }
+            })
+            .map_err(|e| e.raw_os_error().unwrap_or(libc::EINVAL))
+    });
+    match res {
+        Ok(raw) => int_to_poly_word(ctx, raw),
+        Err(errno) => raise_syscall(ctx, "Function system failed", errno),
     }
 }
 
