@@ -220,15 +220,23 @@ hangs:
   (`collect_pool_forwards_cross_nursery_pointer`): a parent in nursery A
   pointing at a leaf in nursery B — both promote into A, B resets empty,
   the cross-link is rewritten. Byte-identity fences all green.
-- **P2b — per-thread nurseries + collector election.** Give each forked
-  thread its OWN nursery (today they share nursery 0); `gc()` collects the
-  whole pool; CAS collector election so two trigger-crossers don't
-  livelock; pool-lock-blocked threads count as parked for the barrier. Still
-  giant-locked, so no new heap-word races. Fences: all six concurrency demos
-  + fork-heavy allocation storm under `POLYML_GC_THRESHOLD=1` + `GC_AUDIT`
-  over the union + negative controls for the new invariants (election
-  livelock, Σ-sizing, pool-lock parking) built BEFORE the code — this
-  project's history says the test is the discovery instrument.
+- **P2b — per-thread nurseries. ✅ LANDED.** Every forked thread installs
+  its OWN nursery (default 32 MB, `POLYML_CHILD_NURSERY_BYTES` override,
+  1 MB floor) with a per-thread trigger; `gc()` gathers ALL pool nurseries
+  and drives `collect_pool` (union from-space; promote-into-primary; reset
+  children); the `POLYML_GC_AUDIT` residual scan runs per from-space range
+  over the union; the untrusted RTS-arg ranges (`rts_safe_spaces`) cover
+  every pool nursery. Collector ELECTION was verified structurally
+  unnecessary under the giant lock (exactly one thread runs ⟹ only the
+  runner can cross its trigger) — it lands with P4, where mutators run
+  free. Known conservative limitation: the OPCODE-level untrusted predicate
+  still validates against this thread's nursery only, so a cross-nursery
+  pointer under the (out-of-envelope) untrusted+threads combo gets a clean
+  `BadImage` halt, never unsoundness; widen with P4. Fences: the
+  alloc-storm demo (3 workers, exact-total discriminator — written BEFORE
+  the change and passing on both sides of it), a 2 MB-child-nursery variant
+  (264 s of continuous child-triggered pool collections, total intact),
+  all six concurrency demos, stage-0 + chain byte-identity.
 - **P3 — atomics + statics.** Protocol words atomic (upstream-faithful,
   global-mutexLock shape first); RTS statics behind per-subsystem locks;
   `gc_requested` a real atomic with explicit ordering. Still giant-locked.

@@ -74,6 +74,7 @@ jobs:
             --test concurrency_interrupt \
             --test concurrency_stdin_park \
             --test concurrency_exit \
+            --test concurrency_alloc_storm \
             -- --ignored
 
   cross-check:

@@ -1814,8 +1814,15 @@ impl Interpreter {
             return None;
         }
         let mut ranges: Vec<(usize, usize)> = self.safe_spaces.image_ranges_usize();
-        if let Some(a) = self.alloc_space_range() {
-            ranges.push((a.start as usize, a.end as usize));
+        // P2b: a valid heap pointer may live in ANY pool nursery (a peer
+        // thread's allocation shared through a ref), so the untrusted
+        // validation ranges must cover the whole pool, not just ours.
+        for i in 0..self.runtime.nursery_count() {
+            let h = self.runtime.nursery_handle(i);
+            // SAFETY: pinned pool nursery; we only read its range bounds
+            // (start/capacity), racing nothing under the giant lock.
+            let r = unsafe { (*h).as_ptr_range() };
+            ranges.push((r.start as usize, r.end as usize));
         }
         Some(crate::rts::RtsSafeSpaces { ranges })
     }
@@ -2809,6 +2816,28 @@ impl Interpreter {
         // The parent already registered our handle (with published roots).
         child.registered = true;
 
+        // P2b: the child gets its OWN nursery — per-thread bump allocation
+        // with a per-thread trigger (the correctness mechanism for parallel
+        // allocation, ahead of P4). Installed via the pool lock (safe here,
+        // pre-acquire); the collector evacuates the whole pool, promoting
+        // this nursery's live data into the primary and resetting it. Skip
+        // when no heap is configured (heapless test contexts).
+        if runtime.nursery_count() > 0 {
+            let default_bytes = 32 * 1024 * 1024usize;
+            let child_bytes = std::env::var("POLYML_CHILD_NURSERY_BYTES")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&b| b >= 1024 * 1024)
+                .unwrap_or(default_bytes);
+            let cap_words = child_bytes / std::mem::size_of::<PolyWord>();
+            child.nursery = runtime.install_nursery(crate::space::MemorySpace::new(
+                cap_words,
+                crate::space::SpaceKind::Mutable,
+            ));
+            let thresh = usize::from(crate::rts::gc_threshold_percent().unwrap_or(80));
+            child.gc_trigger_words = cap_words.checked_mul(thresh).map_or(0, |x| x / 100);
+        }
+
         // ---- Acquire the giant lock FIRST, KEEPING the parent-published
         // `ForkRoots` published while we wait (do NOT overwrite it with a
         // fresh empty capture — the child has no seeded stack yet, so an
@@ -3027,23 +3056,35 @@ impl Interpreter {
 
         // Reach the nursery via the pool (P1: exactly one, index 0). We
         // hold the STW barrier (every other thread parked), so we are the
-        // sole live heap accessor; the Box-pinned handle is stable.
-        // SAFETY: sole accessor under the barrier; handle addresses the
-        // pinned nursery. P2 iterates all pool nurseries here.
-        let alloc = if self.runtime.nursery_count() > 0 {
-            unsafe { &mut *self.runtime.nursery_handle(0) }
-        } else {
+        // sole live heap accessor; the Box-pinned handles are stable.
+        // P2b: gather EVERY pool nursery — the collection evacuates the
+        // UNION (cross-nursery pointers are unrestricted, so partial
+        // collection is unsound; docs/parallel-design.md).
+        // SAFETY: sole accessor under the barrier; each handle addresses a
+        // pinned nursery; handles are distinct pool entries (no aliasing).
+        let n_nurseries = self.runtime.nursery_count();
+        if n_nurseries == 0 {
             return None;
-        };
-        // Capture from-space range so we can audit for residual
-        // pointers after the swap. Anything in interpreter state
-        // (or the new to-space) that still points into this range
-        // post-GC is a missed root.
-        let from_range = alloc.as_ptr_range();
-        let from_lo = from_range.start as usize;
-        let from_hi = from_range.end as usize;
+        }
+        let mut nursery_refs: Vec<&mut crate::space::MemorySpace> = (0..n_nurseries)
+            .map(|i| unsafe { &mut *self.runtime.nursery_handle(i) })
+            .collect();
+        // Capture every from-space range so we can audit for residual
+        // pointers after the swap. Anything in interpreter state (or the
+        // new to-space) that still points into any of these post-GC is a
+        // missed root.
+        let from_ranges: Vec<(usize, usize)> = nursery_refs
+            .iter()
+            .map(|s| {
+                let r = s.as_ptr_range();
+                (r.start as usize, r.end as usize)
+            })
+            .collect();
+        // The single-range audit variables cover the PRIMARY (kept for the
+        // existing audit plumbing; the union audit loops the full list).
+        let (from_lo, from_hi) = from_ranges[0];
 
-        let new_used = crate::gc::collect(alloc, |c| {
+        let new_used = crate::gc::collect_pool(&mut nursery_refs, |c| {
             // ---- Per-thread roots: drive the registry as an iterable.
             for roots in registry.iter_mut() {
                 // SAFETY: each capture aliases live interpreter state for
@@ -3211,9 +3252,18 @@ impl Interpreter {
 
         // ---- Audit: any pointer still in old from-space is a missed root.
         // Opt-in via POLYML_GC_AUDIT=1 — full audit is O(used+stack)
-        // and meaningful overhead on the hot loop.
+        // and meaningful overhead on the hot loop. P2b: audited per
+        // from-space RANGE over the whole union. Caveat: the PRIMARY's
+        // range check is against its OLD storage range, whose Box was
+        // dropped by the swap — the addresses can never recur in live data
+        // (the allocator can't hand them out again until the OS reuses the
+        // mapping), so a hit is still a genuine missed root. Non-primary
+        // nurseries keep their storage (reset_empty), so their hits are
+        // exact.
         if crate::env::env_flag("POLYML_GC_AUDIT") {
-            self.audit_no_residual_from_space_ptrs(from_lo, from_hi);
+            for &(lo, hi) in &from_ranges {
+                self.audit_no_residual_from_space_ptrs(lo, hi);
+            }
         }
         let _ = from_lo;
         let _ = from_hi;
