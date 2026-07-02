@@ -1930,6 +1930,18 @@ impl Interpreter {
     fn request_gc_collect(&mut self) -> Option<usize> {
         let runtime = Arc::clone(&self.runtime);
         let handle = Arc::clone(&self.handle);
+        if runtime.parallel {
+            // PARALLEL (P4): collector ELECTION. If a peer is already
+            // collecting we lose, park as a safepoint peer (roots
+            // published across the wait), and return None — the caller
+            // retries its allocation against the freshly-evacuated pool.
+            let (raw, send) = self.make_send_roots();
+            // SAFETY: `send` aliases live `self`; the box outlives the
+            // (possible) park and `self` is not mutated while parked.
+            let r = unsafe { runtime.request_gc_parallel(&handle, send, || self.gc()) };
+            unsafe { drop(Box::from_raw(raw)) };
+            return r.flatten();
+        }
         runtime.request_gc(&handle, || self.gc())
     }
 
@@ -1964,6 +1976,12 @@ impl Interpreter {
     /// when there is only one registered thread (the common case): we are
     /// the sole runner, so yielding would just re-acquire ourselves.
     fn cooperative_yield(&mut self) {
+        // PARALLEL (P4): peers genuinely run concurrently — there is no
+        // lock to hand over, so the cooperative yield is deleted (skip
+        // before the registry_len probe, which takes the sched mutex).
+        if self.runtime.parallel {
+            return;
+        }
         if self.runtime.registry_len() <= 1 {
             return;
         }
@@ -4863,7 +4881,7 @@ impl Interpreter {
                 // Single-threaded: `gc_requested` is never set by a peer (we
                 // ARE the only thread), so this never fires and the step
                 // count is unchanged.
-                if self.runtime.gc_requested_relaxed() {
+                if self.runtime.gc_requested_poll() {
                     self.safepoint_park();
                 }
                 // Per-thread interrupt/kill request (3f) routed via the

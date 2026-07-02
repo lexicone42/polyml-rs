@@ -220,12 +220,19 @@ pub struct SchedInner {
     /// common case) the requester IS the running mutator and collects
     /// immediately.
     pub gc_requested: bool,
-    /// The giant mutator lock: `true` while exactly one thread is running
-    /// bytecode (and may touch the heap). Only one thread can run at a
-    /// time — this is concurrency, not parallelism (upstream's
-    /// interpreter-mode model). A thread waiting to run blocks on
-    /// `mutator_wake` until `running` is `false` and `!gc_requested`.
-    pub running: bool,
+    /// The COUNT of threads currently running bytecode (in ML memory).
+    ///
+    /// Giant-lock mode (default): 0 or 1 — the giant mutator lock. A
+    /// thread waiting to run blocks on `mutator_wake` until `running == 0`
+    /// and `!gc_requested` (concurrency, not parallelism — upstream's
+    /// interpreter-mode model).
+    ///
+    /// PARALLEL mode (P4, `POLY_PARALLEL=1`): a true runner count — the
+    /// acquire paths no longer wait on it (many threads run at once); it
+    /// remains as a sanity invariant (every release matches an acquire)
+    /// and a diagnostic. Exclusion comes only from the stop-the-world
+    /// handshake (`gc_requested` + the per-handle parked barrier).
+    pub running: usize,
     /// Number of threads currently blocked in `acquire`/`reacquire`/`park`
     /// waiting for the giant lock. A cooperative `yield` checks this: if a
     /// peer is waiting it forces a hand-off (waits until someone else has
@@ -273,7 +280,7 @@ impl SchedState {
         Self {
             inner: Mutex::new(SchedInner {
                 gc_requested: false,
-                running: false,
+                running: 0,
                 waiters: 0,
                 registry: Vec::new(),
             }),
@@ -345,6 +352,19 @@ pub struct HeapCell(std::sync::Mutex<NurseryPool>);
 pub struct Runtime {
     /// The nursery pool (parallelism P1). See [`NurseryPool`].
     heap: HeapCell,
+    /// PARALLEL mode (P4): `POLY_PARALLEL=1` + real threads. When true, the
+    /// giant lock no longer EXCLUDES runners — `acquire`/`release` become
+    /// brief in_ml transitions under the sched mutex (which stays for state
+    /// changes, like upstream's schedLock, but is never held while
+    /// executing bytecode) and the STW handshake is the only
+    /// stop-everything mechanism. Memoized once at Runtime construction.
+    pub parallel: bool,
+    /// The lock-free mirror of `SchedInner::gc_requested` (P4): stored
+    /// (Release) under the sched mutex by the requester, read (Acquire) at
+    /// safepoints without taking the mutex — the per-step poll must not
+    /// touch a lock. The Acquire pairs with the collector's Release so a
+    /// parking thread's published roots are visible to the collector.
+    pub gc_requested_atomic: AtomicBool,
     /// Count of completed collections (diagnostic; lets a test assert that
     /// a GC actually fired mid-run).
     pub gc_count: std::sync::atomic::AtomicU64,
@@ -378,6 +398,12 @@ impl Runtime {
         }
         Arc::new(Self {
             heap: HeapCell(std::sync::Mutex::new(pool)),
+            // PARALLEL requires real threads: without POLY_REAL_THREADS
+            // `fork` is a dormant no-op stub, so POLY_PARALLEL alone is a
+            // documented no-op (there is never a second runner).
+            parallel: crate::env::env_flag("POLY_PARALLEL")
+                && crate::interpreter::real_threads_enabled(),
+            gc_requested_atomic: AtomicBool::new(false),
             gc_count: std::sync::atomic::AtomicU64::new(0),
             gc_audit_residual: std::sync::atomic::AtomicU64::new(0),
             gc_trigger_words,
@@ -494,14 +520,15 @@ impl Runtime {
         // running, so it may now proceed).
         self.sched.collector_wake.notify_all();
         inner.waiters += 1;
-        while inner.running || inner.gc_requested {
+        // PARALLEL: no exclusion — wait only for an in-flight collection.
+        while (!self.parallel && inner.running > 0) || inner.gc_requested {
             inner = self.sched.mutator_wake.wait(inner).unwrap();
         }
         inner.waiters -= 1;
         // We won the lock. Retract our roots (we will mutate the stack)
         // and become the running thread.
         *handle.parked_roots.lock().unwrap() = None;
-        inner.running = true;
+        inner.running += 1;
         handle.in_ml.store(true, Ordering::SeqCst);
         // Announce the take: a yielder blocked in its forced-hand-off loop
         // (yield_ml_memory) waits for `running` to become true, and without
@@ -558,13 +585,14 @@ impl Runtime {
         // appeared, already with published roots, so the barrier can re-check).
         self.sched.collector_wake.notify_all();
         inner.waiters += 1;
-        while inner.running || inner.gc_requested {
+        // PARALLEL: no exclusion — wait only for an in-flight collection.
+        while (!self.parallel && inner.running > 0) || inner.gc_requested {
             inner = self.sched.mutator_wake.wait(inner).unwrap();
         }
         inner.waiters -= 1;
         // We won the lock. Retract our roots and become the running thread.
         *handle.parked_roots.lock().unwrap() = None;
-        inner.running = true;
+        inner.running += 1;
         handle.in_ml.store(true, Ordering::SeqCst);
         // Announce the take (see `acquire_ml_memory`): wake any yielder
         // blocked in its forced-hand-off loop.
@@ -596,14 +624,15 @@ impl Runtime {
         // roots are published, so it may proceed).
         self.sched.collector_wake.notify_all();
         inner.waiters += 1;
-        while inner.running || inner.gc_requested {
+        // PARALLEL: no exclusion — wait only for an in-flight collection.
+        while (!self.parallel && inner.running > 0) || inner.gc_requested {
             inner = self.sched.mutator_wake.wait(inner).unwrap();
         }
         inner.waiters -= 1;
         // We won the lock. Retract the (forwarded) ForkRoots and become the
         // running thread.
         *handle.parked_roots.lock().unwrap() = None;
-        inner.running = true;
+        inner.running += 1;
         handle.in_ml.store(true, Ordering::SeqCst);
         // Announce the take (see `acquire_ml_memory`): the forking parent
         // may be blocked in its yield's forced-hand-off loop waiting for
@@ -630,11 +659,12 @@ impl Runtime {
     /// deregisters this thread.
     pub unsafe fn release_ml_memory(&self, handle: &ThreadHandle, roots: SendRoots) {
         let mut inner = self.sched.inner.lock().unwrap();
-        // Publish BEFORE clearing `running`: a collector can only proceed
-        // once `running == false`, and by then our roots are already Some.
+        // Publish BEFORE dropping out of `running`: a collector can only
+        // proceed once we are not-in_ml, and by then our roots are Some.
         *handle.parked_roots.lock().unwrap() = Some(roots);
         handle.in_ml.store(false, Ordering::SeqCst);
-        inner.running = false;
+        debug_assert!(inner.running > 0, "release without a matching acquire");
+        inner.running -= 1;
         self.sched.mutator_wake.notify_all();
         self.sched.collector_wake.notify_all();
     }
@@ -659,14 +689,14 @@ impl Runtime {
     pub fn exit_running(&self, handle: &Arc<ThreadHandle>) {
         let mut inner = self.sched.inner.lock().unwrap();
         debug_assert!(
-            inner.running,
-            "exit_running called but the giant lock is not held (running == false)"
+            inner.running > 0,
+            "exit_running called but no thread is running (running == 0)"
         );
         inner.registry.retain(|h| !Arc::ptr_eq(h, handle));
         handle.in_ml.store(false, Ordering::SeqCst);
-        // This thread holds the lock, so clearing it is correct: we are
-        // releasing it on the way out.
-        inner.running = false;
+        // This thread is one of the runners (giant mode: THE runner), so
+        // decrementing is correct: we are releasing on the way out.
+        inner.running -= 1;
         // Now unreachable by the collector (off the registry); drop the
         // dead stack's published roots if any.
         *handle.parked_roots.lock().unwrap() = None;
@@ -730,7 +760,8 @@ impl Runtime {
         let mut inner = self.sched.inner.lock().unwrap();
         *handle.parked_roots.lock().unwrap() = Some(roots);
         handle.in_ml.store(false, Ordering::SeqCst);
-        inner.running = false;
+        debug_assert!(inner.running > 0, "release without a matching acquire");
+        inner.running -= 1;
         self.sched.mutator_wake.notify_all();
         self.sched.collector_wake.notify_all();
     }
@@ -742,13 +773,14 @@ impl Runtime {
     pub fn reacquire_ml_memory(&self, handle: &ThreadHandle) {
         let mut inner = self.sched.inner.lock().unwrap();
         inner.waiters += 1;
-        while inner.running || inner.gc_requested {
+        // PARALLEL: no exclusion — wait only for an in-flight collection.
+        while (!self.parallel && inner.running > 0) || inner.gc_requested {
             self.sched.collector_wake.notify_all();
             inner = self.sched.mutator_wake.wait(inner).unwrap();
         }
         inner.waiters -= 1;
         *handle.parked_roots.lock().unwrap() = None;
-        inner.running = true;
+        inner.running += 1;
         handle.in_ml.store(true, Ordering::SeqCst);
         // Announce the take (see `acquire_ml_memory`): wake any yielder
         // blocked in its forced-hand-off loop.
@@ -766,17 +798,21 @@ impl Runtime {
         let mut inner = self.sched.inner.lock().unwrap();
         *handle.parked_roots.lock().unwrap() = Some(roots);
         handle.in_ml.store(false, Ordering::SeqCst);
-        inner.running = false;
+        debug_assert!(
+            inner.running > 0,
+            "safepoint_park without a matching acquire"
+        );
+        inner.running -= 1;
         self.sched.mutator_wake.notify_all();
         self.sched.collector_wake.notify_all();
-        // Re-acquire the lock once the GC finished AND it is free.
+        // Re-acquire once the GC finished (giant mode: AND the lock is free).
         inner.waiters += 1;
-        while inner.running || inner.gc_requested {
+        while (!self.parallel && inner.running > 0) || inner.gc_requested {
             inner = self.sched.mutator_wake.wait(inner).unwrap();
         }
         inner.waiters -= 1;
         *handle.parked_roots.lock().unwrap() = None;
-        inner.running = true;
+        inner.running += 1;
         handle.in_ml.store(true, Ordering::SeqCst);
         // Announce the take (see `acquire_ml_memory`): wake any yielder
         // blocked in its forced-hand-off loop.
@@ -793,6 +829,12 @@ impl Runtime {
     /// `roots` aliases the live `ThreadContext` and stays valid across the
     /// yield.
     pub unsafe fn yield_ml_memory(&self, handle: &ThreadHandle, roots: SendRoots) {
+        // PARALLEL: the cooperative hand-off is meaningless (peers really
+        // run concurrently — there is no lock to hand over). The safepoint
+        // GC check is separate (`gc_requested_poll` → `safepoint_park`).
+        if self.parallel {
+            return;
+        }
         let mut inner = self.sched.inner.lock().unwrap();
         // No peer is waiting for the lock — keep running (a self-yield
         // would be pointless and would just churn condvars).
@@ -802,26 +844,26 @@ impl Runtime {
         // Publish + release the lock so a waiting peer can take it.
         *handle.parked_roots.lock().unwrap() = Some(roots);
         handle.in_ml.store(false, Ordering::SeqCst);
-        inner.running = false;
+        inner.running -= 1;
         self.sched.mutator_wake.notify_all();
         self.sched.collector_wake.notify_all();
         // FORCE a hand-off: wait until a peer has actually TAKEN the lock
-        // (running becomes true) — otherwise our own re-acquire below would
-        // win the race against the just-notified peer and nothing would
-        // interleave. (If meanwhile a GC is requested, the collector takes
-        // priority; we wait it out in the re-acquire loop.) We only insist
-        // on a hand-off while a peer is still queued.
-        while inner.waiters > 0 && !inner.running && !inner.gc_requested {
+        // (running becomes nonzero) — otherwise our own re-acquire below
+        // would win the race against the just-notified peer and nothing
+        // would interleave. (If meanwhile a GC is requested, the collector
+        // takes priority; we wait it out in the re-acquire loop.) We only
+        // insist on a hand-off while a peer is still queued.
+        while inner.waiters > 0 && inner.running == 0 && !inner.gc_requested {
             inner = self.sched.mutator_wake.wait(inner).unwrap();
         }
         // Now re-acquire normally (wait our turn behind the peer that ran).
         inner.waiters += 1;
-        while inner.running || inner.gc_requested {
+        while inner.running > 0 || inner.gc_requested {
             inner = self.sched.mutator_wake.wait(inner).unwrap();
         }
         inner.waiters -= 1;
         *handle.parked_roots.lock().unwrap() = None;
-        inner.running = true;
+        inner.running += 1;
         handle.in_ml.store(true, Ordering::SeqCst);
         // Announce the take (see `acquire_ml_memory`): wake any OTHER
         // yielder blocked in its forced-hand-off loop.
@@ -857,10 +899,14 @@ impl Runtime {
             // We are the running thread; mark a GC so no peer can acquire
             // the lock mid-collection and so peers at their safepoint park.
             inner.gc_requested = true;
+            // Mirror for the lock-free safepoint poll. Release pairs with
+            // the poll's Acquire (see `gc_requested_atomic`).
+            self.gc_requested_atomic.store(true, Ordering::Release);
             // ---- Stop-the-world barrier: wait for every OTHER registered
             // thread to be parked (not in_ml) AND to have published its
-            // roots. `running` stays true (we hold it), so no peer can
-            // become the running mutator while we spin here.
+            // roots. Our own `running` count stays held (we are the giant-
+            // lock holder), so no peer can become the running mutator while
+            // we spin here.
             let me = Arc::as_ptr(handle);
             loop {
                 let all_parked = inner.registry.iter().all(|h| {
@@ -887,18 +933,105 @@ impl Runtime {
         // Run the collection WITHOUT holding the scheduler lock (the
         // collect closure re-locks `inner` and each handle's `parked_roots`
         // to read published roots — std Mutex is not reentrant, so we must
-        // not hold `inner` here). `gc_requested == true` + `running == true`
-        // + the barrier above guarantee exclusivity: no peer can acquire the
-        // lock, and every peer is non-running with published, frozen roots.
+        // not hold `inner` here). `gc_requested == true` + our held running
+        // count + the barrier above guarantee exclusivity: no peer can
+        // acquire the lock, and every peer is non-running with published,
+        // frozen roots.
         let r = collect();
         self.gc_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         {
             let mut inner = self.sched.inner.lock().unwrap();
             inner.gc_requested = false;
+            self.gc_requested_atomic.store(false, Ordering::Release);
             self.sched.mutator_wake.notify_all();
         }
         r
+    }
+
+    /// PARALLEL-mode GC entry (P4): request a stop-the-world collection
+    /// with a COLLECTOR ELECTION. Under `POLY_PARALLEL` several runners can
+    /// cross their allocation trigger simultaneously; the scheduler mutex
+    /// is the election — the FIRST requester to set `gc_requested` becomes
+    /// the collector, every later requester (finding it already set) is a
+    /// LOSER: it parks exactly like a safepoint peer (publish + not-in_ml),
+    /// waits out the collection, retracts, and returns `None` WITHOUT
+    /// collecting — its trigger condition is stale after the winner's
+    /// collection (the pool was evacuated), so the caller simply retries
+    /// its allocation.
+    ///
+    /// The WINNER path mirrors [`Self::request_gc`]'s barrier, with one
+    /// difference in what holds mutators out: in giant mode `running` stays
+    /// held; here newcomer acquires block on the `gc_requested` component
+    /// of the (parallel) acquire loops, and every already-running peer
+    /// parks at its next safepoint poll (which reads the lock-free mirror).
+    ///
+    /// # Safety
+    /// `roots` must alias the calling thread's live `ThreadContext` and
+    /// stay valid across the (possible) park; on either path they are no
+    /// longer aliased when this returns.
+    pub unsafe fn request_gc_parallel<R>(
+        &self,
+        handle: &Arc<ThreadHandle>,
+        roots: SendRoots,
+        collect: impl FnOnce() -> R,
+    ) -> Option<R> {
+        {
+            let mut inner = self.sched.inner.lock().unwrap();
+            if inner.gc_requested {
+                // LOST the election: a peer is already collecting (or about
+                // to). Park as a safepoint peer: publish, drop out of
+                // running, let the winner's barrier count us, wait out the
+                // collection, then resume WITHOUT collecting.
+                *handle.parked_roots.lock().unwrap() = Some(roots);
+                handle.in_ml.store(false, Ordering::SeqCst);
+                debug_assert!(inner.running > 0, "gc loser without a matching acquire");
+                inner.running -= 1;
+                self.sched.collector_wake.notify_all();
+                while inner.gc_requested {
+                    inner = self.sched.mutator_wake.wait(inner).unwrap();
+                }
+                *handle.parked_roots.lock().unwrap() = None;
+                inner.running += 1;
+                handle.in_ml.store(true, Ordering::SeqCst);
+                return None;
+            }
+            // WON the election: we are the collector.
+            inner.gc_requested = true;
+            self.gc_requested_atomic.store(true, Ordering::Release);
+            // Stop-the-world barrier — identical predicate to `request_gc`:
+            // every OTHER registered thread must be parked (not in_ml) AND
+            // have published roots before any object moves.
+            let me = Arc::as_ptr(handle);
+            loop {
+                let all_parked = inner.registry.iter().all(|h| {
+                    if Arc::as_ptr(h) == me {
+                        return true;
+                    }
+                    !h.in_ml.load(Ordering::SeqCst) && h.parked_roots.lock().unwrap().is_some()
+                });
+                if all_parked {
+                    break;
+                }
+                inner = self.sched.collector_wake.wait(inner).unwrap();
+            }
+        }
+        // Collect WITHOUT holding the scheduler lock (as in `request_gc`:
+        // the closure re-locks `inner` and each `parked_roots`). Exclusivity
+        // holds because `gc_requested == true` blocks every acquire path and
+        // the barrier confirmed every peer parked with frozen roots. The
+        // published `roots` argument was never needed on this path (the
+        // collector forwards its own stack directly).
+        let r = collect();
+        self.gc_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut inner = self.sched.inner.lock().unwrap();
+            inner.gc_requested = false;
+            self.gc_requested_atomic.store(false, Ordering::Release);
+            self.sched.mutator_wake.notify_all();
+        }
+        Some(r)
     }
 
     /// Snapshot the registry handles (for the collector to iterate the
@@ -914,12 +1047,12 @@ impl Runtime {
         self.sched.inner.lock().unwrap().registry.len()
     }
 
-    /// Whether the giant mutator lock is currently held (`running`). Test
+    /// Whether any thread currently runs bytecode (`running > 0`). Test
     /// probe for the H2 negative control: an `exit_parked` from a NON-holder
     /// must NOT flip this off while a peer holds it.
     #[must_use]
     pub fn running_for_test(&self) -> bool {
-        self.sched.inner.lock().unwrap().running
+        self.sched.inner.lock().unwrap().running > 0
     }
 
     /// Test-only: publish a (dummy, root-free) `SendRoots` into a handle's
@@ -937,12 +1070,16 @@ impl Runtime {
         inner.registry.push(Arc::clone(handle));
     }
 
-    /// Relaxed check of whether a GC has been requested (the safepoint
-    /// poll). Correctness only needs eventual visibility; the lock
-    /// acquire is amortised over the 65536-step poll cadence.
+    /// The safepoint poll: has a GC been requested? Reads the LOCK-FREE
+    /// atomic mirror (P4) — the per-step poll must not take the scheduler
+    /// mutex once runners are genuinely parallel (and skipping the lock is
+    /// a small win for the giant-lock path too). Acquire pairs with the
+    /// requester's Release store, so a `true` here happens-after the
+    /// request was fully staged; a stale `false` only delays the park by
+    /// one poll interval (the collector's barrier waits for us).
     #[must_use]
-    pub fn gc_requested_relaxed(&self) -> bool {
-        self.sched.inner.lock().unwrap().gc_requested
+    pub fn gc_requested_poll(&self) -> bool {
+        self.gc_requested_atomic.load(Ordering::Acquire)
     }
 
     /// Sample the current blocking-event generation. A blocking RTS path

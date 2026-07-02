@@ -64,7 +64,9 @@ jobs:
 
       # Real-threads workloads need the basis-bearing image (only built here):
       # the mutex demo, the in-process socket server+client (blocking-syscall
-      # giant-lock release), preemption fairness, and interrupt-state fidelity.
+      # giant-lock release), preemption fairness, interrupt-state fidelity,
+      # and the POLY_PARALLEL fences (giant lock dropped: STW soundness under
+      # true parallelism, mutex exactness, racy-ref bounds, compute scaling).
       - name: Real-threads concurrency demos
         run: |
           cargo test --release -p polyml-bin \
@@ -76,6 +78,7 @@ jobs:
             --test concurrency_exit \
             --test concurrency_alloc_storm \
             --test concurrency_mutex_hammer \
+            --test concurrency_parallel \
             -- --ignored
 
   cross-check:

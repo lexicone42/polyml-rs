@@ -271,8 +271,46 @@ hangs:
   release-on-publish/acquire-on-collect ordering; per-subsystem RTS-static
   locks (audited already thread-safe by the shared-state recon — mostly
   Mutex/Atomic/OnceLock today).
-- **P4 — drop the lock (`POLY_PARALLEL=1`). GATE PASSED (memory model
-  measured + adopted). The invariant contract for the surgery:**
+- **P4 — drop the lock (`POLY_PARALLEL=1`). ✅ LANDED — TRUE PARALLELISM,
+  measured: two compute-bound workers run at ratio 0.51 of the giant-lock
+  wall-clock (23.66s → 12.04s; 0.50 is the 2-thread ideal), with
+  byte-identical computed results. Implementation notes (refinements on
+  the contract below, which is otherwise implemented as written):**
+
+  * `SchedInner::running` became a **count** (`usize`); giant mode uses it
+    as 0/1 (provably the old bool), parallel mode keeps it as a sanity
+    invariant only. Every acquire/re-acquire wait loop is now
+    `while (!parallel && running > 0) || gc_requested` — under
+    `POLY_PARALLEL` only the collection component excludes.
+  * The **sched mutex stays for state transitions** (brief, amortized —
+    entry/exit/park/safepoint only, like upstream's schedLock) but no
+    longer excludes runners. The per-step poll reads the lock-free
+    `gc_requested_atomic` mirror (`gc_requested_poll`, Acquire), stored
+    (Release) under the mutex at both request/clear sites.
+  * Collector **election is the sched mutex itself**, not a separate CAS
+    token: `request_gc_parallel`'s first-to-set-`gc_requested` wins;
+    losers park as safepoint peers (publish + not-in_ml, counted by the
+    winner's barrier) and return `None` — the caller just retries its
+    allocation against the evacuated pool.
+  * The pool-lock-parked clause proved unnecessary: `install_nursery` is
+    brief and never blocks on scheduler state, and the collector takes
+    the pool lock only AFTER the barrier confirms every peer parked — no
+    lock-order cycle exists.
+  * The cooperative yield is deleted under `POLY_PARALLEL` (early-return
+    before the registry probe); the safepoint poll's only jobs are the
+    STW check + request delivery.
+
+  Fences (all green): `concurrency_parallel.rs` — alloc-storm exact
+  total + `POLYML_GC_AUDIT=1` under 3 truly-parallel workers,
+  mutex-hammer exact 400k (P3 protocol atomics now load-bearing),
+  racy-ref bounded-value/no-crash, compute-scaling ratio gate (<0.85,
+  measured 0.51), `POLY_PARALLEL`-without-real-threads no-op; every
+  pre-existing demo (mutex/sockets/preempt/interrupt/stdin/exit/storm/
+  hammer) passes BOTH flag-off and flag-on; the GC-handshake suite
+  passes; stage-0 byte-identical flag-off AND with `POLY_PARALLEL=1`
+  alone; `POLY_REAL_THREADS=1` step count unchanged by `POLY_PARALLEL`.
+
+  **The original invariant contract (implemented):**
 
   *States.* Each thread is in exactly one of: RUNNING (`in_ml == true`,
   executing bytecode, may touch the heap), PARKED (`in_ml == false` AND

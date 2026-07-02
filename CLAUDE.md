@@ -98,8 +98,17 @@ Stage1.sml`). Consequences:
 - **Real threads (`POLY_REAL_THREADS=1`, default OFF):** genuine `Thread.fork` /
   `Thread.Mutex` / `ConditionVar` over OS threads sharing one heap, under a
   **giant lock + safepoint stop-the-world GC** (`crates/polyml-runtime/src/sched.rs`,
-  port of upstream `processes.cpp`). This is **concurrency, not parallelism** —
-  exactly one mutator runs bytecode at a time (upstream's interpreter-mode model).
+  port of upstream `processes.cpp`). Default mode is **concurrency, not
+  parallelism** — exactly one mutator runs bytecode at a time (upstream's
+  interpreter-mode model). **Add `POLY_PARALLEL=1` for TRUE PARALLELISM
+  (P4)**: the giant lock no longer excludes runners (per-thread nurseries +
+  relaxed-atomic heap accessors + protocol-word-atomic mutexes + a
+  collector-election STW handshake carry the soundness); two compute-bound
+  workers measure ratio 0.51 of giant-lock wall-clock (2-thread ideal =
+  0.50), byte-identical results. Fences: `concurrency_parallel.rs` (storm+
+  audit / mutex exactness / racy-ref bounds / scaling gate / no-op-without-
+  real-threads); design + invariant contract: `docs/parallel-design.md`.
+  `POLY_PARALLEL` without `POLY_REAL_THREADS` is a no-op.
   The 2-thread mutex demo runs end-to-end on the `polyexport` REPL
   (`crates/polyml-bin/tests/concurrency_mutex_demo.rs`, `…/concurrency_support/mutex_demo.sml`
   → counter = 200000); the runtime-level GC-handshake + fork-TOCTOU + H1/H2
@@ -141,10 +150,12 @@ Stage1.sml`). Consequences:
     `notify_all` at every lock-take. (2) `ConditionVar.wait` never released its
     mutex arg (self-deadlock on the SML re-lock); fix = release + wake before
     parking. LESSON: the concurrency TEST is the discovery instrument.
-  - Still missing for *full* concurrency: a **preemptive** scheduler (beyond the
-    cooperative safepoint yield), parking recv/send/stdin/`OS.Process.system`
-    (needs GC forwarding of RTS-local heap refs across a park), and breaking the
-    giant lock for true parallelism. Design: `docs/concurrency-and-jit-roadmap.md`.
+  - The giant lock is BROKEN under `POLY_PARALLEL=1` (see above) — under it
+    threads are preempted by the OS, not the cooperative yield (which is
+    deleted on that path). Still missing: parking `OS.Process.system`'s wait
+    under the parallel barrier semantics is untested at scale (works via the
+    same park helpers), and Windows. Design history:
+    `docs/concurrency-and-jit-roadmap.md` → `docs/parallel-design.md`.
 
 ## Diagnostic tooling (use it before hand-tracing)
 
@@ -349,23 +360,23 @@ How it works:
   their arity RE-DERIVED from the SML `rtsCallFullN` site (the old stub
   arities were systematically wrong — latent, since unreachable).
 - Real OS threads exist behind `POLY_REAL_THREADS=1` (giant lock + safepoint GC,
-  see Architecture). Attribute fidelity improved (task #140): `ConditionVar`
-  timed wait (`PolyThreadCondVarWaitUntil`) and `Thread.numProcessors` are real;
-  **blocking syscalls release the giant lock** — `accept`/`connect`/`select`
-  publish roots + release across their wait (`park_while_blocking` in rts.rs),
-  so a blocked SML thread no longer freezes peers (proven: an in-process
-  concurrent socket server+client, `concurrency_sockets`, which deadlocks
-  without the park — the step-based cooperative yield can't rescue a step that
-  blocks on a wall-clock syscall). Sound because those calls carry only NATIVE
-  data across the wait (fd/sockaddr Vec/fd-sets); `recv`/`send` are NOT parked
-  (their buffer is a live heap pointer) — the basis' `select` covers their
-  readiness wait. Still open: a *preemptive* scheduler (beyond cooperative
-  safepoint yielding), parking recv/send/stdin-read + `OS.Process.system`'s
-  wait (needs the GC to forward RTS-local heap refs across a park), and
-  breaking the giant lock for true parallelism. Whole-region JIT
-  was BUILT + measured (sound but a net slowdown — see Performance & JIT); a real
-  native *speedup* is now believed out of reach for this interpreter (the tight
-  threaded loop wins). Windows remains unimplemented.
+  see Architecture), and **the giant lock is BROKEN under `POLY_PARALLEL=1`
+  (P4, task #140)** — true parallelism, measured 0.51× wall-clock for two
+  compute workers (2-thread ideal 0.50), fenced by `concurrency_parallel.rs`
+  + every pre-existing demo passing flag-on. The parallelism stack underneath
+  (all landed): per-thread nurseries + union-from-space pool collector (P1/
+  P2), protocol-word atomic mutexes + Relaxed-atomic hot heap accessors
+  measured ~9.5% FASTER than plain (P3 + the memory-model gate), collector
+  election + lock-free `gc_requested` mirror + STW parked barrier (P4).
+  ALL blocking syscalls release the lock (`park_while_blocking[_with_root]`
+  — native-only parks for `accept`/`connect`/`select`/`system`; GC-root-cell
+  bounce buffers for recv/readArray/stdin; proven by `concurrency_sockets`
+  + `concurrency_stdin_park`). Attribute fidelity: `ConditionVar` timed
+  wait + `Thread.numProcessors` real. Still open: Windows; a long-soak
+  multi-connection server capstone (P5). Whole-region JIT was BUILT +
+  measured (sound but a net slowdown — see Performance & JIT); a real
+  native *speedup* is now believed out of reach for this interpreter (the
+  tight threaded loop wins).
 
 (The Isabelle number-theory tower is complete — Lagrange's four-square theorem,
 the last open partial, is proved; see `docs/four-square-progress-*.md`. It is
