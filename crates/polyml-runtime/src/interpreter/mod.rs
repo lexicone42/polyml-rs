@@ -2905,12 +2905,24 @@ impl Interpreter {
         // wake and mutate its stack mid-collection).
         let mut parked_guards: Vec<std::sync::MutexGuard<'_, Option<crate::sched::SendRoots>>> =
             Vec::new();
+        // Parked threads' EXTRA RTS root cells (see ThreadHandle::
+        // rts_park_root): each is an RTS-local PolyWord in a blocked RTS
+        // fn's live frame (e.g. a parked readArray's destination byte
+        // array), forwarded alongside the thread's published root-set. The
+        // raw cell pointers are collected here UNDER the corresponding
+        // parked_roots guard (held for the whole collection), so the owner
+        // can neither retract its publication nor clear the cell while we
+        // hold them.
+        let mut parked_rts_cells: Vec<*mut PolyWord> = Vec::new();
         for h in &parked_handles {
             if Arc::as_ptr(h) == my_handle {
                 continue;
             }
             let guard = h.parked_roots.lock().unwrap();
             if guard.is_some() {
+                if let Some(cell) = *h.rts_park_root.lock().unwrap() {
+                    parked_rts_cells.push(cell.0);
+                }
                 parked_guards.push(guard);
             }
         }
@@ -2957,6 +2969,16 @@ impl Interpreter {
                         (sr.forward)(sr.ptr, std::ptr::from_mut(c).cast::<()>());
                     }
                 }
+            }
+            // ---- Parked threads' EXTRA RTS root cells (blocking-syscall
+            // parks that must touch a heap object after re-acquiring).
+            for &cell in &parked_rts_cells {
+                // SAFETY: each cell is a live Rust stack local in a blocked
+                // RTS fn's frame (stable across the park); its owner cannot
+                // touch it until it re-acquires the lock we hold. Forwarding
+                // it here is what makes the owner's post-park re-derive see
+                // the MOVED object instead of dangling into from-space.
+                unsafe { c.forward(cell) };
             }
 
             // ---- Shared roots, forwarded ONCE.

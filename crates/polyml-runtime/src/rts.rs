@@ -245,6 +245,26 @@ impl RtsPark {
         r
     }
 
+    /// [`Self::park_while`] carrying one EXTRA GC-root cell: an RTS-local
+    /// `PolyWord` (a stack local in the caller's live frame) that still
+    /// references a heap object the caller must touch AFTER the park —
+    /// the collector forwards it alongside the published root-set, so the
+    /// caller's post-park re-read sees the MOVED object. The cell is
+    /// registered BEFORE the publish/release and cleared AFTER re-acquire,
+    /// mirroring the parked_roots discipline. `f` itself must still touch
+    /// only NATIVE data (the kernel writes into a native bounce buffer;
+    /// the heap copy happens post-park via the forwarded cell).
+    fn park_while_with_root<T>(&mut self, cell: &mut PolyWord, f: impl FnOnce() -> T) -> T {
+        if self.send.is_none() {
+            return f(); // one-shot already consumed — run inline (lock held).
+        }
+        *self.handle.rts_park_root.lock().unwrap() =
+            Some(crate::sched::SendPtrMut(std::ptr::from_mut(cell)));
+        let r = self.park_while(f);
+        *self.handle.rts_park_root.lock().unwrap() = None;
+        r
+    }
+
     /// Free the roots box if the RTS call finished without parking.
     fn free_unused(mut self) {
         if !self.raw.is_null() {
@@ -294,6 +314,27 @@ pub(crate) fn park_while_blocking<T>(f: impl FnOnce() -> T) -> T {
         let mut b = slot.borrow_mut();
         match b.as_mut() {
             Some(p) => p.park_while(f),
+            None => f(),
+        }
+    })
+}
+
+/// Whether a park is armed for the current RTS call (multi-threaded
+/// session). Lets an IO function keep its zero-copy direct path when
+/// single-threaded and only pay for a native bounce/copy when a park
+/// (and therefore a possible peer GC) is actually in play.
+pub(crate) fn park_is_armed() -> bool {
+    CURRENT_PARK.with(|slot| slot.borrow().is_some())
+}
+
+/// [`park_while_blocking`] carrying one extra GC-root cell (see
+/// [`RtsPark::park_while_with_root`]). Single-threaded: runs `f` inline —
+/// no peer, no GC, the cell needs no forwarding.
+pub(crate) fn park_while_blocking_with_root<T>(cell: &mut PolyWord, f: impl FnOnce() -> T) -> T {
+    CURRENT_PARK.with(|slot| {
+        let mut b = slot.borrow_mut();
+        match b.as_mut() {
+            Some(p) => p.park_while_with_root(cell, f),
             None => f(),
         }
     })
@@ -2122,19 +2163,25 @@ fn poly_network_get_sock_type_list_inner() -> PolyWord {
 // that path also works. We DO keep upstream's EINTR retry loop on every
 // blocking syscall (network.cpp `while (... == CALLINTERRUPTED)`).
 //
-// GIANT-LOCK RELEASE (multi-threaded sessions, POLY_REAL_THREADS=1):
-// `accept` and `connect` release the giant lock across their blocking wait
-// via `park_while_blocking` — they extract everything to NATIVE data (an
-// fd, a copied sockaddr Vec) BEFORE the wait and allocate results AFTER
-// re-acquiring, so a peer GC moving heap objects while they wait can touch
-// nothing they hold. That is what lets a multi-threaded SML server's
-// accept-loop thread coexist with worker threads rather than freezing them.
-// `recv`/`send` are NOT parked — their buffer is a live HEAP pointer a
-// moving collector would dangle; the basis' `select` (bounded ~1s/poll,
-// re-looped in ML at a cooperative-yield point) covers the readiness wait,
-// so recv/send run on a ready fd and return promptly. Parking recv/send/
-// select soundly needs the GC to forward RTS-local heap refs across the
-// wait — the next concurrency increment.
+// GIANT-LOCK RELEASE (multi-threaded sessions, POLY_REAL_THREADS=1): every
+// blocking socket syscall releases the giant lock across its kernel wait.
+// Two disciplines, by whether the kernel touches a heap buffer:
+// - NATIVE-ONLY parks (`accept`/`connect`/`select`, via
+//   `park_while_blocking`): extract everything to NATIVE data (fd, copied
+//   sockaddr Vec, fd-sets) BEFORE the wait, allocate results AFTER
+//   re-acquiring — a peer GC moving heap objects mid-wait touches nothing
+//   they hold.
+// - BOUNCE + FORWARDED-CELL parks (`recv`/`recvfrom`, via
+//   `park_while_blocking_with_root`; `send`/`sendto` copy-OUT + plain
+//   park): the ML buffer is a HEAP byte array a peer GC may MOVE, so the
+//   kernel only ever sees a NATIVE bounce buffer; the buffer's base WORD
+//   is registered as an extra GC-root cell the collector forwards, and the
+//   post-park copy re-derives the (possibly moved) destination from the
+//   forwarded cell. errno is captured INSIDE each parked closure (the
+//   re-acquire's own futex syscalls may clobber it).
+// The park is armed only when real threads are ON with peers registered —
+// the single-threaded default runs every syscall inline on the zero-copy
+// direct path, byte-identical to before.
 mod socket_rts {
     // The cast-heavy socklen_t / c_int / sockaddr conversions below are all
     // intentional (fixed C-ABI widths and pointer-to-sockaddr casts that the
@@ -2487,20 +2534,40 @@ mod socket_rts {
         if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
             flags |= libc::MSG_OOB;
         }
-        let sent = loop {
-            // SAFETY: `[base+off, base+off+len)` was bounds-checked to lie
-            // within the byte object's body by `socket_buf_region`.
-            let r = unsafe { libc::send(fd, base.add(off).cast::<libc::c_void>(), len, flags) };
-            if r < 0 && last_errno() == libc::EINTR {
-                continue;
+        // errno is captured INSIDE the closure: on the park path the
+        // re-acquire's own syscalls (futex) may clobber errno before the
+        // caller could read it.
+        let do_send = |ptr: *const u8| loop {
+            // SAFETY (caller): `[ptr, ptr+len)` is a live, bounds-checked
+            // buffer (heap direct-path, or a native copy on the park path).
+            let r = unsafe { libc::send(fd, ptr.cast::<libc::c_void>(), len, flags) };
+            if r >= 0 {
+                return Ok(r);
             }
-            break r;
+            let e = last_errno();
+            if e != libc::EINTR {
+                return Err(e);
+            }
         };
-        if sent < 0 {
-            return raise_syscall(ctx, "send failed", last_errno());
+        let sent = if park_is_armed() {
+            // MULTI-THREADED: a send can block (full socket buffer). Copy
+            // the heap bytes to NATIVE memory under the lock, park across
+            // the send — a peer GC moving the source object touches nothing
+            // the kernel sees.
+            // SAFETY: `[base+off, base+off+len)` bounds-checked by
+            // socket_buf_region; copied while the lock is held.
+            let native = unsafe { std::slice::from_raw_parts(base.add(off), len) }.to_vec();
+            park_while_blocking(|| do_send(native.as_ptr()))
+        } else {
+            // SINGLE-THREADED (the default): zero-copy direct send.
+            // SAFETY: bounds-checked by socket_buf_region.
+            do_send(unsafe { base.add(off) })
+        };
+        match sent {
+            #[allow(clippy::cast_possible_wrap)]
+            Ok(n) => PolyWord::tagged(n as isize),
+            Err(e) => raise_syscall(ctx, "send failed", e),
         }
-        #[allow(clippy::cast_possible_wrap)]
-        PolyWord::tagged(sent as isize)
     }
 
     /// `PolyNetworkReceive(threadId, args)` — `recv(2)`. network.cpp:992.
@@ -2535,28 +2602,73 @@ mod socket_rts {
         if socket_int_arg(ctx.safe_spaces.as_ref(), field(5)) != 0 {
             flags |= libc::MSG_OOB;
         }
-        // NB: recv is NOT parked — `base` is a live HEAP pointer (into the
-        // caller's byte array), and a peer GC during a park would move that
-        // object and dangle it. The basis calls PolyNetworkSelect (which IS
-        // effectively yield-bounded) before recv, so by the time we get here
-        // the fd is ready and recv returns promptly. Parking recv/send
-        // soundly needs the GC to forward RTS-local heap refs across the
-        // wait — deferred (see the module-level concurrency note).
-        let recvd = loop {
-            // SAFETY: `[base+off, base+off+len)` was bounds-checked to lie
-            // within the byte object's body by `socket_buf_region`; recv
-            // writes at most `len` bytes there.
-            let r = unsafe { libc::recv(fd, base.add(off).cast::<libc::c_void>(), len, flags) };
-            if r < 0 && last_errno() == libc::EINTR {
-                continue;
+        // errno captured INSIDE the closure (the park re-acquire's futex
+        // syscalls may clobber it).
+        let do_recv = |ptr: *mut u8| loop {
+            // SAFETY (caller): `[ptr, ptr+len)` is a live writable buffer
+            // (heap direct-path, or the native bounce on the park path).
+            let r = unsafe { libc::recv(fd, ptr.cast::<libc::c_void>(), len, flags) };
+            if r >= 0 {
+                #[allow(clippy::cast_sign_loss)]
+                return Ok(r as usize);
             }
-            break r;
+            let e = last_errno();
+            if e != libc::EINTR {
+                return Err(e);
+            }
         };
-        if recvd < 0 {
-            return raise_syscall(ctx, "recv failed", last_errno());
+        let recvd = if park_is_armed() {
+            // MULTI-THREADED: park the giant lock across the blocking recv.
+            // The destination is a HEAP byte array a peer GC may MOVE while
+            // we wait, so the kernel never sees its address: recv into a
+            // NATIVE bounce buffer with the base WORD registered as an
+            // extra GC-root cell (the collector forwards it), then
+            // re-derive the — possibly moved — destination and copy the
+            // bytes in AFTER re-acquiring.
+            let mut bounce = vec![0u8; len];
+            let mut base_cell = field(1);
+            let r = park_while_blocking_with_root(&mut base_cell, || do_recv(bounce.as_mut_ptr()));
+            match r {
+                Ok(n) => {
+                    // Range-free re-derive from the FORWARDED cell (the
+                    // pre-park space snapshot is stale after a peer GC; the
+                    // GC invariant — a forwarded valid object stays valid,
+                    // length preserved — carries the pre-park validation).
+                    use crate::length_word::{is_byte_object, length_of};
+                    let new_p = base_cell.as_ptr::<PolyWord>();
+                    // SAFETY: validated pre-park by socket_buf_region; the
+                    // collector forwarded the cell to the moved object.
+                    let lw = unsafe { crate::space::MemorySpace::length_word_of(new_p) };
+                    let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
+                    if !is_byte_object(lw)
+                        || off.checked_add(len).is_none_or(|end| end > body_bytes)
+                    {
+                        return raise_syscall(ctx, "recv failed", libc::EINVAL);
+                    }
+                    // SAFETY: bounds re-checked on the forwarded object;
+                    // n <= len.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bounce.as_ptr(),
+                            new_p.cast::<u8>().cast_mut().add(off),
+                            n,
+                        );
+                    }
+                    Ok(n)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            // SINGLE-THREADED (the default): zero-copy direct recv.
+            // SAFETY: `[base+off, base+off+len)` was bounds-checked by
+            // socket_buf_region; recv writes at most `len` bytes there.
+            do_recv(unsafe { base.add(off) })
+        };
+        match recvd {
+            #[allow(clippy::cast_possible_wrap)]
+            Ok(n) => PolyWord::tagged(n as isize),
+            Err(e) => raise_syscall(ctx, "recv failed", e),
         }
-        #[allow(clippy::cast_possible_wrap)]
-        PolyWord::tagged(recvd as isize)
     }
 
     /// `PolyNetworkSendTo(threadId, args)` — `sendto(2)`. network.cpp:950.
@@ -2593,29 +2705,44 @@ mod socket_rts {
         if socket_int_arg(ctx.safe_spaces.as_ref(), field(6)) != 0 {
             flags |= libc::MSG_OOB;
         }
-        let sent = loop {
-            // SAFETY: buffer region bounds-checked by `socket_buf_region`;
-            // `addr_bytes` is a full sockaddr passed by ptr+len.
+        // errno captured INSIDE the closure (park re-acquire may clobber it).
+        let do_sendto = |ptr: *const u8| loop {
+            // SAFETY (caller): `[ptr, ptr+len)` is a live buffer;
+            // `addr_bytes` is a native sockaddr Vec passed by ptr+len.
             let r = unsafe {
                 libc::sendto(
                     fd,
-                    base.add(off).cast::<libc::c_void>(),
+                    ptr.cast::<libc::c_void>(),
                     len,
                     flags,
                     addr_bytes.as_ptr().cast::<libc::sockaddr>(),
                     addr_bytes.len() as libc::socklen_t,
                 )
             };
-            if r < 0 && last_errno() == libc::EINTR {
-                continue;
+            if r >= 0 {
+                return Ok(r);
             }
-            break r;
+            let e = last_errno();
+            if e != libc::EINTR {
+                return Err(e);
+            }
         };
-        if sent < 0 {
-            return raise_syscall(ctx, "sendto failed", last_errno());
+        let sent = if park_is_armed() {
+            // MULTI-THREADED: copy-out to native + park, as in `send`
+            // (the addr is already a native Vec).
+            // SAFETY: bounds-checked by socket_buf_region; copied under
+            // the lock.
+            let native = unsafe { std::slice::from_raw_parts(base.add(off), len) }.to_vec();
+            park_while_blocking(|| do_sendto(native.as_ptr()))
+        } else {
+            // SAFETY: bounds-checked by socket_buf_region.
+            do_sendto(unsafe { base.add(off) })
+        };
+        match sent {
+            #[allow(clippy::cast_possible_wrap)]
+            Ok(n) => PolyWord::tagged(n as isize),
+            Err(e) => raise_syscall(ctx, "sendto failed", e),
         }
-        #[allow(clippy::cast_possible_wrap)]
-        PolyWord::tagged(sent as isize)
     }
 
     /// `PolyNetworkReceiveFrom(threadId, args)` — `recvfrom(2)`.
@@ -2652,27 +2779,73 @@ mod socket_rts {
         }
         let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-        let recvd = loop {
-            // SAFETY: buffer region bounds-checked by `socket_buf_region`;
-            // `storage`/`addr_len` are valid out-params sized to sockaddr_storage.
+        // errno captured INSIDE the closure (park re-acquire may clobber it).
+        let do_recvfrom = |ptr: *mut u8,
+                           storage: &mut libc::sockaddr_storage,
+                           addr_len: &mut libc::socklen_t| loop {
+            // SAFETY (caller): `[ptr, ptr+len)` is a live writable buffer;
+            // `storage`/`addr_len` are valid native out-params.
             let r = unsafe {
                 libc::recvfrom(
                     fd,
-                    base.add(off).cast::<libc::c_void>(),
+                    ptr.cast::<libc::c_void>(),
                     len,
                     flags,
-                    (&raw mut storage).cast::<libc::sockaddr>(),
-                    &raw mut addr_len,
+                    std::ptr::from_mut(storage).cast::<libc::sockaddr>(),
+                    std::ptr::from_mut(addr_len),
                 )
             };
-            if r < 0 && last_errno() == libc::EINTR {
-                continue;
+            if r >= 0 {
+                #[allow(clippy::cast_sign_loss)]
+                return Ok(r as usize);
             }
-            break r;
+            let e = last_errno();
+            if e != libc::EINTR {
+                return Err(e);
+            }
         };
-        if recvd < 0 {
-            return raise_syscall(ctx, "recvfrom failed", last_errno());
-        }
+        let recvd = if park_is_armed() {
+            // MULTI-THREADED: bounce + forwarded root cell, as in `recv`
+            // (the peer-addr out-params are native stack locals).
+            let mut bounce = vec![0u8; len];
+            let mut base_cell = field(1);
+            let r = park_while_blocking_with_root(&mut base_cell, || {
+                do_recvfrom(bounce.as_mut_ptr(), &mut storage, &mut addr_len)
+            });
+            match r {
+                Ok(n) => {
+                    // Range-free re-derive from the FORWARDED cell (see recv).
+                    use crate::length_word::{is_byte_object, length_of};
+                    let new_p = base_cell.as_ptr::<PolyWord>();
+                    // SAFETY: validated pre-park; forwarded by the collector.
+                    let lw = unsafe { crate::space::MemorySpace::length_word_of(new_p) };
+                    let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
+                    if !is_byte_object(lw)
+                        || off.checked_add(len).is_none_or(|end| end > body_bytes)
+                    {
+                        return raise_syscall(ctx, "recvfrom failed", libc::EINVAL);
+                    }
+                    // SAFETY: bounds re-checked on the forwarded object; n <= len.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bounce.as_ptr(),
+                            new_p.cast::<u8>().cast_mut().add(off),
+                            n,
+                        );
+                    }
+                    Ok(n)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            // SINGLE-THREADED: zero-copy direct recvfrom.
+            // SAFETY: bounds-checked by socket_buf_region.
+            do_recvfrom(unsafe { base.add(off) }, &mut storage, &mut addr_len)
+        };
+        let recvd = match recvd {
+            Ok(n) => n,
+            Err(e) => return raise_syscall(ctx, "recvfrom failed", e),
+        };
         let cap = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
         if addr_len > cap {
             addr_len = cap;
@@ -5089,7 +5262,7 @@ fn write_array(spaces: Option<&RtsSafeSpaces>, strm: PolyWord, arg: PolyWord) ->
     // Route via std::io for fds 1/2; write real files via their fd.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = (fd_plus_one - 1) as i32;
-    let n = match fd {
+    let write_from = |slice: &[u8]| match fd {
         1 => retry_eintr_write(&mut std::io::stdout(), slice),
         2 => retry_eintr_write(&mut std::io::stderr(), slice),
         0 => Ok(0),
@@ -5104,6 +5277,19 @@ fn write_array(spaces: Option<&RtsSafeSpaces>, strm: PolyWord, arg: PolyWord) ->
             let _ = f.into_raw_fd();
             n
         }
+    };
+    let n = if park_is_armed() {
+        // MULTI-THREADED: a write can block (full pipe, slow tty). Copy
+        // the heap bytes to a NATIVE buffer while we still hold the lock,
+        // then park across the write — a peer GC moving the source object
+        // mid-wait touches nothing the kernel sees. Nothing heap is needed
+        // post-park (the byte count is native).
+        let native = slice.to_vec();
+        park_while_blocking(|| write_from(&native))
+    } else {
+        // SINGLE-THREADED (the default): zero-copy direct write,
+        // byte-identical to before.
+        write_from(slice)
     };
     match n {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -6053,27 +6239,75 @@ fn read_array_from_stream(
             return PolyWord::tagged(0);
         }
     }
-    // SAFETY: buf is a byte object and `off + len <= body_bytes` was just
-    // verified, so writing off..off+len bytes of its body is in-bounds.
-    let base = buf_p.cast::<u8>().cast_mut();
-    let slice = unsafe { std::slice::from_raw_parts_mut(base.add(off), len) };
     #[allow(clippy::cast_possible_truncation)]
     let fd = (fd_plus_one - 1) as i32;
-    let n = if fd == 0 {
-        let syn = read_synthetic_stdin(slice);
-        if syn > 0 {
-            Ok(syn)
+    // Shared reader: fd 0 checks the synthetic-stdin queue first.
+    let read_into = |slice: &mut [u8]| {
+        if fd == 0 {
+            let syn = read_synthetic_stdin(slice);
+            if syn > 0 {
+                Ok(syn)
+            } else {
+                retry_eintr_read(&mut std::io::stdin(), slice)
+            }
         } else {
-            retry_eintr_read(&mut std::io::stdin(), slice)
+            // For non-stdio fds, reconstruct a File to read, then
+            // immediately forget it so we don't close the fd.
+            use std::os::fd::{FromRawFd, IntoRawFd};
+            let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+            let r = retry_eintr_read(&mut f, slice);
+            let _kept = f.into_raw_fd();
+            r
+        }
+    };
+    let n = if park_is_armed() {
+        // MULTI-THREADED: park the giant lock across the blocking read.
+        // The destination is a HEAP byte array a peer GC may MOVE while we
+        // wait, so the kernel must never see its address: read into a
+        // NATIVE bounce buffer with the buf WORD registered as an extra GC
+        // root cell (the collector forwards it alongside our published
+        // roots), then re-derive the — possibly moved — destination from
+        // the forwarded word and copy the bytes in AFTER re-acquiring.
+        // This is what lets the REPL's buffered stdin read (TextIO readArr
+        // → subcode 8) block without freezing forked peers.
+        let mut bounce = vec![0u8; len];
+        let mut buf_cell = buf;
+        let n = park_while_blocking_with_root(&mut buf_cell, || read_into(&mut bounce));
+        match n {
+            Ok(n) => {
+                // Re-derive from the FORWARDED cell. Range re-validation
+                // would be unsound here (the pre-park space snapshot is
+                // stale after a peer GC); instead trust the GC invariant —
+                // a forwarded valid object stays valid — and re-check the
+                // RANGE-FREE guards (byte object, off+len fits the body,
+                // which GC preserves verbatim).
+                use crate::length_word::{is_byte_object, length_of};
+                let new_p = buf_cell.as_ptr::<PolyWord>();
+                // SAFETY: `buf` was validated pre-park; the collector
+                // forwarded the cell, so `new_p` is the same (possibly
+                // moved) object; its length word is readable.
+                let lw = unsafe { crate::space::MemorySpace::length_word_of(new_p) };
+                let body_bytes = length_of(lw).saturating_mul(std::mem::size_of::<usize>());
+                if !is_byte_object(lw) || off.checked_add(len).is_none_or(|end| end > body_bytes) {
+                    return PolyWord::tagged(0);
+                }
+                let base = new_p.cast::<u8>().cast_mut();
+                // SAFETY: bounds re-checked on the forwarded object; n <= len.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bounce.as_ptr(), base.add(off), n);
+                }
+                Ok(n)
+            }
+            Err(e) => Err(e),
         }
     } else {
-        // For non-stdio fds, reconstruct a File to read, then
-        // immediately forget it so we don't close the fd.
-        use std::os::fd::{FromRawFd, IntoRawFd};
-        let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
-        let r = retry_eintr_read(&mut f, slice);
-        let _kept = f.into_raw_fd();
-        r
+        // SINGLE-THREADED (the default): read straight into the heap
+        // buffer — no peer, no GC, zero-copy, byte-identical to before.
+        // SAFETY: buf is a byte object and `off + len <= body_bytes` was
+        // verified above, so writing off..off+len bytes is in-bounds.
+        let base = buf_p.cast::<u8>().cast_mut();
+        let slice = unsafe { std::slice::from_raw_parts_mut(base.add(off), len) };
+        read_into(slice)
     };
     match n {
         #[allow(clippy::cast_possible_wrap)]
@@ -6114,21 +6348,29 @@ fn read_string_from_stream(ctx: &mut RtsContext<'_>, strm: PolyWord, arg: PolyWo
     let mut buf = vec![0u8; want];
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
     let fd = (fd_plus_one - 1) as i32;
-    let n = if fd == 0 {
-        let syn = read_synthetic_stdin(&mut buf);
-        if syn > 0 {
-            Ok(syn)
+    // PARK the giant lock across the blocking read (multi-threaded
+    // sessions): `buf` is NATIVE and the fd is native, so a peer can run —
+    // and GC — while we wait in the kernel; the heap string is allocated
+    // AFTER re-acquiring. This is the REPL's stdin read (TextIO readVec →
+    // IO subcode 10), i.e. what keeps the REPL prompt from freezing
+    // forked background threads while it waits for the user.
+    let n = park_while_blocking(|| {
+        if fd == 0 {
+            let syn = read_synthetic_stdin(&mut buf);
+            if syn > 0 {
+                Ok(syn)
+            } else {
+                retry_eintr_read(&mut std::io::stdin(), &mut buf)
+            }
         } else {
-            retry_eintr_read(&mut std::io::stdin(), &mut buf)
+            // Borrow the fd without taking ownership (= no close).
+            use std::os::fd::{FromRawFd, IntoRawFd};
+            let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+            let r = retry_eintr_read(&mut f, &mut buf);
+            let _kept = f.into_raw_fd();
+            r
         }
-    } else {
-        // Borrow the fd without taking ownership (= no close).
-        use std::os::fd::{FromRawFd, IntoRawFd};
-        let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
-        let r = retry_eintr_read(&mut f, &mut buf);
-        let _kept = f.into_raw_fd();
-        r
-    };
+    });
     match n {
         Ok(0) => alloc_empty_string(ctx),
         Ok(n) => alloc_poly_string(ctx, &buf[..n]),

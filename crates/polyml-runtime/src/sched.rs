@@ -58,6 +58,18 @@ pub struct SendPtr(pub *const PolyWord);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
 
+/// `Send` wrapper for a raw `*mut PolyWord` — a single forwardable root
+/// CELL (see [`ThreadHandle::rts_park_root`]). The cell is a Rust stack
+/// local in a blocked RTS function's live frame: stable for the park's
+/// duration, forwarded in place by the lock-holding collector.
+#[derive(Clone, Copy)]
+pub struct SendPtrMut(pub *mut PolyWord);
+// SAFETY: dereferenced only by the lock-holding collector while the
+// owning thread is confirmed parked (it cannot touch the cell before
+// re-acquiring the lock the collector holds).
+unsafe impl Send for SendPtrMut {}
+unsafe impl Sync for SendPtrMut {}
+
 /// The image-mutable root regions to scan during GC.
 #[derive(Clone, Default)]
 pub struct ImageRoots(pub Vec<(SendPtr, usize)>);
@@ -160,6 +172,23 @@ pub struct ThreadHandle {
     /// mutator under the giant lock (peers parked, no GC in flight), so it
     /// can never be read while stale.
     pub thread_obj_addr: AtomicUsize,
+    /// EXTRA GC-root cell for a blocking-syscall park (`rts::RtsPark`):
+    /// the address of an RTS-LOCAL `PolyWord` (a Rust stack local in the
+    /// blocked RTS function's live frame) that still references a heap
+    /// object the function must touch AFTER re-acquiring — e.g. the
+    /// destination byte array of a parked `recv`/`readArray`, whose bytes
+    /// are bounced through native memory and copied in post-park. RTS
+    /// args are popped into Rust locals before dispatch (NOT on the SML
+    /// stack), so without this cell the collector could not forward them
+    /// and the post-park re-derive would dangle.
+    ///
+    /// Set by the parking thread BEFORE it publishes + releases; cleared
+    /// AFTER it re-acquires. The collector forwards it (under the giant
+    /// lock, holding the thread's `parked_roots` guard, so the parked
+    /// thread can neither retract nor clear concurrently) right after the
+    /// thread's published root-set. `None` for every non-parked state and
+    /// for parks that carry no heap reference (the common case).
+    pub rts_park_root: Mutex<Option<SendPtrMut>>,
 }
 
 /// Monotonic source for [`ThreadHandle::thread_id`] (0 is reserved for
@@ -179,6 +208,7 @@ impl ThreadHandle {
             is_daemon: AtomicBool::new(false),
             thread_id: NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed),
             thread_obj_addr: AtomicUsize::new(0),
+            rts_park_root: Mutex::new(None),
         })
     }
 }

@@ -109,10 +109,22 @@ Stage1.sml`). Consequences:
   SIGNAL thread at startup that loops on `PolyWaitForSignal`; once `fork` really
   spawns it, that thread MUST **park** (it is flagged a daemon + blocks in
   `try_thread_rts`), else it busy-spins the giant lock and hangs the REPL.
-  - **Blocking syscalls release the giant lock** (`park_while_blocking` in
-    rts.rs): `accept`/`connect`/`select` publish roots + release across their
-    wait (NATIVE-data-only; `recv`/`send` stay unparked — heap buffer). Proof:
-    `concurrency_sockets` (in-process SML server+client — deadlocks without it).
+  - **Blocking syscalls release the giant lock** — ALL of them (`rts.rs`):
+    native-only parks (`accept`/`connect`/`select`, `OS.Process.system`) via
+    `park_while_blocking`; heap-buffer syscalls (`recv`/`recvfrom`/readArray/
+    stdin-read) via `park_while_blocking_with_root` — the kernel only ever
+    sees a NATIVE bounce buffer, the buffer's base word is a collector-
+    forwarded root cell (`ThreadHandle::rts_park_root`), and the post-park
+    copy re-derives the moved destination from the forwarded cell
+    (RANGE-FREE re-checks only — the pre-park space snapshot is stale after
+    a peer GC). `send`/`sendto`/writeArray copy OUT to native under the
+    lock, then park. errno is captured INSIDE each parked closure (re-acquire
+    futexes clobber it). Gated on `park_is_armed()` — single-threaded takes
+    the zero-copy direct path, byte-identical. Proofs: `concurrency_sockets`
+    (accept-park; deadlocks without) + `concurrency_stdin_park` (a thread
+    blocked in TextIO.inputLine frees peers AND the line survives constant
+    buffer-moving GCs — delta=0 without the park, ~1000+ with). NB the REPL
+    + program SHARE buffered stdin (drain leftovers before a timing read).
   - **Thread attributes are faithful**: `InterruptState` (Defer/Synch/Asynch/
     AsynchOnce) honored from the thread object's flags word;
     `Thread.interrupt`/`kill`/`isActive`/`broadcastInterrupt` target threads via
