@@ -98,6 +98,40 @@ together with `--untrusted` is out of the validated envelope; and `--untrusted` 
 ambient authority (filesystem, environment, stdout). See `SECURITY.md` for the
 threat model.
 
+## The parallel memory model (`POLY_PARALLEL=1`)
+
+With the giant lock dropped (P4, `docs/parallel-design.md`), several SML
+threads mutate one shared heap at once, so the memory model becomes a
+correctness claim in its own right:
+
+- **Hot heap-word accessors are `Relaxed` atomics** (`AtomicUsize` views of
+  `repr(transparent)` `PolyWord` cells — LOAD/STORE_ML_WORD, the indirect
+  family). A racy SML program therefore observes *unspecified values*, never
+  Rust-level undefined behaviour. This was the *measured* choice, not a tax:
+  the atomic accessors benchmarked ~9.5% FASTER than plain derefs
+  (drift-cancelled A/B; the narrower aliasing semantics free LLVM's codegen).
+- **SML `Mutex`/`ConditionVar` protocol words run on hardware atomics**
+  (`fetch_add`/`compare_exchange`/`swap` — P3), so SML-level locking is real
+  mutual exclusion, fenced by an exact-count hammer (2 threads × 200k
+  lock/incr/unlock = exactly 400k, `concurrency_parallel.rs`).
+- **Stop-the-world GC**: a collector is *elected* (first requester under the
+  scheduler mutex); it waits until every registered peer is provably parked
+  (`in_ml == false` AND published roots) before anything moves. Peers park
+  only *between* bytecode steps, so an opcode's internal multi-allocation
+  sequences are atomic w.r.t. the barrier. `POLYML_GC_AUDIT=1` re-walks every
+  root set after each parallel collection in the storm fence.
+- **Residual, stated honestly:** *byte*-array accessors remain plain (a racy
+  `Word8Array` shared without a mutex is the one surface where the UB-freedom
+  argument does not yet apply — wrap it in an SML `Mutex`, as any correct
+  program would); and `--untrusted` + threads remains out of the validated
+  envelope (above).
+
+The proof obligations are all fenced: byte-identity of the default path
+(stage-0 + the 27.7B-step chain), exact-count discriminators under load, the
+racy-ref bounds probe, and measured scaling (0.51× two workers, 0.24× a
+4-connection compute server — `concurrency_parallel.rs`,
+`concurrency_server.rs`).
+
 ## Reproducing
 
 The faithfulness and safety harnesses are wired into `tools/regression.sh full`.

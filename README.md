@@ -139,6 +139,31 @@ Scope note: `--untrusted` is *memory* safety, **not a sandbox** — the image st
 runs with your user's ambient authority (filesystem, environment, stdout). See
 [`SECURITY.md`](SECURITY.md) for the threat model.
 
+### 7. True parallel SML threads
+
+```sh
+POLY_REAL_THREADS=1 POLY_PARALLEL=1 ./poly run polyexport < your_threads.sml
+```
+
+`Thread.fork` / `Thread.Mutex` / `ConditionVar` are real OS threads over one
+shared heap. With `POLY_REAL_THREADS=1` alone they interleave under a giant
+lock (upstream's interpreter-mode semantics); adding **`POLY_PARALLEL=1`
+drops the giant lock** — threads execute bytecode **genuinely in parallel**,
+with per-thread nursery allocation, lock-free heap-word accessors (relaxed
+atomics — measured *faster* than plain loads), SML mutexes running on
+hardware atomics, and a collector-election stop-the-world GC. Measured: two
+compute-bound workers finish in **0.51×** the giant-lock wall-clock (the
+2-thread ideal is 0.50), and a 4-connection SML socket server — external
+TCP clients, one forked handler thread per connection — answers its load in
+**0.24×** (4-way ideal 0.25), every response verified against an exact
+oracle.
+Racy SML programs get unspecified *values*, never undefined *behaviour*
+(the data-race-freedom of the Rust port carries to parallel mode). Both
+flags default OFF; the single-threaded path stays byte-identical, and
+`POLY_PARALLEL` without `POLY_REAL_THREADS` is a no-op. Design + invariant
+contract: [`docs/parallel-design.md`](docs/parallel-design.md); fences:
+`concurrency_parallel.rs`, `concurrency_server.rs`.
+
 ---
 
 ## Faithfulness, not just "it boots"
@@ -308,22 +333,16 @@ no fabricated axioms.**
   structure, and IPv6 / DNS on the socket side.
 - **Windows** — not yet validated (the RTS/filesystem layer is Unix-oriented). The
   endianness gap is **closed**: s390x (big-endian) runs byte-identically (above).
-- **Full concurrency** — real OS threads (`Thread.fork` / `Thread.Mutex` /
-  `ConditionVar` over a shared heap) work behind **`POLY_REAL_THREADS=1`** (default
-  OFF): a giant-lock + safepoint stop-the-world GC model — *concurrency, not
-  parallelism* (one mutator runs bytecode at a time, matching upstream's
-  interpreter-mode semantics). A 2-thread mutex demo runs end-to-end (counter →
-  200000), and — since blocking socket syscalls (`accept`/`connect`/`select`)
-  now **release the giant lock** across their wait — an **in-process concurrent
-  socket server + client** round-trips a payload between two SML threads
-  (`concurrency_sockets`), which would deadlock if a blocked thread held the
-  lock. `ConditionVar` timed wait and `Thread.numProcessors` are real too.
-  Default OFF keeps the bootstrap/REPL/HOL4/Isabelle paths byte-identical
-  single-threaded. Still open: a *preemptive* scheduler (beyond the cooperative
-  safepoint yield), releasing the lock across `recv`/`send`/stdin blocking too
-  (needs GC forwarding of RTS-local heap refs), and breaking the giant lock for
-  true parallelism. **Interrupts are done**: Ctrl-C (SIGINT) raises the SML
-  `Interrupt` exception, so a runaway loop is interruptible instead of hard-killed.
+- **Threading refinements** — threads themselves are DONE (see *True parallel
+  SML threads* above): the giant-lock model, all blocking syscalls parking
+  (accept/connect/select/system natively; recv/read/stdin via GC-rooted bounce
+  buffers), faithful thread attributes, and the `POLY_PARALLEL=1` lock drop
+  with measured near-ideal scaling. What remains: parallel mode is opt-in
+  (the default stays the byte-identical giant-lock model), scheduling under
+  the giant lock is cooperative (the OS preempts under `POLY_PARALLEL`), and
+  long-soak production hardening of the parallel path is young. **Interrupts
+  are done**: Ctrl-C (SIGINT) raises the SML `Interrupt` exception, so a
+  runaway loop is interruptible instead of hard-killed.
 - **JIT as a big speedup** — it's correct and a *modest* (~2%) win. Whole-region
   native compilation was built end-to-end and measured: **byte-identical across the
   full 27.7-billion-step self-bootstrap (a deep soundness result) but a net
@@ -383,17 +402,20 @@ The original staged plan is in [`PLAN.md`](PLAN.md). In short:
   run faithfully on 32-bit (its bytecode bakes in 64-bit word-size constants);
   this matches upstream's documented limitation. So cross-word-size carries data,
   not compiled code; a true 64↔32 execution story needs recompilation.
-- **Settled this cycle:** real OS threads behind `POLY_REAL_THREADS=1` (giant-lock +
-  safepoint-GC concurrency); interrupts (SIGINT → SML `Interrupt`); the
-  memory-safety residual (the `--untrusted` safe mode); the JIT made an optional
-  feature (interpreter-only / big-endian-native builds); and the
-  **whole-region-JIT-as-speedup question — answered "no"**: it was built end-to-end,
-  proven byte-identical across the 27.7-billion-step self-bootstrap, but measured a
-  net slowdown (the tight threaded interpreter wins). The number-theory tower is
-  complete.
-- **Next:** the remaining larger subsystems — a *preemptive* thread scheduler (beyond
-  the cooperative safepoint yield), Windows, and the cross-*word-size* recompilation
-  story.
+- **Settled this cycle:** real OS threads behind `POLY_REAL_THREADS=1`, then
+  **true parallelism behind `POLY_PARALLEL=1`** (the giant lock dropped:
+  per-thread nurseries, atomic heap accessors measured ~9.5% *faster* than
+  plain, protocol-word-atomic mutexes, collector-election stop-the-world GC —
+  two workers at 0.51× / a 4-connection server at 0.24× of giant-lock
+  wall-clock, chain still byte-identical); interrupts (SIGINT → SML
+  `Interrupt`); the memory-safety residual (the `--untrusted` safe mode); the
+  JIT made an optional feature (interpreter-only / big-endian-native builds);
+  and the **whole-region-JIT-as-speedup question — answered "no"**: it was
+  built end-to-end, proven byte-identical across the 27.7-billion-step
+  self-bootstrap, but measured a net slowdown (the tight threaded interpreter
+  wins). The number-theory tower is complete.
+- **Next:** Windows, the cross-*word-size* recompilation story, and long-soak
+  hardening of the parallel path.
 
 ---
 

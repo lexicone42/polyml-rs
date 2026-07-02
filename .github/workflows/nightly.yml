@@ -79,6 +79,7 @@ jobs:
             --test concurrency_alloc_storm \
             --test concurrency_mutex_hammer \
             --test concurrency_parallel \
+            --test concurrency_server \
             -- --ignored
 
   cross-check:

@@ -372,11 +372,14 @@ How it works:
   — native-only parks for `accept`/`connect`/`select`/`system`; GC-root-cell
   bounce buffers for recv/readArray/stdin; proven by `concurrency_sockets`
   + `concurrency_stdin_park`). Attribute fidelity: `ConditionVar` timed
-  wait + `Thread.numProcessors` real. Still open: Windows; a long-soak
-  multi-connection server capstone (P5). Whole-region JIT was BUILT +
-  measured (sound but a net slowdown — see Performance & JIT); a real
-  native *speedup* is now believed out of reach for this interpreter (the
-  tight threaded loop wins).
+  wait + `Thread.numProcessors` real. The P5 capstone LANDED too: a
+  4-connection SML compute server (accept loop + forked handler per
+  connection) answers REAL external TCP clients at **0.24× the giant-lock
+  wall-clock** (4-way ideal 0.25), every response verified against an exact
+  Rust oracle (`concurrency_server.rs` + `parallel_server_demo.sml`).
+  Still open: Windows. Whole-region JIT was BUILT + measured (sound but a
+  net slowdown — see Performance & JIT); a real native *speedup* is now
+  believed out of reach for this interpreter (the tight threaded loop wins).
 
 (The Isabelle number-theory tower is complete — Lagrange's four-square theorem,
 the last open partial, is proved; see `docs/four-square-progress-*.md`. It is

@@ -24,6 +24,12 @@ crash without memory-unsafety — a plain issue is fine too.
   invoking user's ambient authority (filesystem, environment, stdout).
   Sandboxing is out of scope today; don't run hostile images you wouldn't run
   as an ordinary program.
+- **Parallel mode (`POLY_REAL_THREADS=1 POLY_PARALLEL=1`) and trusted SML.**
+  Racy SML programs get unspecified *values*, never memory-unsafety (heap-word
+  accessors are atomic; see `docs/correctness-and-safety.md`, "The parallel
+  memory model") — memory-unsafety reachable from compiled SML in parallel
+  mode IS a vulnerability. One documented exception: combining `--untrusted`
+  (foreign images) with the threads modes is outside the validated envelope.
 
 The methodology behind these claims (loader fuzzing, the malicious-image
 corpus, the deref-surface lint, the unsafe-block audit) is documented in
