@@ -21,6 +21,16 @@ MODE="${1:-fast}"
 fail=0
 run() { echo; echo ">>> $*"; "$@" || { echo "!!! FAILED: $*"; fail=1; }; }
 
+# Pick a working Python for the deref lint. Plain `python3` is right in CI and
+# most environments; some dev setups shim `python3` to a wrapper that only runs
+# under `uv run` (it refuses a direct call). Prefer the bare interpreter, fall
+# back to `uv run python3` only when the bare one can't execute a trivial
+# script — so a REAL lint failure is never masked.
+PY="python3"
+if ! python3 -c 'pass' >/dev/null 2>&1 && command -v uv >/dev/null 2>&1; then
+  PY="uv run python3"
+fi
+
 echo "=== polyml-rs regression ($MODE) ==="
 run cargo build --release -p polyml-bin -p polyml-jit
 
@@ -39,7 +49,7 @@ run cargo test --release -p polyml-image
 run cargo test --release -p polyml-bin            # non-#[ignore]: cli_run, golden_sml, untrusted corpus
 # --untrusted deref-surface completeness lint (also a CI step): any new
 # image-controlled-operand deref not behind the untrusted gate fails here.
-run python3 tools/lint-image-deref.py
+run $PY tools/lint-image-deref.py
 
 if [ "$MODE" = "full" ]; then
   echo; echo "--- building checkpoints (if missing) ---"
