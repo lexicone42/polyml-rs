@@ -62,6 +62,18 @@ jobs:
       - name: De-fanged RTS stub contract (rts_defang)
         run: cargo test --release -p polyml-bin --test rts_defang
 
+      # Real-threads workloads need the basis-bearing image (only built here):
+      # the mutex demo, the in-process socket server+client (blocking-syscall
+      # giant-lock release), preemption fairness, and interrupt-state fidelity.
+      - name: Real-threads concurrency demos
+        run: |
+          cargo test --release -p polyml-bin \
+            --test concurrency_mutex_demo \
+            --test concurrency_sockets \
+            --test concurrency_preempt \
+            --test concurrency_interrupt \
+            -- --ignored
+
   cross-check:
     runs-on: ubuntu-latest
     timeout-minutes: 45

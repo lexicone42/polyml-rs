@@ -108,10 +108,31 @@ Stage1.sml`). Consequences:
   single-threaded (`fork` is a dormant no-op stub). Keystone: the basis forks a
   SIGNAL thread at startup that loops on `PolyWaitForSignal`; once `fork` really
   spawns it, that thread MUST **park** (it is flagged a daemon + blocks in
-  `try_thread_rts`), else it busy-spins the giant lock and hangs the REPL. Still
-  missing for *full* concurrency: a thread scheduler/preemption beyond the
-  cooperative safepoint yield, and `Thread.Thread` attribute fidelity. Design:
-  `docs/concurrency-and-jit-roadmap.md`.
+  `try_thread_rts`), else it busy-spins the giant lock and hangs the REPL.
+  - **Blocking syscalls release the giant lock** (`park_while_blocking` in
+    rts.rs): `accept`/`connect`/`select` publish roots + release across their
+    wait (NATIVE-data-only; `recv`/`send` stay unparked — heap buffer). Proof:
+    `concurrency_sockets` (in-process SML server+client — deadlocks without it).
+  - **Thread attributes are faithful**: `InterruptState` (Defer/Synch/Asynch/
+    AsynchOnce) honored from the thread object's flags word;
+    `Thread.interrupt`/`kill`/`isActive`/`broadcastInterrupt` target threads via
+    a GC-sound object↔handle map (tagged-int id in thread-object word 0 =
+    upstream's `threadRef` slot; moves with the object, GC-immune);
+    `ConditionVar.waitUntil` + `numProcessors` real. Proofs:
+    `concurrency_preempt` (two compute threads provably interleave),
+    `concurrency_interrupt` (Asynch delivers, Defer defers).
+  - **TWO latent scheduler bugs fixed** (both found by the fairness test):
+    (1) cooperative yield of *compute-bound* threads never worked —
+    `yield_ml_memory` waited on `running` but no acquire path notified
+    `mutator_wake`, so a pure-compute peer's yields early-returned forever
+    (every prior demo interleaved via block-events, not compute); fix =
+    `notify_all` at every lock-take. (2) `ConditionVar.wait` never released its
+    mutex arg (self-deadlock on the SML re-lock); fix = release + wake before
+    parking. LESSON: the concurrency TEST is the discovery instrument.
+  - Still missing for *full* concurrency: a **preemptive** scheduler (beyond the
+    cooperative safepoint yield), parking recv/send/stdin/`OS.Process.system`
+    (needs GC forwarding of RTS-local heap refs across a park), and breaking the
+    giant lock for true parallelism. Design: `docs/concurrency-and-jit-roadmap.md`.
 
 ## Diagnostic tooling (use it before hand-tracing)
 
