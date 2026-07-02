@@ -544,13 +544,12 @@ impl Verdict {
 fn run_poly(poly: &Path, image: &Path, untrusted: bool, timeout_secs: u64) -> Verdict {
     use std::os::unix::process::ExitStatusExt;
 
-    // Use `timeout` to bound hangs; a timeout-killed child exits 124.
-    let mut cmd = Command::new("timeout");
-    cmd.arg("-k")
-        .arg("2")
-        .arg(format!("{timeout_secs}"))
-        .arg(poly)
-        .arg("run");
+    // The hang bound is enforced IN-PROCESS (poll + kill) rather than via
+    // the GNU `timeout` wrapper — macOS runners don't ship `timeout`, and a
+    // failed wrapper spawn mis-read as UNSAFE (the nightly macOS job's
+    // false red).
+    let mut cmd = Command::new(poly);
+    cmd.arg("run");
     if untrusted {
         cmd.arg("--untrusted");
     }
@@ -561,25 +560,40 @@ fn run_poly(poly: &Path, image: &Path, untrusted: bool, timeout_secs: u64) -> Ve
     // Keep the heap small + quiet so the harness is fast.
     cmd.env("POLYML_GC_QUIET", "1");
     cmd.env("POLYML_HEAP_BYTES", (64 * 1024 * 1024).to_string());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    cmd.stdin(std::process::Stdio::null());
 
-    let output = match cmd.output() {
-        Ok(o) => o,
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
         Err(e) => return Verdict::Unsafe(format!("spawn failed: {e}")),
     };
-    let status = output.status;
+    // Portable wait-with-timeout: poll try_wait for up to timeout_secs, then
+    // kill (a hang is UNSAFE — not a controlled halt). ~50ms granularity.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Verdict::Unsafe("timed out (hang)".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Verdict::Unsafe(format!("wait failed: {e}")),
+        }
+    };
+
     if let Some(sig) = status.signal() {
         // Killed by a signal — the hallmark of UB (SEGV/ABRT/BUS) or a hard
-        // OOM kill. timeout's SIGTERM (15) means a hang.
+        // OOM kill.
         return Verdict::Unsafe(format!("killed by signal {sig}"));
     }
     let code = status.code().unwrap_or(-1);
-    // `timeout` returns 124 when it had to kill the child for running too
-    // long → a hang (UNSAFE for our purposes: not a controlled halt).
-    if code == 124 {
-        return Verdict::Unsafe("timed out (hang)".to_string());
-    }
-    // 137 = 128+9 (SIGKILL) can surface as an exit code under some shells
-    // when the OOM killer fires; treat as UNSAFE.
+    // 137 = 128+9 (SIGKILL) can surface as an exit code when the OOM killer
+    // fires; treat as UNSAFE.
     if code == 137 {
         return Verdict::Unsafe("OOM (137)".to_string());
     }
