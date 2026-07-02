@@ -59,13 +59,19 @@ use crate::length_word::{
 use crate::poly_word::PolyWord;
 use crate::space::MemorySpace;
 
-/// A handle to one alloc-space being GC'd. Lives only for the duration
-/// of `collect`. Callers reach into here to ask whether a PolyWord
-/// points into our from-space and to install forwarding pointers.
+/// A handle to the alloc-space(s) being GC'd. Lives only for the duration
+/// of `collect`/`collect_pool`. Callers reach into here to ask whether a
+/// PolyWord points into from-space and to install forwarding pointers.
+///
+/// Parallelism P2: from-space is a UNION of ranges — every nursery in the
+/// pool is evacuated in one stop-the-world cycle (cross-nursery pointers
+/// are unrestricted, so partial collection is unsound; see
+/// docs/parallel-design.md). Membership is a binary search over the
+/// sorted, disjoint range list; with one nursery this degenerates to the
+/// old two-comparison check.
 pub struct Collector<'a> {
-    /// Currently-active heap; we copy out of this.
-    from_start: *const PolyWord,
-    from_end: *const PolyWord,
+    /// Sorted, disjoint (start, end) address ranges of every from-space.
+    from_ranges: Vec<(usize, usize)>,
     /// Scratch buffer; copies go here.
     to_storage: &'a mut [PolyWord],
     /// Bump pointer into `to_storage`.
@@ -82,17 +88,25 @@ pub struct Collector<'a> {
 }
 
 impl<'a> Collector<'a> {
+    /// Union membership: is `addr` inside any from-space range? Binary
+    /// search over the sorted, disjoint range list.
+    #[inline]
+    fn in_from_space(&self, addr: usize) -> bool {
+        let idx = self
+            .from_ranges
+            .partition_point(|&(start, _)| start <= addr);
+        idx > 0 && addr < self.from_ranges[idx - 1].1
+    }
+
     fn contains_polyword(&self, w: PolyWord) -> bool {
         if w.is_tagged() {
             return false;
         }
-        let p = w.as_ptr::<PolyWord>();
-        p >= self.from_start && p < self.from_end
+        self.in_from_space(w.0)
     }
 
     fn contains_raw_ptr(&self, p: *const u8) -> bool {
-        let pw = p.cast::<PolyWord>();
-        pw >= self.from_start && pw < self.from_end
+        self.in_from_space(p as usize)
     }
 
     /// Forward (or read forwarding pointer of) the object pointed to
@@ -130,8 +144,8 @@ impl<'a> Collector<'a> {
             return;
         }
         let addr = w.0;
-        // Range check on the raw address.
-        if addr < self.from_start as usize || addr >= self.from_end as usize {
+        // Range check on the raw address (union membership).
+        if !self.in_from_space(addr) {
             return;
         }
         // Look up which from-space object contains this address.
@@ -301,45 +315,66 @@ pub fn collect<F>(alloc: &mut MemorySpace, visit_roots: F) -> usize
 where
     F: FnOnce(&mut Collector<'_>),
 {
-    let from_start = alloc.as_ptr_range().start;
-    let from_end = alloc.as_ptr_range().end;
+    collect_pool(std::slice::from_mut(&mut &mut *alloc), visit_roots)
+}
 
-    // Pre-pass: build a sorted list of from-space object body ranges.
-    // This lets `forward` distinguish "pointer to object header" from
-    // "mid-body PC value" so we can translate the latter while
-    // preserving its offset.
+/// Multi-nursery stop-the-world collection (parallelism P2).
+///
+/// Evacuates the UNION of all `spaces` (every pool nursery) into ONE fresh
+/// to-space, then swaps `spaces[0]`'s storage for it and resets every other
+/// nursery empty (their live objects were promoted into the primary).
+/// Cross-nursery pointers need no special case — forwarding is
+/// membership-driven over the union of from-space ranges.
+///
+/// To-space is sized to Σ CAPACITY over all nurseries, so it can NEVER
+/// overflow (live ≤ Σ used ≤ Σ capacity); with a single nursery this is
+/// exactly the primary's capacity — byte-identical to the pre-pool
+/// single-space collect.
+pub fn collect_pool<F>(spaces: &mut [&mut MemorySpace], visit_roots: F) -> usize
+where
+    F: FnOnce(&mut Collector<'_>),
+{
+    assert!(
+        !spaces.is_empty(),
+        "collect_pool needs at least one nursery"
+    );
+
+    // from-space ranges (full storage capacity per space, as the old
+    // single-space code used `as_ptr_range`) + the union object pre-pass
+    // over each space's USED region. Ranges are sorted for binary-search
+    // membership; from_objects sorted by body start for `find_object`.
+    let mut from_ranges: Vec<(usize, usize)> = Vec::with_capacity(spaces.len());
     let mut from_objects: Vec<(usize, usize)> = Vec::new();
-    {
-        let storage_start = from_start;
-        let used_words = alloc.used_words();
+    let mut total_capacity = 0usize;
+    for space in spaces.iter() {
+        let range = space.as_ptr_range();
+        from_ranges.push((range.start as usize, range.end as usize));
+        total_capacity += space.capacity_words();
+        // Pre-pass: object body ranges in this space's live region.
+        let storage_start = range.start;
+        let used_words = space.used_words();
         let mut i = 0usize;
         while i < used_words {
-            // SAFETY: i is in-bounds of the storage slice.
+            // SAFETY: i is in-bounds of this space's storage slice.
             let lw = unsafe { *storage_start.add(i) };
             let n = length_of(lw);
             if i + 1 + n > used_words {
-                // Definitely malformed: object body would overrun
-                // the live region. Advance one slot conservatively.
                 i += 1;
                 continue;
             }
-            // A zero-length body is legal — empty arrays / vectors.
-            // The "body" address still has identity and may be
-            // referenced from elsewhere; record it so `find_object`
-            // can map pointers to it.
             let body_addr = unsafe { storage_start.add(i + 1) } as usize;
             from_objects.push((body_addr, n));
             i += 1 + n;
         }
     }
+    from_ranges.sort_unstable();
+    from_objects.sort_unstable_by_key(|&(start, _)| start);
 
-    // Allocate scratch the same size as `alloc`.
-    let cap = alloc.capacity_words();
-    let mut scratch = vec![PolyWord::ZERO; cap].into_boxed_slice();
+    // Σ-capacity to-space (never overflows).
+    let mut scratch = vec![PolyWord::ZERO; total_capacity].into_boxed_slice();
 
     let mut col = Collector {
-        from_start,
-        from_end,
+        from_ranges,
         to_storage: &mut scratch,
         to_used: 0,
         from_objects,
@@ -353,7 +388,7 @@ where
     let new_used = col.to_used;
     if !col.untracked_addrs.is_empty() {
         let mut sample: Vec<usize> = col.untracked_addrs.iter().copied().collect();
-        sample.sort();
+        sample.sort_unstable();
         sample.dedup();
         eprintln!(
             "  GC untracked: {} pointer occurrences in from-space did not match any tracked object ({} unique addresses):",
@@ -361,10 +396,10 @@ where
             sample.len(),
         );
         for addr in sample.iter().take(5) {
-            // Read the would-be length word at addr-8
+            // Read the would-be length word at addr-8.
             // SAFETY: addr was a real pointer into from-space; addr-8
             // may or may not be a valid header but the page is still
-            // mapped because the from_storage Box hasn't dropped yet.
+            // mapped because no from_storage Box has dropped yet.
             let lw_ptr = (*addr - std::mem::size_of::<usize>()) as *const PolyWord;
             let lw_val = unsafe { (*lw_ptr).0 };
             let raw_len = length_of(PolyWord::from_bits(lw_val));
@@ -374,10 +409,10 @@ where
             );
         }
         // A from-space pointer matching no tracked object means a missed GC root;
-        // `replace_storage` (below) drops from-space, which would leave that slot
-        // dangling — a silent use-after-free. Fail fast instead of corrupting the
-        // heap. (In correct operation this set is always empty; this only fires on
-        // a genuine collector bug, exactly when crashing beats continuing.)
+        // the swap below drops from-space, which would leave that slot dangling —
+        // a silent use-after-free. Fail fast instead of corrupting the heap. (In
+        // correct operation this set is always empty; this only fires on a genuine
+        // collector bug, exactly when crashing beats continuing.)
         panic!(
             "GC invariant violated: {} untracked from-space pointer occurrence(s) \
              (e.g. 0x{:016x}); a root was missed",
@@ -385,7 +420,15 @@ where
             sample.first().copied().unwrap_or(0)
         );
     }
-    alloc.replace_storage(scratch, new_used);
+
+    // Promote: the primary takes the to-space; every other nursery is now
+    // empty (its live objects were copied into the primary's new storage
+    // and every pointer to them forwarded).
+    let n_spaces = spaces.len();
+    spaces[0].replace_storage(scratch, new_used);
+    for space in spaces.iter_mut().take(n_spaces).skip(1) {
+        space.reset_empty();
+    }
     new_used
 }
 
@@ -414,6 +457,15 @@ impl MemorySpace {
         assert!(new_used <= new_storage.len());
         self.storage = new_storage;
         self.used = new_used;
+    }
+
+    /// Reset a nursery to empty after a multi-nursery collection promoted
+    /// its live objects into the primary (parallelism P2). Storage (and
+    /// hence capacity) is kept; only the bump pointer is rewound. The old
+    /// contents are dead (every pointer to them was forwarded), so they
+    /// are simply overwritten by future allocations.
+    pub fn reset_empty(&mut self) {
+        self.used = 0;
     }
 }
 
@@ -495,5 +547,66 @@ mod tests {
         let new_leaf = leaf_word.as_ptr::<PolyWord>();
         assert_eq!(unsafe { (*new_leaf).0 }, 0xdead_beef);
         assert_eq!(unsafe { (*new_parent.add(1)).0 }, PolyWord::tagged(42).0);
+    }
+
+    /// P2 multi-nursery collection with a CROSS-NURSERY pointer: a parent
+    /// object in nursery A points at a leaf in nursery B. `collect_pool`
+    /// must forward through the union (membership over both ranges),
+    /// promote both objects into the primary (A), and reset B empty — with
+    /// the cross-nursery link rewritten to the promoted leaf.
+    #[test]
+    fn collect_pool_forwards_cross_nursery_pointer() {
+        let mut a = MemorySpace::new(64, SpaceKind::Mutable);
+        let mut b = MemorySpace::new(64, SpaceKind::Mutable);
+        // Leaf lives in nursery B.
+        let leaf = b.alloc(1);
+        unsafe {
+            set_length_word(leaf, 1, F_BYTE_OBJ);
+            leaf.write(PolyWord::from_bits(0xcafe_f00d));
+        }
+        // Parent lives in nursery A, pointing across into B.
+        let parent = a.alloc(2);
+        unsafe {
+            set_length_word(parent, 2, 0);
+            parent.write(PolyWord::from_ptr(leaf.cast_const()));
+            parent.add(1).write(PolyWord::tagged(7));
+        }
+        let leaf_addr_before = leaf as usize;
+
+        let mut root = PolyWord::from_ptr(parent.cast_const());
+        let new_used = collect_pool(&mut [&mut a, &mut b], |c| {
+            unsafe { c.forward(&mut root as *mut _) };
+        });
+
+        // The whole live graph (parent + leaf) is now in the primary (A);
+        // B was promoted-and-reset.
+        assert_eq!(b.used_words(), 0, "nursery B should be reset empty");
+        assert!(new_used >= 4, "parent(1+2) + leaf(1+1) live words expected");
+
+        let new_parent = root.as_ptr::<PolyWord>();
+        let new_leaf = unsafe { *new_parent }.as_ptr::<PolyWord>();
+        // The cross-nursery link was rewritten (leaf MOVED out of B).
+        assert_ne!(
+            new_leaf as usize, leaf_addr_before,
+            "the cross-nursery leaf pointer must be forwarded, not stale"
+        );
+        assert_eq!(
+            unsafe { (*new_leaf).0 },
+            0xcafe_f00d,
+            "leaf value must survive promotion"
+        );
+        assert_eq!(unsafe { (*new_parent.add(1)).0 }, PolyWord::tagged(7).0);
+        // Both promoted objects live in the primary's new storage.
+        let a_range = a.as_ptr_range();
+        let a_lo = a_range.start as usize;
+        let a_hi = a_range.end as usize;
+        assert!(
+            (new_parent as usize) >= a_lo && (new_parent as usize) < a_hi,
+            "promoted parent must be in the primary"
+        );
+        assert!(
+            (new_leaf as usize) >= a_lo && (new_leaf as usize) < a_hi,
+            "promoted leaf must be in the primary"
+        );
     }
 }

@@ -207,14 +207,28 @@ hangs:
   through the pool. Fences all green: stage-0 + 7-stage chain byte-identical,
   the tiny-heap GC-UAF fence (GC actually fires + collects through the pool),
   all six concurrency demos, 102/0 units, 13/13 runtime integration.
-- **P2 — multi-nursery GC, still giant-locked.** Forked threads get their
-  own nurseries; the elected collector evacuates all of them; the giant
-  lock still serializes execution (no new races yet). Fences: all five
-  concurrency demos + fork-heavy allocation storm under
-  `POLYML_GC_THRESHOLD=1` + `POLYML_GC_AUDIT` widened to the union +
-  negative controls for the new invariants (collector election, pool-lock
-  parking, Σ-sizing) built BEFORE the code — this project's history says
-  the test is the discovery instrument.
+- **P2a — multi-space-capable collector. ✅ LANDED.** `collect` →
+  `collect_pool(&mut [&mut MemorySpace], visit_roots)`: from-space is the
+  UNION of all nurseries (sorted range-set, binary-search membership); the
+  object pre-pass walks every nursery's used region; the to-space is Σ
+  CAPACITY (can never overflow — live ≤ Σ used ≤ Σ capacity); after the
+  Cheney scan the primary takes the to-space and every other nursery is
+  reset empty (its live objects PROMOTED into the primary, every pointer
+  forwarded). Cross-nursery pointers need no special case. For N=1 this is
+  byte-identical to the old single-space collect (Σ capacity = primary
+  capacity). Proven by a hand-built two-nursery unit test
+  (`collect_pool_forwards_cross_nursery_pointer`): a parent in nursery A
+  pointing at a leaf in nursery B — both promote into A, B resets empty,
+  the cross-link is rewritten. Byte-identity fences all green.
+- **P2b — per-thread nurseries + collector election.** Give each forked
+  thread its OWN nursery (today they share nursery 0); `gc()` collects the
+  whole pool; CAS collector election so two trigger-crossers don't
+  livelock; pool-lock-blocked threads count as parked for the barrier. Still
+  giant-locked, so no new heap-word races. Fences: all six concurrency demos
+  + fork-heavy allocation storm under `POLYML_GC_THRESHOLD=1` + `GC_AUDIT`
+  over the union + negative controls for the new invariants (election
+  livelock, Σ-sizing, pool-lock parking) built BEFORE the code — this
+  project's history says the test is the discovery instrument.
 - **P3 — atomics + statics.** Protocol words atomic (upstream-faithful,
   global-mutexLock shape first); RTS statics behind per-subsystem locks;
   `gc_requested` a real atomic with explicit ordering. Still giant-locked.
