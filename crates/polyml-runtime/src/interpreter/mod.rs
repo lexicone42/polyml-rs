@@ -531,6 +531,14 @@ pub struct Interpreter {
     /// This thread's scheduler handle (in_ml / parked_roots / requests /
     /// exited). Registered in `runtime.sched.registry` while running.
     handle: Arc<crate::sched::ThreadHandle>,
+    /// Cached raw handle to THIS thread's allocation nursery in the pool
+    /// (parallelism P1). The Box-pinned `MemorySpace` never moves, so the
+    /// handle is stable for the interpreter's life; the fast allocation
+    /// path derefs it directly (no pool lock). `null` until a nursery is
+    /// attached. Sound because — under the giant lock (P1) — exactly one
+    /// mutator runs, and the collector holds the STW barrier before it
+    /// touches any nursery, so this `&mut` is never aliased.
+    nursery: *mut crate::space::MemorySpace,
     /// Whether `handle` has been pushed into the scheduler registry. Set
     /// on first `run_until`; idempotent across repeated calls.
     registered: bool,
@@ -1239,6 +1247,7 @@ impl Interpreter {
             frames: Vec::new(),
             runtime,
             handle: crate::sched::ThreadHandle::new(),
+            nursery: std::ptr::null_mut(),
             registered: false,
             holds_lock_on_entry: false,
             published_box: None,
@@ -1294,6 +1303,7 @@ impl Interpreter {
             frames: Vec::new(),
             runtime,
             handle: crate::sched::ThreadHandle::new(),
+            nursery: std::ptr::null_mut(),
             registered: false,
             holds_lock_on_entry: false,
             published_box: None,
@@ -1353,6 +1363,11 @@ impl Interpreter {
             frames: Vec::new(),
             runtime,
             handle,
+            // A forked child inherits the SAME single nursery in P1 (the
+            // pool has one space; the child bump-allocates from it under
+            // the giant lock, exactly as before). P2 gives each thread its
+            // own nursery handle here.
+            nursery: std::ptr::null_mut(),
             registered: false,
             holds_lock_on_entry: false,
             published_box: None,
@@ -1501,22 +1516,51 @@ impl Interpreter {
         self.alloc_space_mut()
     }
 
-    /// Mutable access to the shared heap. Only valid while this thread
-    /// holds ML memory (inside `run_until`'s acquire/release bracket) —
-    /// the giant lock is the heap's mutual exclusion, so this is the
-    /// sole live `&mut MemorySpace`.
+    /// This thread's cached nursery handle, lazily resolved from the pool
+    /// on first use (P1: the single shared nursery, index 0). Returns
+    /// `null` if no nursery has been installed. The handle is stable for
+    /// the interpreter's life (Box-pinned), so this fetch happens at most
+    /// once per thread.
     #[inline]
-    fn alloc_space_mut(&mut self) -> Option<&mut MemorySpace> {
-        // SAFETY: the calling thread holds ML memory (in_ml == true)
-        // throughout interpretation, so no other thread aliases the heap.
-        unsafe { self.runtime.heap_mut().as_mut() }
+    fn nursery_ptr(&mut self) -> *mut MemorySpace {
+        if self.nursery.is_null() && self.runtime.nursery_count() > 0 {
+            self.nursery = self.runtime.nursery_handle(0);
+        }
+        self.nursery
     }
 
-    /// Shared accessor to the heap (read-only path).
+    /// Mutable access to this thread's allocation nursery. Only valid while
+    /// this thread holds ML memory (inside `run_until`'s acquire/release
+    /// bracket) — under the giant lock (P1) exactly one mutator runs and
+    /// the collector holds the STW barrier before touching any nursery, so
+    /// this is never aliased.
+    #[inline]
+    fn alloc_space_mut(&mut self) -> Option<&mut MemorySpace> {
+        let p = self.nursery_ptr();
+        // SAFETY: `p` is either null (→ None) or a stable Box-pinned
+        // nursery this thread exclusively accesses under the lock.
+        unsafe { p.as_mut() }
+    }
+
+    /// Shared accessor to this thread's nursery (read-only path). Takes
+    /// `&self`, so it does NOT cache — it reads the already-resolved handle
+    /// (populated by the first `alloc_space_mut`/`nursery_ptr` on the hot
+    /// path) or falls back to a pool lookup. The single-threaded floor
+    /// resolves the handle at attach time, so the fallback is cold.
     #[inline]
     fn alloc_space_ref(&self) -> Option<&MemorySpace> {
-        // SAFETY: as above; we hand out a shared ref only.
-        unsafe { self.runtime.heap_mut().as_ref() }
+        let p = if self.nursery.is_null() {
+            if self.runtime.nursery_count() > 0 {
+                self.runtime.nursery_handle(0)
+            } else {
+                std::ptr::null_mut()
+            }
+        } else {
+            self.nursery
+        };
+        // SAFETY: `p` is null (→ None) or a stable Box-pinned nursery this
+        // thread reads under the lock; we hand out a shared ref only.
+        unsafe { p.as_ref() }
     }
 
     /// Read-only accessor to this interpreter's RTS table. Used by the
@@ -1615,13 +1659,11 @@ impl Interpreter {
         // gc_trigger_words = cap * thresh / 100. Saturate at 0 if
         // cap is so large that the multiply would overflow.
         self.gc_trigger_words = cap.checked_mul(thresh).map_or(0, |x| x / 100);
-        // Store the heap + trigger in the shared Runtime (single Arc ref
-        // at build time).
+        // Install the nursery into the pool + cache this thread's handle
+        // (P1: the one nursery). `install_nursery` takes the pool lock, so
+        // it works whether or not we are the sole Arc holder.
+        self.nursery = self.runtime.install_nursery(space);
         if let Some(rt) = Arc::get_mut(&mut self.runtime) {
-            // SAFETY: single-threaded build time, no other heap accessor.
-            unsafe {
-                *rt.heap_mut() = Some(space);
-            }
             rt.gc_trigger_words = self.gc_trigger_words;
         }
         self
@@ -2983,9 +3025,16 @@ impl Interpreter {
         // Image mutable spaces (the global namespace + runtime refs).
         let image_roots = self.image_mutable_roots.clone();
 
-        // SAFETY: we are the collector holding the giant lock with every
-        // other thread parked, so we are the sole live heap accessor.
-        let alloc = unsafe { self.runtime.heap_mut() }.as_mut()?;
+        // Reach the nursery via the pool (P1: exactly one, index 0). We
+        // hold the STW barrier (every other thread parked), so we are the
+        // sole live heap accessor; the Box-pinned handle is stable.
+        // SAFETY: sole accessor under the barrier; handle addresses the
+        // pinned nursery. P2 iterates all pool nurseries here.
+        let alloc = if self.runtime.nursery_count() > 0 {
+            unsafe { &mut *self.runtime.nursery_handle(0) }
+        } else {
+            return None;
+        };
         // Capture from-space range so we can audit for residual
         // pointers after the swap. Anything in interpreter state
         // (or the new to-space) that still points into this range

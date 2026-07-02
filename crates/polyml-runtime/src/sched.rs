@@ -285,19 +285,65 @@ impl SchedState {
     }
 }
 
-/// A `Send`/`Sync` cell holding the shared heap.
+/// The pool of allocation nurseries (parallelism P1). Each mutator thread
+/// bump-allocates from its OWN `MemorySpace` (lock-free on the hot path);
+/// the pool OWNS every nursery so the collector can reach them all at a
+/// stop-the-world safepoint.
 ///
-/// Only the lock-holder (a thread with `in_ml == true`, or the collector
-/// while all mutators are parked) dereferences it, so no inner per-access
-/// mutex is needed — the giant lock IS the heap's mutual exclusion.
-pub struct HeapCell(std::cell::UnsafeCell<Option<MemorySpace>>);
-// SAFETY: synchronised by the giant lock, not by Rust's borrow checker.
-unsafe impl Send for HeapCell {}
-unsafe impl Sync for HeapCell {}
+/// Each nursery is `Box`-pinned: its `MemorySpace` never moves even as the
+/// `Vec` grows, so a mutator's cached raw handle (`*mut MemorySpace`) and
+/// the whole-region JIT's baked `addr_of!(space.used)` pointers stay valid
+/// for the nursery's lifetime. Nurseries are only ever appended (never
+/// removed), so an index or a raw handle is stable for the process.
+///
+/// P1 status: exactly ONE nursery (the CLI/REPL's single space), so the
+/// collector's single-space `collect` on `spaces[0]` is byte-identical to
+/// the pre-pool `runtime.heap`. Multi-nursery evacuation lands in P2.
+pub struct NurseryPool {
+    spaces: Vec<std::pin::Pin<Box<MemorySpace>>>,
+}
+
+impl NurseryPool {
+    const fn new() -> Self {
+        Self { spaces: Vec::new() }
+    }
+
+    /// Install a nursery, returning a stable raw handle to it. The handle
+    /// stays valid for the process (Box-pinned, never removed).
+    fn install(&mut self, space: MemorySpace) -> *mut MemorySpace {
+        let mut pinned = Box::pin(space);
+        // SAFETY: we never move the MemorySpace out of the Pin<Box>; the
+        // raw handle addresses the pinned heap allocation, stable for life.
+        let handle: *mut MemorySpace = unsafe { std::pin::Pin::get_unchecked_mut(pinned.as_mut()) };
+        self.spaces.push(pinned);
+        handle
+    }
+
+    /// Number of installed nurseries.
+    fn len(&self) -> usize {
+        self.spaces.len()
+    }
+
+    /// Raw handle to nursery `i` (the collector's reach into the pool).
+    fn handle(&mut self, i: usize) -> *mut MemorySpace {
+        // SAFETY: as in `install` — the pinned MemorySpace never moves.
+        unsafe { std::pin::Pin::get_unchecked_mut(self.spaces[i].as_mut()) }
+    }
+}
+
+/// A `Send`/`Sync` cell holding the nursery pool.
+///
+/// The fast allocation path dereferences a thread's cached nursery handle
+/// directly (no lock); the pool `Mutex` is taken only to install a nursery
+/// (build time / future refill) or by the collector at a safepoint. Under
+/// the giant lock exactly one mutator runs, so today even the handle deref
+/// is trivially exclusive; the pool structure is what P2/P4 need.
+pub struct HeapCell(std::sync::Mutex<NurseryPool>);
+// (Mutex already gives Send/Sync; the wrapper keeps the field name stable.)
 
 /// The `Arc`-shared runtime: everything common to all threads.
 pub struct Runtime {
-    /// The shared ML heap. Accessed only by the current lock-holder.
+    /// The nursery pool (parallelism P1). See [`NurseryPool`].
     heap: HeapCell,
     /// Count of completed collections (diagnostic; lets a test assert that
     /// a GC actually fired mid-run).
@@ -326,8 +372,12 @@ impl Runtime {
         gc_trigger_words: usize,
         rts: Arc<RtsTable>,
     ) -> Arc<Self> {
+        let mut pool = NurseryPool::new();
+        if let Some(space) = heap {
+            let _ = pool.install(space);
+        }
         Arc::new(Self {
-            heap: HeapCell(std::cell::UnsafeCell::new(heap)),
+            heap: HeapCell(std::sync::Mutex::new(pool)),
             gc_count: std::sync::atomic::AtomicU64::new(0),
             gc_audit_residual: std::sync::atomic::AtomicU64::new(0),
             gc_trigger_words,
@@ -337,16 +387,29 @@ impl Runtime {
         })
     }
 
-    /// Mutable access to the shared heap.
+    /// Install a nursery into the pool, returning a stable raw handle to
+    /// it (Box-pinned; valid for the process). Called at build time (and
+    /// by future refill). Takes the pool lock briefly.
+    pub fn install_nursery(&self, space: MemorySpace) -> *mut MemorySpace {
+        self.heap.0.lock().unwrap().install(space)
+    }
+
+    /// Number of nurseries in the pool (P1: 0 or 1).
+    #[must_use]
+    pub fn nursery_count(&self) -> usize {
+        self.heap.0.lock().unwrap().len()
+    }
+
+    /// Raw handle to nursery `i` — the collector's reach into the pool.
     ///
     /// # Safety
-    /// The caller must currently hold ML memory (`in_ml == true`) or be
-    /// the collector with all mutators parked. The giant-lock discipline
-    /// guarantees no aliasing.
-    #[allow(clippy::mut_from_ref)]
-    pub unsafe fn heap_mut(&self) -> &mut Option<MemorySpace> {
-        // SAFETY: caller upholds the giant-lock discipline.
-        unsafe { &mut *self.heap.0.get() }
+    /// The returned handle addresses a Box-pinned `MemorySpace` that never
+    /// moves; the caller must uphold the giant-lock/STW discipline (be the
+    /// sole heap accessor) before dereferencing it, exactly as with the
+    /// old `heap_mut`.
+    #[must_use]
+    pub fn nursery_handle(&self, i: usize) -> *mut MemorySpace {
+        self.heap.0.lock().unwrap().handle(i)
     }
 
     /// Append an image-mutable root region.

@@ -193,10 +193,20 @@ hangs:
 ## Stages (each flag-gated, each fully fenced before the next)
 
 - **P0 — semantic layer** (above). Flag-invisible; all existing fences.
-- **P1 — nursery plumbing, single-threaded.** Chunk pool + per-thread
-  nursery owned by the handle (Box-pinned); the CLI path uses exactly one
-  nursery; GC learns range-set membership but still collects one nursery.
-  Byte-identity proves the plumbing invisible.
+- **P1 — nursery plumbing, single-threaded. ✅ LANDED.** The heap moved
+  from `Runtime.heap` (one `Option<MemorySpace>` behind an UnsafeCell) into
+  a `NurseryPool` (`Vec<Pin<Box<MemorySpace>>>` behind a Mutex, in
+  `sched.rs`). Each `Interpreter` caches a raw `*mut MemorySpace` handle to
+  its nursery — resolved once from the pool, stable for life (Box-pinned),
+  so the hot allocation path (`alloc_space_mut`/`nursery_ptr`) never takes
+  the pool lock. The pool lock is taken only to install a nursery (build
+  time) or by the collector (`gc()` reaches nursery 0 via
+  `runtime.nursery_handle(0)`). P1 has exactly ONE nursery, so the
+  single-space `collect` is byte-identical; the collector still evacuates
+  one space (multi-range membership is P2). Forked children share nursery 0
+  through the pool. Fences all green: stage-0 + 7-stage chain byte-identical,
+  the tiny-heap GC-UAF fence (GC actually fires + collects through the pool),
+  all six concurrency demos, 102/0 units, 13/13 runtime integration.
 - **P2 — multi-nursery GC, still giant-locked.** Forked threads get their
   own nurseries; the elected collector evacuates all of them; the giant
   lock still serializes execution (no new races yet). Fences: all five
