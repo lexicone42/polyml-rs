@@ -82,6 +82,17 @@ jobs:
             --test concurrency_server \
             -- --ignored
 
+      # Seeded concurrency fuzzer: kill/interrupt storms against the
+      # real-threads + parallel runtime under audited constant
+      # collections, reproducible by seed. The seed window ROTATES with
+      # the day of year, so every night sweeps fresh interleavings while
+      # any failure names its exact seed for local reproduction.
+      - name: Concurrency fuzz storms (rotating seeds)
+        run: |
+          FUZZ_BASE=$(( $(date +%j) * 100 )) FUZZ_COUNT=25 \
+            cargo test --release -p polyml-bin --test concurrency_fuzz \
+            -- --ignored --nocapture
+
   cross-check:
     runs-on: ubuntu-latest
     timeout-minutes: 45

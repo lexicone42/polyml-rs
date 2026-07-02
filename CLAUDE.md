@@ -114,8 +114,16 @@ Stage1.sml`). Consequences:
   workers measure ratio 0.51 of giant-lock wall-clock (2-thread ideal =
   0.50), byte-identical results. Fences: `concurrency_parallel.rs` (storm+
   audit / mutex exactness / racy-ref bounds / scaling gate / no-op-without-
-  real-threads); design + invariant contract: `docs/parallel-design.md`.
-  `POLY_PARALLEL` without `POLY_REAL_THREADS` is a no-op.
+  real-threads) + `concurrency_fuzz.rs` (SEEDED storm fuzzer: randomized
+  fork/mutex/condvar/kill/interrupt schedules under audited constant
+  collections, both modes, reproducible by seed — `FUZZ_BASE`/`FUZZ_COUNT`
+  env; nightly rotates the window by day-of-year. Oracle design: killable
+  threads never touch locks — an async kill inside a critical section
+  strands the mutex, upstream semantics too — so the lock-users' counter
+  stays EXACT and main polls isActive, never waiting on anything a dead
+  thread was meant to signal); design + invariant contract:
+  `docs/parallel-design.md`. `POLY_PARALLEL` without `POLY_REAL_THREADS`
+  is a no-op.
   The 2-thread mutex demo runs end-to-end on the `polyexport` REPL
   (`crates/polyml-bin/tests/concurrency_mutex_demo.rs`, `…/concurrency_support/mutex_demo.sml`
   → counter = 200000); the runtime-level GC-handshake + fork-TOCTOU + H1/H2

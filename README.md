@@ -162,7 +162,10 @@ Racy SML programs get unspecified *values*, never undefined *behaviour*
 flags default OFF; the single-threaded path stays byte-identical, and
 `POLY_PARALLEL` without `POLY_REAL_THREADS` is a no-op. Design + invariant
 contract: [`docs/parallel-design.md`](docs/parallel-design.md); fences:
-`concurrency_parallel.rs`, `concurrency_server.rs`.
+`concurrency_parallel.rs`, `concurrency_server.rs`, plus a **seeded
+concurrency fuzzer** (`concurrency_fuzz.rs`) that storms the runtime with
+randomized fork/mutex/condvar/kill/interrupt schedules under audited
+constant collections — reproducible by seed, rotating nightly in CI.
 
 ---
 
