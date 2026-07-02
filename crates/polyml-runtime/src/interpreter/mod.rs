@@ -1326,6 +1326,8 @@ impl Interpreter {
         runtime: Arc<crate::sched::Runtime>,
         handle: Arc<crate::sched::ThreadHandle>,
         thread_obj: PolyWord,
+        untrusted: bool,
+        safe_spaces: SafeSpaces,
     ) -> Self {
         let stack_capacity = 1024 * 1024;
         let rts = Arc::clone(&runtime.rts);
@@ -1368,12 +1370,13 @@ impl Interpreter {
             diag: None,
             jit_cache: JitCache::default(),
             region_registry: RegionRegistry::default(),
-            // A forked child inherits the parent's trust posture is not yet
-            // wired (real threads are an opt-in path with its own fork
-            // discipline). The single-threaded floor never reaches here;
-            // default trusted is the safe, byte-identical choice.
-            untrusted: false,
-            safe_spaces: SafeSpaces::default(),
+            // A forked child INHERITS the parent's trust posture (P0 fix:
+            // it used to hard-code trusted, so the first fork in an
+            // --untrusted session silently de-fanged the safe mode for
+            // that child). The SafeSpaces ranges are the shared image +
+            // alloc spaces, identical for every thread over one Runtime.
+            untrusted,
+            safe_spaces,
         }
     }
 
@@ -1403,7 +1406,13 @@ impl Interpreter {
         // — exactly the generic-register TOCTOU window. Instead leave
         // `registered == false`; the first `acquire_running` (inside the
         // first `run_until`) registers-and-acquires atomically.
-        let mut me = Self::for_child_thread(runtime, handle, PolyWord::tagged(0));
+        let mut me = Self::for_child_thread(
+            runtime,
+            handle,
+            PolyWord::tagged(0),
+            false,
+            SafeSpaces::default(),
+        );
         me.thread_object = None;
         me.registered = false;
         me
@@ -2076,7 +2085,14 @@ impl Interpreter {
             // kRequestKill → KillException, regardless of the flags word.
             request::KILL => {
                 self.handle.requests.store(request::NONE, Ordering::SeqCst);
-                Ok(Some(StepResult::Returned(PolyWord::tagged(0))))
+                // P0 exit semantics: a KILL that is part of a PolyFinish
+                // broadcast must carry the EXIT CODE — this safepoint check
+                // runs BEFORE the step's finish-flag check, so without
+                // reading the flag here the main thread would consume the
+                // broadcast and return a generic 0 while the real code
+                // sits in the flag.
+                let code = crate::rts::finish_requested().unwrap_or(0);
+                Ok(Some(StepResult::Returned(PolyWord::tagged(code))))
             }
             request::INTERRUPT => {
                 let flags = self.own_thread_flags();
@@ -2123,7 +2139,10 @@ impl Interpreter {
         match self.handle.requests.load(Ordering::SeqCst) {
             request::KILL => {
                 self.handle.requests.store(request::NONE, Ordering::SeqCst);
-                Ok(Some(StepResult::Returned(PolyWord::tagged(0))))
+                // P0: carry the PolyFinish exit code, as in
+                // process_asynch_requests above.
+                let code = crate::rts::finish_requested().unwrap_or(0);
+                Ok(Some(StepResult::Returned(PolyWord::tagged(code))))
             }
             request::INTERRUPT => {
                 let intbits = self.own_thread_flags() & pflag::INTMASK;
@@ -2500,8 +2519,25 @@ impl Interpreter {
                 self.handle
                     .is_daemon
                     .store(true, std::sync::atomic::Ordering::SeqCst);
+                // P0: the daemon must be KILLABLE. An unconditional
+                // `loop { block_on_event() }` never checks `requests`, so
+                // any shutdown design that broadcasts KILL (PolyFinish,
+                // Session teardown, root-halt) would deadlock on the
+                // signal thread forever. Check for a pending KILL after
+                // every wake; a KILL ends this thread's run loop exactly
+                // like PolyThreadKillSelf. INTERRUPT is intentionally NOT
+                // delivered here (upstream's signal thread is not an
+                // interrupt target; broadcastInterrupt skips it via the
+                // EnableBroadcastInterrupt flag).
                 loop {
                     self.block_on_event();
+                    let req = self
+                        .handle
+                        .requests
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    if req == crate::sched::request::KILL {
+                        return Ok(Some(StepResult::Returned(PolyWord::tagged(0))));
+                    }
                 }
             }
             _ => Ok(None),
@@ -2646,6 +2682,10 @@ impl Interpreter {
         // the lock, then reclaims the box. Wrap as a usize so it is Send.
         let fork_raw_bits = fork_raw as usize;
         let child_handle_for_thread = Arc::clone(&child_handle);
+        // P0: the child inherits the parent's trust posture (see
+        // for_child_thread) — an --untrusted session's forks stay untrusted.
+        let child_untrusted = self.untrusted;
+        let child_safe_spaces = self.safe_spaces.clone();
 
         // Spawn the OS thread. We are the running mutator (hold the giant
         // lock); `runtime` was moved into the closure, so keep a clone for
@@ -2659,6 +2699,8 @@ impl Interpreter {
                     runtime,
                     child_handle_for_thread,
                     fork_raw_bits as *mut ForkRoots,
+                    child_untrusted,
+                    child_safe_spaces,
                 );
             });
 
@@ -2701,6 +2743,8 @@ impl Interpreter {
         runtime: Arc<crate::sched::Runtime>,
         handle: Arc<crate::sched::ThreadHandle>,
         fork_raw: *mut ForkRoots,
+        untrusted: bool,
+        safe_spaces: SafeSpaces,
     ) {
         let trace = crate::env::env_flag("POLY_THREAD_TRACE");
         if trace {
@@ -2712,8 +2756,13 @@ impl Interpreter {
         // before we acquire. We read the (possibly-forwarded) values back
         // only AFTER acquiring the lock (see below), so the child never
         // holds a stale copy (the B1 root-handoff).
-        let mut child =
-            Interpreter::for_child_thread(runtime.clone(), handle.clone(), PolyWord::ZERO);
+        let mut child = Interpreter::for_child_thread(
+            runtime.clone(),
+            handle.clone(),
+            PolyWord::ZERO,
+            untrusted,
+            safe_spaces,
+        );
         child.thread_object = None;
         // The parent already registered our handle (with published roots).
         child.registered = true;
@@ -4392,6 +4441,16 @@ impl Interpreter {
         if !real_threads_enabled() {
             return;
         }
+        // P0 exit semantics: after PolyFinish/OS.Process.exit the process
+        // EXITS — upstream never joins threads on exit() at all. Peers got
+        // a KILL broadcast (the finish check in step_impl) and most drain
+        // promptly, but a thread blocked in a parked KERNEL syscall (a
+        // stdin read, an accept) cannot be woken by a flag; joining it
+        // would hang the exit forever. Like upstream, don't wait: the
+        // process teardown reclaims the OS threads.
+        if crate::rts::finish_requested().is_some() {
+            return;
+        }
         loop {
             // Count registered threads that are not us and not exited.
             let snapshot = self.runtime.registry_snapshot();
@@ -4684,7 +4743,32 @@ impl Interpreter {
         // past the "exit" point. (Upstream's PolyFinish calls
         // `exit()` and never returns; we don't have that luxury.)
         if let Some(code) = crate::rts::finish_requested() {
-            crate::rts::clear_finish_requested();
+            // SINGLE-THREADED (the default): consume-and-clear, exactly as
+            // ever — byte-identical.
+            //
+            // MULTI-THREADED (P0 exit-semantics fix): PolyFinish/
+            // OS.Process.exit means the PROCESS exits. The flag used to be
+            // consumed by whichever thread stepped next — a CHILD could
+            // swallow the exit (its run loop just ends as a normal thread
+            // exit) while the exiting program kept running: an inversion.
+            // Now: leave the flag SET so every thread (including main,
+            // whose Returned(code) is what the CLI turns into the process
+            // exit) sees it; broadcast KILL so blocked peers (mutex/
+            // condvar/park waiters, the signal daemon) wake and terminate
+            // instead of blocking wait_for_children forever.
+            if self.runtime.registry_len() > 1 {
+                for h in self.runtime.registry_snapshot() {
+                    if !std::ptr::eq(Arc::as_ptr(&h), Arc::as_ptr(&self.handle)) {
+                        h.requests.store(
+                            crate::sched::request::KILL,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                    }
+                }
+                self.runtime.notify_block_event();
+            } else {
+                crate::rts::clear_finish_requested();
+            }
             return Ok(StepResult::Returned(PolyWord::tagged(code)));
         }
 

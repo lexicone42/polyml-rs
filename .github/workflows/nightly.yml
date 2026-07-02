@@ -73,6 +73,7 @@ jobs:
             --test concurrency_preempt \
             --test concurrency_interrupt \
             --test concurrency_stdin_park \
+            --test concurrency_exit \
             -- --ignored
 
   cross-check:

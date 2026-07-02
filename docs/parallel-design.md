@@ -90,12 +90,40 @@ giant lock on an embarrassingly-parallel workload — measured, either way.
    is only sound against bounds frozen at a safepoint (a peer's `used` is
    mid-bump; header writes are non-atomic) — use published used-marks.
 
-## The memory model (written position)
+## The memory model (written position — fifth recon map folded in)
 
 With N mutators, SML programs sharing `ref`s without `Thread.Mutex` race.
 Upstream: plain loads/stores for user data; interlocked ops only for the
 mutex/condvar protocol (`processes.cpp` AtomicIncrement/Decrement/Exchange,
 taken under a global `mutexLock` in interpreter builds — `bytecode.cpp`).
+
+**The atomics site inventory (recon-complete).** The words that MUST become
+atomic: the Thread.Mutex protocol word — `EXTINSTR_LOCK_MUTEX` (mod.rs
+~6114, read-then-write TOCTOU today), `TRY_LOCK_MUTEX` (~6138),
+`EXTINSTR_ATOMIC_RESET` (~6170, must be an atomic *exchange* or the
+"was-I-sole-locker" answer lies), `ATOMIC_EXCH_ADD` (~6202),
+`atomic_incr_decr` (~6764), `reset_mutex_word` (~2833, called from
+MutexUnlock/CondVarWait/WaitUntil); and thread-object words 1 (`flags`,
+SML-written via STORE_ML_WORD, cross-read by BroadcastInterrupt/CondVarWake)
+and 3 (`requestCopy`, cross-written by make_thread_request). `ThreadHandle.
+requests` (AtomicU8, fetch_max + CAS-consume) is ALREADY the correct
+template. **Correction the map verified against upstream:** the
+`PolyThreadMutexUnlock` arm's plain word reset is NOT upstream-faithful
+(`Processes::MutexUnlock` doesn't write the word) and can erase a peer's
+just-taken lock; the CondVarWait/WaitUntil preamble resets ARE faithful
+(`AtomicallyReleaseMutex`).
+
+**Already-safe (map-confirmed, no change):** every process-global is already
+`Mutex`/`Atomic`/`OnceLock` EXCEPT the two P0 semantic ones (`FINISH_REQUESTED`,
+SIGINT's `INTERRUPT_PENDING` — both handled in P0). `CURRENT_PARK`/`JIT_INTERP`
+are `thread_local!` (correct *provided* one OS thread drives one Interpreter —
+an invariant to keep). Interpreter per-thread fields (stack/sp/pc/frames/
+thread_object/bootstrap_tail_call — the last two explicitly hoisted from
+globals for exactly this) are correct; `rts: Arc<RtsTable>` is immutable
+post-register (fingerprint-protected). The `bootstrap_tail_call`
+global→per-thread hoist is the proven prior-art pattern for the remaining
+migrations.
+
 Our position, staged:
 
 - **Protocol words become genuinely atomic** (the SML `Thread.Mutex` lock
@@ -109,17 +137,27 @@ Our position, staged:
   word there) and can erase a peer's just-taken lock — it must go atomic
   or go away; the CondVarWait preamble resets ARE upstream-faithful
   (`AtomicallyReleaseMutex`) and just need the atomic port.
-- **User data stays plain-but-racy-by-contract**: raw-pointer word-aligned
-  loads/stores (never `&mut` over shared words); no tearing on aligned
-  64-bit words on x86-64/aarch64; racy programs get unspecified *values*,
-  never memory-unsafety. This is de-facto (hardware + raw pointer)
-  soundness rather than Rust-abstract-machine purity — the same boundary
-  upstream lives with — documented in the correctness docs as such.
-  Before committing: **measure** the clean alternative (relaxed
-  `AtomicUsize` for every bytecode heap load/store) on the single-threaded
-  benchmark suite; if it is ≤1–2% we take it and the boundary disappears.
-  (The fifth recon map — the full plain-store site inventory — gates the
-  start of P4; scheduler surgery does not begin without it.)
+- **User data — LEANING Position 2 (abstract-machine clean).** The recon's
+  decisive argument is identity, not physics: this project's whole
+  differentiator is "faithful port with **stronger** memory safety," and
+  Position 1 (plain raw-pointer racy accesses, upstream's C model) embeds a
+  class of textbook data-race UB that Miri/TSan flag on day one — betraying
+  the brand for a few percent the 4×-slower-than-upstream dispatch loop
+  renders immaterial. Position 2: route every heap-word load/store (the
+  INDIRECT family — INDIRECT_LOCAL_B0/B1 are the profiled-hottest opcodes —
+  LOAD/STORE_ML_WORD/BYTE/UNTAGGED, blockMove, `thread_obj_read/write`, the
+  header rewrite in `clear_mutable_bit`, and GC's `forward` reads) through
+  `AtomicUsize::from_ptr(p).load/store(Relaxed)`. On x86-64/aarch64 a
+  Relaxed load/store is the SAME instruction as a plain one — cost is only
+  inhibited compiler reordering of adjacent heap ops. What does NOT change:
+  the per-thread ML stack (private), immutable code-byte fetches, and
+  fresh-object init (the STW handshake's Mutex/SeqCst boundaries already
+  provide the publication fences). **The measurement gate stays**: wrap the
+  accessor in one inline helper, build both, run `tools/bench.sh`; if
+  Position 2 is ≤ a few % (expected), take it and the UB boundary
+  disappears entirely. The full plain-store site list (now inventoried
+  above) gates the start of P4 — scheduler surgery does not begin without
+  it.
 
 ## P0 — the semantic layer (the critic's find: build this FIRST)
 
