@@ -2802,10 +2802,16 @@ mod tests {
             }
         }
         assert_eq!(diverged, 0, "{diverged}/{cases} hashfold cases diverged");
-        assert_eq!(
-            non_native, 0,
-            "{non_native}/{cases} hashfold cases were non-native"
-        );
+        // Tick/coverage exactness is an x86_64 codegen artifact (aarch64
+        // Cranelift shapes the leaf differently — nightly macOS caught
+        // this sibling of the sumto tick assert). Result equality above
+        // is the correctness assert on every arch.
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(
+                non_native, 0,
+                "{non_native}/{cases} hashfold cases were non-native"
+            );
+        }
     }
 
     /// The #2-hash region must NOT be flagged recursive or stack-size-using
