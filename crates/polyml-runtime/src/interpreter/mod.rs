@@ -323,7 +323,7 @@ fn arbint_trace_on() -> bool {
 /// upstream C (`processes.h:154-160`) and the SML basis, which reads and
 /// writes the word directly (`Thread.sml:309-344`, `setIstateBits`):
 /// bit 0 = accept broadcast interrupts; bits 1-2 = the interrupt state.
-mod pflag {
+pub(crate) mod pflag {
     /// If set, accepts a broadcast interrupt (`EnableBroadcastInterrupt`).
     pub const BROADCAST: usize = 1;
     /// Ignore interrupts completely (`InterruptDefer`).
@@ -8089,6 +8089,29 @@ impl Interpreter {
             self.push(PolyWord::tagged(0))?;
             self.do_call(fn_closure)?;
             return Ok(StepResult::Continue);
+        }
+        // Deliver pending interrupt/kill requests at EVERY RTS return
+        // (upstream's InterruptCode-poisoned stack-limit trap fires on
+        // exactly this boundary, interpreter.cpp:141-156). The 65536-step
+        // safepoint alone is NOT enough: a thread looping through blocking
+        // RTS calls (the basis slices OS.Process.sleep into 1 s polls)
+        // executes only ~tens of bytecode steps per second, so a
+        // `Thread.kill` against a sleeper went undelivered for many
+        // minutes — found by the threaded differential oracle (upstream
+        // kills a sleeper promptly). The result value is already pushed;
+        // raising here matches upstream's trap-at-next-instruction.
+        if real_threads_enabled()
+            && self
+                .handle
+                .requests
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != crate::sched::request::NONE
+        {
+            let r = self.push_continue(result)?;
+            if let Some(sr) = self.process_asynch_requests()? {
+                return Ok(sr);
+            }
+            return Ok(r);
         }
         self.push_continue(result)
     }

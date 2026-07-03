@@ -306,6 +306,105 @@ pub(crate) fn clear_park() {
     });
 }
 
+/// The ABORT PROBE for indefinite kernel waits: captured BEFORE parking
+/// (the handle is native data; the thread-object flags word is heap data,
+/// so its interrupt-state is sampled here under the lock — racing a
+/// concurrent attribute change is upstream-equivalent). Inside the park a
+/// slice loop polls this to abort on a pending KILL (always) or an
+/// ASYNCH-deliverable INTERRUPT — the same predicate as MutexBlock's
+/// skip_wait, i.e. upstream's "don't block if interrupted-asynch or
+/// killed".
+pub(crate) struct ParkAbortProbe {
+    handle: std::sync::Arc<crate::sched::ThreadHandle>,
+    asynch_interrupts: bool,
+}
+
+impl ParkAbortProbe {
+    /// Capture from the current park (None single-threaded — no peer can
+    /// request anything, semantics unchanged).
+    pub(crate) fn capture() -> Option<Self> {
+        CURRENT_PARK.with(|slot| {
+            slot.borrow().as_ref().map(|p| {
+                let addr = p
+                    .handle
+                    .thread_obj_addr
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                // Thread-object word 1 = the ML flags word (tagged).
+                // SAFETY: the mirror is maintained by fork/GC fixup; a zero
+                // mirror (never materialized) reads as "no asynch".
+                let flags = if addr == 0 {
+                    0
+                } else {
+                    let w = unsafe {
+                        std::sync::atomic::AtomicUsize::from_ptr(
+                            (addr as *mut crate::poly_word::PolyWord)
+                                .wrapping_add(1)
+                                .cast::<usize>(),
+                        )
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    };
+                    crate::poly_word::PolyWord::from_bits(w).untag() as usize
+                };
+                let intbits = flags & crate::interpreter::pflag::INTMASK;
+                ParkAbortProbe {
+                    handle: std::sync::Arc::clone(&p.handle),
+                    asynch_interrupts: intbits == crate::interpreter::pflag::ASYNCH
+                        || intbits == crate::interpreter::pflag::ASYNCH_ONCE,
+                }
+            })
+        })
+    }
+
+    /// Should the kernel wait abort NOW? (KILL always; INTERRUPT only when
+    /// asynch-deliverable.)
+    pub(crate) fn should_abort(&self) -> bool {
+        let req = self
+            .handle
+            .requests
+            .load(std::sync::atomic::Ordering::SeqCst);
+        req == crate::sched::request::KILL
+            || (req == crate::sched::request::INTERRUPT && self.asynch_interrupts)
+    }
+}
+
+/// Wait for readiness on `fd` in ≤100 ms poll slices (NATIVE data only —
+/// safe inside a park), aborting early per `probe`. Upstream never blocks
+/// indefinitely in the kernel (ThreadPauseForIO polls with request
+/// checks); a `Thread.kill` against an accept/recv-blocked thread must
+/// land promptly — the threaded differential oracle found ours never did.
+/// Returns Ok(true)=ready, Ok(false)=aborted-by-request, Err(errno).
+pub(crate) fn poll_readable_slices(
+    fd: libc::c_int,
+    events: libc::c_short,
+    probe: Option<&ParkAbortProbe>,
+) -> Result<bool, i32> {
+    loop {
+        let mut pfd = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        let r = unsafe { libc::poll(&raw mut pfd, 1, 100) };
+        if r > 0 {
+            return Ok(true);
+        }
+        if r < 0 {
+            let e = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            if e != libc::EINTR {
+                return Err(e);
+            }
+        }
+        if let Some(p) = probe {
+            if p.should_abort() {
+                return Ok(false);
+            }
+        }
+    }
+}
+
 /// Run a blocking syscall with the giant lock released (when this session
 /// is multi-threaded — otherwise just run it). See [`RtsPark::park_while`]
 /// for the NATIVE-DATA-ONLY contract on `f`.
@@ -2434,10 +2533,21 @@ mod socket_rts {
         // GC while we wait touches nothing we hold. This is what lets an SML
         // accept-loop thread coexist with worker threads. Returns Ok(fd) or
         // Err(errno).
+        // Readiness-first in ≤100 ms slices with a request-abort probe
+        // (threaded-oracle finding: a Thread.kill against an
+        // accept-blocked thread must land promptly — an indefinite kernel
+        // accept never lets it).
+        let probe = ParkAbortProbe::capture();
         let new_fd = park_while_blocking(|| {
             loop {
+                if !poll_readable_slices(fd, libc::POLLIN, probe.as_ref())? {
+                    return Err(libc::EINTR); // aborted by kill/interrupt
+                }
                 // SAFETY: `storage`/`addr_len` are valid out-params sized to
                 // sockaddr_storage; accept fills at most `addr_len` bytes.
+                // POLLIN on a listening socket = a pending connection, so
+                // this returns immediately (a raced-away connection shows
+                // as EAGAIN-ish/EINTR and we re-poll).
                 let s = unsafe {
                     libc::accept(
                         fd,
@@ -2449,7 +2559,7 @@ mod socket_rts {
                     return Ok(s);
                 }
                 let e = last_errno();
-                if e != libc::EINTR {
+                if e != libc::EINTR && e != libc::EAGAIN && e != libc::EWOULDBLOCK {
                     return Err(e);
                 }
             }
@@ -2609,8 +2719,15 @@ mod socket_rts {
             flags |= libc::MSG_OOB;
         }
         // errno captured INSIDE the closure (the park re-acquire's futex
-        // syscalls may clobber it).
+        // syscalls may clobber it). Readiness-first in ≤100 ms slices with
+        // a request-abort probe (threaded-oracle blocking-boundary class:
+        // kill/asynch-interrupt must land promptly on a recv-blocked
+        // thread). The probe is captured pre-park; None single-threaded.
+        let probe = ParkAbortProbe::capture();
         let do_recv = |ptr: *mut u8| loop {
+            if !poll_readable_slices(fd, libc::POLLIN, probe.as_ref())? {
+                return Err(libc::EINTR); // aborted by kill/interrupt
+            }
             // SAFETY (caller): `[ptr, ptr+len)` is a live writable buffer
             // (heap direct-path, or the native bounce on the park path).
             let r = unsafe { libc::recv(fd, ptr.cast::<libc::c_void>(), len, flags) };
@@ -2619,7 +2736,7 @@ mod socket_rts {
                 return Ok(r as usize);
             }
             let e = last_errno();
-            if e != libc::EINTR {
+            if e != libc::EINTR && e != libc::EAGAIN && e != libc::EWOULDBLOCK {
                 return Err(e);
             }
         };
@@ -2786,9 +2903,14 @@ mod socket_rts {
         let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
         // errno captured INSIDE the closure (park re-acquire may clobber it).
+        // Readiness-first slices + request-abort probe, as in `recv`.
+        let probe = ParkAbortProbe::capture();
         let do_recvfrom = |ptr: *mut u8,
                            storage: &mut libc::sockaddr_storage,
                            addr_len: &mut libc::socklen_t| loop {
+            if !poll_readable_slices(fd, libc::POLLIN, probe.as_ref())? {
+                return Err(libc::EINTR); // aborted by kill/interrupt
+            }
             // SAFETY (caller): `[ptr, ptr+len)` is a live writable buffer;
             // `storage`/`addr_len` are valid native out-params.
             let r = unsafe {
@@ -2806,7 +2928,7 @@ mod socket_rts {
                 return Ok(r as usize);
             }
             let e = last_errno();
-            if e != libc::EINTR {
+            if e != libc::EINTR && e != libc::EAGAIN && e != libc::EWOULDBLOCK {
                 return Err(e);
             }
         };
@@ -6424,7 +6546,22 @@ fn read_array_from_stream(
         // → subcode 8) block without freezing forked peers.
         let mut bounce = vec![0u8; len];
         let mut buf_cell = buf;
-        let n = park_while_blocking_with_root(&mut buf_cell, || read_into(&mut bounce));
+        // Readiness-first slices with a request-abort probe (the
+        // blocking-boundary class): synthetic-stdin bytes are consumed
+        // FIRST (they must not wait on a quiet real fd 0).
+        let probe = ParkAbortProbe::capture();
+        let n = park_while_blocking_with_root(&mut buf_cell, || {
+            if fd == 0 {
+                let syn = read_synthetic_stdin(&mut bounce);
+                if syn > 0 {
+                    return Ok(syn);
+                }
+            }
+            if !poll_readable_slices(fd, libc::POLLIN, probe.as_ref())? {
+                return Err(libc::EINTR); // aborted by kill/interrupt
+            }
+            read_into(&mut bounce)
+        });
         match n {
             Ok(n) => {
                 // Re-derive from the FORWARDED cell. Range re-validation
@@ -6506,14 +6643,23 @@ fn read_string_from_stream(ctx: &mut RtsContext<'_>, strm: PolyWord, arg: PolyWo
     // AFTER re-acquiring. This is the REPL's stdin read (TextIO readVec →
     // IO subcode 10), i.e. what keeps the REPL prompt from freezing
     // forked background threads while it waits for the user.
+    // Readiness-first slices with a request-abort probe (the
+    // blocking-boundary class): kill/asynch-interrupt must land promptly
+    // even against a thread waiting on a silent stdin. Synthetic bytes
+    // are consumed FIRST (they must not wait on the real fd).
+    let probe = ParkAbortProbe::capture();
     let n = park_while_blocking(|| {
         if fd == 0 {
             let syn = read_synthetic_stdin(&mut buf);
             if syn > 0 {
-                Ok(syn)
-            } else {
-                retry_eintr_read(&mut std::io::stdin(), &mut buf)
+                return Ok(syn);
             }
+        }
+        if !poll_readable_slices(fd, libc::POLLIN, probe.as_ref())? {
+            return Err(libc::EINTR); // aborted by kill/interrupt
+        }
+        if fd == 0 {
+            retry_eintr_read(&mut std::io::stdin(), &mut buf)
         } else {
             // Borrow the fd without taking ownership (= no close).
             use std::os::fd::{FromRawFd, IntoRawFd};
