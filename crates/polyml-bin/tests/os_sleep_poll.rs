@@ -59,6 +59,85 @@ fn sleep_really_sleeps() {
     );
 }
 
+/// Ctrl-C (SIGINT) during a BLOCKED stdin read must raise the SML
+/// `Interrupt` exception promptly — caught by the program's own handler —
+/// not wait for input to arrive (the pre-fix behavior: the EINTR retry
+/// loop swallowed the signal and the 65536-step poll never came while
+/// blocked) and not surface as a `SysErr` artifact of the aborted read.
+#[test]
+#[ignore = "needs vendor/polyml/polyexport (self-bootstrap the 7-stage chain first)"]
+fn sigint_aborts_blocked_stdin_read_with_sml_interrupt() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let Some(image) = polyexport() else {
+        eprintln!("SKIP: vendor/polyml/polyexport missing (self-bootstrap first)");
+        return;
+    };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_poly"))
+        .args(["run", "--max-steps", "10000000000"])
+        .arg(&image)
+        .env("POLYML_GC_QUIET", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn poly");
+
+    // One declaration, two reads: the first consumes the declaration's own
+    // leftover newline (the REPL and program share buffered stdin); the
+    // second genuinely blocks. Stdin stays OPEN (no data) so only SIGINT
+    // can end the read.
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin
+        .write_all(
+            b"val x = (TextIO.inputLine TextIO.stdIn; TextIO.inputLine TextIO.stdIn) \
+              handle e => (print (\"@@CAUGHT \" ^ exnName e ^ \"\\n\"); NONE);\n",
+        )
+        .expect("write driver");
+    stdin.flush().expect("flush");
+
+    // Give the REPL time to compile and block in the second read.
+    std::thread::sleep(Duration::from_secs(3));
+    let pid = child.id().to_string();
+    let t0 = Instant::now();
+    let _ = Command::new("kill").args(["-INT", &pid]).status();
+
+    // The handler's print must arrive promptly.
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut seen = String::new();
+    let caught = loop {
+        if t0.elapsed() > Duration::from_secs(5) {
+            break false;
+        }
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break false,
+            Ok(_) => {
+                seen.push_str(&line);
+                if line.contains("@@CAUGHT Interrupt") {
+                    break true;
+                }
+            }
+            Err(_) => break false,
+        }
+    };
+    let latency = t0.elapsed();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        caught,
+        "SIGINT did not raise SML Interrupt into the blocked read's handler \
+         within 5s:\n{seen}"
+    );
+    assert!(
+        latency < Duration::from_secs(3),
+        "Interrupt took {latency:?} — the blocked read is not aborting promptly"
+    );
+}
+
 #[test]
 #[ignore = "needs vendor/polyml/polyexport (self-bootstrap the 7-stage chain first)"]
 fn upstream_test166_condvars_with_real_threads() {

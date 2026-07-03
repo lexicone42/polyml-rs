@@ -8076,6 +8076,52 @@ impl Interpreter {
         if armed_park {
             crate::rts::clear_park();
         }
+        // Deliver pending interrupt/kill requests at EVERY RTS return
+        // (upstream's InterruptCode-poisoned stack-limit trap fires on
+        // exactly this boundary, interpreter.cpp:141-156). The 65536-step
+        // safepoint alone is NOT enough: a thread looping through blocking
+        // RTS calls (the basis slices OS.Process.sleep into 1 s polls)
+        // executes only ~tens of bytecode steps per second, so a
+        // `Thread.kill` against a sleeper went undelivered for many
+        // minutes — found by the threaded differential oracle (upstream
+        // kills a sleeper promptly).
+        //
+        // This runs BEFORE the raised-exception handling: an ABORTED
+        // blocking call (the slice-loops return an EINTR SysErr) must
+        // surface as the KILL / Interrupt that aborted it, not as the
+        // SysErr artifact — upstream's aborted waits raise Interrupt.
+        // (A pending SYNCH interrupt leaves process_asynch_requests as a
+        // no-op and falls through to the normal raise, exactly upstream's
+        // deferred semantics.)
+        if real_threads_enabled()
+            && self
+                .handle
+                .requests
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != crate::sched::request::NONE
+        {
+            if raised.is_none() {
+                self.push_continue(result)?;
+            }
+            if let Some(sr) = self.process_asynch_requests()? {
+                return Ok(sr);
+            }
+            if raised.is_none() {
+                return Ok(StepResult::Continue);
+            }
+            // fall through: Synch-deferred request + a real raise
+        }
+        // SINGLE-THREADED twin: a pending Ctrl-C (SIGINT) is delivered at
+        // the RTS boundary too — the REPL's blocked stdin read aborts via
+        // the slice loop and must surface as the SML Interrupt exception
+        // promptly, not wait for the 65536-step poll (nor surface as the
+        // slice loop's EINTR SysErr).
+        if !real_threads_enabled() && crate::interrupt::take_interrupt() {
+            if raised.is_none() {
+                self.push_continue(result)?;
+            }
+            return self.raise_interrupt();
+        }
         // If the RTS function asked to raise an exception, push the
         // packet onto the stack and unwind to the registered handler.
         // Matches upstream's CALL_FAST_RTS<N> dispatch:
@@ -8089,29 +8135,6 @@ impl Interpreter {
             self.push(PolyWord::tagged(0))?;
             self.do_call(fn_closure)?;
             return Ok(StepResult::Continue);
-        }
-        // Deliver pending interrupt/kill requests at EVERY RTS return
-        // (upstream's InterruptCode-poisoned stack-limit trap fires on
-        // exactly this boundary, interpreter.cpp:141-156). The 65536-step
-        // safepoint alone is NOT enough: a thread looping through blocking
-        // RTS calls (the basis slices OS.Process.sleep into 1 s polls)
-        // executes only ~tens of bytecode steps per second, so a
-        // `Thread.kill` against a sleeper went undelivered for many
-        // minutes — found by the threaded differential oracle (upstream
-        // kills a sleeper promptly). The result value is already pushed;
-        // raising here matches upstream's trap-at-next-instruction.
-        if real_threads_enabled()
-            && self
-                .handle
-                .requests
-                .load(std::sync::atomic::Ordering::SeqCst)
-                != crate::sched::request::NONE
-        {
-            let r = self.push_continue(result)?;
-            if let Some(sr) = self.process_asynch_requests()? {
-                return Ok(sr);
-            }
-            return Ok(r);
         }
         self.push_continue(result)
     }

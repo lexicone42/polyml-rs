@@ -397,9 +397,20 @@ pub(crate) fn poll_readable_slices(
                 return Err(e);
             }
         }
-        if let Some(p) = probe {
-            if p.should_abort() {
-                return Ok(false);
+        match probe {
+            Some(p) => {
+                if p.should_abort() {
+                    return Ok(false);
+                }
+            }
+            // SINGLE-THREADED: a pending Ctrl-C aborts the wait (peek only
+            // — rts_call's boundary check consumes it and raises the SML
+            // Interrupt, superseding the slice loop's EINTR artifact). The
+            // REPL's blocked stdin read is the user-facing case.
+            None => {
+                if crate::interrupt::interrupt_pending() {
+                    return Ok(false);
+                }
             }
         }
     }
@@ -2488,8 +2499,28 @@ mod socket_rts {
         // `bytes` is a NATIVE Vec (copied out of the heap already), so we can
         // park the giant lock across the blocking connect (multi-threaded
         // sessions) — a peer may run/GC while we wait; nothing heap is
-        // touched inside. Returns Ok(()) or Err(errno).
+        // touched inside. NONBLOCKING-connect dance so a kill/asynch-
+        // interrupt lands promptly (threaded-oracle finding: connect to an
+        // unroutable address SYN-retries for minutes and a kernel-blocked
+        // connect never sees the request): O_NONBLOCK → EINPROGRESS →
+        // POLLOUT in ≤100 ms slices with the abort probe → SO_ERROR
+        // verdict → restore the original flags. Returns Ok(()) or
+        // Err(errno).
+        let probe = ParkAbortProbe::capture();
         let res = park_while_blocking(|| {
+            // SAFETY: fcntl on a valid fd.
+            let orig_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            let restore = |r: Result<(), i32>| {
+                if orig_flags >= 0 {
+                    // SAFETY: restoring the original mode bits.
+                    unsafe { libc::fcntl(fd, libc::F_SETFL, orig_flags) };
+                }
+                r
+            };
+            if orig_flags >= 0 {
+                // SAFETY: setting O_NONBLOCK on a valid fd.
+                unsafe { libc::fcntl(fd, libc::F_SETFL, orig_flags | libc::O_NONBLOCK) };
+            }
             loop {
                 // SAFETY: `bytes` is a full sockaddr; ptr+len passed to connect(2).
                 let r = unsafe {
@@ -2500,12 +2531,40 @@ mod socket_rts {
                     )
                 };
                 if r == 0 {
-                    return Ok(());
+                    return restore(Ok(()));
                 }
                 let e = last_errno();
-                if e != libc::EINTR {
-                    return Err(e);
+                if e == libc::EINTR {
+                    continue;
                 }
+                if e != libc::EINPROGRESS && e != libc::EALREADY {
+                    return restore(Err(e));
+                }
+                break; // in progress: wait for writability in slices
+            }
+            loop {
+                match poll_readable_slices(fd, libc::POLLOUT, probe.as_ref()) {
+                    Err(e) => return restore(Err(e)),
+                    Ok(false) => return restore(Err(libc::EINTR)), // aborted
+                    Ok(true) => {}
+                }
+                // Writable: fetch the connect(2) verdict.
+                let mut soerr: libc::c_int = 0;
+                let mut slen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+                // SAFETY: valid out-params for SO_ERROR.
+                let g = unsafe {
+                    libc::getsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_ERROR,
+                        (&raw mut soerr).cast::<libc::c_void>(),
+                        &raw mut slen,
+                    )
+                };
+                if g < 0 {
+                    return restore(Err(last_errno()));
+                }
+                return restore(if soerr == 0 { Ok(()) } else { Err(soerr) });
             }
         });
         match res {
