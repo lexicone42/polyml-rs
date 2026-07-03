@@ -120,11 +120,28 @@ correctness claim in its own right:
   only *between* bytecode steps, so an opcode's internal multi-allocation
   sequences are atomic w.r.t. the barrier. `POLYML_GC_AUDIT=1` re-walks every
   root set after each parallel collection in the storm fence.
-- **Residual, stated honestly:** *byte*-array accessors remain plain (a racy
-  `Word8Array` shared without a mutex is the one surface where the UB-freedom
-  argument does not yet apply — wrap it in an SML `Mutex`, as any correct
-  program would); and `--untrusted` + threads remains out of the validated
-  envelope (above).
+- **Independently audited with ThreadSanitizer** (`tools/tsan.sh`; nightly
+  Rust, `-Zsanitizer=thread`, `-Zbuild-std`): the GC unit suite (including
+  the parallel-drain claim-race stress), the scheduler handshake suite, the
+  mutex/racy-ref/alloc-storm demos, kill/interrupt fuzz storms, AND
+  dedicated racy-publish probes (`tools/tsan-probes/`) all run
+  **warning-free** under `POLY_PARALLEL=1`. The probes were the discovery
+  instrument: publishing freshly-built objects through racy refs exposed
+  that object-INITIALIZATION writes (tuples, closures, refs,
+  `allocWordMemory`, thread objects), the untagged load/store family,
+  and the length-word header write/read pair (reachable cross-thread at
+  RECYCLED addresses after a pool GC) were still plain — all 16 sites now
+  go through the Relaxed-atomic accessors, and the probes re-run clean.
+  Byte-identity of the default path was re-proven after the conversion
+  (stage-0 + the 27.7B-step chain, exact md5).
+- **Residual, stated honestly:** *byte*-array/string CONTENT accessors
+  remain plain (scalar byte ops and `blockMoveByte`'s memmove — per-byte
+  atomics would cost real vectorization on string paths). A racy
+  `Word8Array`/string shared without a mutex is the one surface where the
+  UB-freedom argument does not apply — the committed
+  `tools/tsan-probes/byte_publish.sml` characterizes it (TSan warns there,
+  by design; wrap shared byte buffers in an SML `Mutex`). And
+  `--untrusted` + threads remains out of the validated envelope (above).
 
 The proof obligations are all fenced: byte-identity of the default path
 (stage-0 + the 27.7B-step chain), exact-count discriminators under load, the

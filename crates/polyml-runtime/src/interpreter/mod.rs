@@ -2960,15 +2960,15 @@ impl Interpreter {
         use crate::length_word::F_MUTABLE_BIT;
         let length = 9;
         let p = self.allocate(length, F_MUTABLE_BIT)?;
-        // SAFETY: just allocated 9 words.
+        // SAFETY: just allocated 9 words. (ATOMIC init — see do_tuple)
         unsafe {
-            p.add(0).write(PolyWord::tagged(0)); // threadRef (id written by caller)
-            p.add(1).write(attrs); // flags — the ML attrs word, as passed
-            p.add(2).write(PolyWord::tagged(0)); // threadLocal
-            p.add(3).write(PolyWord::tagged(0)); // requestCopy
-            p.add(4).write(stack); // mlStackSize — the ML stack word, as passed
+            Self::heap_write(p.add(0), PolyWord::tagged(0)); // threadRef (id written by caller)
+            Self::heap_write(p.add(1), attrs); // flags — the ML attrs word, as passed
+            Self::heap_write(p.add(2), PolyWord::tagged(0)); // threadLocal
+            Self::heap_write(p.add(3), PolyWord::tagged(0)); // requestCopy
+            Self::heap_write(p.add(4), stack); // mlStackSize — the ML stack word, as passed
             for i in 5..length {
-                p.add(i).write(PolyWord::tagged(0)); // debuggerSlots
+                Self::heap_write(p.add(i), PolyWord::tagged(0)); // debuggerSlots
             }
         }
         Ok(PolyWord::from_ptr(p.cast_const()))
@@ -5132,10 +5132,11 @@ impl Interpreter {
                 let init = self.pop()?;
                 let flags = self.pop()?.untag() as u8;
                 let p = self.allocate(length, flags)?;
-                // SAFETY: just allocated `length` words
+                // SAFETY: just allocated `length` words (ATOMIC init
+                // — see do_tuple)
                 unsafe {
                     for i in 0..length {
-                        p.add(i).write(init);
+                        Self::heap_write(p.add(i), init);
                     }
                 }
                 self.pop()?; // pop length
@@ -5398,8 +5399,9 @@ impl Interpreter {
                     return Err(InterpError::NotAClosure(base));
                 }
                 let p = base.as_ptr::<PolyWord>();
-                // SAFETY: caller emits valid offsets
-                let raw = unsafe { *p.add(index) };
+                // SAFETY: caller emits valid offsets (ATOMIC — shared
+                // heap word; see heap_read)
+                let raw = unsafe { Self::heap_read(p.add(index)) };
                 self.pop()?;
                 // Re-tag: untag the raw bits as if they were already
                 // a numeric value to be tagged.
@@ -5549,15 +5551,17 @@ impl Interpreter {
                         why,
                     })?;
                     // SAFETY: validated mutable object + in-bounds word index.
+                    // (ATOMIC — shared heap word.)
                     unsafe {
-                        v.ptr.cast_mut().add(index).write(PolyWord::from_bits(raw));
+                        Self::heap_write(v.ptr.cast_mut().add(index), PolyWord::from_bits(raw));
                     }
                     self.pop()?;
                     return self.push_continue(PolyWord::tagged(0));
                 }
                 let p = base.as_ptr::<PolyWord>().cast_mut();
                 // SAFETY: caller emits valid offset on mutable base
-                unsafe { p.add(index).write(PolyWord::from_bits(raw)) };
+                // (ATOMIC — shared heap word.)
+                unsafe { Self::heap_write(p.add(index), PolyWord::from_bits(raw)) };
                 self.pop()?;
                 self.push_continue(PolyWord::tagged(0))
             }
@@ -6367,8 +6371,8 @@ impl Interpreter {
             EXTINSTR_CREATE_MUTEX => {
                 use crate::length_word::{F_MUTABLE_BIT, F_NO_OVERWRITE, F_WEAK_BIT};
                 let p = self.allocate(1, F_MUTABLE_BIT | F_NO_OVERWRITE | F_WEAK_BIT)?;
-                // SAFETY: just allocated 1 word
-                unsafe { p.add(0).write(PolyWord::tagged(0)) };
+                // SAFETY: just allocated 1 word (ATOMIC init — see do_tuple)
+                unsafe { Self::heap_write(p.add(0), PolyWord::tagged(0)) };
                 self.push_continue(PolyWord::from_ptr(p.cast_const()))
             }
             // Real mutex semantics (bytecode.cpp:1507-1532). Single-
@@ -7126,10 +7130,14 @@ impl Interpreter {
         let p = self.allocate(n, 0)?; // 0 = ordinary word object
         // Upstream: `for (; storeWords > 0; ) p->Set(--storeWords, *sp++)`.
         // That writes slot[n-1] first (popping the top), then slot[n-2], etc.
+        // ATOMIC init writes (Relaxed): under POLY_PARALLEL a peer can
+        // reach this object through a racy SML publish, and TSan proved
+        // the plain-write/atomic-read pair is a formal data race (the
+        // publish-by-racy-ref probe). Relaxed is free on x86/aarch64.
         for i in (0..n).rev() {
             let v = self.pop()?;
             // SAFETY: i < n_words by construction.
-            unsafe { p.add(i).write(v) };
+            unsafe { Self::heap_write(p.add(i), v) };
         }
         self.push_continue(PolyWord::from_ptr(p.cast_const()))
     }
@@ -7148,8 +7156,8 @@ impl Interpreter {
         // filled in that order, popping each from the top.
         for i in (1..length).rev() {
             let v = self.pop()?;
-            // SAFETY: i < length
-            unsafe { p.add(i).write(v) };
+            // SAFETY: i < length (ATOMIC init — see do_tuple)
+            unsafe { Self::heap_write(p.add(i), v) };
         }
         // Now the source closure is on top. Copy its first word
         // (code address) to slot 0 of the new closure.
@@ -7161,8 +7169,8 @@ impl Interpreter {
             // SAFETY: src is a valid closure
             unsafe { *src_ptr }
         };
-        // SAFETY: slot 0 is in bounds
-        unsafe { p.add(0).write(code_addr) };
+        // SAFETY: slot 0 is in bounds (ATOMIC init — see do_tuple)
+        unsafe { Self::heap_write(p.add(0), code_addr) };
         // Replace top of stack with new closure.
         self.pop()?;
         self.push_continue(PolyWord::from_ptr(p.cast_const()))
@@ -7185,11 +7193,11 @@ impl Interpreter {
             // SAFETY: src closure invariant
             unsafe { *src_ptr }
         };
-        // SAFETY: indices < length
+        // SAFETY: indices < length (ATOMIC init — see do_tuple)
         unsafe {
-            p.add(0).write(code_addr);
+            Self::heap_write(p.add(0), code_addr);
             for i in 1..length {
-                p.add(i).write(PolyWord::tagged(0));
+                Self::heap_write(p.add(i), PolyWord::tagged(0));
             }
         }
         // Replace top with new closure pointer.
@@ -7212,7 +7220,8 @@ impl Interpreter {
                     why,
                 })?;
             // SAFETY: validated mutable object + in-bounds slot.
-            unsafe { v.ptr.cast_mut().add(slot + 1).write(u) };
+            // (ATOMIC — mutable closure slots are shared heap words.)
+            unsafe { Self::heap_write(v.ptr.cast_mut().add(slot + 1), u) };
             return Ok(StepResult::Continue);
         }
         let p = target.as_ptr::<PolyWord>();
@@ -7220,8 +7229,8 @@ impl Interpreter {
         // safe because the closure was allocated mutable.
         let p_mut = p.cast_mut();
         // SAFETY: caller emitted a valid slot index for a closure
-        // with at least slot+2 words.
-        unsafe { p_mut.add(slot + 1).write(u) };
+        // with at least slot+2 words. (ATOMIC — shared heap word.)
+        unsafe { Self::heap_write(p_mut.add(slot + 1), u) };
         Ok(StepResult::Continue)
     }
 
@@ -7233,8 +7242,8 @@ impl Interpreter {
 
         let init = self.peek(0)?;
         let p = self.allocate(1, F_MUTABLE_BIT)?;
-        // SAFETY: 1 word allocated
-        unsafe { p.add(0).write(init) };
+        // SAFETY: 1 word allocated (ATOMIC init — see do_tuple)
+        unsafe { Self::heap_write(p.add(0), init) };
         self.pop()?;
         self.push_continue(PolyWord::from_ptr(p.cast_const()))
     }
@@ -7254,12 +7263,9 @@ impl Interpreter {
             let new_bits =
                 vo.length_word.0 & !((F_MUTABLE_BIT as usize) << length_word::FLAGS_SHIFT);
             // SAFETY: vo.ptr.sub(1) is the validated length-word slot.
-            unsafe {
-                vo.ptr
-                    .cast_mut()
-                    .sub(1)
-                    .write(PolyWord::from_bits(new_bits))
-            };
+            // (ATOMIC — header words are shared; pairs with the atomic
+            // length_word_of.)
+            unsafe { Self::heap_write(vo.ptr.cast_mut().sub(1), PolyWord::from_bits(new_bits)) };
             return if replace_with_zero {
                 self.pop()?;
                 self.push_continue(PolyWord::tagged(0))
@@ -7268,12 +7274,13 @@ impl Interpreter {
             };
         }
         let p = v.as_ptr::<PolyWord>().cast_mut();
-        // SAFETY: caller upholds top is a mutable heap object.
+        // SAFETY: caller upholds top is a mutable heap object. (ATOMIC —
+        // header words are shared; pairs with the atomic length_word_of.)
         unsafe {
             let lw_ptr = p.sub(1);
-            let lw = *lw_ptr;
+            let lw = Self::heap_read(lw_ptr);
             let new_bits = lw.0 & !((F_MUTABLE_BIT as usize) << length_word::FLAGS_SHIFT);
-            lw_ptr.write(PolyWord::from_bits(new_bits));
+            Self::heap_write(lw_ptr, PolyWord::from_bits(new_bits));
         }
         if replace_with_zero {
             self.pop()?;
@@ -7829,10 +7836,10 @@ impl Interpreter {
         }
         let length = 8;
         let p = self.allocate(length, F_MUTABLE_BIT)?;
-        // SAFETY: just allocated `length` words
+        // SAFETY: just allocated `length` words (ATOMIC init — see do_tuple)
         unsafe {
             for i in 0..length {
-                p.add(i).write(PolyWord::tagged(0));
+                Self::heap_write(p.add(i), PolyWord::tagged(0));
             }
         }
         let t = PolyWord::from_ptr(p.cast_const());

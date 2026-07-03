@@ -124,6 +124,18 @@ Stage1.sml`). Consequences:
   thread was meant to signal); design + invariant contract:
   `docs/parallel-design.md`. `POLY_PARALLEL` without `POLY_REAL_THREADS`
   is a no-op.
+  - **TSan-audited** (`tools/tsan.sh [fast|full]`, nightly + build-std):
+    the WORD-object heap graph is data-race-free by construction under
+    `POLY_PARALLEL` — the racy-publish probes (`tools/tsan-probes/`)
+    found 16 remaining plain sites (object-INIT writes, untagged
+    load/store, the header write/read pair — reachable cross-thread at
+    RECYCLED addresses) and all now use the Relaxed accessors; probes
+    re-run warning-free, chain re-proven byte-identical. DOCUMENTED
+    residual: byte/string CONTENT stays plain (blockMoveByte memmove +
+    scalar byte ops) — `byte_publish.sml` warns by design; racy shared
+    byte buffers need an SML Mutex. When adding opcode handlers: heap
+    word accesses go through `heap_read`/`heap_write`, headers through
+    `length_word_of`/`set_length_word` — never raw derefs.
   The 2-thread mutex demo runs end-to-end on the `polyexport` REPL
   (`crates/polyml-bin/tests/concurrency_mutex_demo.rs`, `…/concurrency_support/mutex_demo.sml`
   → counter = 200000); the runtime-level GC-handshake + fork-TOCTOU + H1/H2

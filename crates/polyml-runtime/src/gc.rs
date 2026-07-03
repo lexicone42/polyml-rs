@@ -801,7 +801,7 @@ where
     // USED region (consumed only by stack-slot forwarding — see
     // `Collector::find_object`).
     let mut ranges_unsorted: Vec<(usize, usize, usize)> = Vec::with_capacity(spaces.len()); // (start, end, capacity)
-    let mut total_capacity = 0usize;
+    let mut total_used = 0usize;
     for space in spaces.iter() {
         let range = space.as_ptr_range();
         ranges_unsorted.push((
@@ -809,8 +809,17 @@ where
             range.end as usize,
             space.capacity_words(),
         ));
-        total_capacity += space.capacity_words();
+        total_used += space.used_words();
     }
+    // To-space sizing: live can never exceed Σ USED, and the primary
+    // should keep (at least) its own capacity across the swap. Sizing by
+    // Σ CAPACITY instead (the original pool formula) BALLOONED the
+    // primary by the children's total capacity on EVERY pool collection
+    // (replace_storage hands the whole scratch to the primary) —
+    // unbounded RSS growth, ~+192 MB/cycle with six 32 MB nurseries.
+    // Single-space: Σ used ≤ capacity, so this is exactly the old
+    // "to-space = the space's capacity" — byte-identical.
+    let total_capacity = spaces[0].capacity_words().max(total_used);
     ranges_unsorted.sort_unstable();
     let from_ranges: Vec<(usize, usize)> =
         ranges_unsorted.iter().map(|&(s, e, _)| (s, e)).collect();
@@ -1272,6 +1281,37 @@ mod tests {
             }
         }
         assert_eq!(cur, l2, "chain must terminate at the shared leaf2");
+    }
+
+    /// Pool collections must NOT balloon the primary: to-space is sized
+    /// max(primary capacity, Σ used), not Σ capacity — the original pool
+    /// formula grew the primary by the children's total capacity on
+    /// EVERY collection (unbounded RSS growth; +192 MB/cycle with six
+    /// 32 MB nurseries).
+    #[test]
+    fn pool_collect_does_not_balloon_primary() {
+        let mut a = MemorySpace::new(1024, SpaceKind::Mutable);
+        let mut b = MemorySpace::new(1024, SpaceKind::Mutable);
+        let cap0 = a.capacity_words();
+        let mut root = PolyWord::tagged(0);
+        for round in 0..5 {
+            // A little live data in the child each round.
+            let leaf = b.alloc(1);
+            unsafe {
+                set_length_word(leaf, 1, F_BYTE_OBJ);
+                leaf.write(PolyWord::from_bits(0xbeef));
+            }
+            root = PolyWord::from_ptr(leaf.cast_const());
+            collect_pool(&mut [&mut a, &mut b], |c| unsafe {
+                c.forward(&mut root as *mut _);
+            });
+            assert_eq!(
+                a.capacity_words(),
+                cap0,
+                "primary ballooned on pool collection round {round} \
+                 (Σ-capacity to-space sizing regressed)"
+            );
+        }
     }
 
     /// P6 determinism floor: 1 worker (or None) takes the EXACT serial

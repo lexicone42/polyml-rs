@@ -154,13 +154,23 @@ impl MemorySpace {
 
     /// Read the length word that precedes the given object pointer.
     ///
+    /// ATOMIC (Relaxed): under `POLY_PARALLEL` a peer can allocate at a
+    /// RECYCLED address (nursery reset + reallocation) while this thread
+    /// still reaches the old object through a racy SML publish — TSan
+    /// proved the plain read races with `set_length_word`'s header write.
+    /// Relaxed is free on x86/aarch64.
+    ///
     /// # Safety
     /// `obj_ptr` must have been returned by an `alloc` on **this**
     /// `MemorySpace`. Crossing-space lookups are undefined.
     #[must_use]
     pub unsafe fn length_word_of(obj_ptr: *const PolyWord) -> PolyWord {
         // SAFETY: precondition.
-        unsafe { *obj_ptr.sub(1) }
+        let bits = unsafe {
+            std::sync::atomic::AtomicUsize::from_ptr(obj_ptr.sub(1).cast::<usize>().cast_mut())
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        PolyWord::from_bits(bits)
     }
 
     /// Bytes covered by the space's storage. Useful for the future
@@ -191,11 +201,14 @@ impl MemorySpace {
 /// # Safety
 /// `obj_ptr` must have come from a `MemorySpace::alloc` call.
 pub unsafe fn set_length_word(obj_ptr: *mut PolyWord, n_words: usize, flags: u8) {
+    // ATOMIC (Relaxed) — pairs with `length_word_of`; see its note on the
+    // recycled-address race under POLY_PARALLEL.
     // SAFETY: precondition.
     unsafe {
-        obj_ptr
-            .sub(1)
-            .write(length_word::make_length_word(n_words, flags));
+        std::sync::atomic::AtomicUsize::from_ptr(obj_ptr.sub(1).cast::<usize>()).store(
+            length_word::make_length_word(n_words, flags).0,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 }
 

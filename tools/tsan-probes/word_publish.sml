@@ -1,0 +1,12 @@
+structure T = Thread.Thread;
+structure M = Thread.Mutex;
+structure C = Thread.ConditionVar;
+val r = ref [0];
+val m = M.mutex (); val cv = C.conditionVar (); val nDone = ref 0;
+fun publisher 0 = () | publisher n = (r := [n, n + 1, n + 2]; publisher (n - 1));
+fun consumer (0, s) = s | consumer (n, s) = consumer (n - 1, s + length (!r));
+fun finish () = (M.lock m; nDone := !nDone + 1; C.signal cv; M.unlock m);
+val () = ignore (T.fork (fn () => (publisher 100000; finish ()), []));
+val () = ignore (T.fork (fn () => (ignore (consumer (100000, 0)); finish ()), []));
+val () = (M.lock m; while !nDone < 2 do C.wait (cv, m); M.unlock m);
+val () = print "PUB_PROBE_DONE\n";

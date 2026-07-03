@@ -172,6 +172,12 @@ fn generate(seed: u64) -> (String, u64) {
 /// Run one seed in one mode; return an error description on any failure.
 fn run_seed(image: &std::path::Path, seed: u64, parallel: bool) -> Result<(), String> {
     let (sml, _expected) = generate(seed);
+    // FUZZ_DUMP=1: save every generated driver (not just failures) so it
+    // can be replayed under other binaries — e.g. the TSan-instrumented
+    // interpreter-only poly.
+    if std::env::var("FUZZ_DUMP").is_ok_and(|v| v == "1") {
+        let _ = std::fs::write(format!("/tmp/fuzz_dump_seed_{seed}.sml"), &sml);
+    }
     let mut envs: Vec<(&str, &str)> = vec![
         ("POLY_REAL_THREADS", "1"),
         // Storm under constant, audited collections.
