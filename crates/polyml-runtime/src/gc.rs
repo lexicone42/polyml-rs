@@ -831,6 +831,17 @@ where
         range_bit_base.push(bits_total);
         bits_total += cap;
     }
+    if std::env::var("POLYML_GC_SIZES").is_ok() {
+        let total_used: usize = spaces.iter().map(|s| s.used_words()).sum();
+        eprintln!(
+            "  GC sizes: spaces={} primary_cap={} total_used={} bits_total={} bitmap_bytes={}",
+            spaces.len(),
+            spaces[0].capacity_words(),
+            total_used,
+            bits_total,
+            bits_total.div_ceil(64) * 8,
+        );
+    }
     let mut start_bits = vec![0u64; bits_total.div_ceil(64)];
     for (k, &(start, _, _)) in ranges_unsorted.iter().enumerate() {
         let space = spaces
