@@ -1424,7 +1424,13 @@ fn register_builtins(t: &mut RtsTable) {
         RtsFn::Arity2(poly_process_env_system),
     );
     t.register("PolyTerminate", RtsFn::Arity2(poly_terminate));
-    t.register("PolyPollIODescriptors", RtsFn::Arity4(zero4));
+    // REAL poll(2) (was a success-shaped zero4 stub — the tagged-0-as-
+    // vector return SEGV'd `OS.Process.sleep` under real threads; found
+    // by upstream's Test166). In-place swap: register() order is frozen.
+    t.register(
+        "PolyPollIODescriptors",
+        RtsFn::Arity4(socket_rts::poly_poll_io_descriptors),
+    );
     // rtsCallFull2 → threadId + 2 args → CALL_FAST_RTS3.
     t.register("PolySetSignalHandler", RtsFn::Arity3(zero3));
     // The entire Posix structure dispatches through this one entry. Code 4
@@ -3304,6 +3310,152 @@ mod socket_rts {
             p.add(2).write(result_vecs[2]);
             PolyWord::from_ptr(p.cast_const())
         }
+    }
+
+    /// `PolyPollIODescriptors(threadId, ioVec, bitVec, timeoutMs)` — the
+    /// real poll(2) behind `OS.IO.poll` (basicio.cpp's poll dispatch).
+    /// `ioVec` is a vector of iodescs (1-word byte objects holding fd+1),
+    /// `bitVec` the matching request bits (1=in, 2=out, 4=pri — the basis
+    /// `inBit`/`outBit`/`priBit`), `timeoutMs` a tagged millisecond bound
+    /// (the ML wrapper loops in ≤1 s slices). Returns a word vector of
+    /// result bits, one per descriptor.
+    ///
+    /// `OS.Process.sleep` is `poll([], SOME t)` — the empty-vector case
+    /// must genuinely SLEEP (poll with zero fds), parking the giant lock
+    /// so peers keep running. This entry was a legacy success-shaped stub
+    /// (returned tagged 0); the SML wrapper then ran `Vector.exists` over
+    /// that 0-as-vector — a near-null header deref, the SEGV upstream's
+    /// Test166 found. Only NATIVE data (fds/bits/timeout) crosses the
+    /// park; the result vector is allocated after re-acquire.
+    pub(super) fn poly_poll_io_descriptors(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        io_vec: PolyWord,
+        bit_vec: PolyWord,
+        timeout: PolyWord,
+    ) -> PolyWord {
+        use crate::length_word::{length_of, make_length_word};
+        let timeout_ms = if timeout.is_tagged() {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                timeout.untag().max(0) as libc::c_int
+            }
+        } else {
+            0
+        };
+        let spaces = ctx.safe_spaces.clone();
+
+        // Gather (fd, requested-bits) pairs — NATIVE data only, so the
+        // poll below can park. Vector lengths should match; clamp to the
+        // shorter to stay total on malformed input.
+        let mut fds: Vec<libc::c_int> = Vec::new();
+        let mut req_bits: Vec<usize> = Vec::new();
+        if let (Some(io_obj), Some(bit_obj)) = (
+            safe_rts_arg_obj(spaces.as_ref(), io_vec),
+            safe_rts_arg_obj(spaces.as_ref(), bit_vec),
+        ) {
+            // SAFETY: ptr-1 is each object's validated length word.
+            let n_io = io_obj.clamp_body_words(length_of(unsafe {
+                crate::space::MemorySpace::length_word_of(io_obj.ptr)
+            }));
+            let n_bits = bit_obj.clamp_body_words(length_of(unsafe {
+                crate::space::MemorySpace::length_word_of(bit_obj.ptr)
+            }));
+            for j in 0..n_io.min(n_bits) {
+                // SAFETY: j < validated body word counts.
+                let (desc, bits) = unsafe { (*io_obj.ptr.add(j), *bit_obj.ptr.add(j)) };
+                // iodesc: 1-word byte object holding fd+1 (see
+                // wrap_file_descriptor); bits: a tagged small word.
+                let Some(d) = safe_rts_arg_obj(spaces.as_ref(), desc) else {
+                    return raise_syscall(ctx, "poll failed", libc::EBADF);
+                };
+                // SAFETY: validated 1-word object body.
+                let raw = unsafe { (*d.ptr).0 };
+                if raw == 0 {
+                    return raise_syscall(ctx, "poll failed", libc::EBADF);
+                }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                fds.push((raw - 1) as libc::c_int);
+                #[allow(clippy::cast_sign_loss)]
+                req_bits.push(bits.untag().max(0) as usize);
+            }
+        }
+
+        let mut pollfds: Vec<libc::pollfd> = fds
+            .iter()
+            .zip(&req_bits)
+            .map(|(&fd, &bits)| {
+                let mut events: libc::c_short = 0;
+                if bits & 1 != 0 {
+                    events |= libc::POLLIN;
+                }
+                if bits & 2 != 0 {
+                    events |= libc::POLLOUT;
+                }
+                if bits & 4 != 0 {
+                    events |= libc::POLLPRI;
+                }
+                libc::pollfd {
+                    fd,
+                    events,
+                    revents: 0,
+                }
+            })
+            .collect();
+
+        // PARK across the wait — with ZERO descriptors poll(2) is a pure
+        // timeout sleep (the OS.Process.sleep path), and a blocked sleeper
+        // must not freeze peers.
+        let res = park_while_blocking(|| {
+            loop {
+                // SAFETY: `pollfds` is a valid array (possibly empty).
+                let r = unsafe {
+                    libc::poll(
+                        pollfds.as_mut_ptr(),
+                        pollfds.len() as libc::nfds_t,
+                        timeout_ms,
+                    )
+                };
+                if r >= 0 {
+                    return Ok(());
+                }
+                let e = last_errno();
+                if e != libc::EINTR {
+                    return Err(e);
+                }
+            }
+        });
+        if let Err(e) = res {
+            return raise_syscall(ctx, "poll failed", e);
+        }
+
+        // Result vector: per descriptor, the requested bits that are ready
+        // (error/hangup surfaces on the in/out bits, as upstream reports).
+        let n = pollfds.len();
+        let Some(space) = ctx.alloc_space.as_mut() else {
+            return PolyWord::tagged(0);
+        };
+        let p = space.alloc_or_exit(n);
+        // SAFETY: just allocated `n` words.
+        unsafe {
+            p.sub(1).write(make_length_word(n, 0));
+            for (k, pf) in pollfds.iter().enumerate() {
+                let mut out = 0usize;
+                if pf.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                    out |= 1;
+                }
+                if pf.revents & (libc::POLLOUT | libc::POLLERR) != 0 {
+                    out |= 2;
+                }
+                if pf.revents & libc::POLLPRI != 0 {
+                    out |= 4;
+                }
+                out &= req_bits[k];
+                #[allow(clippy::cast_possible_wrap)]
+                p.add(k).write(PolyWord::tagged(out as isize));
+            }
+        }
+        PolyWord::from_ptr(p.cast_const())
     }
 } // mod socket_rts
 

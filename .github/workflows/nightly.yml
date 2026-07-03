@@ -80,6 +80,7 @@ jobs:
             --test concurrency_mutex_hammer \
             --test concurrency_parallel \
             --test concurrency_server \
+            --test os_sleep_poll \
             -- --ignored
 
       # Seeded concurrency fuzzer: kill/interrupt storms against the

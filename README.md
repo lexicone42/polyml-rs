@@ -182,9 +182,16 @@ evidence here is unusually strong — and it was earned by finding real bugs.
   faithful on all of them, and even reproduces a latent *upstream* stage-0
   compiler bug byte-for-byte (the strongest faithfulness statement available).
 - **Poly/ML's own test corpus.** We run upstream's `Tests/` suite (212 Succeed +
-  83 Fail programs) through both engines — this is how the `PolySubtractArbitrary`
-  negation bug was caught and fixed (it lived in the RTS path the diff-corpus
-  missed).
+  83 Fail programs) through our engine (`tools/upstream-suite.sh`, one process
+  per test): **278/295 pass** (all 83 must-fail tests fail correctly), with
+  every remaining failure in a documented-gap bucket — non-blocking/Unix-domain
+  sockets, the C FFI, `Posix`, IEEE rounding modes, weak refs, the fixed ML
+  stack. This corpus keeps earning its keep: it caught the
+  `PolySubtractArbitrary` negation bug (in the RTS path the diff-corpus
+  missed), and later a SEGV from the last surviving success-shaped RTS stub
+  (`PolyPollIODescriptors` behind `OS.Process.sleep`) that 450 fuzz seeds and
+  a ThreadSanitizer pass couldn't see — no workload of ours ever called
+  `sleep`. Now a real `poll(2)`, with the timing fenced.
 - **Hunted for soundness from every angle.** Arithmetic/structure/program fuzz,
   loader fuzz (found + fixed 2 memory-safety bugs on untrusted images), a GC
   soak, the interp-vs-JIT differential (1,201 fn×args cases, zero real JIT bugs),

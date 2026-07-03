@@ -202,7 +202,15 @@ run`, diff results. `tools/build-oracle.sh [interp]` builds upstream at
 the reference for codegen debugging). `tools/diff-oracle.sh --dir tools/diff-corpus`
 runs ~1,300 comparisons (Basis + compiler-stress + seeded LCG fuzz drivers that
 exercise BOTH the inline opcode path and the ref-forced RTS path), all
-byte-identical. **Lesson:** test every dispatch path — the PolySubtractArbitrary
+byte-identical. `tools/upstream-suite.sh [succeed|fail|all]` runs Poly/ML's OWN
+Tests/ corpus ONE PROCESS PER TEST (in-process driving dies at the first hard
+halt — deep recursion is a halt for us, upstream grows ML stacks): **278/295
+as of 2026-07-03** (POLY_REAL_THREADS=1; 277 default — Test166 needs threads),
+all 17 fails in documented-gap buckets (nonblocking/Unix sockets, FFI, Posix,
+rounding modes, weak refs, fixed ML stack, one codegen-assumption arith test).
+It found the Test166 SEGV: `PolyPollIODescriptors` was the last success-shaped
+stub (tagged 0 where the basis expects a vector; `OS.Process.sleep` =
+`poll([], t)`) — now a REAL poll(2), fenced by `os_sleep_poll.rs`. **Lesson:** test every dispatch path — the PolySubtractArbitrary
 negation bug lived in the RTS path the opcode-path fuzzing missed. The lone
 `IntInf.andb/orb` divergence is a **latent upstream stage-0 bug** we reproduce
 byte-for-byte (not ours). Full methodology + the memory-safety audits:
