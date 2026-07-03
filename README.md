@@ -251,7 +251,18 @@ principles** and machine-checked the landmark theorems by the **real LCF kernel*
 runtime, and under `POLY_PARALLEL=1` they use real cores — measured **6.5×**
 on Par_List compute and **3.2×** on parallel LCF kernel inference (six
 workers, 600k certified inferences, every theorem audited sound, GC-audit
-clean under constant collections). Fences: `isabelle_parallel.rs`.
+clean under constant collections). The showpiece: **parallel theorem
+proving** — all 144 cells of the 12×12 multiplication table derived from
+the Peano axioms by a verified LCF-style evaluator (every step a
+kernel-checked axiom instantiation; no oracle, no reflection), one
+`Par_List` future per cell: **8.0 min under the giant lock → 43.6 s
+parallel (11×; 2.7× against a churn-free single-worker baseline of
+118 s — proving is allocation-heavy, so the serial stop-the-world
+collector is the honest Amdahl bound, consistent with the kernel
+benchmark)**, every theorem audited 0-hypothesis against an
+independently-built statement, with a negative probe confirming the audit
+rejects a wrong entry. Fences: `isabelle_parallel.rs`,
+`isabelle_parallel_proving.rs`.
 The proofs are original ML-on-`Pure` (constructed via `Thm.*`/`Drule.*`/tactics),
 **not lifted** from Isabelle's `HOL-Number_Theory` or the AFP (only `Pure` itself is
 vendored, so there is nothing upstream to copy).
