@@ -261,8 +261,16 @@ parallel (11×; 2.7× against a churn-free single-worker baseline of
 collector is the honest Amdahl bound, consistent with the kernel
 benchmark)**, every theorem audited 0-hypothesis against an
 independently-built statement, with a negative probe confirming the audit
-rejects a wrong entry. Fences: `isabelle_parallel.rs`,
-`isabelle_parallel_proving.rs`.
+rejects a wrong entry. And the **Cassini lattice**: workers prove the
+Fibonacci cells `fib 0..15` in parallel, then a second parallel phase
+instantiates the *general* Cassini identity (proved by induction) at each
+of 14 overlapping windows and transports three cell theorems into it —
+deriving concrete identities like `⊢ 34·89 = 55² + 1` whose proofs run
+through the general theorem, with each window consuming cells proved by
+*different* workers. The consistency of the parallel work is itself
+kernel-checked (cells 39.7 s → 12.5 s parallel; `LATTICE_CLOSED`).
+Fences: `isabelle_parallel.rs`, `isabelle_parallel_proving.rs`,
+`isabelle_cassini_lattice.rs`.
 The proofs are original ML-on-`Pure` (constructed via `Thm.*`/`Drule.*`/tactics),
 **not lifted** from Isabelle's `HOL-Number_Theory` or the AFP (only `Pure` itself is
 vendored, so there is nothing upstream to copy).
