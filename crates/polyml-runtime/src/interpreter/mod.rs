@@ -2318,7 +2318,30 @@ impl Interpreter {
                     || (req == crate::sched::request::INTERRUPT
                         && (intbits == pflag::ASYNCH || intbits == pflag::ASYNCH_ONCE));
                 if !skip_wait {
-                    self.block_on_event();
+                    // LOST-WAKEUP FENCE (parallel): the owner can unlock —
+                    // reset the word AND bump the generation — in the window
+                    // between the SML lock-attempt failure and this block.
+                    // Sample the generation FIRST, then RE-CHECK the mutex
+                    // word: an unlock that landed entirely before the
+                    // sample shows as an unlocked word (return; the SML
+                    // loop retries the lock); one that lands after shows
+                    // as a generation bump. Either way the wait cannot
+                    // sleep through it. (Upstream's per-thread threadLock
+                    // signal has the same effect structurally.)
+                    let since = self.runtime.block_gen();
+                    let still_locked = args.get(1).is_none_or(|mutex| {
+                        if self.word0_deref_ok(*mutex) {
+                            let p = mutex.as_ptr::<PolyWord>();
+                            // SAFETY: word0_deref_ok validated word 0;
+                            // atomic read (shared heap word).
+                            unsafe { Self::heap_read(p).0 != PolyWord::tagged(0).0 }
+                        } else {
+                            true
+                        }
+                    });
+                    if still_locked {
+                        self.block_on_event_since(since);
+                    }
                 }
                 // Upstream delivers the pending asynch interrupt/kill right
                 // after MutexBlock returns, via the InterruptCode-poisoned
@@ -2358,14 +2381,26 @@ impl Interpreter {
                 if self.runtime.registry_len() <= 1 {
                     return Ok(None);
                 }
+                // LOST-WAKEUP FENCE (parallel): sample the generation
+                // BEFORE releasing the condvar's internal mutex. The SML
+                // waker must hold that mutex to mark our wait-list flag and
+                // call CondVarWake, so every wake destined for us bumps the
+                // generation AFTER this sample. We then wait past
+                // `since + 1` — our own notify below accounts for exactly
+                // one bump — so a destined wake that lands anywhere in the
+                // release→wait window makes the wait return immediately
+                // (the SML innerWait re-checks its flag; spurious returns
+                // are benign). Sampling inside block_on_event instead left
+                // a concurrent-peer window: upstream's strict-alternation
+                // condvar ping-pong (diff-corpus-threads) hung in ~100
+                // handoffs under POLY_PARALLEL.
+                let since = self.runtime.block_gen();
                 if let Some(mutex) = args.get(1) {
                     self.reset_mutex_word(*mutex)?;
                 }
                 // Wake any thread blocked (in MutexBlock) on the mutex we
                 // just released — upstream signals each such waiter's
-                // threadLock; ours re-check on the global block event. This
-                // bump happens BEFORE we sample our own wait generation, so
-                // we cannot wake ourselves with it.
+                // threadLock; ours re-check on the global block event.
                 self.runtime.notify_block_event();
                 // Upstream WaitInfinite: "Wait until we're woken up. Don't
                 // block if we have been interrupted or killed" — ANY
@@ -2380,7 +2415,7 @@ impl Interpreter {
                     .load(std::sync::atomic::Ordering::SeqCst)
                     == crate::sched::request::NONE
                 {
-                    self.block_on_event();
+                    self.block_on_event_since(since + 1);
                 }
                 // The InterruptCode-poisoned trap right after the RTS
                 // return (see the MutexBlock arm): delivers only when the
@@ -2403,7 +2438,10 @@ impl Interpreter {
                 }
                 // Atomically release the condvar's internal mutex + wake its
                 // blocked waiters, exactly as the untimed arm above
-                // (upstream WaitUntilTime has the same preamble).
+                // (upstream WaitUntilTime has the same preamble) — including
+                // the pre-release generation sample (the lost-wakeup fence;
+                // see PolyThreadCondVarWait).
+                let since = self.runtime.block_gen();
                 if let Some(mutex) = args.get(1) {
                     self.reset_mutex_word(*mutex)?;
                 }
@@ -2430,7 +2468,7 @@ impl Interpreter {
                     .load(std::sync::atomic::Ordering::SeqCst)
                     == crate::sched::request::NONE
                 {
-                    self.block_on_event_timeout(millis);
+                    self.block_on_event_timeout_since(since + 1, millis);
                 }
                 if let Some(sr) = self.process_asynch_requests()? {
                     return Ok(Some(sr));
@@ -2627,6 +2665,12 @@ impl Interpreter {
     /// SML side re-checks its own wait list either way.
     fn block_on_event_timeout(&mut self, millis: u64) {
         let since = self.runtime.block_gen();
+        self.block_on_event_timeout_since(since, millis);
+    }
+
+    /// [`Self::block_on_event_timeout`] with a caller-sampled generation
+    /// (the lost-wakeup fence — see [`Self::block_on_event_since`]).
+    fn block_on_event_timeout_since(&mut self, since: u64, millis: u64) {
         let runtime = Arc::clone(&self.runtime);
         let handle = Arc::clone(&self.handle);
         let (raw, send) = self.make_send_roots();
@@ -2652,6 +2696,17 @@ impl Interpreter {
         // Sample the event generation BEFORE releasing the lock, so a wake
         // racing in the release→wait window is not lost.
         let since = self.runtime.block_gen();
+        self.block_on_event_since(since);
+    }
+
+    /// [`Self::block_on_event`] with a CALLER-sampled generation. Under
+    /// `POLY_PARALLEL` a peer runs CONCURRENTLY with the RTS preamble that
+    /// precedes the block (e.g. CondVarWait's atomic mutex release), so
+    /// the generation must be sampled BEFORE the point at which a peer's
+    /// wake can become destined for us — sampling inside `block_on_event`
+    /// leaves a lost-wakeup window (found by the threaded differential
+    /// oracle: upstream's strict-alternation condvar ping-pong hangs).
+    fn block_on_event_since(&mut self, since: u64) {
         let runtime = Arc::clone(&self.runtime);
         let handle = Arc::clone(&self.handle);
         let (raw, send) = self.make_send_roots();

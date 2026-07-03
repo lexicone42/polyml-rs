@@ -116,6 +116,10 @@ if [ "$MODE" = "full" ]; then
     # tools/diff-corpus-gen/README.md for how to regenerate/expand).
     tools/diff-oracle.sh --dir tools/diff-corpus || \
       echo "  (differential reported divergences — expected: 2 intinf andb/orb stage-0, else investigate)"
+    # THREADED differential: deterministic threaded programs through
+    # upstream (native threads) vs ours in BOTH modes (giant lock +
+    # POLY_PARALLEL). Found the parallel condvar lost-wakeup.
+    run tools/diff-threads.sh
   else
     echo "  (skipped — build the oracle: tools/build-oracle.sh)"
   fi
