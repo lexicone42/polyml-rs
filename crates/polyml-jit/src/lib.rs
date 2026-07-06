@@ -1041,7 +1041,7 @@ pub unsafe extern "C" fn rts_trampoline(stub_word: i64, n_args: i64, args: *cons
     let mut ctx = RtsContext {
         alloc_space: interp.jit_alloc_space_mut(),
         raised_exception: None,
-            gc_requested_by_rts: false,
+        gc_requested_by_rts: false,
         rts: Some(&rts_ref),
         bootstrap_tail_call: seed_bootstrap_tail,
         safe_spaces: None,
