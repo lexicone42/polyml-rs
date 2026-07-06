@@ -2542,30 +2542,28 @@ mod socket_rts {
                 }
                 break; // in progress: wait for writability in slices
             }
-            loop {
-                match poll_readable_slices(fd, libc::POLLOUT, probe.as_ref()) {
-                    Err(e) => return restore(Err(e)),
-                    Ok(false) => return restore(Err(libc::EINTR)), // aborted
-                    Ok(true) => {}
-                }
-                // Writable: fetch the connect(2) verdict.
-                let mut soerr: libc::c_int = 0;
-                let mut slen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-                // SAFETY: valid out-params for SO_ERROR.
-                let g = unsafe {
-                    libc::getsockopt(
-                        fd,
-                        libc::SOL_SOCKET,
-                        libc::SO_ERROR,
-                        (&raw mut soerr).cast::<libc::c_void>(),
-                        &raw mut slen,
-                    )
-                };
-                if g < 0 {
-                    return restore(Err(last_errno()));
-                }
-                return restore(if soerr == 0 { Ok(()) } else { Err(soerr) });
+            match poll_readable_slices(fd, libc::POLLOUT, probe.as_ref()) {
+                Err(e) => return restore(Err(e)),
+                Ok(false) => return restore(Err(libc::EINTR)), // aborted
+                Ok(true) => {}
             }
+            // Writable: fetch the connect(2) verdict.
+            let mut soerr: libc::c_int = 0;
+            let mut slen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: valid out-params for SO_ERROR.
+            let g = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_ERROR,
+                    (&raw mut soerr).cast::<libc::c_void>(),
+                    &raw mut slen,
+                )
+            };
+            if g < 0 {
+                return restore(Err(last_errno()));
+            }
+            restore(if soerr == 0 { Ok(()) } else { Err(soerr) })
         });
         match res {
             Ok(()) => PolyWord::tagged(0),
