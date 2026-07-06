@@ -4961,8 +4961,20 @@ impl Interpreter {
                 // (registry_len <= 1), so the floor is unaffected.
                 self.cooperative_yield();
             }
-            steps += 1;
-            match self.step_impl::<INSTR>() {
+            // BURST: run instructions inside ONE function frame up to the
+            // next safepoint boundary (or max_steps). The per-call
+            // architecture reloaded ALL hot interpreter state (pc, sp,
+            // code bounds, stack base) from `self` memory at EVERY
+            // instruction — `step_burst` inlines the step body once into
+            // its loop, so LLVM keeps that state in registers ACROSS
+            // instructions. The quota stops exactly at the 65536 boundary,
+            // so the safepoint cadence (and every observable step count)
+            // is byte-identical to the per-call loop.
+            #[allow(clippy::cast_possible_truncation)]
+            let quota = (0x10000 - (steps & 0xFFFF)).min(max_steps - steps) as u32;
+            let (did, r) = self.step_burst::<INSTR>(quota);
+            steps += u64::from(did);
+            match r {
                 Ok(StepResult::Continue) => {}
                 Ok(other) => return (steps, Ok(other)),
                 Err(e) => return (steps, Err(e)),
@@ -4970,12 +4982,462 @@ impl Interpreter {
         }
     }
 
+    /// Would the auto-GC trigger fire right now? (The fast tier gates on
+    /// this ONCE per run: its opcodes never allocate, so the condition
+    /// cannot newly arise inside the tier.)
+    #[inline]
+    fn gc_trigger_met(&self) -> bool {
+        self.gc_trigger_words > 0
+            && self
+                .alloc_space_ref()
+                .is_some_and(|s| s.used_words() >= self.gc_trigger_words)
+    }
+
+    /// Execute up to `quota` instructions inside one frame (see the burst
+    /// note in `run_until_impl`). Returns how many instructions were
+    /// executed and the first non-`Continue` outcome (if any).
+    ///
+    /// ## The FAST TIER
+    ///
+    /// The hottest opcodes (~half of all dynamic steps: local pushes,
+    /// small constants, stack resets, byte jumps) are pure register
+    /// machine work — no allocation, no calls, no raising. The per-call
+    /// architecture made every one of them pay a `step_one` call plus a
+    /// reload of pc/sp/bounds from `self` memory, PLUS the per-step
+    /// finish-flag and GC-trigger checks. The tier runs them from LOCAL
+    /// variables (pc, sp, stack base, code bounds), committing back to
+    /// `self` when it exits.
+    ///
+    /// Soundness containment:
+    /// - Entry gates: skipped entirely under `INSTR` (per-step
+    ///   diagnostics semantics), when PolyFinish is pending, or when the
+    ///   GC trigger is already met — and fast ops cannot make any of
+    ///   those newly true.
+    /// - REPLAY discipline: every arm validates against the locals and
+    ///   commits only on full success; on any fault (bounds, underflow,
+    ///   unknown opcode) it breaks with pc/sp still at the instruction
+    ///   START, and the general `step_one` re-executes that instruction,
+    ///   raising the canonical error — byte-identical error behavior.
+    /// - The stack is a fixed `Box<[PolyWord]>` (never reallocates), so
+    ///   the cached base pointer is stable; sp moves only via the same
+    ///   checked arithmetic the primitives use.
+    #[allow(clippy::inline_always)]
+    #[allow(clippy::too_many_lines)]
+    fn step_burst<const INSTR: bool>(
+        &mut self,
+        quota: u32,
+    ) -> (u32, Result<StepResult, InterpError>) {
+        use opcodes::{
+            INSTR_CALL_CONST_ADDR8_0, INSTR_CONST_0, INSTR_CONST_1, INSTR_CONST_2,
+            INSTR_CONST_INT_B, INSTR_EQUAL_WORD, INSTR_FIXED_ADD, INSTR_FIXED_SUB,
+            INSTR_INDIRECT_LOCAL_B0, INSTR_INDIRECT_LOCAL_B1, INSTR_JUMP_BACK8,
+            INSTR_JUMP_NEQ_LOCAL, INSTR_JUMP8, INSTR_JUMP8_FALSE, INSTR_LESS_EQ_UNSIGNED,
+            INSTR_LESS_SIGNED, INSTR_LOCAL_0, INSTR_LOCAL_7, INSTR_LOCAL_B, INSTR_RESET_1,
+            INSTR_RESET_R_2, INSTR_RETURN_1, INSTR_SET_STACK_VAL_B, INSTR_WORD_ADD,
+        };
+        let mut done = 0u32;
+        while done < quota {
+            if !INSTR
+                && !self.untrusted
+                && crate::rts::finish_requested().is_none()
+                && !self.gc_trigger_met()
+                && !self.code_start.is_null()
+            {
+                // ---- FAST TIER (locals) ----
+                let mut pc = self.pc;
+                let mut sp = self.sp;
+                let mut code_start = self.code_start;
+                let mut code_end = self.code_end;
+                let base: *mut PolyWord = self.stack.as_mut_ptr();
+                let stack_len = self.stack.len();
+                while done < quota {
+                    if pc >= code_end {
+                        break; // fault → replay on the general path
+                    }
+                    // SAFETY: pc < code_end (live code bytes).
+                    let op = unsafe { *pc };
+                    match op {
+                        INSTR_CONST_0 | INSTR_CONST_1 | INSTR_CONST_2 => {
+                            if sp == 0 {
+                                break;
+                            }
+                            sp -= 1;
+                            // SAFETY: sp < stack_len (checked non-zero, decremented).
+                            unsafe {
+                                *base.add(sp) = PolyWord::tagged((op - INSTR_CONST_0) as isize);
+                            }
+                            // SAFETY: pc+1 <= code_end.
+                            pc = unsafe { pc.add(1) };
+                        }
+                        INSTR_CONST_INT_B => {
+                            // SAFETY GATE: operand byte must be in bounds.
+                            if unsafe { pc.add(1) } >= code_end || sp == 0 {
+                                break;
+                            }
+                            // SAFETY: pc+1 < code_end checked.
+                            let b = unsafe { *pc.add(1) };
+                            sp -= 1;
+                            // SAFETY: sp < stack_len.
+                            unsafe {
+                                *base.add(sp) = PolyWord::tagged(isize::from(b));
+                            }
+                            // SAFETY: pc+2 <= code_end.
+                            pc = unsafe { pc.add(2) };
+                        }
+                        INSTR_LOCAL_0..=INSTR_LOCAL_7 => {
+                            let depth = (op - INSTR_LOCAL_0) as usize;
+                            let idx = sp + depth;
+                            if idx >= stack_len || sp == 0 {
+                                break;
+                            }
+                            // SAFETY: idx < stack_len; sp-1 < stack_len.
+                            unsafe {
+                                let v = *base.add(idx);
+                                sp -= 1;
+                                *base.add(sp) = v;
+                            }
+                            // SAFETY: pc+1 <= code_end.
+                            pc = unsafe { pc.add(1) };
+                        }
+                        INSTR_RESET_1 => {
+                            if sp + 1 > stack_len {
+                                break;
+                            }
+                            sp += 1;
+                            // SAFETY: pc+1 <= code_end.
+                            pc = unsafe { pc.add(1) };
+                        }
+                        INSTR_JUMP8 => {
+                            if unsafe { pc.add(1) } >= code_end {
+                                break;
+                            }
+                            // SAFETY: pc+1 < code_end.
+                            let off = unsafe { *pc.add(1) } as usize;
+                            // fetch advanced past the operand, then offset.
+                            // SAFETY: pointer arithmetic within/one-past the
+                            // code object, validated below.
+                            let new_pc = unsafe { pc.add(2 + off) };
+                            if new_pc < code_start || new_pc >= code_end {
+                                break; // replay → canonical PcOutOfBounds
+                            }
+                            pc = new_pc;
+                        }
+                        INSTR_JUMP8_FALSE => {
+                            if unsafe { pc.add(1) } >= code_end || sp >= stack_len {
+                                break;
+                            }
+                            // SAFETY: pc+1 < code_end; sp < stack_len.
+                            let off = unsafe { *pc.add(1) } as usize;
+                            let v = unsafe { *base.add(sp) };
+                            let taken_pc = unsafe { pc.add(2 + off) };
+                            let fall_pc = unsafe { pc.add(2) };
+                            if v == PolyWord::tagged(0) {
+                                if taken_pc < code_start || taken_pc >= code_end {
+                                    break;
+                                }
+                                sp += 1;
+                                pc = taken_pc;
+                            } else {
+                                sp += 1;
+                                pc = fall_pc;
+                            }
+                        }
+                        INSTR_SET_STACK_VAL_B => {
+                            if unsafe { pc.add(1) } >= code_end || sp >= stack_len {
+                                break;
+                            }
+                            // SAFETY: pc+1 < code_end.
+                            let idx = unsafe { *pc.add(1) } as usize;
+                            if idx == 0 {
+                                break; // replay → canonical StackUnderflow
+                            }
+                            // pop, then write sp[idx-1] with the popped sp.
+                            let target = sp + 1 + (idx - 1);
+                            if target >= stack_len {
+                                break;
+                            }
+                            // SAFETY: sp < stack_len; target < stack_len.
+                            unsafe {
+                                let u = *base.add(sp);
+                                *base.add(target) = u;
+                            }
+                            sp += 1;
+                            // SAFETY: pc+2 <= code_end.
+                            pc = unsafe { pc.add(2) };
+                        }
+                        INSTR_JUMP_BACK8 => {
+                            if unsafe { pc.add(1) } >= code_end {
+                                break;
+                            }
+                            // SAFETY: pc+1 < code_end. new_pc = (pc+2) −
+                            // (off+2) = pc − off (see the general arm's
+                            // derivation).
+                            let off = unsafe { *pc.add(1) } as usize;
+                            let new_pc = (pc as usize).wrapping_sub(off) as *const u8;
+                            if new_pc < code_start || new_pc >= code_end {
+                                break; // replay → canonical PcOutOfBounds
+                            }
+                            pc = new_pc;
+                        }
+                        INSTR_JUMP_NEQ_LOCAL => {
+                            // Operands: depth, want, off at pc+1..=pc+3.
+                            if unsafe { pc.add(3) } >= code_end {
+                                break;
+                            }
+                            // SAFETY: pc+1..pc+3 < code_end.
+                            let (depth, want, off) =
+                                unsafe { (*pc.add(1) as usize, *pc.add(2), *pc.add(3) as usize) };
+                            let idx = sp + depth;
+                            if idx >= stack_len {
+                                break;
+                            }
+                            // SAFETY: idx < stack_len.
+                            let u = unsafe { *base.add(idx) };
+                            if u.is_tagged() && u.untag() == isize::from(want) {
+                                // equal → fall through
+                                // SAFETY: pc+4 <= code_end.
+                                pc = unsafe { pc.add(4) };
+                            } else {
+                                // SAFETY: arithmetic validated below.
+                                let new_pc = unsafe { pc.add(4 + off) };
+                                if new_pc < code_start || new_pc >= code_end {
+                                    break;
+                                }
+                                pc = new_pc;
+                            }
+                        }
+                        INSTR_FIXED_SUB | INSTR_FIXED_ADD => {
+                            // pop x, pop y, push tagged(y∓x); overflow →
+                            // replay (the general arm raises SML Overflow).
+                            if sp + 1 >= stack_len {
+                                break;
+                            }
+                            // SAFETY: sp, sp+1 < stack_len.
+                            let (x, y) = unsafe { (*base.add(sp), *base.add(sp + 1)) };
+                            let t = if op == INSTR_FIXED_SUB {
+                                (y.untag() as i128) - (x.untag() as i128)
+                            } else {
+                                (x.untag() as i128) + (y.untag() as i128)
+                            };
+                            if t < crate::poly_word::MIN_TAGGED as i128
+                                || t > crate::poly_word::MAX_TAGGED as i128
+                            {
+                                break; // overflow → replay raises
+                            }
+                            sp += 1;
+                            // SAFETY: sp < stack_len.
+                            #[allow(clippy::cast_possible_truncation)]
+                            unsafe {
+                                *base.add(sp) = PolyWord::tagged(t as isize);
+                            }
+                            // SAFETY: pc+1 <= code_end.
+                            pc = unsafe { pc.add(1) };
+                        }
+                        INSTR_LESS_SIGNED => {
+                            // pop x, pop y, push tagged(y < x) — raw-word
+                            // signed compare, exactly `bin_op_cmp`.
+                            if sp + 1 >= stack_len {
+                                break;
+                            }
+                            // SAFETY: sp, sp+1 < stack_len.
+                            let (x, y) = unsafe { (*base.add(sp), *base.add(sp + 1)) };
+                            sp += 1;
+                            // SAFETY: sp < stack_len.
+                            unsafe {
+                                *base.add(sp) =
+                                    PolyWord::tagged(isize::from((y.0 as isize) < (x.0 as isize)));
+                            }
+                            // SAFETY: pc+1 <= code_end.
+                            pc = unsafe { pc.add(1) };
+                        }
+                        INSTR_RESET_R_2 => {
+                            // pop top, drop 2, push top back (`reset(2)`).
+                            let new_sp = sp + 2;
+                            if new_sp >= stack_len {
+                                break;
+                            }
+                            // SAFETY: sp < new_sp < stack_len.
+                            unsafe {
+                                let top = *base.add(sp);
+                                *base.add(new_sp) = top;
+                            }
+                            sp = new_sp;
+                            // SAFETY: pc+1 <= code_end.
+                            pc = unsafe { pc.add(1) };
+                        }
+                        INSTR_CALL_CONST_ADDR8_0 => {
+                            // Frontier op: SYNC → the proven general-path
+                            // helpers → RELOAD (the call switches code
+                            // objects, so code bounds change; it touches
+                            // only the ML stack + frames — no allocation,
+                            // no GC/finish state change — so no re-gating
+                            // is needed).
+                            if unsafe { pc.add(1) } >= code_end {
+                                break;
+                            }
+                            // SAFETY: pc+1 < code_end.
+                            let imm = unsafe { *pc.add(1) } as usize;
+                            self.pc = unsafe { pc.add(2) };
+                            self.sp = sp;
+                            done += 1;
+                            // SAFETY: same contract as the general arm
+                            // (read_pc_const validates in untrusted mode).
+                            let call = unsafe { self.read_pc_const(imm, 3) }
+                                .and_then(|closure| self.do_call(closure));
+                            if let Err(e) = call {
+                                return (done, Err(e));
+                            }
+                            pc = self.pc;
+                            sp = self.sp;
+                            code_start = self.code_start;
+                            code_end = self.code_end;
+                            if code_start.is_null() {
+                                break;
+                            }
+                            continue;
+                        }
+                        INSTR_RETURN_1 => {
+                            // Frontier op: sync → do_return(1) → reload
+                            // (returns restore the caller's code bounds).
+                            self.pc = unsafe { pc.add(1) };
+                            self.sp = sp;
+                            done += 1;
+                            match self.do_return(1) {
+                                Ok(StepResult::Continue) => {}
+                                other => return (done, other),
+                            }
+                            pc = self.pc;
+                            sp = self.sp;
+                            code_start = self.code_start;
+                            code_end = self.code_end;
+                            if code_start.is_null() {
+                                break;
+                            }
+                            continue;
+                        }
+                        INSTR_LOCAL_B => {
+                            // Operand-depth local push (`dup_local(b)`).
+                            if unsafe { pc.add(1) } >= code_end || sp == 0 {
+                                break;
+                            }
+                            // SAFETY: pc+1 < code_end.
+                            let depth = unsafe { *pc.add(1) } as usize;
+                            let idx = sp + depth;
+                            if idx >= stack_len {
+                                break;
+                            }
+                            // SAFETY: idx < stack_len; sp-1 < stack_len.
+                            unsafe {
+                                let v = *base.add(idx);
+                                sp -= 1;
+                                *base.add(sp) = v;
+                            }
+                            // SAFETY: pc+2 <= code_end.
+                            pc = unsafe { pc.add(2) };
+                        }
+                        INSTR_INDIRECT_LOCAL_B0 | INSTR_INDIRECT_LOCAL_B1 => {
+                            // push local[depth]'s heap word 0/1 (TRUSTED
+                            // path only — the tier gate excludes untrusted
+                            // mode, whose validation must not be bypassed).
+                            if unsafe { pc.add(1) } >= code_end || sp == 0 {
+                                break;
+                            }
+                            // SAFETY: pc+1 < code_end.
+                            let depth = unsafe { *pc.add(1) } as usize;
+                            let idx = sp + depth;
+                            if idx >= stack_len {
+                                break;
+                            }
+                            // SAFETY: idx < stack_len.
+                            let u = unsafe { *base.add(idx) };
+                            if u.is_tagged() {
+                                break; // not a pointer → replay (canonical fault)
+                            }
+                            let field = usize::from(op == INSTR_INDIRECT_LOCAL_B1);
+                            let p = u.as_ptr::<PolyWord>();
+                            // SAFETY: trusted mode; caller emitted a valid
+                            // object reference (same contract as the
+                            // general arm); atomic heap read.
+                            let val = unsafe { Self::heap_read(p.add(field)) };
+                            sp -= 1;
+                            // SAFETY: sp < stack_len.
+                            unsafe {
+                                *base.add(sp) = val;
+                            }
+                            // SAFETY: pc+2 <= code_end.
+                            pc = unsafe { pc.add(2) };
+                        }
+                        INSTR_EQUAL_WORD | INSTR_LESS_EQ_UNSIGNED => {
+                            if sp + 1 >= stack_len {
+                                break;
+                            }
+                            // SAFETY: sp, sp+1 < stack_len.
+                            let (x, y) = unsafe { (*base.add(sp), *base.add(sp + 1)) };
+                            let b = if op == INSTR_EQUAL_WORD {
+                                x.0 == y.0
+                            } else {
+                                y.0 <= x.0
+                            };
+                            sp += 1;
+                            // SAFETY: sp < stack_len.
+                            unsafe {
+                                *base.add(sp) = PolyWord::tagged(isize::from(b));
+                            }
+                            // SAFETY: pc+1 <= code_end.
+                            pc = unsafe { pc.add(1) };
+                        }
+                        INSTR_WORD_ADD => {
+                            // Tagged word add: y + x − TAG (`bin_op_word`).
+                            if sp + 1 >= stack_len {
+                                break;
+                            }
+                            // SAFETY: sp, sp+1 < stack_len.
+                            let (x, y) = unsafe { (*base.add(sp), *base.add(sp + 1)) };
+                            let r = y.0.wrapping_add(x.0).wrapping_sub(PolyWord::tagged(0).0);
+                            sp += 1;
+                            // SAFETY: sp < stack_len.
+                            unsafe {
+                                *base.add(sp) = PolyWord::from_bits(r);
+                            }
+                            // SAFETY: pc+1 <= code_end.
+                            pc = unsafe { pc.add(1) };
+                        }
+                        _ => break, // non-fast opcode → general path
+                    }
+                    done += 1;
+                }
+                self.pc = pc;
+                self.sp = sp;
+                if done >= quota {
+                    break;
+                }
+            }
+            // One general step (the instruction the tier declined, or the
+            // INSTR/finish/GC-gated mode).
+            done += 1;
+            match self.step_one::<INSTR>() {
+                Ok(StepResult::Continue) => {}
+                other => return (done, other),
+            }
+        }
+        (done, Ok(StepResult::Continue))
+    }
+
+    /// Execute a single instruction (the out-of-line entry used by the
+    /// CLI `step()` drivers, the JIT bridge, and the diff harness; the
+    /// hot loop goes through [`Self::step_burst`], which inlines
+    /// [`Self::step_one`]'s body directly into its loop).
+    fn step_impl<const INSTR: bool>(&mut self) -> Result<StepResult, InterpError> {
+        self.step_one::<INSTR>()
+    }
+
     /// Execute a single instruction. `INSTR` selects the instrumented path
     /// (per-step RTS-trace ring, diagnostics counters, RTS step trace); when
     /// `false` those branches vanish at monomorphisation.
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::wildcard_imports)]
-    fn step_impl<const INSTR: bool>(&mut self) -> Result<StepResult, InterpError> {
+    #[inline(always)]
+    fn step_one<const INSTR: bool>(&mut self) -> Result<StepResult, InterpError> {
         use opcodes::*;
 
         // If PolyFinish was just called, halt cleanly with the
