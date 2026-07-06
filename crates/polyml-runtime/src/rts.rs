@@ -148,6 +148,11 @@ pub struct RtsContext<'a> {
     /// instead of returning normally. Read by the dispatch site
     /// (`Interpreter::rts_call`) which routes to RAISE_EXCEPTION.
     pub raised_exception: Option<PolyWord>,
+    /// Set by `PolyFullGC`: the dispatch site runs a synchronous
+    /// stop-the-world collection after the call returns (the RTS fn
+    /// itself cannot reach the interpreter's GC machinery). Same
+    /// flow-a-flag-through-the-context pattern as `raised_exception`.
+    pub gc_requested_by_rts: bool,
     /// Borrowed reference to the RTS table itself, so an RTS
     /// function like `PolyCreateEntryPointObject` can look up
     /// other RTS names to build runtime entry-point objects.
@@ -1243,7 +1248,17 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyGetEnvironment",
         RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
     );
-    t.register("PolyFullGC", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // REAL full GC: sets the context flag; the dispatch site
+    // (`Interpreter::rts_call`) runs a synchronous stop-the-world
+    // collection after this call returns — so the very next SML
+    // instruction observes the post-GC world (Weak refs demoted, etc.).
+    t.register(
+        "PolyFullGC",
+        RtsFn::Arity1(|ctx, _| {
+            ctx.gc_requested_by_rts = true;
+            PolyWord::tagged(0)
+        }),
+    );
     t.register(
         "PolyGetLocalStats",
         RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
@@ -4162,6 +4177,7 @@ fn arb_via_bigint(
     let mut ctx = RtsContext {
         alloc_space: alloc,
         raised_exception: None,
+        gc_requested_by_rts: false,
         rts: None,
         bootstrap_tail_call: PolyWord::ZERO,
         safe_spaces: None,
@@ -6933,6 +6949,7 @@ mod tests {
         let mut ctx = RtsContext {
             alloc_space: None,
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -6965,6 +6982,7 @@ mod tests {
         RtsContext {
             alloc_space: None,
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7246,6 +7264,7 @@ mod tests {
         let mut ctx = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7312,6 +7331,7 @@ mod tests {
         let mut c = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7345,6 +7365,7 @@ mod tests {
         let mut c = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7387,6 +7408,7 @@ mod tests {
         let mut c = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7461,6 +7483,7 @@ mod tests {
         let mut c = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7540,6 +7563,7 @@ mod tests {
         let mut c = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7582,6 +7606,7 @@ mod tests {
         let mut c = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7604,6 +7629,7 @@ mod tests {
         let mut c = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7648,6 +7674,7 @@ mod tests {
         let mut c = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7755,6 +7782,7 @@ mod tests {
         let mut c = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7774,6 +7802,7 @@ mod tests {
         let mut c = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7827,6 +7856,7 @@ mod tests {
         let mut ctx = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7852,6 +7882,7 @@ mod tests {
         let mut ctx = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,
@@ -7873,6 +7904,7 @@ mod tests {
         let mut ctx = RtsContext {
             alloc_space: Some(&mut space),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: None,
             bootstrap_tail_call: PolyWord::ZERO,
             safe_spaces: None,

@@ -220,10 +220,18 @@ runs ~1,300 comparisons (Basis + compiler-stress + seeded LCG fuzz drivers that
 exercise BOTH the inline opcode path and the ref-forced RTS path), all
 byte-identical. `tools/upstream-suite.sh [succeed|fail|all]` runs Poly/ML's OWN
 Tests/ corpus ONE PROCESS PER TEST (in-process driving dies at the first hard
-halt — deep recursion is a halt for us, upstream grows ML stacks): **278/295
-as of 2026-07-03** (POLY_REAL_THREADS=1; 277 default — Test166 needs threads),
-all 17 fails in documented-gap buckets (nonblocking/Unix sockets, FFI, Posix,
-rounding modes, weak refs, fixed ML stack, one codegen-assumption arith test).
+halt — deep recursion is a halt for us, upstream grows ML stacks): **279/295
+as of 2026-07-06** (POLY_REAL_THREADS=1; 278 default — Test166 needs threads),
+all 16 fails in documented-gap buckets (nonblocking/Unix sockets + DNS, FFI,
+Posix, rounding modes, fixed ML stack, one codegen-assumption arith test).
+Test120 flipped 2026-07-06: **weak refs are REAL** (`Weak.weak`/`weakArray`
+demote dead entries to NONE; `gc.rs::weak_fixup` ports upstream
+`gc_check_weak_ref.cpp` to the copying GC — weak slots skipped by BOTH scan
+paths, post-trace fixup forwards survivors/demotes dead, shared SOME cells
+dedup via tombstone) and **`PolyML.fullGC` is REAL** (synchronous STW collect
+at the RTS boundary via `RtsContext::gc_requested_by_rts`). Fenced by
+`weak_refs.rs` (serial + parallel GC) + a gc.rs unit case-matrix. NB: never
+run the suite while the chain is running — it reads `polyexport` mid-rewrite.
 It found the Test166 SEGV: `PolyPollIODescriptors` was the last success-shaped
 stub (tagged 0 where the basis expects a vector; `OS.Process.sleep` =
 `poll([], t)`) — now a REAL poll(2), fenced by `os_sleep_poll.rs`. **Lesson:** test every dispatch path — the PolySubtractArbitrary

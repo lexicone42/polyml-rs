@@ -3314,9 +3314,20 @@ impl Interpreter {
                             }
                         }
                         _ => {
-                            // Ordinary word object.
-                            for k in 0..n {
-                                unsafe { c.forward(body.add(k)) };
+                            // WEAK image-mutable object: slots are weak
+                            // links — register for the post-trace fixup
+                            // instead of strongly forwarding (upstream
+                            // scans permanent-mutable weak areas in
+                            // gc_check_weak_ref.cpp::ScanAreas).
+                            if (crate::length_word::flags_of(lw) & crate::length_word::F_WEAK_BIT)
+                                != 0
+                            {
+                                c.register_weak(body as usize);
+                            } else {
+                                // Ordinary word object.
+                                for k in 0..n {
+                                    unsafe { c.forward(body.add(k)) };
+                                }
                             }
                         }
                     }
@@ -8029,6 +8040,7 @@ impl Interpreter {
         let mut ctx = crate::rts::RtsContext {
             alloc_space: self.alloc_space_mut(),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: Some(&rts_ref),
             // The typed-FP fast-call path never dispatches
             // `PolyEndBootstrapMode`, so the slot stays ZERO (unused).
@@ -8438,6 +8450,7 @@ impl Interpreter {
                 let mut ctx = crate::rts::RtsContext {
                     alloc_space: self.alloc_space_mut(),
                     raised_exception: None,
+                    gc_requested_by_rts: false,
                     rts: None,
                     bootstrap_tail_call: PolyWord::ZERO,
                     safe_spaces: None,
@@ -8515,6 +8528,7 @@ impl Interpreter {
         let mut ctx = RtsContext {
             alloc_space: self.alloc_space_mut(),
             raised_exception: None,
+            gc_requested_by_rts: false,
             rts: Some(&rts_ref),
             // Seed the per-thread bootstrap tail-call slot from this
             // interpreter's field. `PolyEndBootstrapMode` writes it back
@@ -8534,6 +8548,7 @@ impl Interpreter {
         // Read the per-thread bootstrap tail-call slot back into the
         // interpreter field before we drop `ctx` (it borrows `self`).
         let raised = ctx.raised_exception;
+        let gc_requested = ctx.gc_requested_by_rts;
         self.bootstrap_tail_call = ctx.bootstrap_tail_call;
         // Disarm the blocking-syscall park (frees the roots box if the call
         // never parked; no-op if it parked, or single-threaded).
@@ -8600,7 +8615,15 @@ impl Interpreter {
             self.do_call(fn_closure)?;
             return Ok(StepResult::Continue);
         }
-        self.push_continue(result)
+        let r = self.push_continue(result);
+        if gc_requested {
+            // PolyFullGC: collect NOW, synchronously — after the (unit)
+            // result is pushed and rooted, at an instruction boundary.
+            // Waiting for the 65536-step safepoint would let the caller
+            // read a weak ref BEFORE the collection it just requested.
+            let _ = self.request_gc_collect();
+        }
+        r
     }
 
     /// Common RAISE_EX path, also reachable from an RTS-raised
@@ -8642,6 +8665,7 @@ impl Interpreter {
             let mut ctx = crate::rts::RtsContext {
                 alloc_space: self.alloc_space_mut(),
                 raised_exception: None,
+                gc_requested_by_rts: false,
                 rts: None,
                 bootstrap_tail_call: PolyWord::ZERO,
                 safe_spaces: None,
@@ -8663,6 +8687,7 @@ impl Interpreter {
             let mut ctx = crate::rts::RtsContext {
                 alloc_space: self.alloc_space_mut(),
                 raised_exception: None,
+                gc_requested_by_rts: false,
                 rts: None,
                 bootstrap_tail_call: PolyWord::ZERO,
                 safe_spaces: None,

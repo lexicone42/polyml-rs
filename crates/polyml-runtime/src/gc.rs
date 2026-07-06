@@ -53,8 +53,8 @@
 #![allow(dead_code)]
 
 use crate::length_word::{
-    self, F_BYTE_OBJ, F_CLOSURE_OBJ, F_CODE_OBJ, F_TOMBSTONE_BIT, FLAGS_SHIFT, flags_of, length_of,
-    type_of,
+    self, F_BYTE_OBJ, F_CLOSURE_OBJ, F_CODE_OBJ, F_TOMBSTONE_BIT, F_WEAK_BIT, FLAGS_SHIFT,
+    flags_of, length_of, type_of,
 };
 use crate::poly_word::PolyWord;
 use crate::space::MemorySpace;
@@ -88,6 +88,12 @@ pub struct Collector<'a> {
     /// Per-range starting bit index into `start_bits` (parallel to
     /// `from_ranges`).
     range_bit_base: Vec<usize>,
+    /// Weak objects (F_WEAK_BIT word objects) registered during the scan:
+    /// their slots are NOT traced (that is what makes them weak); the
+    /// post-trace `weak_fixup` forwards surviving SOME cells and demotes
+    /// dead entries to NONE. Entries are BODY addresses — to-space bodies
+    /// for copied weak objects, permanent bodies for image-mutable ones.
+    pub weak_objects: Vec<usize>,
     /// Addresses that fell in from-space but didn't match any tracked
     /// object — usually a pre-pass bug. Logged at end of collect.
     untracked_addrs: Vec<usize>,
@@ -119,6 +125,14 @@ impl<'a> Collector<'a> {
 
     fn contains_raw_ptr(&self, p: *const u8) -> bool {
         self.in_from_space(p as usize)
+    }
+
+    /// Register a WEAK object (body address) for the post-trace fixup
+    /// instead of tracing its slots. Used by the image-mutable root scan
+    /// for permanent weak objects; copied weak objects self-register in
+    /// `scan_object`.
+    pub fn register_weak(&mut self, body: usize) {
+        self.weak_objects.push(body);
     }
 
     /// Forward (or read forwarding pointer of) the object pointed to
@@ -338,9 +352,125 @@ impl<'a> Collector<'a> {
                 }
             }
             _ => {
+                // WEAK word object (Weak.weak / weakArray, alloc flags
+                // 0wx60): its slots are exactly the weak links — do NOT
+                // trace them (tracing is what keeps referents alive).
+                // Register for the post-trace `weak_fixup`, which forwards
+                // surviving SOME cells and demotes dead entries to NONE.
+                // Weak BYTE cells fall into the byte arm above (ignored),
+                // matching upstream gc_check_weak_ref.cpp.
+                if (flags_of(lw) & F_WEAK_BIT) != 0 {
+                    self.weak_objects.push(obj_ptr as usize);
+                    return;
+                }
                 // Ordinary word object: every body word is a PolyWord.
                 for i in 0..n_words {
                     unsafe { self.forward(obj_ptr.add(i)) };
+                }
+            }
+        }
+    }
+
+    /// Post-trace weak-reference fixup — the copying-GC port of upstream
+    /// `gc_check_weak_ref.cpp` (runs between mark and update phases there;
+    /// after the strong trace reaches its fixpoint here). For every slot
+    /// of every registered weak object:
+    /// - tagged (NONE) or non-from-space SOME with permanent ref: keep;
+    /// - SOME strongly forwarded elsewhere: point at that copy (its ref
+    ///   was strongly traced through it — same result as upstream, where
+    ///   a marked SOME implies a marked ref);
+    /// - weak-only SOME whose inner ref survived (tombstoned or
+    ///   permanent): copy the 1-word SOME cell now (never scanned — its
+    ///   single slot is final) and tombstone the original, so a SOME cell
+    ///   shared by several weak slots gets ONE copy;
+    /// - inner ref dead: slot := TAGGED(0) (NONE) and the from-space SOME
+    ///   content := TAGGED(0) — upstream's "for safety" overwrite, which
+    ///   is exactly what makes the shared-SOME case converge (a later
+    ///   visitor sees the tagged content and demotes too).
+    /// A slot pointing at anything that is not a 1-word word object is
+    /// demoted to NONE: upstream asserts there (UB in release); we define
+    /// the total behavior, and never leave a from-space pointer behind.
+    ///
+    /// # Safety
+    /// Must run after the strong trace completed (serial cheney_scan or
+    /// the parallel drain), before promote. Single-threaded.
+    unsafe fn weak_fixup(&mut self) {
+        const TOMB: usize = (F_TOMBSTONE_BIT as usize) << FLAGS_SHIFT;
+        let weak_objs = std::mem::take(&mut self.weak_objects);
+        for body in weak_objs {
+            let n = length_of(unsafe { *(body as *const PolyWord).sub(1) });
+            for i in 0..n {
+                let slot = (body as *mut PolyWord).wrapping_add(i);
+                let w = unsafe { *slot };
+                if w.is_tagged() {
+                    continue;
+                }
+                let some_addr = w.0;
+                if !self.in_from_space(some_addr) {
+                    // Permanent SOME cell: its CONTENT may still be a
+                    // dying local ref (upstream scans permanent-mutable
+                    // weak areas for exactly this).
+                    let ref_w = unsafe { *(some_addr as *const PolyWord) };
+                    if ref_w.is_tagged() {
+                        // Safety-overwritten earlier this pass (shared).
+                        unsafe { slot.write(PolyWord::tagged(0)) };
+                    } else if self.in_from_space(ref_w.0) {
+                        let ref_hdr = unsafe { *(ref_w.0 as *const PolyWord).sub(1) };
+                        if (flags_of(ref_hdr) & F_TOMBSTONE_BIT) != 0 {
+                            let fwd = ref_hdr.0 & !TOMB;
+                            unsafe {
+                                (some_addr as *mut PolyWord).write(PolyWord::from_bits(fwd));
+                            }
+                        } else {
+                            unsafe {
+                                (some_addr as *mut PolyWord).write(PolyWord::tagged(0));
+                                slot.write(PolyWord::tagged(0));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let some_hdr = unsafe { *(some_addr as *const PolyWord).sub(1) };
+                if (flags_of(some_hdr) & F_TOMBSTONE_BIT) != 0 {
+                    // Strongly copied (and strongly scanned) elsewhere.
+                    unsafe { slot.write(PolyWord::from_bits(some_hdr.0 & !TOMB)) };
+                    continue;
+                }
+                if length_of(some_hdr) != 1 || type_of(some_hdr) != 0 {
+                    unsafe { slot.write(PolyWord::tagged(0)) };
+                    continue;
+                }
+                let ref_w = unsafe { *(some_addr as *const PolyWord) };
+                if ref_w.is_tagged() {
+                    unsafe { slot.write(PolyWord::tagged(0)) };
+                    continue;
+                }
+                let new_ref = if self.in_from_space(ref_w.0) {
+                    let ref_hdr = unsafe { *(ref_w.0 as *const PolyWord).sub(1) };
+                    if (flags_of(ref_hdr) & F_TOMBSTONE_BIT) != 0 {
+                        PolyWord::from_bits(ref_hdr.0 & !TOMB)
+                    } else {
+                        // Dead ref: NONE + the safety overwrite.
+                        unsafe {
+                            (some_addr as *mut PolyWord).write(PolyWord::tagged(0));
+                            slot.write(PolyWord::tagged(0));
+                        }
+                        continue;
+                    }
+                } else {
+                    ref_w // permanent ref — always reachable
+                };
+                // Survivor: copy the SOME cell, tombstone the original.
+                let to_ptr = self.bump_to(1);
+                unsafe {
+                    to_ptr
+                        .sub(1)
+                        .write(length_word::make_length_word(1, flags_of(some_hdr)));
+                    to_ptr.write(new_ref);
+                    (some_addr as *mut PolyWord)
+                        .sub(1)
+                        .write(PolyWord::from_bits((to_ptr as usize) | TOMB));
+                    slot.write(PolyWord::from_bits(to_ptr as usize));
                 }
             }
         }
@@ -469,6 +599,10 @@ mod par {
         pub untracked: Mutex<Vec<usize>>,
         /// POLYML_GC_PAR_STATS=1: per-worker breakdown on stderr.
         stats: bool,
+        /// Weak objects registered during the parallel scan (to-space
+        /// bodies); merged into `Collector::weak_objects` after the
+        /// drain — the fixup itself is single-threaded.
+        pub weak: Mutex<Vec<usize>>,
     }
 
     /// A worker's private two-slot state: the chunk it is SCANNING and
@@ -537,6 +671,7 @@ mod par {
                 steal: Mutex::new(steal),
                 untracked: Mutex::new(Vec::new()),
                 stats: crate::env::env_flag("POLYML_GC_PAR_STATS"),
+                weak: Mutex::new(Vec::new()),
             }
         }
 
@@ -816,6 +951,13 @@ mod par {
                     }
                 }
                 _ => {
+                    // WEAK word object: slots are the weak links — skip
+                    // (mirror of the serial arm; the single-threaded
+                    // post-drain `weak_fixup` resolves them).
+                    if (super::flags_of(lw) & super::F_WEAK_BIT) != 0 {
+                        self.weak.lock().unwrap().push(body);
+                        return;
+                    }
                     // SAFETY: sole scanner of this object; scan_slots
                     // splits wide ranges into disjoint stealable tasks.
                     unsafe { self.scan_slots(body, 0, n_words, w) };
@@ -1209,6 +1351,7 @@ where
         to_used: 0,
         start_bits,
         range_bit_base,
+        weak_objects: Vec::new(),
         untracked_addrs: Vec::new(),
         par_workers,
     };
@@ -1244,10 +1387,18 @@ where
         col.to_used = shared.arena_used.load(std::sync::atomic::Ordering::Acquire);
         col.untracked_addrs
             .extend(shared.untracked.lock().unwrap().iter().copied());
+        col.weak_objects
+            .extend(shared.weak.lock().unwrap().iter().copied());
     } else {
         // SAFETY: collector invariants upheld.
         unsafe { col.cheney_scan() };
     }
+    // Weak-reference fixup (single-threaded, both paths): forward
+    // surviving SOME cells, demote dead entries to NONE. Runs after the
+    // strong trace's fixpoint, before promote — so no weak slot ever
+    // survives into the promoted heap holding a from-space pointer.
+    // SAFETY: trace complete; sole heap accessor.
+    unsafe { col.weak_fixup() };
     let t_scan = t0.elapsed();
 
     let new_used = col.to_used;
@@ -1779,6 +1930,121 @@ mod tests {
                     }
                 }
                 assert_eq!(cur.0, PolyWord::tagged(0).0, "chain {c} must end at nil");
+            }
+        }
+    }
+
+    /// Weak references (upstream gc_check_weak_ref.cpp semantics, ported
+    /// to the copying collector): a weak object's slots hold NONE or
+    /// SOME-cell pointers; after collection an entry whose inner ref was
+    /// unreachable through strong paths reads NONE, a surviving entry
+    /// points at the ONE forwarded SOME whose content is the forwarded
+    /// ref. Covers: dead ref -> NONE; live-elsewhere ref -> survives;
+    /// SOME cell shared by two weak slots (both outcomes); SOME cell
+    /// ALSO strongly reachable; and the parallel drain.
+    #[test]
+    fn weak_refs_dead_demoted_live_forwarded() {
+        for workers in [None, Some(4)] {
+            let mut a = MemorySpace::new(4096, SpaceKind::Mutable);
+
+            let mk_ref = |sp: &mut MemorySpace, val: usize| {
+                let r = sp.alloc(1);
+                unsafe {
+                    set_length_word(r, 1, F_MUTABLE_BIT);
+                    r.write(PolyWord::tagged(val as isize));
+                }
+                r
+            };
+            let mk_some = |sp: &mut MemorySpace, r: *mut PolyWord| {
+                let s = sp.alloc(1);
+                unsafe {
+                    set_length_word(s, 1, 0);
+                    s.write(PolyWord::from_ptr(r.cast_const()));
+                }
+                s
+            };
+
+            let dead_ref = mk_ref(&mut a, 111);
+            let live_ref = mk_ref(&mut a, 222);
+            let shared_dead_ref = mk_ref(&mut a, 333);
+            let strong_ref = mk_ref(&mut a, 444);
+
+            let some_dead = mk_some(&mut a, dead_ref);
+            let some_live = mk_some(&mut a, live_ref);
+            let some_shared = mk_some(&mut a, shared_dead_ref);
+            let some_strong = mk_some(&mut a, strong_ref);
+
+            // Weak object: 5 slots (weakArray shape), alloc flags 0wx60.
+            let wk = a.alloc(5);
+            unsafe {
+                set_length_word(wk, 5, F_MUTABLE_BIT | F_WEAK_BIT);
+                wk.write(PolyWord::from_ptr(some_dead.cast_const()));
+                wk.add(1).write(PolyWord::from_ptr(some_live.cast_const()));
+                wk.add(2)
+                    .write(PolyWord::from_ptr(some_shared.cast_const()));
+                wk.add(3)
+                    .write(PolyWord::from_ptr(some_shared.cast_const())); // shared
+                wk.add(4)
+                    .write(PolyWord::from_ptr(some_strong.cast_const()));
+            }
+            // Second weak object holding the live SOME too (shared, alive).
+            let wk2 = a.alloc(1);
+            unsafe {
+                set_length_word(wk2, 1, F_MUTABLE_BIT | F_WEAK_BIT);
+                wk2.write(PolyWord::from_ptr(some_live.cast_const()));
+            }
+
+            // Strong roots: both weak objects, the LIVE ref (held
+            // elsewhere), and the strongly-shared SOME cell.
+            let mut root_wk = PolyWord::from_ptr(wk.cast_const());
+            let mut root_wk2 = PolyWord::from_ptr(wk2.cast_const());
+            let mut root_live = PolyWord::from_ptr(live_ref.cast_const());
+            let mut root_some_strong = PolyWord::from_ptr(some_strong.cast_const());
+
+            collect_pool_with_workers_impl(&mut [&mut a], workers, Some(64), |c| unsafe {
+                c.forward(&mut root_wk as *mut _);
+                c.forward(&mut root_wk2 as *mut _);
+                c.forward(&mut root_live as *mut _);
+                c.forward(&mut root_some_strong as *mut _);
+            });
+
+            let w = root_wk.as_ptr::<PolyWord>();
+            let none = PolyWord::tagged(0).0;
+            unsafe {
+                // Slot 0: dead ref -> NONE.
+                assert_eq!((*w).0, none, "workers={workers:?}: dead entry not demoted");
+                // Slot 1: live ref -> SOME survives; content = forwarded live ref.
+                let s1 = (*w.add(1)).0;
+                assert_ne!(s1, none, "workers={workers:?}: live entry wrongly demoted");
+                let inner = (*(s1 as *const PolyWord)).0;
+                assert_eq!(
+                    inner, root_live.0,
+                    "workers={workers:?}: surviving SOME must hold the forwarded ref"
+                );
+                assert_eq!(
+                    (*(inner as *const PolyWord)).0,
+                    PolyWord::tagged(222).0,
+                    "workers={workers:?}: ref payload corrupted"
+                );
+                // wk2 shares the SAME surviving SOME copy.
+                let w2 = root_wk2.as_ptr::<PolyWord>();
+                assert_eq!(
+                    (*w2).0,
+                    s1,
+                    "workers={workers:?}: shared surviving SOME must be ONE copy"
+                );
+                // Slots 2+3: shared SOME with dead ref -> both NONE.
+                assert_eq!((*w.add(2)).0, none, "workers={workers:?}: shared dead 1");
+                assert_eq!((*w.add(3)).0, none, "workers={workers:?}: shared dead 2");
+                // Slot 4: SOME also strongly rooted -> the strong copy,
+                // with its ref kept alive through it.
+                let s4 = (*w.add(4)).0;
+                assert_eq!(
+                    s4, root_some_strong.0,
+                    "workers={workers:?}: strongly-shared SOME must be the strong copy"
+                );
+                let inner4 = (*(s4 as *const PolyWord)).0;
+                assert_eq!((*(inner4 as *const PolyWord)).0, PolyWord::tagged(444).0);
             }
         }
     }
