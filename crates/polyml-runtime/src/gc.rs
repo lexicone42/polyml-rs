@@ -1170,12 +1170,36 @@ where
         total_capacity
     };
 
-    let scratch_raw: Box<[usize]> = vec![0usize; total_capacity].into_boxed_slice();
-    let mut scratch: Box<[PolyWord]> =
-        // SAFETY: PolyWord is repr(transparent) over usize (same layout,
-        // any bit pattern valid); Box<[usize]> and Box<[PolyWord]> are
-        // interchangeable.
-        unsafe { Box::from_raw(Box::into_raw(scratch_raw) as *mut [PolyWord]) };
+    // PING-PONG scratch reuse: the primary's retired from-space (stashed
+    // last cycle) becomes this cycle's to-space when big enough — killing
+    // the per-cycle munmap of ~capacity faulted pages (measured ~190 ms of
+    // the promote phase on a 1.3 GB heap) AND the invisible mutator-side
+    // re-faulting of a fresh lazy-zero arena after every collection. The
+    // collector never reads to-space words it did not write, so STALE
+    // contents are harmless. Gates: POLYML_GC_REUSE_MAX_BYTES (default
+    // 4 GB; 0 disables) bounds the sustained 2x residency on huge heaps,
+    // and POLYML_GC_AUDIT forces the calloc path (the audit scans
+    // [0, len) — stale tails would false-positive — and fresh mappings
+    // keep missed-root dangling pointers SEGV-detectable rather than
+    // silently reading recycled memory).
+    let audit = crate::env::env_flag("POLYML_GC_AUDIT");
+    let reuse_max_words = std::env::var("POLYML_GC_REUSE_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4_000_000_000)
+        / std::mem::size_of::<usize>();
+    let reuse_enabled = !audit && total_capacity <= reuse_max_words;
+    let mut scratch: Box<[PolyWord]> = match spaces[0].spare.take() {
+        Some(b) if reuse_enabled && b.len() >= total_capacity => b,
+        _ => {
+            // Fresh calloc arena (lazy zero pages; see the comment above).
+            let scratch_raw: Box<[usize]> = vec![0usize; total_capacity].into_boxed_slice();
+            // SAFETY: PolyWord is repr(transparent) over usize (same layout,
+            // any bit pattern valid); Box<[usize]> and Box<[PolyWord]> are
+            // interchangeable.
+            unsafe { Box::from_raw(Box::into_raw(scratch_raw) as *mut [PolyWord]) }
+        }
+    };
 
     let t_scratch = t0.elapsed();
 
@@ -1266,7 +1290,7 @@ where
     // empty (its live objects were copied into the primary's new storage
     // and every pointer to them forwarded).
     let n_spaces = spaces.len();
-    spaces[0].replace_storage(scratch, new_used);
+    spaces[0].replace_storage_pingpong(scratch, new_used, reuse_enabled);
     for space in spaces.iter_mut().take(n_spaces).skip(1) {
         space.reset_empty();
     }
@@ -1309,9 +1333,22 @@ impl MemorySpace {
     /// Swap in a fresh storage buffer with `new_used` bytes occupied.
     /// Old storage is dropped. Used by the GC after copy completes.
     pub fn replace_storage(&mut self, new_storage: Box<[PolyWord]>, new_used: usize) {
+        self.replace_storage_pingpong(new_storage, new_used, false);
+    }
+
+    /// Swap in the new to-space; the retired from-space is STASHED as the
+    /// ping-pong spare (`keep_spare`) for reuse as the next collection's
+    /// scratch, or dropped (the pre-reuse behavior).
+    pub fn replace_storage_pingpong(
+        &mut self,
+        new_storage: Box<[PolyWord]>,
+        new_used: usize,
+        keep_spare: bool,
+    ) {
         assert!(new_used <= new_storage.len());
-        self.storage = new_storage;
+        let old = std::mem::replace(&mut self.storage, new_storage);
         self.used = new_used;
+        self.spare = if keep_spare { Some(old) } else { None };
     }
 
     /// Reset a nursery to empty after a multi-nursery collection promoted
@@ -1742,6 +1779,48 @@ mod tests {
                     }
                 }
                 assert_eq!(cur.0, PolyWord::tagged(0).0, "chain {c} must end at nil");
+            }
+        }
+    }
+
+    /// PING-PONG reuse: across consecutive collections the primary's
+    /// retired from-space must round-trip as the next to-space (same
+    /// allocation, no per-cycle map/unmap), and results must be correct
+    /// on the recycled (stale, non-zero) buffer.
+    #[test]
+    fn pool_collect_pingpong_reuses_from_space() {
+        let mut a = MemorySpace::new(4096, SpaceKind::Mutable);
+        let mut b = MemorySpace::new(1024, SpaceKind::Mutable);
+        let mut root = PolyWord::tagged(0);
+        let mut prev_storage: Option<usize> = None;
+        for round in 0..6 {
+            let leaf = b.alloc(2);
+            unsafe {
+                set_length_word(leaf, 2, 0);
+                leaf.write(PolyWord::tagged(round as isize));
+                leaf.add(1).write(PolyWord::tagged(1000 + round as isize));
+            }
+            root = PolyWord::from_ptr(leaf.cast_const());
+            let before = a.storage_ptr() as usize;
+            collect_pool_with_workers_impl(&mut [&mut a, &mut b], None, None, |c| unsafe {
+                c.forward(&mut root as *mut _);
+            });
+            // From round 2 on, the new to-space must BE round N-1's
+            // from-space (the ping-pong pair established after round 1).
+            if let Some(expect) = prev_storage {
+                assert_eq!(
+                    a.storage_ptr() as usize,
+                    expect,
+                    "round {round}: to-space is not the retired from-space                      (ping-pong reuse regressed)"
+                );
+            }
+            assert!(a.spare.is_some(), "round {round}: from-space not stashed");
+            prev_storage = Some(before);
+            // Payload correct on the recycled (stale-content) buffer.
+            let p = root.as_ptr::<PolyWord>();
+            unsafe {
+                assert_eq!((*p).0, PolyWord::tagged(round as isize).0);
+                assert_eq!((*p.add(1)).0, PolyWord::tagged(1000 + round as isize).0);
             }
         }
     }

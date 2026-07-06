@@ -38,6 +38,12 @@ pub struct MemorySpace {
     pub(crate) storage: Box<[PolyWord]>,
     pub(crate) used: usize,
     kind: SpaceKind,
+    /// Retired from-space kept for PING-PONG reuse as the next
+    /// collection's to-space scratch (primary space only; see
+    /// `gc::collect_pool_with_workers`). Never part of the space's
+    /// address range. Contents are STALE — the collector only reads
+    /// to-space words it wrote.
+    pub(crate) spare: Option<Box<[PolyWord]>>,
 }
 
 impl MemorySpace {
@@ -49,6 +55,7 @@ impl MemorySpace {
             storage,
             used: 0,
             kind,
+            spare: None,
         }
     }
 

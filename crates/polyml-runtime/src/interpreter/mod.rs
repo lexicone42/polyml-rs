@@ -3345,10 +3345,12 @@ impl Interpreter {
         // [0, sp) are the free/garbage zone (drop_n/RESET bump sp past
         // them, leaving stale values BY DESIGN — see "Below sp is free"
         // above). Those stale values can be pointers into the from-space
-        // Box that `collect` just FREED via replace_storage, so they now
+        // Box that `collect` just RETIRED via replace_storage (freed, or
+        // stashed as the ping-pong spare — either way dead), so they now
         // DANGLE. A later sp-lowering op that re-exposes one before
-        // writing it would let the dispatch loop dereference freed
-        // memory → use-after-free SIGSEGV.
+        // writing it would let the dispatch loop dereference dead
+        // memory → use-after-free SIGSEGV (or, with the spare reused,
+        // silently read recycled to-space).
         //
         // Overwrite every below-sp slot with a safe tagged sentinel
         // (Tagged(0)). This is sound because below-sp is dead-for-
@@ -3358,9 +3360,9 @@ impl Interpreter {
         // read it would be a benign tagged int 0, not a wild deref.
         // O(sp) once per collect — cheap vs the Cheney copy; deliberately
         // NOT on the hot drop_n/RESET path. This runs AFTER from-space is
-        // freed (replace_storage inside collect) and BEFORE any op or the
-        // audit, closing the dangling-pointer window. History: the GC-soak
-        // findings + fix, commits 77b6141 + 8756419 (task #109).
+        // retired (replace_storage inside collect) and BEFORE any op or
+        // the audit, closing the dangling-pointer window. History: the
+        // GC-soak findings + fix, commits 77b6141 + 8756419 (task #109).
         for roots in registry.iter_mut() {
             // SAFETY: captures still alias live interpreter state; the
             // collect above has freed from-space, so scrub then fixup.

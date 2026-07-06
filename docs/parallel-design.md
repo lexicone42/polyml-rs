@@ -493,11 +493,37 @@ hangs:
   can parallelize it): copying stays on one worker, split-scan still
   trims scan 270 → 237 ms. Small-live workloads (the Isabelle 6-worker
   kernel bench, ~35 MB live): no measurable change — there the pause is
-  dominated by the pre-pass + promote phases, which stay serial (the
-  next credible target, along with ping-pong semispace reuse to kill
-  the per-cycle map/unmap + re-fault cost). Limits: the win needs live
-  data big enough that scan dominates AND graph breadth; plateaued at 4
-  workers by memory bandwidth.
+  dominated by the pre-pass + promote phases, which stay serial.
+  Limits: the win needs live data big enough that scan dominates AND
+  graph breadth; plateaued at 4 workers by memory bandwidth.
+
+- **P6c — PING-PONG SEMISPACE REUSE (default ON) — the promote phase
+  drops to ~0 and the serial scan nearly halves.** The phase profile on
+  REAL workloads (the Euler LCF driver: promote 189 ms of a 429 ms
+  pause) exposed where the pause actually went: every collection
+  calloc'd a fresh to-space and DROPPED the old from-space — a ~190 ms
+  munmap of the faulted pages inside the pause, plus an invisible
+  mutator tax re-faulting the fresh lazy-zero arena after every
+  collection, plus first-touch faults during the scan's own copying.
+  Now the primary STASHES its retired from-space (`MemorySpace::spare`)
+  and the next collection reuses it as scratch when big enough: no
+  munmap, no re-fault; stale contents are harmless because the
+  collector never reads to-space words it did not write. Measured
+  (410 MB-live storm): serial pause 398 → 180 ms (scan 287 → 144 — the
+  scan had been paying the fault cost; promote → 0.0), wall −9%;
+  stacked with the P6b parallel drain: **pause 398 → 85 ms (4.7×)**.
+  Euler driver: pause 429 → 239 ms. Gates: `POLYML_GC_REUSE_MAX_BYTES`
+  (default 4 GB; 0 disables) bounds the sustained 2× residency on huge
+  heaps, and `POLYML_GC_AUDIT=1` forces the calloc path — the audit
+  scans `[0, len)` (stale tails would false-positive) and fresh
+  mappings keep missed-root dangling pointers SEGV-detectable rather
+  than silently reading recycled memory. Fences: ping-pong round-trip
+  unit test (same buffer across cycles, correct results on the stale
+  arena); the 27.7B-step chain byte-identical WITH reuse on (this
+  change touches the default path — the chain is the read-before-write
+  detector: any code depending on fresh-zero heap would diverge);
+  370/372 diff-oracle (the 2 = the known upstream andb/orb stage-0
+  bug); storm+audit suites green; regression fast green.
 
   Fences: 4 parallel unit tests incl. a chunk-churn stress (64-word
   chunks force hundreds of seal/steal/oversize transitions; filler-aware
