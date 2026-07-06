@@ -97,9 +97,6 @@ pub struct Collector<'a> {
     /// workers' seed queue — to-space body addresses). `None` (default)
     /// = the exact pre-P6 serial path, byte-identical.
     par_workers: Option<usize>,
-    /// Seed queue for the parallel scan (to-space body addresses copied
-    /// during the serial roots phase). Unused when `par_workers` is None.
-    par_seeds: Vec<usize>,
 }
 
 impl<'a> Collector<'a> {
@@ -281,11 +278,6 @@ impl<'a> Collector<'a> {
         let fwd_word =
             PolyWord::from_bits((to_ptr as usize) | ((F_TOMBSTONE_BIT as usize) << FLAGS_SHIFT));
         unsafe { obj_ptr.cast::<PolyWord>().cast_mut().sub(1).write(fwd_word) };
-        // P6: the parallel scan is queue-driven — every object copied
-        // during the (serial) roots phase seeds the workers.
-        if self.par_workers.is_some() {
-            self.par_seeds.push(to_ptr as usize);
-        }
         to_ptr
     }
 
@@ -401,14 +393,48 @@ mod par {
     unsafe impl Send for SendBase {}
     unsafe impl Sync for SendBase {}
 
-    /// Work-batch size: locals spill to the shared injector (and thieves
-    /// take) in batches, so shared-lock traffic is per-BATCH, not
-    /// per-object. A worker spills only when its local queue exceeds
-    /// 2×BATCH — a chain-shaped graph (local queue depth ~1) never touches
-    /// the injector at all and degrades to ~serial cost.
-    const BATCH: usize = 256;
+    /// MAXIMUM chunk size in words (4 MB): the granularity of work
+    /// OWNERSHIP. Each chunk is allocated into by exactly one worker and
+    /// scanned LINEARLY by exactly one worker — the property the
+    /// queue-drain design lacked (its random-order visits lost to the
+    /// serial sweep's sequential prefetch at every scale; see
+    /// docs/parallel-design.md). Workers START small
+    /// (`INITIAL_CHUNK_WORDS`) and DOUBLE per seal up to this max, so a
+    /// collection that copies little claims little (fillers inflate
+    /// `to_used`, and an inflated `used` fires the 80% GC trigger early
+    /// on small heaps — measured as extra collections on a 64 MB storm).
+    const CHUNK_WORDS: usize = 512 * 1024;
+    /// First chunk claim per worker (32 KB).
+    const INITIAL_CHUNK_WORDS: usize = 4 * 1024;
 
-    /// Shared state of one parallel scan.
+    /// One contiguous slice of the arena: `[start, alloc)` holds copied
+    /// objects; `[scan, alloc)` is not yet scanned. All word indices.
+    pub(super) struct Chunk {
+        start: usize,
+        end: usize,
+        alloc: usize,
+        scan: usize,
+    }
+
+    /// A unit of stealable scan work.
+    pub(super) enum Task {
+        /// A whole chunk: swept linearly by its thief.
+        Chunk(Chunk),
+        /// A slot range [lo, hi) of ONE wide to-space object (body byte
+        /// address): wide pointer arrays are the breadth of the object
+        /// graph, but `forward_slot` copies children inline during the
+        /// parent's scan — without splitting, one worker copies every
+        /// child of a wide parent (measured: 99.7% of a 410 MB probe on
+        /// one worker). Ranges are disjoint, so each slot is forwarded
+        /// exactly once.
+        Slots { body: usize, lo: usize, hi: usize },
+    }
+
+    /// Scan grain for wide-object splitting (words). A 51200-slot array
+    /// becomes ~12 stealable ranges via binary splitting.
+    const SPLIT_WORDS: usize = 4096;
+
+    /// Shared state of one CHUNKED parallel collection.
     pub(super) struct Shared<'a> {
         pub from_ranges: &'a [(usize, usize)],
         /// Object-start bitmap + per-range bit bases (see
@@ -417,19 +443,53 @@ mod par {
         range_bit_base: &'a [usize],
         base: SendBase,
         to_len: usize,
-        /// Atomic bump cursor (word index into to-space).
-        pub to_used: AtomicUsize,
-        /// Objects pushed-but-not-fully-scanned. A worker decrements only
-        /// AFTER scanning an object (its children already pushed), so
-        /// `pending == 0` really means "no work anywhere".
-        pending: AtomicUsize,
-        /// Shared injector of work BATCHES (to-space body addresses).
-        /// Workers keep an owner-local lock-free Vec and only exchange
-        /// batches here.
-        injector: Mutex<Vec<Vec<usize>>>,
+        /// Arena frontier: CHUNK claims only (one fetch_add per ~4 MB,
+        /// not per object — object allocation is a plain local bump
+        /// inside the owning worker's chunk).
+        pub arena_used: AtomicUsize,
+        /// Per-collection chunk size (== arena size when workers == 1, so
+        /// the single-worker path never seals a chunk and produces the
+        /// EXACT serial layout — no fillers, same addresses). Overridable
+        /// per collection (`POLYML_GC_CHUNK_WORDS` / test stress).
+        chunk_words: usize,
+        /// Objects of `1 + n` words strictly above this get their own
+        /// exact-size arena slice (bounds filler waste per seal).
+        oversize_words: usize,
+        /// Workers currently holding scannable work. A worker decrements
+        /// on entering its idle probe and re-increments when it acquires
+        /// work; `busy == 0` with an empty steal queue is quiescence
+        /// (copies only happen while scanning, i.e. while busy).
+        busy: AtomicUsize,
+        /// Stealable work: full-but-unscanned chunks (swept linearly by
+        /// the thief — locality preserved) and split wide-object slot
+        /// ranges.
+        steal: Mutex<Vec<Task>>,
         /// From-space pointers matching no tracked object (collector-bug
         /// canary, merged into `Collector::untracked_addrs` after the drain).
         pub untracked: Mutex<Vec<usize>>,
+        /// POLYML_GC_PAR_STATS=1: per-worker breakdown on stderr.
+        stats: bool,
+    }
+
+    /// A worker's private two-slot state: the chunk it is SCANNING and
+    /// the chunk it is ALLOCATING into (often the same — the serial-
+    /// Cheney case, where scan chases alloc within one chunk).
+    struct Worker {
+        cur: Chunk,
+        /// Sealed-but-still-scanning predecessor (when the alloc chunk
+        /// filled mid-scan, scanning continues here until exhausted).
+        scanning: Option<Chunk>,
+        /// Next chunk claim size — doubles per seal up to
+        /// `Shared::chunk_words` (adaptive: small collections claim
+        /// small, big copiers reach the max in a few seals).
+        next_chunk: usize,
+        /// POLYML_GC_PAR_STATS instrumentation (words scanned / copied,
+        /// chunks stolen, CAS claim losses) — zero-cost adds on the
+        /// already-taken paths.
+        words_scanned: usize,
+        words_copied: usize,
+        steals: usize,
+        claim_losses: usize,
     }
 
     impl<'a> Shared<'a> {
@@ -438,24 +498,128 @@ mod par {
             start_bits: &'a [u64],
             range_bit_base: &'a [usize],
             to_storage: &mut [PolyWord],
-            to_used: usize,
-            seeds: &[usize],
+            root_used: usize,
             workers: usize,
+            chunk_override: Option<usize>,
         ) -> Self {
-            // Split the seeds into ~worker-count batches so everyone can
-            // start immediately.
-            let chunk = seeds.len().div_ceil(workers).max(1);
-            let batches: Vec<Vec<usize>> = seeds.chunks(chunk).map(<[usize]>::to_vec).collect();
+            let to_len = to_storage.len();
+            let chunk_words = if workers <= 1 {
+                to_len
+            } else {
+                chunk_override.unwrap_or(CHUNK_WORDS).max(16)
+            };
+            let oversize_words = if workers <= 1 {
+                usize::MAX
+            } else {
+                (chunk_words / 8).max(2)
+            };
+            // The serial roots phase copied into the contiguous prefix
+            // [0, root_used) — seed it as the first stealable chunk.
+            let mut steal = Vec::new();
+            if root_used > 0 {
+                steal.push(Task::Chunk(Chunk {
+                    start: 0,
+                    end: root_used,
+                    alloc: root_used,
+                    scan: 0,
+                }));
+            }
             Self {
                 from_ranges,
                 start_bits,
                 range_bit_base,
                 base: SendBase(to_storage.as_mut_ptr()),
-                to_len: to_storage.len(),
-                to_used: AtomicUsize::new(to_used),
-                pending: AtomicUsize::new(seeds.len()),
-                injector: Mutex::new(batches),
+                to_len,
+                arena_used: AtomicUsize::new(root_used),
+                chunk_words,
+                oversize_words,
+                busy: AtomicUsize::new(workers),
+                steal: Mutex::new(steal),
                 untracked: Mutex::new(Vec::new()),
+                stats: crate::env::env_flag("POLYML_GC_PAR_STATS"),
+            }
+        }
+
+        /// Claim `n` words from the arena frontier. Panics on overflow —
+        /// the caller sizes the arena with worker slack, and the serial
+        /// path's Σ-used bound plus that slack covers every real case
+        /// (same failure class as the serial `bump_to` assert).
+        fn claim_arena(&self, n: usize) -> usize {
+            let start = self.arena_used.fetch_add(n, Ordering::Relaxed);
+            assert!(
+                start + n <= self.to_len,
+                "GC to-space overflow (chunked): requested {n}, at {start}/{}",
+                self.to_len
+            );
+            start
+        }
+
+        /// Allocate `1 + n_words` for a copied object in the worker's
+        /// current chunk (plain local bump); seal + replace the chunk
+        /// when full. Returns the BODY pointer, plus — for OVERSIZED
+        /// objects — a private chunk descriptor the caller must publish
+        /// only AFTER the copy completes (publishing the chunk first
+        /// would let a thief scan uninitialized words).
+        fn alloc_obj(&self, w: &mut Worker, n_words: usize) -> (*mut PolyWord, Option<Chunk>) {
+            let need = 1 + n_words;
+            if need > self.oversize_words {
+                // Oversized: its own exact arena slice.
+                let start = self.claim_arena(need);
+                let chunk = Chunk {
+                    start,
+                    end: start + need,
+                    alloc: start + need,
+                    scan: start,
+                };
+                // SAFETY: exclusive fresh claim.
+                return (unsafe { self.base.0.add(start + 1) }, Some(chunk));
+            }
+            if w.cur.alloc + need > w.cur.end {
+                self.seal_and_replace(w, need);
+            }
+            let body = w.cur.alloc + 1;
+            w.cur.alloc += need;
+            // SAFETY: within the worker's exclusively-owned chunk.
+            (unsafe { self.base.0.add(body) }, None)
+        }
+
+        /// Seal the worker's current alloc chunk (plug the dead tail with
+        /// a FILLER byte-object header so the heap stays one contiguous
+        /// valid object sequence — walkers skip it; the next collection
+        /// reclaims it) and open a fresh one big enough for `need`.
+        fn seal_and_replace(&self, w: &mut Worker, need: usize) {
+            let gap = w.cur.end - w.cur.alloc;
+            if gap > 0 {
+                // SAFETY: [alloc, end) is our exclusive dead tail.
+                unsafe {
+                    self.base
+                        .0
+                        .add(w.cur.alloc)
+                        .write(length_word::make_length_word(gap - 1, F_BYTE_OBJ));
+                }
+                w.cur.alloc = w.cur.end;
+            }
+            let size = w.next_chunk.max(need);
+            w.next_chunk = (w.next_chunk * 2).min(self.chunk_words);
+            let start = self.claim_arena(size);
+            let fresh = Chunk {
+                start,
+                end: start + size,
+                alloc: start,
+                scan: start,
+            };
+            let old = std::mem::replace(&mut w.cur, fresh);
+            if old.scan < old.alloc {
+                // Unscanned content survives the seal: keep it as our
+                // scanning slot if free (we may be mid-sweep of exactly
+                // this chunk — the sweep re-reads worker state each
+                // iteration and picks it back up from `scanning`),
+                // otherwise share it whole.
+                if w.scanning.is_none() {
+                    w.scanning = Some(old);
+                } else {
+                    self.steal.lock().unwrap().push(Task::Chunk(old));
+                }
             }
         }
 
@@ -527,42 +691,14 @@ mod par {
             None
         }
 
-        /// Atomically reserve `1 + n_words` in to-space; returns the body
-        /// pointer. The assert mirrors `bump_to` (Σ-capacity can never
-        /// overflow because the claim CAS guarantees one copy per object).
-        fn bump(&self, n_words: usize) -> *mut PolyWord {
-            let len_idx = self.to_used.fetch_add(1 + n_words, Ordering::Relaxed);
-            let new_used = len_idx + 1 + n_words;
-            assert!(
-                new_used <= self.to_len,
-                "GC to-space overflow (parallel): requested {n_words}, at {len_idx}/{}",
-                self.to_len
-            );
-            // SAFETY: reserved region is exclusively ours per the fetch_add.
-            unsafe { self.base.0.add(len_idx + 1) }
-        }
-
-        /// Push newly-copied work: owner-local (lock-free); spill a batch
-        /// to the shared injector when the local queue grows past 2×BATCH.
-        fn push_work(&self, local: &mut Vec<usize>, body: usize) {
-            self.pending.fetch_add(1, Ordering::Relaxed);
-            local.push(body);
-            // Share half once we clearly have surplus. A chain-shaped graph
-            // keeps the local depth ~1 and never pays the injector lock; a
-            // wide graph spills early so idle peers get fed.
-            if local.len() > BATCH {
-                let spill = local.split_off(local.len() / 2);
-                self.injector.lock().unwrap().push(spill);
-            }
-        }
-
         /// Parallel forward of one object known to start at `body_start`:
-        /// claim via header CAS, copy, publish. Returns the to-space body.
+        /// claim via header CAS, copy into the worker's chunk, publish.
+        /// Returns the to-space body.
         ///
         /// # Safety
         /// `body_start` must be the body address of a well-formed
         /// from-space object (came from `find_object`).
-        unsafe fn forward_object(&self, body_start: usize, local: &mut Vec<usize>) -> usize {
+        unsafe fn forward_object(&self, body_start: usize, w: &mut Worker) -> usize {
             let header_ptr = (body_start as *const PolyWord).cast_mut().wrapping_sub(1);
             // SAFETY: PolyWord is repr(transparent) over usize; the header
             // word is shared mutable state, accessed atomically only.
@@ -587,14 +723,17 @@ mod par {
                     Ordering::Acquire,
                 ) {
                     Ok(_) => break,
-                    Err(cur) => lw_bits = cur,
+                    Err(cur) => {
+                        w.claim_losses += 1;
+                        lw_bits = cur;
+                    }
                 }
             }
             // We hold the claim; lw_bits is the original length word.
             let lw = PolyWord::from_bits(lw_bits);
             let n_words = length_of(lw);
             let flags = flags_of(lw);
-            let to_ptr = self.bump(n_words);
+            let (to_ptr, oversize) = self.alloc_obj(w, n_words);
             let new_lw = length_word::make_length_word(n_words, flags);
             // SAFETY: to_ptr-1..to_ptr+n_words is our exclusive reservation;
             // the source body is frozen (all mutators parked, we hold the claim).
@@ -602,11 +741,23 @@ mod par {
                 to_ptr.sub(1).write(new_lw);
                 std::ptr::copy_nonoverlapping(body_start as *const PolyWord, to_ptr, n_words);
             }
+            w.words_copied += 1 + n_words;
+            unsafe {}
             // Publish: Release makes the copied body visible to any reader
-            // that Acquire-loads this tombstone.
+            // that Acquire-loads this tombstone. No work-queue push: the
+            // object sits in the worker's own chunk, which is swept
+            // linearly (or stolen whole).
             header.store((to_ptr as usize) | BUSY, Ordering::Release);
-            // Exactly-once push: we won the claim, so we are the sole pusher.
-            self.push_work(local, to_ptr as usize);
+            if let Some(c) = oversize {
+                // Publish the oversize slice only now that its body is
+                // fully written (the steal-mutex handoff orders the writes
+                // for the thief).
+                if w.scanning.is_none() {
+                    w.scanning = Some(c);
+                } else {
+                    self.steal.lock().unwrap().push(Task::Chunk(c));
+                }
+            }
             to_ptr as usize
         }
 
@@ -615,12 +766,12 @@ mod par {
         /// # Safety
         /// `slot` must be a valid, writable pointer to a PolyWord in a
         /// to-space object owned (being scanned) by this worker.
-        unsafe fn forward_slot(&self, slot: *mut PolyWord, local: &mut Vec<usize>) {
-            let w = unsafe { *slot };
-            if w.is_tagged() {
+        unsafe fn forward_slot(&self, slot: *mut PolyWord, w: &mut Worker) {
+            let word = unsafe { *slot };
+            if word.is_tagged() {
                 return;
             }
-            let addr = w.0;
+            let addr = word.0;
             if !self.in_from_space(addr) {
                 return;
             }
@@ -633,7 +784,7 @@ mod par {
                 self.untracked.lock().unwrap().push(addr);
                 return;
             };
-            let new_body = unsafe { self.forward_object(body_start, local) };
+            let new_body = unsafe { self.forward_object(body_start, w) };
             let offset_bytes = addr.wrapping_sub(body_start);
             unsafe { slot.write(PolyWord::from_bits(new_body.wrapping_add(offset_bytes))) };
         }
@@ -644,7 +795,7 @@ mod par {
         /// # Safety
         /// `body` must be a fully-copied to-space object body address that
         /// this worker popped from a queue (sole scanner).
-        unsafe fn scan_object(&self, body: usize, local: &mut Vec<usize>) {
+        unsafe fn scan_object(&self, body: usize, w: &mut Worker) {
             let obj_ptr = body as *mut PolyWord;
             // SAFETY: header written before the queue push (program order
             // of the copier + the Mutex transfer / local ownership).
@@ -656,62 +807,170 @@ mod par {
                     let (cp, count) = unsafe { length_word::const_segment_for_code(obj_ptr) };
                     let cp_mut = cp.cast_mut();
                     for i in 0..count {
-                        unsafe { self.forward_slot(cp_mut.add(i), local) };
+                        unsafe { self.forward_slot(cp_mut.add(i), w) };
                     }
                 }
                 F_CLOSURE_OBJ => {
                     for i in 0..n_words {
-                        unsafe { self.forward_slot(obj_ptr.add(i), local) };
+                        unsafe { self.forward_slot(obj_ptr.add(i), w) };
                     }
                 }
                 _ => {
-                    for i in 0..n_words {
-                        unsafe { self.forward_slot(obj_ptr.add(i), local) };
-                    }
+                    // SAFETY: sole scanner of this object; scan_slots
+                    // splits wide ranges into disjoint stealable tasks.
+                    unsafe { self.scan_slots(body, 0, n_words, w) };
                 }
             }
         }
 
-        /// One worker's drain loop: pop the owner-local queue (lock-free),
-        /// refill from the shared batch injector when dry, back off (spin
-        /// then yield) when the injector is empty too, exit on quiescence.
-        pub(super) fn drain(&self) {
-            let mut local: Vec<usize> = Vec::with_capacity(4 * BATCH);
-            let mut idle_spins = 0u32;
+        /// Forward slots [lo, hi) of the word object at `body`, binary-
+        /// splitting ranges wider than `SPLIT_WORDS` into the steal queue
+        /// so peers copy a wide parent's children in parallel.
+        ///
+        /// # Safety
+        /// The range [lo, hi) of `body` must be exclusively ours (sole
+        /// scanner of the object, or a stolen disjoint range).
+        unsafe fn scan_slots(&self, body: usize, mut lo: usize, mut hi: usize, w: &mut Worker) {
+            while hi - lo > SPLIT_WORDS {
+                let mid = lo + (hi - lo) / 2;
+                self.steal
+                    .lock()
+                    .unwrap()
+                    .push(Task::Slots { body, lo: mid, hi });
+                hi = mid;
+            }
+            let obj_ptr = body as *mut PolyWord;
+            for i in lo..hi {
+                unsafe { self.forward_slot(obj_ptr.add(i), w) };
+            }
+            w.words_scanned += hi - lo;
+        }
+
+        /// Sweep the worker's OWN current chunk: the serial-Cheney
+        /// scan-chases-alloc loop, re-reading `w.cur` FRESH each
+        /// iteration — a copy can seal-and-replace the chunk under us
+        /// (the sealed remainder moves to `w.scanning`/the steal queue
+        /// atomically, so nothing is scanned twice or skipped).
+        unsafe fn sweep_own(&self, w: &mut Worker) {
             loop {
-                if let Some(body) = local.pop() {
-                    idle_spins = 0;
-                    // SAFETY: popped exactly once; copy completed before the
-                    // push (copier program order / Mutex batch transfer).
-                    unsafe { self.scan_object(body, &mut local) };
-                    // Decrement AFTER the scan (children already pushed), so
-                    // pending==0 is a true quiescence signal.
-                    self.pending.fetch_sub(1, Ordering::Release);
-                    continue;
-                }
-                // Local dry: grab a whole batch from the injector.
-                if let Some(batch) = self.injector.lock().unwrap().pop() {
-                    idle_spins = 0;
-                    local = batch;
-                    continue;
-                }
-                if self.pending.load(Ordering::Acquire) == 0 {
+                if w.cur.scan >= w.cur.alloc {
                     return;
                 }
-                // Idle backoff, three tiers: spin (latency) → yield → SLEEP.
-                // An idle worker must not burn CPU while a peer chases a
-                // long chain — the first cut measured 2.3× SLOWDOWN from
-                // exactly this (spinners at full burn); yield-only still
-                // cost ~14s of sys-time context-switch churn. The 100µs
-                // sleep caps wake-latency at a negligible fraction of any
-                // collection big enough to matter.
-                idle_spins += 1;
-                if idle_spins < 64 {
-                    std::hint::spin_loop();
-                } else if idle_spins < 80 {
-                    std::thread::yield_now();
-                } else {
-                    std::thread::sleep(std::time::Duration::from_micros(100));
+                // SAFETY: [scan, alloc) of our exclusively-owned chunk is
+                // a valid object sequence (headers precede publication).
+                let lw = unsafe { *self.base.0.add(w.cur.scan) };
+                let n = length_of(lw);
+                let body = unsafe { self.base.0.add(w.cur.scan + 1) } as usize;
+                w.cur.scan += 1 + n;
+                w.words_scanned += 1 + n;
+                // SAFETY: fully-copied object in the arena.
+                unsafe { self.scan_object(body, w) };
+            }
+        }
+
+        /// Sweep a FOREIGN chunk (sealed predecessor or stolen): its
+        /// alloc frontier is frozen, contents exclusively ours to scan;
+        /// fresh copies land in `w.cur` (which may itself seal — handled
+        /// by `seal_and_replace`).
+        unsafe fn sweep_foreign(&self, mut chunk: Chunk, w: &mut Worker) {
+            while chunk.scan < chunk.alloc {
+                // SAFETY: as in sweep_own; frozen frontier.
+                let lw = unsafe { *self.base.0.add(chunk.scan) };
+                let n = length_of(lw);
+                let body = unsafe { self.base.0.add(chunk.scan + 1) } as usize;
+                chunk.scan += 1 + n;
+                w.words_scanned += 1 + n;
+                // SAFETY: fully-copied object in the arena.
+                unsafe { self.scan_object(body, w) };
+            }
+        }
+
+        /// One worker's run loop — the CHUNKED drain. Priority: the
+        /// sealed predecessor, then our own alloc frontier (serial-Cheney
+        /// locality), then stealing WHOLE chunks; quiesce when everyone
+        /// is idle and nothing is stealable (copies only happen while
+        /// scanning, so `busy == 0` + empty queue cannot un-quiesce).
+        pub(super) fn drain(&self) {
+            let mut w = Worker {
+                cur: Chunk {
+                    start: 0,
+                    end: 0,
+                    alloc: 0,
+                    scan: 0,
+                },
+                scanning: None,
+                next_chunk: INITIAL_CHUNK_WORDS.min(self.chunk_words),
+                words_scanned: 0,
+                words_copied: 0,
+                steals: 0,
+                claim_losses: 0,
+            };
+            let mut idle_spins = 0u32;
+            loop {
+                if let Some(sc) = w.scanning.take() {
+                    idle_spins = 0;
+                    // SAFETY: exclusively ours (the seal handoff).
+                    unsafe { self.sweep_foreign(sc, &mut w) };
+                    continue;
+                }
+                if w.cur.scan < w.cur.alloc {
+                    idle_spins = 0;
+                    // SAFETY: our own chunk.
+                    unsafe { self.sweep_own(&mut w) };
+                    continue;
+                }
+                let stolen = self.steal.lock().unwrap().pop();
+                if let Some(task) = stolen {
+                    idle_spins = 0;
+                    w.steals += 1;
+                    // SAFETY: exclusively transferred by the queue.
+                    match task {
+                        Task::Chunk(sc) => unsafe { self.sweep_foreign(sc, &mut w) },
+                        Task::Slots { body, lo, hi } => unsafe {
+                            self.scan_slots(body, lo, hi, &mut w)
+                        },
+                    }
+                    continue;
+                }
+                // Idle probe: nothing local, nothing stealable.
+                self.busy.fetch_sub(1, Ordering::AcqRel);
+                loop {
+                    if !self.steal.lock().unwrap().is_empty() {
+                        self.busy.fetch_add(1, Ordering::AcqRel);
+                        break; // re-enter the work loop
+                    }
+                    if self.busy.load(Ordering::Acquire) == 0 {
+                        if self.stats {
+                            eprintln!(
+                                "  GC worker: scanned {}w copied {}w steals {} claim_losses {}",
+                                w.words_scanned, w.words_copied, w.steals, w.claim_losses
+                            );
+                        }
+                        // Global quiescence. Plug our final open chunk's
+                        // tail with a filler so the whole promoted arena
+                        // [0, arena_used) stays one contiguous valid
+                        // object sequence — the next collection's bitmap
+                        // pre-pass walks it by headers.
+                        let gap = w.cur.end - w.cur.alloc;
+                        if gap > 0 {
+                            // SAFETY: [alloc, end) is our exclusive dead tail.
+                            unsafe {
+                                self.base
+                                    .0
+                                    .add(w.cur.alloc)
+                                    .write(length_word::make_length_word(gap - 1, F_BYTE_OBJ));
+                            }
+                        }
+                        return;
+                    }
+                    idle_spins += 1;
+                    if idle_spins < 64 {
+                        std::hint::spin_loop();
+                    } else if idle_spins < 80 {
+                        std::thread::yield_now();
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_micros(50));
+                    }
                 }
             }
         }
@@ -779,6 +1038,23 @@ where
 pub fn collect_pool_with_workers<F>(
     spaces: &mut [&mut MemorySpace],
     par_workers: Option<usize>,
+    visit_roots: F,
+) -> usize
+where
+    F: FnOnce(&mut Collector<'_>),
+{
+    // POLYML_GC_CHUNK_WORDS: per-worker chunk size tuning knob for the
+    // chunked parallel drain (default 512K words = 4 MB).
+    let chunk_override = std::env::var("POLYML_GC_CHUNK_WORDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    collect_pool_with_workers_impl(spaces, par_workers, chunk_override, visit_roots)
+}
+
+fn collect_pool_with_workers_impl<F>(
+    spaces: &mut [&mut MemorySpace],
+    par_workers: Option<usize>,
+    chunk_override: Option<usize>,
     visit_roots: F,
 ) -> usize
 where
@@ -876,6 +1152,24 @@ where
     // ~175 ms per collection on a 512 MB heap, the second-largest pause
     // term. PolyWord is repr(transparent) over usize, so the box transmute
     // is layout-identical.
+    // Worker count None/0/1 = the exact serial path.
+    let par_workers = par_workers.filter(|&n| n >= 2);
+    // CHUNKED-path slack: sealed chunk tails (fillers) + open chunks per
+    // worker can exceed Σ used. Bound: at max chunk size each seal wastes
+    // < CHUNK/8 (oversize objects get exact slices) while consuming ≥
+    // 7/8·CHUNK, so steady-state waste ≤ consumed/7; the adaptive growth
+    // ramp (INITIAL → CHUNK doubling) adds < 2·CHUNK per worker of
+    // sub-max claims plus the final open chunk. live/4 + 3·w·CHUNK sits
+    // safely above waste ≤ live/6 + ~2.4·w·CHUNK. Over-reservation is
+    // virtually free (lazy-zero pages — only live pages fault in).
+    let total_capacity = if let Some(w) = par_workers {
+        let live: usize = spaces.iter().map(|s| s.used_words()).sum();
+        let chunk = chunk_override.unwrap_or(512 * 1024).max(16);
+        total_capacity.max(live + live / 4 + w * 3 * chunk)
+    } else {
+        total_capacity
+    };
+
     let scratch_raw: Box<[usize]> = vec![0usize; total_capacity].into_boxed_slice();
     let mut scratch: Box<[PolyWord]> =
         // SAFETY: PolyWord is repr(transparent) over usize (same layout,
@@ -885,9 +1179,6 @@ where
 
     let t_scratch = t0.elapsed();
 
-    // Worker count None/0/1 = the exact serial path.
-    let par_workers = par_workers.filter(|&n| n >= 2);
-
     let mut col = Collector {
         from_ranges,
         to_storage: &mut scratch,
@@ -896,22 +1187,28 @@ where
         range_bit_base,
         untracked_addrs: Vec::new(),
         par_workers,
-        par_seeds: Vec::new(),
     };
 
     visit_roots(&mut col);
     let t_roots = t0.elapsed();
     if let Some(workers) = col.par_workers {
-        // P6 parallel queue-driven drain (docs/parallel-design.md § P6).
-        // The roots phase above ran serially and seeded `par_seeds`.
+        // P6 CHUNKED parallel collection (docs/parallel-design.md § P6):
+        // the serial roots phase copied into the contiguous prefix
+        // [0, to_used), which becomes the first stealable chunk; workers
+        // then claim 4 MB chunks from the arena frontier, allocate into
+        // them with PLAIN LOCAL bumps, and sweep each chunk LINEARLY —
+        // the per-worker serial-Cheney locality the queue-drain design
+        // lacked. Dead chunk tails are plugged with FILLER byte objects,
+        // so the promoted heap stays one contiguous valid object
+        // sequence and no space accounting changes anywhere.
         let shared = par::Shared::new(
             &col.from_ranges,
             &col.start_bits,
             &col.range_bit_base,
             col.to_storage,
             col.to_used,
-            &col.par_seeds,
             workers,
+            chunk_override,
         );
         std::thread::scope(|s| {
             for _ in 1..workers {
@@ -920,7 +1217,7 @@ where
             }
             shared.drain();
         });
-        col.to_used = shared.to_used.load(std::sync::atomic::Ordering::Acquire);
+        col.to_used = shared.arena_used.load(std::sync::atomic::Ordering::Acquire);
         col.untracked_addrs
             .extend(shared.untracked.lock().unwrap().iter().copied());
     } else {
@@ -1256,15 +1553,50 @@ mod tests {
                 unsafe { c.forward(r as *mut _) };
             }
         });
-        assert_eq!(
-            new_used, expected_live,
-            "live word count must be EXACT — a duplicate copy (claim race) \
-             or a dropped object (lost work) shows here"
+        // Chunked promotion plugs dead chunk tails with FILLER byte
+        // objects, so new_used ≥ live; the exact-count check moves to a
+        // filler-aware heap walk below.
+        assert!(
+            new_used >= expected_live,
+            "promoted arena smaller than live data — lost work"
         );
 
         // Sharing preserved: every parent sees the SAME forwarded leaves.
         let p0 = parents[0].as_ptr::<PolyWord>();
         let (l1, l2, ch) = unsafe { ((*p0).0, (*p0.add(1)).0, (*p0.add(2)).0) };
+
+        // Walk the promoted heap [0, new_used): every header must parse
+        // (contiguous valid object sequence — an unsealed tail or corrupt
+        // filler shows here), and non-filler words must sum EXACTLY to
+        // the live count — a duplicate copy (claim race) or a dropped
+        // object (lost work) shows here. The only real byte objects are
+        // the two leaves, so any other byte object is a filler.
+        let heap_start = a.as_ptr_range().start;
+        let mut i = 0usize;
+        let mut live_words = 0usize;
+        while i < new_used {
+            let lw = unsafe { *heap_start.add(i) };
+            let n = length_of(lw);
+            assert!(
+                i + 1 + n <= new_used,
+                "object at word {i} (len {n}) overruns the promoted arena"
+            );
+            let body = unsafe { heap_start.add(i + 1) } as usize;
+            let is_filler = type_of(lw) == F_BYTE_OBJ && body != l1 && body != l2;
+            if !is_filler {
+                live_words += 1 + n;
+            }
+            i += 1 + n;
+        }
+        assert_eq!(
+            i, new_used,
+            "promoted arena walk must land exactly on new_used"
+        );
+        assert_eq!(
+            live_words, expected_live,
+            "live word count must be EXACT — a duplicate copy (claim race) \
+             or a dropped object (lost work) shows here"
+        );
         for (i, r) in parents.iter().enumerate() {
             let p = r.as_ptr::<PolyWord>();
             unsafe {
@@ -1294,6 +1626,126 @@ mod tests {
         assert_eq!(cur, l2, "chain must terminate at the shared leaf2");
     }
 
+    /// Chunk-churn stress: TINY chunks (64 words, oversize threshold 8)
+    /// force constant seal / steal / oversize-slice traffic — hundreds of
+    /// chunk transitions where the default 4 MB chunks would produce one.
+    /// 8 chains of mixed-size nodes (2..=12 words — the top sizes take the
+    /// oversize path) alternating across two nurseries (cross-space edges),
+    /// all sharing 3 hot leaves (claim-CAS races), repeated 10 rounds.
+    #[test]
+    fn parallel_collect_chunk_churn_stress() {
+        const CHAINS: usize = 8;
+        const NODES: usize = 400; // per chain
+        for _round in 0..10 {
+            let mut a = MemorySpace::new(CHAINS * NODES * 16, SpaceKind::Mutable);
+            let mut b = MemorySpace::new(CHAINS * NODES * 16, SpaceKind::Mutable);
+            let mut expected_live = 0usize;
+
+            // Three hot shared leaves (word objects; every node points at one).
+            let mut leaves = [PolyWord::tagged(0); 3];
+            for (j, leaf) in leaves.iter_mut().enumerate() {
+                let p = b.alloc(1);
+                unsafe {
+                    set_length_word(p, 1, 0);
+                    p.write(PolyWord::tagged(0x5EED + j as isize));
+                }
+                *leaf = PolyWord::from_ptr(p.cast_const());
+                expected_live += 2;
+            }
+
+            let mut heads = Vec::with_capacity(CHAINS);
+            for c in 0..CHAINS {
+                let mut head = PolyWord::tagged(0);
+                for i in 0..NODES {
+                    let n = 2 + ((c + i) % 11); // 2..=12 words
+                    let space = if (c + i) % 2 == 0 { &mut a } else { &mut b };
+                    let p = space.alloc(n);
+                    unsafe {
+                        set_length_word(p, n, 0);
+                        p.write(head);
+                        p.add(1).write(leaves[(c + i) % 3]);
+                        for k in 2..n {
+                            p.add(k)
+                                .write(PolyWord::tagged((c * 100_000 + i * 31 + k) as isize));
+                        }
+                    }
+                    head = PolyWord::from_ptr(p.cast_const());
+                    expected_live += 1 + n;
+                }
+                heads.push(head);
+            }
+
+            let new_used =
+                collect_pool_with_workers_impl(&mut [&mut a, &mut b], Some(4), Some(64), |col| {
+                    for r in &mut heads {
+                        unsafe { col.forward(r as *mut _) };
+                    }
+                    for r in &mut leaves {
+                        unsafe { col.forward(r as *mut _) };
+                    }
+                });
+
+            // Walk the promoted arena: contiguous validity + EXACT live
+            // accounting (all live objects are WORD objects, so every byte
+            // object is a filler).
+            let heap_start = a.as_ptr_range().start;
+            let (mut i, mut live_words) = (0usize, 0usize);
+            while i < new_used {
+                let lw = unsafe { *heap_start.add(i) };
+                let n = length_of(lw);
+                assert!(
+                    i + 1 + n <= new_used,
+                    "object at word {i} overruns the arena"
+                );
+                if type_of(lw) != F_BYTE_OBJ {
+                    live_words += 1 + n;
+                }
+                i += 1 + n;
+            }
+            assert_eq!(i, new_used, "walk must land exactly on new_used");
+            assert_eq!(
+                live_words, expected_live,
+                "live word count must be EXACT — duplicate copy or lost object"
+            );
+
+            // Leaf payloads survived + forwarded roots are canonical.
+            for (j, leaf) in leaves.iter().enumerate() {
+                unsafe {
+                    assert_eq!(
+                        (*leaf.as_ptr::<PolyWord>()).0,
+                        PolyWord::tagged(0x5EED + j as isize).0,
+                        "leaf {j}: payload corrupted"
+                    );
+                }
+            }
+            // Payload + chain integrity, and leaf-sharing per node: every
+            // node's leaf slot must be the ONE forwarded copy of its leaf.
+            for (c, head) in heads.iter().enumerate() {
+                let mut cur = *head;
+                for i in (0..NODES).rev() {
+                    let n = 2 + ((c + i) % 11);
+                    let p = cur.as_ptr::<PolyWord>();
+                    unsafe {
+                        assert_eq!(
+                            (*p.add(1)).0,
+                            leaves[(c + i) % 3].0,
+                            "chain {c} node {i}: leaf sharing broken"
+                        );
+                        for k in 2..n {
+                            assert_eq!(
+                                (*p.add(k)).0,
+                                PolyWord::tagged((c * 100_000 + i * 31 + k) as isize).0,
+                                "chain {c} node {i} word {k}: payload corrupted"
+                            );
+                        }
+                        cur = *p;
+                    }
+                }
+                assert_eq!(cur.0, PolyWord::tagged(0).0, "chain {c} must end at nil");
+            }
+        }
+    }
+
     /// Pool collections must NOT balloon the primary: to-space is sized
     /// max(primary capacity, Σ used), not Σ capacity — the original pool
     /// formula grew the primary by the children's total capacity on
@@ -1313,7 +1765,11 @@ mod tests {
                 leaf.write(PolyWord::from_bits(0xbeef));
             }
             root = PolyWord::from_ptr(leaf.cast_const());
-            collect_pool(&mut [&mut a, &mut b], |c| unsafe {
+            // Pin the SERIAL path (workers = None): this test asserts the
+            // serial Σ-used to-space sizing; the parallel path adds
+            // bounded per-worker chunk slack by design, so a force-set
+            // POLYML_PARALLEL_GC env must not leak in.
+            collect_pool_with_workers_impl(&mut [&mut a, &mut b], None, None, |c| unsafe {
                 c.forward(&mut root as *mut _);
             });
             assert_eq!(

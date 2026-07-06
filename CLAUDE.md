@@ -92,10 +92,19 @@ Stage1.sml`). Consequences:
   the instrument that drove the 2026-07 pause optimization: object-start
   bitmap pre-pass + lazy-zero scratch + O(1) bitmap-hit slot forwarding =
   ~3.7× smaller pauses, all default-on and chain-byte-identical.
-  `POLYML_PARALLEL_GC=1` is a BUILT+measured parallel scan that LOSES to
-  the tuned serial sweep — default OFF, a correctness testbed; see
-  docs/parallel-design.md § P6. NB closure word-0 can be a MID-BODY code
-  pointer (entry offset) — never assume ML slots are body starts). Boolean env vars (`POLY_REAL_THREADS`, `POLYML_GC_QUIET`,
+  `POLYML_PARALLEL_GC=1` is the CHUNKED-Cheney parallel scan (v2 — the
+  first queue-drain version lost to the serial sweep): per-worker arena
+  chunks swept linearly, filler-sealed tails (heap stays one contiguous
+  object sequence), adaptive 4K→512K chunk growth, wide-object scan
+  splitting. Honest verdict: scan 2.35×/pause 1.7× faster on BIG wide
+  live sets (410 MB probe, plateaus at 4 workers — bandwidth-bound);
+  NEUTRAL on small-live and chain-shaped heaps (there pre-pass+promote
+  dominate, still serial). Default OFF (fillers change heap layout —
+  byte-identity fences are flag-off); worker count `POLYML_GC_THREADS`,
+  chunk tuning `POLYML_GC_CHUNK_WORDS`, per-worker load breakdown
+  `POLYML_GC_PAR_STATS=1`; see docs/parallel-design.md § P6b. NB closure
+  word-0 can be a MID-BODY code pointer (entry offset) — never assume ML
+  slots are body starts). Boolean env vars (`POLY_REAL_THREADS`, `POLYML_GC_QUIET`,
   `POLYML_GC_AUDIT`, the `JIT_*`/`WHOLE_REGION_*` debug flags) parse their
   *value* via `polyml_runtime::env_flag`: unset/empty/`0`/`false`/`off` = OFF,
   anything else = ON — so `=1` enables as documented and `=0` really disables

@@ -389,20 +389,14 @@ hangs:
     DEFAULT nurseries (ratio vs giant-lock 0.78 → 0.31 — the
     big-nursery tuning knob is now much less needed).
 
-  The parallel drain itself (flag-gated, default OFF): claim-then-copy
-  CAS + atomic bump + batched work-stealing queues with idle backoff.
-  Proven sound (shared-DAG claim-race stress with EXACT live-word
-  count, 90+ runs; one-worker = byte-identical serial layout; the full
-  fence ladder). Measured SLOWER than the optimized serial scan at
-  every live size (115 MB: 168 vs 98 ms; 900 MB: ~1.4 s vs ~0.7 s):
-  the linear Cheney sweep's sequential prefetch beats 6 workers doing
-  random-order queue visits with atomic claim traffic — copying GC
-  here is memory-bound and the sweep is already near bandwidth. The
-  credible parallel design is CHUNKED Cheney (per-worker to-space
-  segments, each swept linearly — upstream's task-farm shape); that
-  requires multi-segment space accounting and is deferred with bounded
-  expectations (the whole-region-JIT lesson: measure the representative
-  workload before productionizing). Original design notes below:
+  The FIRST parallel drain (queue-driven: claim-then-copy CAS + atomic
+  bump + batched work-stealing queues) was proven sound but measured
+  SLOWER than the optimized serial scan at every live size (115 MB: 168
+  vs 98 ms; 900 MB: ~1.4 s vs ~0.7 s): the linear Cheney sweep's
+  sequential prefetch beats 6 workers doing random-order queue visits
+  with atomic claim traffic. It was REPLACED by **CHUNKED Cheney (the
+  current implementation)** — see the P6b section below. Historical
+  design notes for the shared pieces (claim protocol, gating) follow:
 
   *Claim protocol.* From-space header states: NORMAL → BUSY →
   TOMBSTONE(to-ptr). A copier CASes NORMAL→BUSY (BUSY = the tombstone
@@ -448,6 +442,72 @@ hangs:
   (the STW pause shrinks in EVERY mode, not just POLY_PARALLEL). Kill
   switch: if the measured win is noise (the whole-region-JIT
   precedent), flag stays off and the code is documented as a testbed.
+
+- **P6b — CHUNKED CHENEY (`POLYML_PARALLEL_GC=1`, default OFF) — BUILT
+  + MEASURED. VERDICT: an honest, bounded WIN on the shape it targets —
+  scan 2.35× faster / total pause 1.7× shorter on a 410 MB wide live
+  graph at 4 workers (plateaus there: memory-bandwidth-bound, 6 adds
+  nothing); NEUTRAL on small-live and chain-shaped heaps; byte-identical
+  SML results everywhere; the default serial path untouched
+  (chain-fence-proven).**
+
+  Design (all in `gc.rs::par`): one contiguous to-space arena; workers
+  claim CHUNKS from an atomic frontier (one `fetch_add` per chunk, not
+  per object — object allocation is a plain local bump) and sweep each
+  chunk LINEARLY — the per-worker sequential prefetch the queue-drain
+  lacked. The pieces that made it work:
+  * **Filler seals.** A sealed chunk's dead tail is plugged with a
+    byte-object header, so the promoted heap stays ONE contiguous valid
+    object sequence — no multi-segment space accounting anywhere (the
+    design problem that deferred P6b originally just dissolves).
+    Workers also seal their final open chunk at quiescence.
+  * **Root-prefix pseudo-chunk.** The serial roots phase copies into
+    `[0, root_used)`; that prefix seeds the steal queue as the first
+    chunk — zero changes to root forwarding.
+  * **Two-slot worker + whole-chunk stealing.** Each worker allocates
+    into `cur` and keeps one sealed-but-unscanned predecessor
+    (`scanning`); further sealed chunks and OVERSIZE objects (exact
+    arena slices, published only AFTER their copy completes) go to a
+    mutex steal queue. Thieves sweep stolen chunks linearly — locality
+    preserved.
+  * **Adaptive chunk growth.** Chunks start at 4 K words and double per
+    seal to 512 K: a collection that copies little claims little
+    (constant-size chunks inflated `to_used` with fillers and fired the
+    80% GC trigger EARLY on small heaps — measured as extra collections
+    before the fix).
+  * **Wide-object scan splitting.** `forward_slot` copies children
+    inline during the parent's scan, so ONE wide pointer array put
+    99.7% of a 410 MB probe on one worker (per-worker stats,
+    `POLYML_GC_PAR_STATS=1`). Scans of word objects wider than 4 K
+    words binary-split their slot ranges into the steal queue
+    (`Task::Slots`) — breadth becomes stealable work.
+  * **Termination.** A `busy` counter: workers decrement entering the
+    idle probe, re-increment on acquiring work; `busy == 0` + empty
+    queue = quiescence (copies only happen while scanning, so the
+    condition cannot un-quiesce).
+
+  Honest measurements (410 MB live, 900 MB heap, 9 collections,
+  `POLYML_GC_PHASES=1`): WIDE graph (80×80 vector tree of 8 K-word
+  arrays): scan 287 → 122 ms (4w), pause 398 → 234 ms; identical
+  stdout. CHAIN of arrays (a linked list — inherent graph depth, no GC
+  can parallelize it): copying stays on one worker, split-scan still
+  trims scan 270 → 237 ms. Small-live workloads (the Isabelle 6-worker
+  kernel bench, ~35 MB live): no measurable change — there the pause is
+  dominated by the pre-pass + promote phases, which stay serial (the
+  next credible target, along with ping-pong semispace reuse to kill
+  the per-cycle map/unmap + re-fault cost). Limits: the win needs live
+  data big enough that scan dominates AND graph breadth; plateaued at 4
+  workers by memory bandwidth.
+
+  Fences: 4 parallel unit tests incl. a chunk-churn stress (64-word
+  chunks force hundreds of seal/steal/oversize transitions; filler-aware
+  EXACT live accounting + full-heap walk validation) hammered 60×
+  clean; `concurrency_parallel` storm+audit suite green flag-on
+  (parallel mutators + parallel GC + heap audit); GC storm with
+  `POLYML_GC_AUDIT=1` flag-on/off stdout-identical; the Euler
+  theorem driver (3.3B steps of real LCF proving) flag-on/off
+  stdout-identical; stage-0 + the 27.7B-step chain byte-identical
+  (default path); `tools/regression.sh fast` green.
 
 ## Fence plan
 
