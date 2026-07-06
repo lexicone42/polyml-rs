@@ -850,23 +850,25 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyThreadNumProcessors",
         RtsFn::Arity0(|_| PolyWord::tagged(num_processors())),
     );
-    // Real / float RTS stubs (basis layer uses these).
+    // REAL rounding modes (upstream real.cpp setrounding/getrounding):
+    // fesetround sets the process FP environment (x87 control word +
+    // SSE MXCSR on x86); our interpreter's Real ops are Rust f64
+    // arithmetic lowered to SSE, which READS MXCSR — so directed
+    // rounding is honored by every subsequent FP op, and Real32.fromReal
+    // (cvtsd2ss) rounds per mode, which is exactly what the basis's
+    // Real32.fromLarge set-convert-restore dance requires. Formal
+    // caveat (same as upstream C without FENV_ACCESS): the optimizer
+    // assumes default mode for compile-time-constant folds; all SML
+    // operands are runtime heap values, so the lowered instructions
+    // decide. IEEEReal encoding: 0=TO_NEAREST 1=TO_NEGINF 2=TO_POSINF
+    // 3=TO_ZERO; setRoundCall < 0 = failure (basis raises Fail).
     t.register(
         "PolyGetRoundingMode",
-        RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
-    ); // TO_NEAREST
-    // Setting TO_NEAREST (0) matches the hardware default and is honored;
-    // any other mode would be silently ignored (wrong rounding in every
-    // subsequent FP op), so it raises instead.
+        RtsFn::Arity1(|_, _| PolyWord::tagged(fenv::get_mode())),
+    );
     t.register(
         "PolySetRoundingMode",
-        RtsFn::Arity1(|ctx, mode| {
-            if mode == PolyWord::tagged(0) {
-                PolyWord::tagged(0)
-            } else {
-                fail_unimpl(ctx, "IEEEReal.setRoundingMode (non-default mode)")
-            }
-        }),
+        RtsFn::Arity1(|_, mode| PolyWord::tagged(fenv::set_mode(mode.untag()))),
     );
     t.register("PolyRealFrexp", RtsFn::Arity2(poly_real_frexp));
     t.register(
@@ -1456,16 +1458,20 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyNetworkGetAddressAndPortFromIP6",
         RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "sockets (IPv6)")),
     );
-    // rtsCallFull2 = threadId + 2 args = Arity3 (was mis-registered Arity2 —
-    // the latent wrong-stub-arity class: harmless while unreachable, but a
-    // clean SysErr beats an arity-mismatch halt once DNS is actually called).
+    // REAL DNS (network.cpp:1866 PolyNetworkGetAddrInfo / :1817
+    // GetNameInfo): getaddrinfo/getnameinfo with AI_CANONNAME, result =
+    // an SML list of 6-tuples (flags, family, socktype, protocol,
+    // sockaddr-bytes, canonname). The lookup itself can block on real
+    // DNS, so it runs under park_while_blocking (native data only — the
+    // hostname is copied to a CString BEFORE the park, allocations
+    // happen AFTER re-acquire; the peer-GC-moves-the-string hazard).
     t.register(
         "PolyNetworkGetAddrInfo",
-        RtsFn::Arity3(|ctx, _, _, _| syserr_unimpl(ctx, "sockets (getAddrInfo/DNS)")),
+        RtsFn::Arity3(socket_rts::poly_network_get_addr_info),
     );
     t.register(
         "PolyNetworkGetNameInfo",
-        RtsFn::Arity2(|ctx, _, _| syserr_unimpl(ctx, "sockets (getNameInfo)")),
+        RtsFn::Arity2(socket_rts::poly_network_get_name_info),
     );
     t.register(
         "PolyNetworkCreateSocket",
@@ -1537,9 +1543,41 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyProcessEnvErrorMessage",
         RtsFn::Arity2(poly_process_env_error_message),
     );
+    // REAL name->errno lookup (process_env.cpp errorFromString via
+    // errors.cpp): the inverse of PolyProcessEnvErrorName, over the same
+    // errno_name table; also accepts the "ERROR<n>" fallback spelling.
+    // Returns a boxed SysWord (0 = not found; the basis maps 0 to NONE).
+    // This is what makes `OS.syserror "ECONNREFUSED"` usable in error
+    // comparisons (upstream Test082's connection-refused check).
     t.register(
         "PolyProcessEnvErrorFromString",
-        RtsFn::Arity2(|_, _, _| PolyWord::tagged(0)),
+        RtsFn::Arity2(|ctx, _, name| {
+            let n = poly_string_to_rust(ctx.safe_spaces.as_ref(), name).unwrap_or_default();
+            let mut code: i64 = 0;
+            for e in 1..=200i64 {
+                if errno_name(e) == Some(n.as_str()) {
+                    code = e;
+                    break;
+                }
+            }
+            if code == 0 {
+                // Alias spellings (upstream's errortable has multiple
+                // rows per number; errorName picks the canonical one).
+                code = match n.as_str() {
+                    "EWOULDBLOCK" => 11,
+                    "EDEADLOCK" => 35,
+                    "ENOTSUP" => 95,
+                    _ => 0,
+                };
+            }
+            if code == 0 {
+                if let Some(rest) = n.strip_prefix("ERROR") {
+                    code = rest.parse().unwrap_or(0);
+                }
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            socket_rts::make_sysword(ctx, code as libc::c_int)
+        }),
     );
     // REAL (was the worst silent-lie in the table — returned tagged(0),
     // which is ALSO the registered success value, so it reported success
@@ -2035,6 +2073,83 @@ fn poly_terminate(_: &mut RtsContext<'_>, _tid: PolyWord, exit_code: PolyWord) -
     PolyWord::tagged(0)
 }
 
+/// C99 fenv rounding-mode access. The `libc` crate does not expose
+/// `fesetround`/`fegetround` (or the per-arch `FE_*` constants), so we
+/// bind them directly. Constants are ARCH-specific (glibc/macOS agree
+/// per arch): x86 encodes them in the control-word bits, arm in FPCR
+/// bits. On arches without a vetted table we support only TO_NEAREST —
+/// `set_mode` returns -1 for the rest and the basis raises `Fail`,
+/// which Test121-style callers treat as not-implemented (the exact
+/// pre-real behavior, now scoped to unsupported arches only).
+mod fenv {
+    unsafe extern "C" {
+        fn fegetround() -> core::ffi::c_int;
+        fn fesetround(round: core::ffi::c_int) -> core::ffi::c_int;
+    }
+
+    /// (TO_NEAREST, TO_NEGINF, TO_POSINF, TO_ZERO) in the platform's
+    /// FE_* encoding, or None if this arch has no vetted table.
+    const fn fe_table() -> Option<(i32, i32, i32, i32)> {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            Some((0, 0x400, 0x800, 0xc00))
+        }
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        {
+            Some((0, 0x80_0000, 0x40_0000, 0xc0_0000))
+        }
+        #[cfg(not(any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "arm",
+            target_arch = "aarch64"
+        )))]
+        {
+            None
+        }
+    }
+
+    /// Current mode in IEEEReal encoding (0=NEAREST 1=NEGINF 2=POSINF
+    /// 3=ZERO); unknown/unsupported reads as 0.
+    pub fn get_mode() -> isize {
+        let Some((near, down, up, zero)) = fe_table() else {
+            return 0;
+        };
+        let cur = unsafe { fegetround() };
+        if cur == near {
+            0
+        } else if cur == down {
+            1
+        } else if cur == up {
+            2
+        } else if cur == zero {
+            3
+        } else {
+            0
+        }
+    }
+
+    /// Set from IEEEReal encoding. 0 = ok, -1 = failure (basis raises).
+    pub fn set_mode(mode: isize) -> isize {
+        let Some((near, down, up, zero)) = fe_table() else {
+            // Unsupported arch: only the hardware default is honored.
+            return if mode == 0 { 0 } else { -1 };
+        };
+        let fe = match mode {
+            0 => near,
+            1 => down,
+            2 => up,
+            3 => zero,
+            _ => return -1,
+        };
+        if unsafe { fesetround(fe) } == 0 {
+            0
+        } else {
+            -1
+        }
+    }
+}
+
 fn poly_interpreted_enter_int_mode_inner() -> PolyWord {
     PolyWord::tagged(0)
 }
@@ -2405,6 +2520,159 @@ mod socket_rts {
     }
 
     /// Allocate an ML pair `(a, b)` (a 2-word ordinary tuple/record object).
+    /// `PolyNetworkGetAddrInfo(threadId, hostName, addrFamily)` — DNS
+    /// forward lookup (network.cpp:1866). Returns an SML list of
+    /// `(flags, family, socktype, protocol, sockaddrBytes, canonname)`;
+    /// the basis's `NetHostDB.getByName` maps this to a host entry.
+    /// Empty result or failure raises SysErr (the basis turns it into
+    /// NONE). Only the FIRST entry carries the canonical name
+    /// (upstream extractAddrInfo parity).
+    pub(super) fn poly_network_get_addr_info(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        host_name: PolyWord,
+        addr_family: PolyWord,
+    ) -> PolyWord {
+        let Some(name_bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), host_name) else {
+            return raise_syscall(ctx, "getaddrinfo failed", libc::EINVAL);
+        };
+        let Ok(c_name) = std::ffi::CString::new(name_bytes) else {
+            return raise_syscall(ctx, "getaddrinfo failed", libc::EINVAL);
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let family = socket_int_arg(ctx.safe_spaces.as_ref(), addr_family) as i32;
+        let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+        hints.ai_family = family;
+        hints.ai_flags = libc::AI_CANONNAME;
+        let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+        // The lookup can block on real DNS: park (native data only).
+        let gai = crate::rts::park_while_blocking(|| unsafe {
+            libc::getaddrinfo(c_name.as_ptr(), std::ptr::null(), &hints, &raw mut res)
+        });
+        if gai != 0 {
+            if !res.is_null() {
+                unsafe { libc::freeaddrinfo(res) };
+            }
+            // Upstream raises gai_strerror text (errno only for
+            // EAI_SYSTEM); the basis catches SysErr -> NONE either way.
+            let errno = if gai == libc::EAI_SYSTEM {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+            } else {
+                0
+            };
+            return raise_syscall(ctx, "getaddrinfo failed", errno);
+        }
+        // Copy everything OUT of the C list first, then free it, then
+        // allocate (allocation can exit on heap exhaustion — never leak
+        // the C allocation).
+        struct Entry {
+            flags: i32,
+            family: i32,
+            socktype: i32,
+            protocol: i32,
+            addr: Vec<u8>,
+            canon: Vec<u8>,
+        }
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut cur = res;
+        while !cur.is_null() {
+            // SAFETY: cur walks the getaddrinfo-owned list.
+            let ai = unsafe { &*cur };
+            let addr = if ai.ai_addr.is_null() {
+                Vec::new()
+            } else {
+                // SAFETY: ai_addr points at ai_addrlen valid bytes.
+                unsafe {
+                    std::slice::from_raw_parts(ai.ai_addr.cast::<u8>(), ai.ai_addrlen as usize)
+                        .to_vec()
+                }
+            };
+            let canon = if entries.is_empty() && !ai.ai_canonname.is_null() {
+                // SAFETY: ai_canonname is a NUL-terminated C string.
+                unsafe { std::ffi::CStr::from_ptr(ai.ai_canonname) }
+                    .to_bytes()
+                    .to_vec()
+            } else {
+                Vec::new()
+            };
+            entries.push(Entry {
+                flags: ai.ai_flags,
+                family: ai.ai_family,
+                socktype: ai.ai_socktype,
+                protocol: ai.ai_protocol,
+                addr,
+                canon,
+            });
+            cur = ai.ai_next;
+        }
+        unsafe { libc::freeaddrinfo(res) };
+        // Build the SML list back-to-front: nil = tagged 0; cons = 2-word
+        // cell; each element a 6-word tuple (upstream extractAddrInfo).
+        let mut list = PolyWord::tagged(0);
+        for e in entries.iter().rev() {
+            let addr_str = alloc_poly_string(ctx, &e.addr);
+            let canon_str = alloc_poly_string(ctx, &e.canon);
+            let Some(space) = ctx.alloc_space.as_mut() else {
+                return PolyWord::tagged(0);
+            };
+            let tup = space.alloc_or_exit(6);
+            // SAFETY: just allocated 6 words.
+            unsafe {
+                crate::space::set_length_word(tup, 6, 0);
+                tup.write(PolyWord::tagged(e.flags as isize));
+                tup.add(1).write(PolyWord::tagged(e.family as isize));
+                tup.add(2).write(PolyWord::tagged(e.socktype as isize));
+                tup.add(3).write(PolyWord::tagged(e.protocol as isize));
+                tup.add(4).write(addr_str);
+                tup.add(5).write(canon_str);
+            }
+            list = alloc_pair(ctx, PolyWord::from_ptr(tup.cast_const()), list);
+        }
+        list
+    }
+
+    /// `PolyNetworkGetNameInfo(threadId, sockAddr)` — reverse DNS
+    /// (network.cpp:1817): getnameinfo on the raw sockaddr bytes,
+    /// returning the host name string. Parks (can block on DNS).
+    pub(super) fn poly_network_get_name_info(
+        ctx: &mut RtsContext<'_>,
+        _tid: PolyWord,
+        sock_addr: PolyWord,
+    ) -> PolyWord {
+        let Some(bytes) = poly_string_raw_bytes(ctx.safe_spaces.as_ref(), sock_addr) else {
+            return raise_syscall(ctx, "getnameinfo failed", libc::EINVAL);
+        };
+        let addr = bytes.to_vec();
+        let mut host = [0u8; libc::NI_MAXHOST as usize];
+        let gai = crate::rts::park_while_blocking(|| unsafe {
+            libc::getnameinfo(
+                addr.as_ptr().cast::<libc::sockaddr>(),
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    addr.len() as libc::socklen_t
+                },
+                host.as_mut_ptr().cast(),
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    host.len() as libc::socklen_t
+                },
+                std::ptr::null_mut(),
+                0,
+                0,
+            )
+        });
+        if gai != 0 {
+            let errno = if gai == libc::EAI_SYSTEM {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+            } else {
+                0
+            };
+            return raise_syscall(ctx, "getnameinfo failed", errno);
+        }
+        let len = host.iter().position(|&b| b == 0).unwrap_or(host.len());
+        alloc_poly_string(ctx, &host[..len])
+    }
+
     pub(super) fn alloc_pair(ctx: &mut RtsContext<'_>, a: PolyWord, b: PolyWord) -> PolyWord {
         let Some(space) = ctx.alloc_space.as_mut() else {
             return PolyWord::tagged(0);
@@ -3868,12 +4136,68 @@ fn errno_name(e: i64) -> Option<&'static str> {
         30 => "EROFS",
         31 => "EMLINK",
         32 => "EPIPE",
+        15 => "ENOTBLK",
+        26 => "ETXTBSY",
+        33 => "EDOM",
         34 => "ERANGE",
+        35 => "EDEADLK",
         36 => "ENAMETOOLONG",
+        37 => "ENOLCK",
+        38 => "ENOSYS",
+        39 => "ENOTEMPTY",
         40 => "ELOOP",
+        42 => "ENOMSG",
+        43 => "EIDRM",
+        59 => "EBFONT",
+        60 => "ENOSTR",
+        61 => "ENODATA",
         62 => "ETIME",
+        63 => "ENOSR",
+        64 => "ENONET",
+        65 => "ENOPKG",
+        66 => "EREMOTE",
+        67 => "ENOLINK",
+        71 => "EPROTO",
+        72 => "EMULTIHOP",
+        74 => "EBADMSG",
+        75 => "EOVERFLOW",
+        84 => "EILSEQ",
+        85 => "ERESTART",
+        86 => "ESTRPIPE",
+        87 => "EUSERS",
+        88 => "ENOTSOCK",
+        89 => "EDESTADDRREQ",
+        90 => "EMSGSIZE",
+        91 => "EPROTOTYPE",
+        92 => "ENOPROTOOPT",
+        93 => "EPROTONOSUPPORT",
+        94 => "ESOCKTNOSUPPORT",
+        95 => "EOPNOTSUPP",
+        96 => "EPFNOSUPPORT",
+        97 => "EAFNOSUPPORT",
+        98 => "EADDRINUSE",
+        99 => "EADDRNOTAVAIL",
+        100 => "ENETDOWN",
+        101 => "ENETUNREACH",
+        102 => "ENETRESET",
+        103 => "ECONNABORTED",
+        104 => "ECONNRESET",
+        105 => "ENOBUFS",
+        106 => "EISCONN",
+        107 => "ENOTCONN",
+        108 => "ESHUTDOWN",
+        109 => "ETOOMANYREFS",
         110 => "ETIMEDOUT",
         111 => "ECONNREFUSED",
+        112 => "EHOSTDOWN",
+        113 => "EHOSTUNREACH",
+        114 => "EALREADY",
+        115 => "EINPROGRESS",
+        116 => "ESTALE",
+        122 => "EDQUOT",
+        125 => "ECANCELED",
+        130 => "EOWNERDEAD",
+        131 => "ENOTRECOVERABLE",
         _ => return None,
     })
 }

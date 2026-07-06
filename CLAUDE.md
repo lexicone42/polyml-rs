@@ -220,11 +220,17 @@ runs ~1,300 comparisons (Basis + compiler-stress + seeded LCG fuzz drivers that
 exercise BOTH the inline opcode path and the ref-forced RTS path), all
 byte-identical. `tools/upstream-suite.sh [succeed|fail|all]` runs Poly/ML's OWN
 Tests/ corpus ONE PROCESS PER TEST (in-process driving dies at the first hard
-halt — deep recursion is a halt for us, upstream grows ML stacks): **279/295
-as of 2026-07-06** (POLY_REAL_THREADS=1; 278 default — Test166 needs threads),
-all 16 fails in documented-gap buckets (nonblocking/Unix sockets + DNS, FFI,
-Posix, rounding modes, fixed ML stack, one codegen-assumption arith test).
-Test120 flipped 2026-07-06: **weak refs are REAL** (`Weak.weak`/`weakArray`
+halt — deep recursion is a halt for us, upstream grows ML stacks): **285/295
+as of 2026-07-06 evening** (POLY_REAL_THREADS=1: Succeed 202/212 + Fail
+83/83; default loses Test166/078/185 which need real threads — and NB the
+socket tests that once failed FAST on the DNS stub now HANG to the 120 s
+timeout in default mode, so the default suite run is slower). The 10
+remaining fails, all documented buckets: nonblocking sockets + select
+(083/178), FFI (162/163), Posix (188/190), UnixSock (193), fixed ML stack
+(081), stream-close semantics (183), one codegen-assumption arith test
+(101). SEVEN tests flipped 2026-07-06: Test120 (weak refs), Test121/171/174
+(rounding modes), Test078/185 (DNS + threads), Test082 (syserror lookup).
+Test120 flipped first: **weak refs are REAL** (`Weak.weak`/`weakArray`
 demote dead entries to NONE; `gc.rs::weak_fixup` ports upstream
 `gc_check_weak_ref.cpp` to the copying GC — weak slots skipped by BOTH scan
 paths, post-trace fixup forwards survivors/demotes dead, shared SOME cells
@@ -421,9 +427,26 @@ How it works:
   SML echo server round-trips through the kernel, `tests/sockets.rs`).
   **Sockets are BLOCKING, not upstream's FIONBIO+ThreadPause** (the scheduler
   is off by default; the one mutator just blocks — see the divergence note on
-  `mod socket_rts`). Still stubbed → raise catchable SysErr (never fake
+  `mod socket_rts`). 2026-07-06 batch, all differential-verified against
+  upstream: **DNS is REAL** (`NetHostDB.getByName`/`getByAddr` =
+  getaddrinfo/getnameinfo under `park_while_blocking` — name copied to a
+  CString BEFORE the park, allocations after re-acquire),
+  **IEEE rounding modes are REAL** (`rts.rs::fenv`, fesetround with
+  per-arch FE_* tables for x86/arm; other arches degrade to
+  TO_NEAREST-only-with-Fail — our Real ops lower to SSE/FPCR-honoring
+  instructions so directed rounding flows through SML arithmetic and
+  `Real32.fromLarge`), and **`OS.syserror` name→errno is REAL** (inverts
+  the now-full Linux `errno_name` table + alias rows EWOULDBLOCK/
+  EDEADLOCK/ENOTSUP). NB the syserror fix moved the CANONICAL CHAIN
+  MD5: `basis/LibraryIOSupport.sml` bakes `OS.syserror "EAGAIN"/
+  "EWOULDBLOCK"/"EINPROGRESS"` into polyexport at basis build — real
+  values now instead of broken NONEs. Step count is UNCHANGED
+  (27,661,574,781); the new pin is `af37a7c15b57b5ccba4482afb444c1d4`
+  (double-run deterministic). Fenced by `tests/rounding_dns.rs`.
+  Still stubbed → raise catchable SysErr (never fake
   success; #135, fenced by `tests/rts_defang.rs`): C FFI, Signal.signal
-  delivery, SaveState, Posix, socket IPv6/DNS. Load-bearing carve-outs that
+  delivery, SaveState, Posix, socket IPv6 + nonblocking (FIONBIO) +
+  UnixSock. Load-bearing carve-outs that
   must NOT raise (measured against the chain): `getConst` (OSSpecificGeneral
   code 4) errno tables + `PolyPosixCreatePersistentFD` (Posix
   stdin/stdout/stderr) at basis load, `PolySetSignalHandler` at REPL startup,
