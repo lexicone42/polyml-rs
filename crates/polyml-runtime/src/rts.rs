@@ -1303,9 +1303,30 @@ fn register_builtins(t: &mut RtsTable) {
         "PolyFFIGetSymbolAddress",
         RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "Foreign: getSymbol (no C FFI)")),
     );
+    // REAL C malloc (Foreign.Memory, network/foreign_call.cpp analog):
+    // `rtsCallFull1` = (threadId, byteCount) = Arity2 (the stub was
+    // Arity1 — the systematically-wrong latent-stub-arity class; safe to
+    // fix, the fingerprint pins names/order only). Returns a voidStar =
+    // SysWord.word = a 1-word byte object holding the raw C pointer (0 on
+    // failure — the basis `allocMem` raises Memory on null). The basis
+    // manages its own free list on top of these chunks, so PolyFFIFree is
+    // effectively never called (free returns to the pool).
     t.register(
         "PolyFFIMalloc",
-        RtsFn::Arity1(|ctx, _| fail_unimpl(ctx, "Foreign.Memory.malloc (no C FFI)")),
+        RtsFn::Arity2(|ctx, _tid, size| {
+            let n = if size.is_tagged() {
+                #[allow(clippy::cast_sign_loss)]
+                {
+                    size.untag().max(0) as usize
+                }
+            } else {
+                // Boxed large-word byte count (word 0).
+                safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), size).map_or(0, |p| unsafe { (*p).0 })
+            };
+            // SAFETY: libc::malloc with a byte count; null on failure.
+            let ptr = unsafe { libc::malloc(n) } as usize;
+            socket_rts::make_voidstar(ctx, ptr)
+        }),
     );
     t.register(
         "PolyFFICreateExtData",
@@ -1689,7 +1710,24 @@ fn register_builtins(t: &mut RtsTable) {
     // FFI stubs (we don't support real FFI yet).
     t.register("PolyFFIGetError", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
     t.register("PolyFFISetError", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
-    t.register("PolyFFIFree", RtsFn::Arity1(|_, _| PolyWord::tagged(0)));
+    // REAL C free (rtsCallFast1 = Arity1: the voidStar boxed pointer).
+    // The basis pool doesn't call this (free returns to its free list),
+    // but honor it for any direct user. Null/tagged 0 => no-op.
+    t.register(
+        "PolyFFIFree",
+        RtsFn::Arity1(|ctx, ptr| {
+            if !ptr.is_tagged() {
+                if let Some(p) = safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), ptr) {
+                    let addr = unsafe { (*p).0 };
+                    if addr != 0 {
+                        // SAFETY: addr came from PolyFFIMalloc's libc::malloc.
+                        unsafe { libc::free(addr as *mut libc::c_void) };
+                    }
+                }
+            }
+            PolyWord::tagged(0)
+        }),
+    );
     t.register(
         "PolyFFICallbackException",
         RtsFn::Arity1(|_, _| PolyWord::tagged(0)),
@@ -3597,6 +3635,23 @@ mod socket_rts {
     }
 
     /// Build a `SysWord.word` value: a 1-word MUTABLE byte box holding the
+    /// Box a full-width native word (a C pointer / voidStar) as a 1-word
+    /// byte object holding the raw bits. Like `make_sysword` but for a
+    /// pointer-sized value (`PolyFFIMalloc`, address boxing).
+    pub(super) fn make_voidstar(ctx: &mut RtsContext<'_>, v: usize) -> PolyWord {
+        use crate::length_word::F_BYTE_OBJ;
+        let Some(space) = ctx.alloc_space.as_mut() else {
+            return PolyWord::tagged(0);
+        };
+        let p = space.alloc_or_exit(1);
+        // SAFETY: just allocated 1 word (the voidStar byte box).
+        unsafe {
+            crate::space::set_length_word(p, 1, F_BYTE_OBJ);
+            p.write(PolyWord::from_bits(v));
+            PolyWord::from_ptr(p.cast_const())
+        }
+    }
+
     /// raw value. Mirrors upstream `Make_sysword` (used by GetSocketError).
     pub(super) fn make_sysword(ctx: &mut RtsContext<'_>, v: libc::c_int) -> PolyWord {
         use crate::length_word::F_BYTE_OBJ;

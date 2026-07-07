@@ -7032,6 +7032,133 @@ impl Interpreter {
                 self.push_continue(old)
             }
             // log2(word at top), replace top. (bytecode.cpp:2359-2367.)
+            // ----- C-memory load/store (Foreign.Memory get*/set*).
+            // Stack (top→down) for loads: offset, index, base; the base
+            // is a boxed large-word whose word 0 holds a raw C pointer.
+            // `p = *(byte**)base + offset` (offset SIGNED bytes), then
+            // `((T*)p)[index]` (index SIGNED elements). bytecode.cpp:2061+.
+            // Trusted-only: the base is an unmanaged C pointer no space
+            // predicate can validate, so untrusted mode HALTS cleanly
+            // (no wild deref) rather than dereferencing it.
+            EXTINSTR_LOAD_C8
+            | EXTINSTR_LOAD_C16
+            | EXTINSTR_LOAD_C32
+            | EXTINSTR_LOAD_C64
+            | EXTINSTR_LOAD_C_FLOAT
+            | EXTINSTR_LOAD_C_DOUBLE => {
+                if self.untrusted {
+                    return Ok(StepResult::Unimplemented {
+                        op: ext,
+                        extended: true,
+                    });
+                }
+                let offset = self.pop()?.untag();
+                let index = self.pop()?.untag();
+                let base = self.peek(0)?;
+                // SAFETY: trusted path; base is a boxed large-word (word 0
+                // = C pointer). The element address is that pointer plus
+                // the signed byte offset plus index*elem_size — an
+                // FFI-controlled unmanaged address by contract.
+                let cptr = unsafe { (*base.as_ptr::<PolyWord>()).0 };
+                let byte_base = (cptr as isize).wrapping_add(offset);
+                match ext {
+                    EXTINSTR_LOAD_C8 => {
+                        // SAFETY: FFI address by contract.
+                        let v = unsafe { ((byte_base + index) as *const u8).read_unaligned() };
+                        self.pop()?;
+                        self.push_continue(PolyWord::tagged(isize::from(v)))
+                    }
+                    EXTINSTR_LOAD_C16 => {
+                        let v = unsafe { ((byte_base + index * 2) as *const u16).read_unaligned() };
+                        self.pop()?;
+                        self.push_continue(PolyWord::tagged(v as isize))
+                    }
+                    EXTINSTR_LOAD_C32 => {
+                        let v = unsafe { ((byte_base + index * 4) as *const u32).read_unaligned() };
+                        // 64-bit host: tagged (bytecode.cpp #ifdef IS64BITS).
+                        self.pop()?;
+                        self.push_continue(PolyWord::tagged(v as isize))
+                    }
+                    EXTINSTR_LOAD_C64 => {
+                        let v = unsafe { ((byte_base + index * 8) as *const u64).read_unaligned() };
+                        self.pop()?;
+                        self.alloc_large_word(v as usize)
+                    }
+                    EXTINSTR_LOAD_C_FLOAT => {
+                        // Read a 32-bit float, box as a Real (double).
+                        let v = unsafe { ((byte_base + index * 4) as *const f32).read_unaligned() };
+                        self.pop()?;
+                        let boxed = self.alloc_real(f64::from(v))?;
+                        self.push_continue(boxed)
+                    }
+                    // EXTINSTR_LOAD_C_DOUBLE
+                    _ => {
+                        let v = unsafe { ((byte_base + index * 8) as *const f64).read_unaligned() };
+                        self.pop()?;
+                        let boxed = self.alloc_real(v)?;
+                        self.push_continue(boxed)
+                    }
+                }
+            }
+            // Stores. Stack (top→down): toStore, offset, index, base;
+            // result is Zero (unit). bytecode.cpp:2148+.
+            EXTINSTR_STORE_C8
+            | EXTINSTR_STORE_C16
+            | EXTINSTR_STORE_C32
+            | EXTINSTR_STORE_C64
+            | EXTINSTR_STORE_C_FLOAT
+            | EXTINSTR_STORE_C_DOUBLE => {
+                if self.untrusted {
+                    return Ok(StepResult::Unimplemented {
+                        op: ext,
+                        extended: true,
+                    });
+                }
+                let value = self.pop()?;
+                // For float/double the value is a boxed Real — read it
+                // before popping offset/index (read_real borrows self).
+                let real = matches!(ext, EXTINSTR_STORE_C_FLOAT | EXTINSTR_STORE_C_DOUBLE)
+                    .then(|| self.read_real(value))
+                    .transpose()?;
+                let offset = self.pop()?.untag();
+                let index = self.pop()?.untag();
+                let base = self.peek(0)?;
+                // SAFETY: trusted path; unmanaged FFI address by contract.
+                let cptr = unsafe { (*base.as_ptr::<PolyWord>()).0 };
+                let byte_base = (cptr as isize).wrapping_add(offset);
+                // SAFETY: FFI address by contract; width per opcode.
+                unsafe {
+                    match ext {
+                        EXTINSTR_STORE_C8 => {
+                            ((byte_base + index) as *mut u8).write_unaligned(value.untag() as u8);
+                        }
+                        EXTINSTR_STORE_C16 => {
+                            ((byte_base + index * 2) as *mut u16)
+                                .write_unaligned(value.untag() as u16);
+                        }
+                        EXTINSTR_STORE_C32 => {
+                            ((byte_base + index * 4) as *mut u32)
+                                .write_unaligned(value.untag() as u32);
+                        }
+                        EXTINSTR_STORE_C64 => {
+                            // value is a boxed large-word (word 0 = raw bits).
+                            let raw = (*value.as_ptr::<PolyWord>()).0;
+                            ((byte_base + index * 8) as *mut u64).write_unaligned(raw as u64);
+                        }
+                        EXTINSTR_STORE_C_FLOAT => {
+                            #[allow(clippy::cast_possible_truncation)]
+                            ((byte_base + index * 4) as *mut f32)
+                                .write_unaligned(real.unwrap() as f32);
+                        }
+                        // EXTINSTR_STORE_C_DOUBLE
+                        _ => {
+                            ((byte_base + index * 8) as *mut f64).write_unaligned(real.unwrap());
+                        }
+                    }
+                }
+                self.stack[self.sp] = PolyWord::tagged(0);
+                Ok(StepResult::Continue)
+            }
             EXTINSTR_LOG2_WORD => {
                 let w = self.peek(0)?;
                 let mut p = w.untag() as usize;
@@ -8161,6 +8288,21 @@ impl Interpreter {
             p.cast::<f64>().write(v);
         }
         Ok(PolyWord::from_ptr(p.cast_const()))
+    }
+
+    /// Box a raw native word as a 1-word LargeWord byte object (the
+    /// `loadC64` result / `voidStar` shape). Mirrors `SIGNED_TO_LONG_W`.
+    fn alloc_large_word(&mut self, v: usize) -> Result<StepResult, InterpError> {
+        let space = self.alloc_space_mut().ok_or(InterpError::NoAllocator)?;
+        let p = space
+            .try_alloc(1)
+            .ok_or_else(|| InterpError::heap_exhausted(1, space))?;
+        // SAFETY: just allocated 1 word.
+        unsafe {
+            crate::space::set_length_word(p, 1, crate::length_word::F_BYTE_OBJ);
+            p.write(PolyWord::from_bits(v));
+        }
+        self.push_continue(PolyWord::from_ptr(p.cast_const()))
     }
 
     /// LargeWord binop helper: pop x (boxed LargeWord), peek y
@@ -9874,16 +10016,15 @@ mod tests {
 
     #[test]
     fn unimplemented_surface() {
-        // ESCAPE + an extension byte we don't handle (use a high value
-        // that's not in our extension dispatch).
-        // We've implemented most of the low/mid range — pick an
-        // extension byte that's still unmapped (loadC* / storeC* are
-        // FFI ops we haven't ported).
-        let code = vec![INSTR_ESCAPE, 0xe2]; // some unimplemented ext
+        // ESCAPE + an extension byte we don't handle. 0xe3/0xe4 are gaps
+        // in the ext table between loadCDouble (0xe2) and storeC8 (0xe5),
+        // unmapped in both our dispatch and upstream int_opcodes.h. (The
+        // former probe used 0xe2 — now a real loadCDouble FFI opcode.)
+        let code = vec![INSTR_ESCAPE, 0xe3]; // some unimplemented ext
         let mut interp = Interpreter::from_bytes(64, code);
         match interp.run().unwrap() {
             StepResult::Unimplemented { op, extended } => {
-                assert_eq!(op, 0xe2);
+                assert_eq!(op, 0xe3);
                 assert!(extended);
             }
             other => panic!("expected Unimplemented (extended), got {other:?}"),

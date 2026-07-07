@@ -220,16 +220,19 @@ runs ~1,300 comparisons (Basis + compiler-stress + seeded LCG fuzz drivers that
 exercise BOTH the inline opcode path and the ref-forced RTS path), all
 byte-identical. `tools/upstream-suite.sh [succeed|fail|all]` runs Poly/ML's OWN
 Tests/ corpus ONE PROCESS PER TEST (in-process driving dies at the first hard
-halt — deep recursion is a halt for us, upstream grows ML stacks): **287/295
-as of 2026-07-06 night** (POLY_REAL_THREADS=1: Succeed 204/212 + Fail
-83/83; default 284/295 — Test166/078/185 need real threads, and 078/185
-HANG to the 120 s timeout there, the two remaining slow spots). The 8
-remaining fails, all documented buckets: FFI (162/163), Posix (188/190),
-UnixSock (193), fixed ML stack (081), stream-close semantics (183), one
-codegen-assumption arith test (101). NINE tests flipped 2026-07-06:
-Test120 (weak refs), Test121/171/174 (rounding modes), Test078/185 (DNS +
-threads), Test082 (syserror lookup), Test083/178 (nonblocking sockets +
-select — pass even in default mode).
+halt — deep recursion is a halt for us, upstream grows ML stacks): **289/295
+as of 2026-07-07** (POLY_REAL_THREADS=1: Succeed 206/212 + Fail 83/83;
+default 286/295 — Test166/078/185 need real threads, 078/185 HANG to the
+120 s timeout there). The 6 remaining fails, all documented buckets: Posix
+(188/190), UnixSock (193), fixed ML stack (081), stream-close semantics
+(183), one codegen-assumption arith test (101). ELEVEN tests flipped
+2026-07-06/07: Test120 (weak refs), Test121/171/174 (rounding modes),
+Test078/185 (DNS + threads), Test082 (syserror lookup), Test083/178
+(nonblocking sockets + select), Test162/163 (**FFI C-memory** — real
+`PolyFFIMalloc`/`Free` + the twelve `loadC*`/`storeC*` opcodes; base = boxed
+large-word C pointer + SIGNED byte offset + SIGNED typed index, all six
+widths byte-identical to upstream; untrusted mode REFUSES them — unmanaged
+addresses no space predicate can validate; `tests/ffi_memory.rs`).
 Test120 flipped first: **weak refs are REAL** (`Weak.weak`/`weakArray`
 demote dead entries to NONE; `gc.rs::weak_fixup` ports upstream
 `gc_check_weak_ref.cpp` to the copying GC — weak slots skipped by BOTH scan
@@ -451,10 +454,16 @@ How it works:
   values now instead of broken NONEs. Step count is UNCHANGED
   (27,661,574,781); the new pin is `af37a7c15b57b5ccba4482afb444c1d4`
   (double-run deterministic). Fenced by `tests/rounding_dns.rs`.
-  Still stubbed → raise catchable SysErr (never fake
-  success; #135, fenced by `tests/rts_defang.rs`): C FFI, Signal.signal
-  delivery, SaveState, Posix, socket IPv6 + nonblocking (FIONBIO) +
-  UnixSock. Load-bearing carve-outs that
+  The **FFI C-memory layer is REAL** (2026-07-07): `PolyFFIMalloc`/`Free`
+  = libc malloc/free returning a boxed voidStar (arity FIXED to Arity2 —
+  `rtsCallFull1`; the fingerprint pins names/order only, so an arity fix
+  is safe), and the twelve `loadC*`/`storeC*` opcodes (0xdd–0xea)
+  dereference a boxed-large-word C pointer + SIGNED byte offset + SIGNED
+  typed index; `--untrusted` refuses them (clean halt). Still stubbed at
+  the CALL layer → raise catchable SysErr (never fake success; #135,
+  fenced by `tests/rts_defang.rs`): C FFI CALLS (dlopen/dlsym/actual
+  invocation + callbacks), Signal.signal delivery, SaveState, Posix,
+  socket IPv6 + UnixSock. Load-bearing carve-outs that
   must NOT raise (measured against the chain): `getConst` (OSSpecificGeneral
   code 4) errno tables + `PolyPosixCreatePersistentFD` (Posix
   stdin/stdout/stderr) at basis load, `PolySetSignalHandler` at REPL startup,
