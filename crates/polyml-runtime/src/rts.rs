@@ -1287,21 +1287,27 @@ fn register_builtins(t: &mut RtsTable) {
     );
     // FFI library loading — de-fanged: a tagged(0) "handle" from these made
     // every downstream Foreign.* use silently operate on garbage.
+    // REAL symbol loading via the dl* family (dlopen/dlsym/dlclose).
+    // loadExecutable = rtsCallFull0 → Arity1; loadLibrary = rtsCallFull1
+    // → Arity2; unloadLibrary = rtsCallFull1 → Arity2 (stub was Arity1 —
+    // latent-wrong-arity class); getSymbol = rtsCallFull2 → Arity3 (stub
+    // was Arity2). The fingerprint pins names/order only, so arity fixes
+    // on activation are safe.
     t.register(
         "PolyFFILoadExecutable",
-        RtsFn::Arity1(|ctx, _| fail_unimpl(ctx, "Foreign: loadExecutable (no C FFI)")),
+        RtsFn::Arity1(|ctx, _| ffi_call::load_executable(ctx)),
     );
     t.register(
         "PolyFFILoadLibrary",
-        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "Foreign: loadLibrary (no C FFI)")),
+        RtsFn::Arity2(|ctx, _, name| ffi_call::load_library(ctx, name)),
     );
     t.register(
         "PolyFFIUnloadLibrary",
-        RtsFn::Arity1(|ctx, _| fail_unimpl(ctx, "Foreign: unloadLibrary (no C FFI)")),
+        RtsFn::Arity2(|ctx, _, h| ffi_call::unload_library(ctx, h)),
     );
     t.register(
         "PolyFFIGetSymbolAddress",
-        RtsFn::Arity2(|ctx, _, _| fail_unimpl(ctx, "Foreign: getSymbol (no C FFI)")),
+        RtsFn::Arity3(|ctx, _, h, name| ffi_call::get_symbol(ctx, h, name)),
     );
     // REAL C malloc (Foreign.Memory, network/foreign_call.cpp analog):
     // `rtsCallFull1` = (threadId, byteCount) = Arity2 (the stub was
@@ -1988,12 +1994,14 @@ fn register_builtins(t: &mut RtsTable) {
     //   PolyInterpretedCreateCIF(threadId, abi, resType, argTypes) → 4
     t.register(
         "PolyInterpretedCreateCIF",
-        RtsFn::Arity4(|ctx, _, _, _, _| fail_unimpl(ctx, "Foreign: createCIF (no C FFI)")),
+        RtsFn::Arity4(|ctx, _, abi, res, args| ffi_call::create_cif(ctx, abi, res, args)),
     );
     //   PolyInterpretedCallFunction(threadId, cif, cfun, res, argv) → 5
     t.register(
         "PolyInterpretedCallFunction",
-        RtsFn::Arity5(|ctx, _, _, _, _, _| fail_unimpl(ctx, "Foreign: callFunction (no C FFI)")),
+        RtsFn::Arity5(|ctx, _, cif, cfun, res, argv| {
+            ffi_call::call_function(ctx, cif, cfun, res, argv)
+        }),
     );
     //   PolyCreateEntryPointObject(threadId, name, isFunc) → 3
     // PolyCreateEntryPointObject(threadId, name) → 2 (rtsCallFull1)
@@ -4063,10 +4071,12 @@ fn poly_specific_general(
 }
 
 fn poly_interpreted_get_abi_list_inner() -> PolyWord {
-    // Returning nil ([]) causes Foreign.sml to raise Option when
-    // looking for ("default", _) in the list. Build a single-element
-    // list `[("default", 0)]` so that valOf succeeds. The actual
-    // ABI value doesn't matter for compilation — only the structure.
+    // Build a single-element list `[("default", FFI_DEFAULT_ABI)]`.
+    // The basis (Foreign.sml:574) picks `("default", abi)` and passes
+    // that abi value straight to `createCIF` → `ffi_prep_cif`, so it
+    // must be the arch's real FFI_DEFAULT_ABI enum value (x86-64:
+    // FFI_UNIX64 = 2; aarch64: FFI_SYSV = 1), NOT a placeholder — the
+    // former 0 is FFI_FIRST_ABI-1 = an invalid ABI that libffi rejects.
     //
     // We have to allocate, but this is called without an alloc_space
     // (legacy Arity0 stub interface). Return a static-ish layout
@@ -4075,30 +4085,25 @@ fn poly_interpreted_get_abi_list_inner() -> PolyWord {
     use std::sync::OnceLock;
     static ABI_LIST: OnceLock<usize> = OnceLock::new();
     let addr = *ABI_LIST.get_or_init(|| {
-        // Manually lay out:
-        //   string "default" — 1 (length word) + ceil(7/8)=1 = 2 words
-        //   abi word — 1 word boxed LargeWord (value 0)
-        //   tuple — 2 words [string, word]
+        // Manually lay out `[("default", <tagged abi>)]`:
+        //   string "default" — length word + 2 body words (len prefix + chars)
+        //   tuple — 2 words [string, TAGGED abi]
         //   cons cell — 2 words [tuple, nil=tagged(0)]
         //
-        // Total: 2 + 1 + 2 + 2 = 7 words. Lay them out contiguously
-        // in a Box<[usize]> with appropriate length-word headers
-        // INTERLEAVED.
-        //
-        // Each object needs its length word AT obj_ptr - 1.
-        // Layout (each row = 1 word):
+        // The abi is a TAGGED int (the ML `abi` eqtype = short int; its
+        // eq code is equalTaggedWordFn), stored INLINE in the tuple — no
+        // separate boxed object. Each object's length word sits at
+        // obj_ptr-1. Layout (each row = 1 word):
         //   [0]  string length word           ← str_ptr-1 (header)
         //   [1]  string body word 1 (length=7) ← str_ptr+0 (length prefix)
         //   [2]  string body word 2 ("default")← str_ptr+1 (chars)
-        //   [3]  abi-word length word          ← abi_ptr-1
-        //   [4]  abi-word body (0)             ← abi_ptr+0
-        //   [5]  tuple length word             ← tup_ptr-1
-        //   [6]  tuple slot 0 (str)            ← tup_ptr+0
-        //   [7]  tuple slot 1 (abi)            ← tup_ptr+1
-        //   [8]  cons length word              ← cons_ptr-1
-        //   [9]  cons head (tup)               ← cons_ptr+0
-        //   [10] cons tail (nil)               ← cons_ptr+1
-        let storage: Box<[usize; 11]> = Box::new([0; 11]);
+        //   [3]  tuple length word             ← tup_ptr-1
+        //   [4]  tuple slot 0 (str)            ← tup_ptr+0
+        //   [5]  tuple slot 1 (TAGGED abi)     ← tup_ptr+1
+        //   [6]  cons length word              ← cons_ptr-1
+        //   [7]  cons head (tup)               ← cons_ptr+0
+        //   [8]  cons tail (nil)               ← cons_ptr+1
+        let storage: Box<[usize; 9]> = Box::new([0; 9]);
         let base: *mut usize = Box::into_raw(storage).cast();
         // SAFETY: just allocated, exclusive access.
         unsafe {
@@ -4108,24 +4113,462 @@ fn poly_interpreted_get_abi_list_inner() -> PolyWord {
             str_ptr.add(0).write(7); // byte length
             let chars: &[u8; 8] = b"default\0";
             std::ptr::copy_nonoverlapping(chars.as_ptr(), str_ptr.add(1).cast::<u8>(), 8);
-            // ABI word — 1 byte-object word.
-            base.add(3).write(make_length_word(1, F_BYTE_OBJ).0);
-            let abi_ptr = base.add(4);
-            abi_ptr.write(0);
-            // Tuple [str, abi] — 2 ordinary words.
-            base.add(5).write(make_length_word(2, 0).0);
-            let tup_ptr = base.add(6);
+            // Tuple [str, abi] — 2 ordinary words; abi is a TAGGED int
+            // (arch default: x86-64 = 2 FFI_UNIX64, aarch64 = 1 FFI_SYSV).
+            base.add(3).write(make_length_word(2, 0).0);
+            let tup_ptr = base.add(4);
             tup_ptr.add(0).write(str_ptr as usize);
-            tup_ptr.add(1).write(abi_ptr as usize);
+            tup_ptr
+                .add(1)
+                .write(PolyWord::tagged(ffi_call::default_abi()).0);
             // Cons [tup, nil] — 2 ordinary words.
-            base.add(8).write(make_length_word(2, 0).0);
-            let cons_ptr = base.add(9);
+            base.add(6).write(make_length_word(2, 0).0);
+            let cons_ptr = base.add(7);
             cons_ptr.add(0).write(tup_ptr as usize);
             cons_ptr.add(1).write(PolyWord::tagged(0).0); // nil
             cons_ptr as usize
         }
     });
     PolyWord::from_bits(addr)
+}
+
+/// Interpreted-mode C FFI CALLS over the system libffi — the port of the
+/// `HAVE_LIBFFI` branch of `bytecode.cpp:2478+`. Three RTS entries wire
+/// the whole `Foreign.call` path: `GetAbiList` (the arch ABI table),
+/// `CreateCIF` (decode the ML `cType` records into `ffi_type*` and
+/// `ffi_prep_cif`), and `CallFunction` (marshal the arg block into a
+/// libffi pointer vector and `ffi_call`). Callbacks (`buildCallBack`)
+/// are unsupported even upstream in interpreted mode.
+///
+/// Gated on the `ffi` cargo feature (default-on). With it off, `CreateCIF`
+/// / `CallFunction` raise a catchable Foreign exception (the `#[cfg(not)]`
+/// fallbacks); the dl* symbol loaders stay real regardless.
+mod ffi_call {
+    #[cfg(feature = "ffi")]
+    use super::make_simple_exception;
+    use super::{
+        PolyWord, RtsContext, fail_unimpl, poly_string_to_rust, raise_syscall, safe_rts_arg_ptr,
+        socket_rts,
+    };
+
+    /// Arch `FFI_DEFAULT_ABI` enum value (flows to `ffi_prep_cif`).
+    pub(super) fn default_abi() -> isize {
+        #[cfg(target_arch = "x86_64")]
+        {
+            2 // FFI_UNIX64 = FFI_DEFAULT_ABI
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            1 // FFI_SYSV = FFI_DEFAULT_ABI
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            2
+        }
+    }
+
+    /// Read the abi enum value, tolerating a TAGGED int (the ML `abi`
+    /// short int) or a BOXED LargeWord (word 0).
+    #[cfg(feature = "ffi")]
+    fn read_abi(ctx: &RtsContext<'_>, abi: PolyWord) -> isize {
+        let v = if abi.is_tagged() {
+            abi.untag()
+        } else {
+            safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), abi)
+                .map_or(0, |p| unsafe { (*p).0 } as isize)
+        };
+        // 0 is not a valid ABI (FFI_FIRST_ABI is 1 on x86-64): it's the
+        // historical placeholder baked into pre-FFI polyexport images.
+        // Substitute the arch default so FFI works on already-built
+        // images (a no-op once the abi list re-bakes the real value).
+        if v == 0 { default_abi() } else { v }
+    }
+
+    /// Read a raw C pointer out of a boxed voidStar (a 1-word byte object
+    /// whose word 0 holds the pointer). Trusted path derefs word 0
+    /// directly; untrusted validates the box first.
+    fn voidstar_addr(ctx: &RtsContext<'_>, w: PolyWord) -> Option<usize> {
+        if w.is_tagged() {
+            return Some(0);
+        }
+        safe_rts_arg_ptr(ctx.safe_spaces.as_ref(), w).map(|p| unsafe { (*p).0 })
+    }
+
+    #[cfg(feature = "ffi")]
+    mod sys {
+        use std::os::raw::{c_int, c_uint, c_ushort, c_void};
+
+        pub type FfiAbi = c_int;
+        pub type FfiStatus = c_int;
+        pub const FFI_OK: FfiStatus = 0;
+        pub const FFI_TYPE_VOID: c_ushort = 0;
+        pub const FFI_TYPE_STRUCT: c_ushort = 13;
+
+        /// Mirror of libffi's public `ffi_type` (ffi.h:129).
+        #[repr(C)]
+        pub struct FfiType {
+            pub size: usize,
+            pub alignment: c_ushort,
+            pub type_: c_ushort,
+            pub elements: *mut *mut FfiType,
+        }
+
+        /// Documented PREFIX of `ffi_cif` (ffi.h:239). Some arches append
+        /// `FFI_EXTRA_CIF_FIELDS`; we never mirror those — the cif block
+        /// is OVER-allocated (see `create_cif`) so libffi's writes into
+        /// any trailing fields stay in-bounds, and we only ever READ this
+        /// documented prefix.
+        #[repr(C)]
+        pub struct FfiCif {
+            pub abi: FfiAbi,
+            pub nargs: c_uint,
+            pub arg_types: *mut *mut FfiType,
+            pub rtype: *mut FfiType,
+            pub bytes: c_uint,
+            pub flags: c_uint,
+        }
+
+        #[link(name = "ffi")]
+        unsafe extern "C" {
+            pub static ffi_type_void: FfiType;
+            pub static ffi_type_uint8: FfiType;
+            pub static ffi_type_sint8: FfiType;
+            pub static ffi_type_uint16: FfiType;
+            pub static ffi_type_sint16: FfiType;
+            pub static ffi_type_uint32: FfiType;
+            pub static ffi_type_sint32: FfiType;
+            pub static ffi_type_uint64: FfiType;
+            pub static ffi_type_sint64: FfiType;
+            pub static ffi_type_float: FfiType;
+            pub static ffi_type_double: FfiType;
+            pub static ffi_type_pointer: FfiType;
+
+            pub fn ffi_prep_cif(
+                cif: *mut FfiCif,
+                abi: FfiAbi,
+                nargs: c_uint,
+                rtype: *mut FfiType,
+                atypes: *mut *mut FfiType,
+            ) -> FfiStatus;
+            pub fn ffi_call(
+                cif: *mut FfiCif,
+                fun: extern "C" fn(),
+                rvalue: *mut c_void,
+                avalue: *mut *mut c_void,
+            );
+        }
+    }
+
+    #[cfg(feature = "ffi")]
+    use sys::{FfiCif, FfiType};
+
+    /// Decode one ML `cType` record `{size: word0, align: word1,
+    /// typeForm: word2}` into an `ffi_type*` (bytecode.cpp `decodeType`).
+    /// Structs recurse and are `calloc`'d (leaked, as upstream); the
+    /// scalar cases return libffi's static singletons.
+    ///
+    /// # Safety
+    /// `pt` must be a valid cType record object; called only on the
+    /// trusted FFI path.
+    #[cfg(feature = "ffi")]
+    unsafe fn decode_type(pt: PolyWord) -> *mut FfiType {
+        if pt.is_tagged() {
+            return std::ptr::null_mut();
+        }
+        let obj = pt.as_ptr::<PolyWord>();
+        // word0 = size, word1 = align, word2 = typeForm — all TAGGED ints
+        // (untag; the C reads `.UnTaggedUnsigned()`).
+        #[allow(clippy::cast_sign_loss)]
+        let size = unsafe { (*obj).untag() } as usize;
+        let type_form = unsafe { *obj.add(2) };
+        if type_form.is_data_ptr() {
+            // Struct: typeForm word0 = element cType list.
+            #[allow(clippy::cast_sign_loss)]
+            let align = unsafe { (*obj.add(1)).untag() } as usize;
+            let tf_obj = type_form.as_ptr::<PolyWord>();
+            let mut list = unsafe { *tf_obj };
+            // Count elements.
+            let mut n = 0usize;
+            let mut p = list;
+            while !p.is_tagged() {
+                n += 1;
+                p = unsafe { *p.as_ptr::<PolyWord>().add(1) };
+            }
+            let space =
+                std::mem::size_of::<FfiType>() + (n + 1) * std::mem::size_of::<*mut FfiType>();
+            let result = unsafe { libc::calloc(1, space) }.cast::<FfiType>();
+            if result.is_null() {
+                return std::ptr::null_mut();
+            }
+            let elems = unsafe { result.add(1) }.cast::<*mut FfiType>();
+            unsafe {
+                (*result).size = size;
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    (*result).alignment = align as u16;
+                }
+                (*result).type_ = sys::FFI_TYPE_STRUCT;
+                (*result).elements = elems;
+            }
+            let mut e = elems;
+            while !list.is_tagged() {
+                let head = unsafe { *list.as_ptr::<PolyWord>() };
+                let t = unsafe { decode_type(head) };
+                if t.is_null() {
+                    return std::ptr::null_mut();
+                }
+                unsafe {
+                    e.write(t);
+                    e = e.add(1);
+                }
+                list = unsafe { *list.as_ptr::<PolyWord>().add(1) };
+            }
+            unsafe { e.write(std::ptr::null_mut()) };
+            return result;
+        }
+        // Scalar: typeForm is a tagged enum.
+        let form = type_form.untag();
+        let ty: &FfiType = unsafe {
+            match form {
+                0 => {
+                    // Floating point: float (size 4) or double.
+                    if size == sys::ffi_type_float.size {
+                        &sys::ffi_type_float
+                    } else {
+                        &sys::ffi_type_double
+                    }
+                }
+                1 => &sys::ffi_type_pointer,
+                2 => match size {
+                    1 => &sys::ffi_type_sint8,
+                    2 => &sys::ffi_type_sint16,
+                    4 => &sys::ffi_type_sint32,
+                    _ => &sys::ffi_type_sint64,
+                },
+                3 => match size {
+                    1 => &sys::ffi_type_uint8,
+                    2 => &sys::ffi_type_uint16,
+                    4 => &sys::ffi_type_uint32,
+                    _ => &sys::ffi_type_uint64,
+                },
+                // 4 => Void, and any unexpected form.
+                _ => &sys::ffi_type_void,
+            }
+        };
+        std::ptr::from_ref(ty).cast_mut()
+    }
+
+    /// `PolyInterpretedCreateCIF(threadId, abi, resultType, argTypes)`.
+    #[cfg(feature = "ffi")]
+    pub(super) fn create_cif(
+        ctx: &mut RtsContext<'_>,
+        abi: PolyWord,
+        result_type: PolyWord,
+        arg_types: PolyWord,
+    ) -> PolyWord {
+        // FFI is TRUSTED-ONLY: the cType records + the returned cif are
+        // raw unmanaged pointers no space predicate can validate.
+        if ctx.safe_spaces.is_some() {
+            return fail_unimpl(ctx, "Foreign.createCIF (disabled in untrusted mode)");
+        }
+        // The abi may arrive TAGGED (the ML `abi` short int, post-rebuild
+        // list) or BOXED (a LargeWord holding the value); read both.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let abi_val = read_abi(ctx, abi) as sys::FfiAbi;
+        // Count args.
+        let mut nargs = 0usize;
+        let mut p = arg_types;
+        while !p.is_tagged() {
+            nargs += 1;
+            p = unsafe { *p.as_ptr::<PolyWord>().add(1) };
+        }
+        // Over-allocate the cif block: the documented prefix + the arg
+        // type vector + generous slack for any arch FFI_EXTRA_CIF_FIELDS.
+        let space = 256 + (nargs + 1) * std::mem::size_of::<*mut FfiType>();
+        let cif = unsafe { libc::malloc(space) }.cast::<FfiCif>();
+        if cif.is_null() {
+            return raise_syscall(ctx, "Insufficient memory", libc::ENOMEM);
+        }
+        let rtype = unsafe { decode_type(result_type) };
+        if rtype.is_null() {
+            return raise_syscall(ctx, "Insufficient memory", libc::ENOMEM);
+        }
+        // The arg-type vector lives right after the cif struct prefix.
+        let atypes = unsafe { cif.add(1) }.cast::<*mut FfiType>();
+        let mut at = atypes;
+        let mut p = arg_types;
+        while !p.is_tagged() {
+            let head = unsafe { *p.as_ptr::<PolyWord>() };
+            let t = unsafe { decode_type(head) };
+            if t.is_null() {
+                return raise_syscall(ctx, "Insufficient memory", libc::ENOMEM);
+            }
+            unsafe {
+                at.write(t);
+                at = at.add(1);
+            }
+            p = unsafe { *p.as_ptr::<PolyWord>().add(1) };
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let status = unsafe { sys::ffi_prep_cif(cif, abi_val, nargs as u32, rtype, atypes) };
+        if status != sys::FFI_OK {
+            let pkt = make_simple_exception(ctx, "Error in ffi_prep_cif");
+            ctx.raised_exception = Some(pkt);
+            return PolyWord::tagged(0);
+        }
+        socket_rts::make_voidstar(ctx, cif as usize)
+    }
+
+    /// `PolyInterpretedCallFunction(threadId, cif, cFun, res, argVec)`.
+    /// The four address args are boxed voidStars (word 0 = pointer). Poly
+    /// packs all call args into ONE contiguous block; libffi wants a
+    /// vector of per-arg pointers, so we walk the block honoring each
+    /// arg type's alignment (bytecode.cpp:2657).
+    #[cfg(feature = "ffi")]
+    pub(super) fn call_function(
+        ctx: &mut RtsContext<'_>,
+        cif_addr: PolyWord,
+        cfun_addr: PolyWord,
+        res_addr: PolyWord,
+        arg_vec: PolyWord,
+    ) -> PolyWord {
+        if ctx.safe_spaces.is_some() {
+            return fail_unimpl(ctx, "Foreign.call (disabled in untrusted mode)");
+        }
+        let (Some(cif_p), Some(fun_p), Some(res_p), Some(arg_p)) = (
+            voidstar_addr(ctx, cif_addr),
+            voidstar_addr(ctx, cfun_addr),
+            voidstar_addr(ctx, res_addr),
+            voidstar_addr(ctx, arg_vec),
+        ) else {
+            return raise_syscall(ctx, "Foreign.call: bad argument", libc::EINVAL);
+        };
+        let cif = cif_p as *mut FfiCif;
+        if cif.is_null() || fun_p == 0 {
+            return raise_syscall(ctx, "Foreign.call: null cif/function", libc::EINVAL);
+        }
+        let nargs = unsafe { (*cif).nargs } as usize;
+        let arg_types = unsafe { (*cif).arg_types };
+        // Build the libffi pointer vector into the packed arg block.
+        let mut argv: Vec<*mut libc::c_void> = Vec::with_capacity(nargs);
+        let mut p = arg_p;
+        for i in 0..nargs {
+            let t = unsafe { *arg_types.add(i) };
+            let align = unsafe { (*t).alignment } as usize;
+            let size = unsafe { (*t).size };
+            if align != 0 {
+                p = (p + align - 1) & !(align - 1);
+            }
+            argv.push(p as *mut libc::c_void);
+            p += size;
+        }
+        let rtype_size = unsafe { (*(*cif).rtype).size };
+        let rtype_kind = unsafe { (*(*cif).rtype).type_ };
+        // SAFETY: cif came from ffi_prep_cif; fun_p is a resolved symbol;
+        // res_p is a caller-provided result block. The libffi contract is
+        // upheld (arg vector matches the cif's arg types).
+        let fun: extern "C" fn() = unsafe { std::mem::transmute::<usize, extern "C" fn()>(fun_p) };
+        // Libffi may write up to a register width even for a smaller
+        // result; give it a full-width scratch and copy back the real
+        // size (bytecode.cpp guards the same way with FFI_SIZEOF_ARG).
+        const FFI_ARG_BYTES: usize = std::mem::size_of::<usize>();
+        if rtype_size < FFI_ARG_BYTES {
+            let mut scratch = [0u8; FFI_ARG_BYTES];
+            unsafe {
+                sys::ffi_call(cif, fun, scratch.as_mut_ptr().cast(), argv.as_mut_ptr());
+            }
+            if rtype_kind != sys::FFI_TYPE_VOID {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(scratch.as_ptr(), res_p as *mut u8, rtype_size);
+                }
+            }
+        } else {
+            unsafe {
+                sys::ffi_call(cif, fun, res_p as *mut libc::c_void, argv.as_mut_ptr());
+            }
+        }
+        PolyWord::tagged(0)
+    }
+
+    // ----- Feature-off fallbacks: raise a catchable Foreign exception.
+    #[cfg(not(feature = "ffi"))]
+    pub(super) fn create_cif(
+        ctx: &mut RtsContext<'_>,
+        _abi: PolyWord,
+        _result_type: PolyWord,
+        _arg_types: PolyWord,
+    ) -> PolyWord {
+        fail_unimpl(ctx, "Foreign.createCIF (built without the `ffi` feature)")
+    }
+
+    #[cfg(not(feature = "ffi"))]
+    pub(super) fn call_function(
+        ctx: &mut RtsContext<'_>,
+        _cif: PolyWord,
+        _cfun: PolyWord,
+        _res: PolyWord,
+        _argv: PolyWord,
+    ) -> PolyWord {
+        fail_unimpl(ctx, "Foreign.call (built without the `ffi` feature)")
+    }
+
+    /// `dlopen` a shared library — `PolyFFILoadLibrary`. Returns a boxed
+    /// voidStar handle (or raises on failure). RTLD_LAZY|RTLD_GLOBAL like
+    /// upstream (polyffi.cpp).
+    pub(super) fn load_library(ctx: &mut RtsContext<'_>, name: PolyWord) -> PolyWord {
+        let Some(path) = poly_string_to_rust(ctx.safe_spaces.as_ref(), name) else {
+            return raise_syscall(ctx, "loadLibrary: bad name", libc::EINVAL);
+        };
+        let Ok(c) = std::ffi::CString::new(path) else {
+            return raise_syscall(ctx, "loadLibrary: bad name", libc::EINVAL);
+        };
+        // SAFETY: dlopen with a valid C string.
+        let h = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
+        if h.is_null() {
+            return raise_syscall(ctx, "loadLibrary: dlopen failed", libc::ENOENT);
+        }
+        socket_rts::make_voidstar(ctx, h as usize)
+    }
+
+    /// `dlopen(NULL)` — a handle to the main program (`PolyFFILoadExecutable`).
+    pub(super) fn load_executable(ctx: &mut RtsContext<'_>) -> PolyWord {
+        // SAFETY: dlopen(NULL) returns the global symbol handle.
+        let h = unsafe { libc::dlopen(std::ptr::null(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
+        socket_rts::make_voidstar(ctx, h as usize)
+    }
+
+    /// `dlclose` — `PolyFFIUnloadLibrary`.
+    pub(super) fn unload_library(ctx: &mut RtsContext<'_>, handle: PolyWord) -> PolyWord {
+        if let Some(h) = voidstar_addr(ctx, handle) {
+            if h != 0 {
+                // SAFETY: h came from our dlopen.
+                unsafe { libc::dlclose(h as *mut libc::c_void) };
+            }
+        }
+        PolyWord::tagged(0)
+    }
+
+    /// `dlsym` — `PolyFFIGetSymbolAddress(handle, name)`. Returns a boxed
+    /// voidStar address (0 if the symbol is absent — the basis treats a
+    /// null external symbol as "not set").
+    pub(super) fn get_symbol(
+        ctx: &mut RtsContext<'_>,
+        handle: PolyWord,
+        name: PolyWord,
+    ) -> PolyWord {
+        let Some(h) = voidstar_addr(ctx, handle) else {
+            return raise_syscall(ctx, "getSymbol: bad handle", libc::EINVAL);
+        };
+        let Some(sym) = poly_string_to_rust(ctx.safe_spaces.as_ref(), name) else {
+            return raise_syscall(ctx, "getSymbol: bad name", libc::EINVAL);
+        };
+        let Ok(c) = std::ffi::CString::new(sym) else {
+            return raise_syscall(ctx, "getSymbol: bad name", libc::EINVAL);
+        };
+        // SAFETY: dlsym on a valid handle + C string.
+        let addr = unsafe { libc::dlsym(h as *mut libc::c_void, c.as_ptr()) };
+        socket_rts::make_voidstar(ctx, addr as usize)
+    }
 }
 
 /// `PolyThreadMaxStackSize(threadId, newSize)` — single-threaded no-op

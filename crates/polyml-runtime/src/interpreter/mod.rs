@@ -7159,6 +7159,45 @@ impl Interpreter {
                 self.stack[self.sp] = PolyWord::tagged(0);
                 Ok(StepResult::Continue)
             }
+            // ----- C heap alloc/free (Foreign.Memory C-stack path).
+            // allocCSpace: top = byte length (tagged); replace with a
+            // boxed voidStar of malloc(length). bytecode.cpp:2369.
+            EXTINSTR_ALLOC_C_SPACE => {
+                if self.untrusted {
+                    return Ok(StepResult::Unimplemented {
+                        op: ext,
+                        extended: true,
+                    });
+                }
+                #[allow(clippy::cast_sign_loss)]
+                let len = self.pop()?.untag() as usize;
+                // SAFETY: libc malloc with a byte count (null on failure).
+                let ptr = unsafe { libc::malloc(len) } as usize;
+                self.alloc_large_word(ptr)
+            }
+            // freeCSpace: stack (top→down) size, addr; pop size, free the
+            // pointer in addr's word 0, replace addr with Zero.
+            // bytecode.cpp:2378.
+            EXTINSTR_FREE_C_SPACE => {
+                if self.untrusted {
+                    return Ok(StepResult::Unimplemented {
+                        op: ext,
+                        extended: true,
+                    });
+                }
+                let _size = self.pop()?;
+                let addr = self.peek(0)?;
+                if addr.is_data_ptr() {
+                    // SAFETY: addr is a boxed voidStar (word 0 = the malloc'd
+                    // pointer from allocCSpace / PolyFFIMalloc).
+                    let ptr = unsafe { (*addr.as_ptr::<PolyWord>()).0 };
+                    if ptr != 0 {
+                        unsafe { libc::free(ptr as *mut libc::c_void) };
+                    }
+                }
+                self.stack[self.sp] = PolyWord::tagged(0);
+                Ok(StepResult::Continue)
+            }
             EXTINSTR_LOG2_WORD => {
                 let w = self.peek(0)?;
                 let mut p = w.untag() as usize;

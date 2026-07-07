@@ -451,19 +451,38 @@ How it works:
   EDEADLOCK/ENOTSUP). NB the syserror fix moved the CANONICAL CHAIN
   MD5: `basis/LibraryIOSupport.sml` bakes `OS.syserror "EAGAIN"/
   "EWOULDBLOCK"/"EINPROGRESS"` into polyexport at basis build — real
-  values now instead of broken NONEs. Step count is UNCHANGED
-  (27,661,574,781); the new pin is `af37a7c15b57b5ccba4482afb444c1d4`
-  (double-run deterministic). Fenced by `tests/rounding_dns.rs`.
-  The **FFI C-memory layer is REAL** (2026-07-07): `PolyFFIMalloc`/`Free`
-  = libc malloc/free returning a boxed voidStar (arity FIXED to Arity2 —
-  `rtsCallFull1`; the fingerprint pins names/order only, so an arity fix
-  is safe), and the twelve `loadC*`/`storeC*` opcodes (0xdd–0xea)
-  dereference a boxed-large-word C pointer + SIGNED byte offset + SIGNED
-  typed index; `--untrusted` refuses them (clean halt). Still stubbed at
-  the CALL layer → raise catchable SysErr (never fake success; #135,
-  fenced by `tests/rts_defang.rs`): C FFI CALLS (dlopen/dlsym/actual
-  invocation + callbacks), Signal.signal delivery, SaveState, Posix,
-  socket IPv6 + UnixSock. Load-bearing carve-outs that
+  values now instead of broken NONEs. (This moved the pin to
+  `af37a7c15b57b5ccba4482afb444c1d4`; then the FFI abi fix below moved it
+  again — see the CURRENT pin there.)
+  The **FFI is REAL end-to-end** (2026-07-07). C-MEMORY layer:
+  `PolyFFIMalloc`/`Free` = libc malloc/free returning a boxed voidStar,
+  and the twelve `loadC*`/`storeC*` opcodes (0xdd–0xea) + `allocCSpace`/
+  `freeCSpace` (0xfd/0xfe) dereference a boxed-large-word C pointer +
+  SIGNED byte offset + SIGNED typed index. CALL layer (`mod ffi_call` in
+  rts.rs, behind the default-on **`ffi` cargo feature** → dynamic-link
+  `-lffi`; `--no-default-features` for cross-arch targets without libffi):
+  `PolyInterpretedGetAbiList`/`CreateCIF`/`CallFunction` port the
+  HAVE_LIBFFI branch of bytecode.cpp — decode the ML `cType` records
+  (tagged `{size,align,typeForm}`) into `ffi_type*`, `ffi_prep_cif`, then
+  marshal the packed arg block into a libffi pointer vector and
+  `ffi_call`. `dlopen`/`dlsym`/`dlclose` back loadLibrary/getSymbol/
+  unloadLibrary/loadExecutable. Real libc/libm calls (`abs`, `strlen`,
+  `sqrt`, `pow`, a `div` struct-return) are byte-identical to upstream;
+  `--untrusted` REFUSES the whole path (unmanaged pointers). **CALLBACKS
+  are unsupported** (buildCallBack raises — same as upstream interpreted
+  mode). **THE abiList IS A COMPILE-TIME-BAKED CONSTANT**
+  (`mkConst(toMachineWord(abiList()))` in INITIALISE_.ML), so fixing its
+  abi value from the old placeholder 0 to the real arch default (x86-64
+  FFI_UNIX64 = 2) MOVED THE CHAIN PIN — step count UNCHANGED
+  (27,661,574,781), **CURRENT pin `64ac324e4bdc965965966a6de085bef1`**
+  (double-run deterministic). A `read_abi` 0→default shim keeps FFI
+  working on pre-FFI images (baked abi=0) without a rebuild. Arity fixes
+  on activation: getSymbol Arity2→Arity3, unloadLibrary Arity1→Arity2,
+  Malloc Arity1→Arity2 (fingerprint pins names/order only). Fenced by
+  `tests/ffi_calls.rs` + `tests/ffi_memory.rs`. Still stubbed → raise
+  catchable SysErr (never fake success; #135, fenced by
+  `tests/rts_defang.rs`): FFI callbacks, Signal.signal delivery,
+  SaveState, Posix, socket IPv6 + UnixSock. Load-bearing carve-outs that
   must NOT raise (measured against the chain): `getConst` (OSSpecificGeneral
   code 4) errno tables + `PolyPosixCreatePersistentFD` (Posix
   stdin/stdout/stderr) at basis load, `PolySetSignalHandler` at REPL startup,
