@@ -2395,19 +2395,27 @@ fn poly_network_get_sock_type_list_inner() -> PolyWord {
 // bytes back into a PolyString via `alloc_poly_string`. The ML basis
 // (INetSock.sml etc.) owns all address construction/parsing.
 //
-// DIVERGENCE FROM UPSTREAM — BLOCKING SOCKETS (deliberate). Upstream sets
-// every socket NON-blocking (`ioctl(FIONBIO)`) at CreateSocket and drives
-// blocking semantics from ML by looping on `PolyNetworkSelect` +
-// `processes->ThreadPauseForIO` (network.cpp:1147/834). That depends on
-// the thread scheduler, which is OFF by default in our single-threaded
-// runtime. We instead leave sockets BLOCKING, so `accept`/`connect`/
-// `recv`/`send` block the one mutator thread directly — correct blocking
-// server/client semantics under the default single-threaded model
-// (exactly as `OS.Process.system` blocks the mutator for its child). The
-// basis' `Socket.send`/`recv` still call `select` first (to wait for
-// writability/readability); our `PolyNetworkSelect` is a real `poll`, so
-// that path also works. We DO keep upstream's EINTR retry loop on every
-// blocking syscall (network.cpp `while (... == CALLINTERRUPTED)`).
+// SOCKET MODEL — NONBLOCKING ENTRY CONTRACT over blocking fds
+// (2026-07-06; supersedes the earlier blocking-sockets divergence).
+// Upstream sets every socket NON-blocking (`ioctl(FIONBIO)`) at
+// CreateSocket and lets the kernel return EWOULDBLOCK; the basis is
+// BUILT on that: `Socket.accept` IS `acceptNB` looping over `select`,
+// `connect` is `connectNB` + select + SO_ERROR (Socket.sml:405-452),
+// and `LibraryIOSupport.nonBlocking` maps the EAGAIN/EWOULDBLOCK/
+// EINPROGRESS SysErrs to NONE. We keep the fds BLOCKING but produce the
+// SAME entry contract with a zero-timeout `ready_now` poll at each
+// entry (accept/recv/recvfrom = POLLIN, send/sendto = POLLOUT →
+// EAGAIN when definitely not ready) and an honest EINPROGRESS from
+// connect — so the NB API works (upstream Test083/178) AND the basis's
+// blocking wrappers funnel every wait into the real, PARKED
+// `PolyNetworkSelect` (which returns the ORIGINAL iodesc elements via
+// the forwarded-triple-root re-derivation: `sameDesc` is pointer
+// equality on mutable byte objects, so fresh fd wraps can never match).
+// NB the nonBlocking wrapper only became functional the same day: its
+// EAGAIN/EWOULDBLOCK/EINPROGRESS comparisons are BAKED at basis build
+// and were broken NONEs until PolyProcessEnvErrorFromString got real.
+// We keep upstream's EINTR retry loop on every blocking syscall
+// (network.cpp `while (... == CALLINTERRUPTED)`).
 //
 // GIANT-LOCK RELEASE (multi-threaded sessions, POLY_REAL_THREADS=1): every
 // blocking socket syscall releases the giant lock across its kernel wait.
@@ -2767,6 +2775,25 @@ mod socket_rts {
     /// `PolyNetworkConnect(threadId, skt, addr)` — `connect(2)`.
     /// network.cpp:859. Blocking connect (see module note): the call blocks
     /// until the connection completes. Returns unit. Retries EINTR.
+    /// Zero-timeout readiness probe — the NONBLOCKING entry contract.
+    /// Upstream sets FIONBIO on every socket and lets the kernel return
+    /// EWOULDBLOCK; our fds stay blocking, so the same contract is
+    /// produced by an explicit 0-timeout poll at each entry: definitely
+    /// not ready => the caller raises EAGAIN (the basis's `nonBlocking`
+    /// wrapper maps that SysErr to NONE, and its BLOCKING wrappers loop
+    /// over the real, parked `PolyNetworkSelect`). POLLERR/POLLHUP (and
+    /// poll errors) count as READY so the actual operation surfaces the
+    /// real error/EOF instead of a masking EAGAIN.
+    fn ready_now(fd: libc::c_int, events: libc::c_short) -> bool {
+        let mut pfd = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        // SAFETY: valid pollfd array of 1, zero timeout (never blocks).
+        (unsafe { libc::poll(&raw mut pfd, 1, 0) }) != 0
+    }
+
     pub(super) fn poly_network_connect(
         ctx: &mut RtsContext<'_>,
         _tid: PolyWord,
@@ -2823,31 +2850,19 @@ mod socket_rts {
                 if e != libc::EINPROGRESS && e != libc::EALREADY {
                     return restore(Err(e));
                 }
-                break; // in progress: wait for writability in slices
+                // IN PROGRESS: restore the blocking flags (the kernel
+                // completes the handshake regardless) and surface
+                // EINPROGRESS — the NONBLOCKING contract. The basis's
+                // `connectNB` maps it to `false`; its BLOCKING `connect`
+                // then waits on the parked select for writability and
+                // reads the SO_ERROR verdict via `getAndClearError`
+                // (Socket.sml:437-452) — exactly upstream's shape. The
+                // old internal POLLOUT-wait + SO_ERROR block made
+                // connectNB indistinguishable from connect.
+                return restore(Err(libc::EINPROGRESS));
             }
-            match poll_readable_slices(fd, libc::POLLOUT, probe.as_ref()) {
-                Err(e) => return restore(Err(e)),
-                Ok(false) => return restore(Err(libc::EINTR)), // aborted
-                Ok(true) => {}
-            }
-            // Writable: fetch the connect(2) verdict.
-            let mut soerr: libc::c_int = 0;
-            let mut slen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-            // SAFETY: valid out-params for SO_ERROR.
-            let g = unsafe {
-                libc::getsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_ERROR,
-                    (&raw mut soerr).cast::<libc::c_void>(),
-                    &raw mut slen,
-                )
-            };
-            if g < 0 {
-                return restore(Err(last_errno()));
-            }
-            restore(if soerr == 0 { Ok(()) } else { Err(soerr) })
         });
+        let _ = &probe; // abort handling now lives in the basis select loop
         match res {
             Ok(()) => PolyWord::tagged(0),
             Err(e) => raise_syscall(ctx, "connect failed", e),
@@ -2866,6 +2881,11 @@ mod socket_rts {
         let Some(fd) = get_stream_socket(ctx, skt) else {
             return PolyWord::tagged(0);
         };
+        // NONBLOCKING contract (see `ready_now`): no pending connection
+        // => EAGAIN; the basis's blocking accept loops acceptNB+select.
+        if !ready_now(fd, libc::POLLIN) {
+            return raise_syscall(ctx, "accept would block", libc::EAGAIN);
+        }
         let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
         // Park the giant lock across the blocking accept (multi-threaded
@@ -3340,6 +3360,22 @@ mod socket_rts {
         let Some(fd) = get_stream_socket(ctx, skt) else {
             return PolyWord::tagged(0);
         };
+        // NONBLOCKING contract (see `ready_now`).
+        if !ready_now(fd, libc::POLLIN) {
+            return raise_syscall(ctx, "recvfrom would block", libc::EAGAIN);
+        }
+        // NONBLOCKING contract (see `ready_now`).
+        if !ready_now(fd, libc::POLLIN) {
+            return raise_syscall(ctx, "recv would block", libc::EAGAIN);
+        }
+        // NONBLOCKING contract (see `ready_now`).
+        if !ready_now(fd, libc::POLLOUT) {
+            return raise_syscall(ctx, "sendto would block", libc::EAGAIN);
+        }
+        // NONBLOCKING contract (see `ready_now`).
+        if !ready_now(fd, libc::POLLOUT) {
+            return raise_syscall(ctx, "send would block", libc::EAGAIN);
+        }
         let mode = match socket_int_arg(ctx.safe_spaces.as_ref(), smode) {
             1 => libc::SHUT_RD,
             2 => libc::SHUT_WR,
@@ -3655,6 +3691,13 @@ mod socket_rts {
         // the inputs by identity, so returning FRESH wrapped-fd iodescs for
         // the ready fds (allocated after re-acquire) is correct.
         let mut set_fds: [Vec<libc::c_int>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        // For each pollfd: which set and which INDEX within that set's
+        // input vector — so the results can return the ORIGINAL iodesc
+        // elements. `Socket.sameDesc` is `=` on iodesc, and iodescs are
+        // MUTABLE byte objects (pointer identity): the old
+        // fresh-wrapped-fd results could never compare equal to the
+        // caller's own descriptors (upstream Test178's select checks).
+        let mut set_idx: Vec<(usize, usize)> = Vec::new();
         let mut pollfds: Vec<libc::pollfd> = Vec::new();
         // Poll events per set: read→POLLIN, write→POLLOUT, exc→POLLPRI.
         let events = [libc::POLLIN, libc::POLLOUT, libc::POLLPRI];
@@ -3680,9 +3723,11 @@ mod socket_rts {
                     events: events[i],
                     revents: 0,
                 });
+                set_idx.push((i, j));
                 set_fds[i].push(fd);
             }
         }
+        let mut post_park_triple = fd_vec_triple;
         if !pollfds.is_empty() {
             // PARK the giant lock across the blocking poll (multi-threaded
             // sessions): `pollfds` is native; nothing heap is held. This is
@@ -3690,8 +3735,12 @@ mod socket_rts {
             // recv/send readiness wait through here — so parking it is what
             // stops a blocked reader/writer from freezing its peers (the
             // step-based cooperative yield cannot rescue a step that blocks
-            // on a wall-clock syscall). Returns Ok(()) or Err(errno).
-            let res = park_while_blocking(|| {
+            // on a wall-clock syscall). The TRIPLE is registered as a
+            // forwarded GC-root cell so the post-park result phase can
+            // re-derive the (possibly moved) input vectors and return the
+            // ORIGINAL iodesc elements. Returns Ok(()) or Err(errno).
+            let mut triple_cell = fd_vec_triple;
+            let res = park_while_blocking_with_root(&mut triple_cell, || {
                 loop {
                     // SAFETY: `pollfds` is a valid array of `len` pollfd entries.
                     let r = unsafe {
@@ -3713,47 +3762,57 @@ mod socket_rts {
             if let Err(e) = res {
                 return raise_syscall(ctx, "select failed", e);
             }
+            post_park_triple = triple_cell;
         }
-        // Build the result: for each set, a FRESH iodesc for each fd whose
-        // poll revents show the requested condition (or an error/hangup,
-        // which the ML side wants to observe too — matching select()
-        // reporting exceptional fds). Fresh allocation is sound (we re-hold
-        // the giant lock) and identity-independent (see the note above).
+        // Build the result: for each set, the ORIGINAL iodesc element of
+        // each entry whose poll revents show the requested condition (or
+        // an error/hangup, which the ML side wants to observe too).
+        // Identity matters: `Socket.sameDesc` is `=` on iodesc, which is
+        // a MUTABLE byte object (pointer equality), so results must BE
+        // the caller's descriptors. Elements are re-derived from the
+        // forwarded triple cell — RANGE-FREE reads only (a peer GC during
+        // the park moved objects AND retired the pre-park space snapshot;
+        // the structure was validated before the park, and GC preserves
+        // object shapes verbatim).
         let ready_mask = [
             libc::POLLIN | libc::POLLHUP | libc::POLLERR,
             libc::POLLOUT | libc::POLLERR,
             libc::POLLPRI | libc::POLLERR,
         ];
+        // Ready (set, index) pairs, in pollfds order (stable per set).
+        let ready: Vec<(usize, usize)> = pollfds
+            .iter()
+            .zip(set_idx.iter())
+            .filter(|(pf, si)| pf.revents & ready_mask[si.0] != 0)
+            .map(|(_, &si)| si)
+            .collect();
+        // Re-derive the (possibly moved) input vectors from the forwarded
+        // triple. SAFETY: the triple was validated pre-park; the collector
+        // forwarded the cell, so this is the same object (same 3-word
+        // shape); each vector word is likewise the forwarded peer of a
+        // pre-validated vector object.
+        let new_triple = post_park_triple.as_ptr::<PolyWord>();
+        let new_vecs = unsafe { [*new_triple, *new_triple.add(1), *new_triple.add(2)] };
         let mut result_vecs = [PolyWord::tagged(0); 3];
         for i in 0..3 {
-            // The ready native fds for set i (poll preserves pollfds order,
-            // and we pushed sets 0,1,2 contiguously, so match by fd+events).
-            let ready_fds: Vec<libc::c_int> = set_fds[i]
+            let elems: Vec<PolyWord> = ready
                 .iter()
-                .filter(|&&fd| {
-                    pollfds
-                        .iter()
-                        .find(|p| p.fd == fd && p.events == events[i])
-                        .is_some_and(|pf| pf.revents & ready_mask[i] != 0)
+                .filter(|&&(si, _)| si == i)
+                .map(|&(_, j)| {
+                    // SAFETY: j indexed this vector pre-park; GC preserves
+                    // the object length, so the read stays in-bounds.
+                    unsafe { *new_vecs[i].as_ptr::<PolyWord>().add(j) }
                 })
-                .copied()
                 .collect();
-            // Allocate a fresh iodesc per ready fd (wrap_file_descriptor
-            // allocates, so it must run here — lock re-held).
-            let mut ready_iodescs: Vec<PolyWord> = Vec::with_capacity(ready_fds.len());
-            for fd in ready_fds {
-                #[allow(clippy::cast_sign_loss)]
-                ready_iodescs.push(wrap_file_descriptor(ctx, fd as u32));
-            }
             // Allocate the word-object vector of the ready iodescs.
             let Some(space) = ctx.alloc_space.as_mut() else {
                 return PolyWord::tagged(0);
             };
-            let p = space.alloc_or_exit(ready_iodescs.len());
-            // SAFETY: just allocated `ready_iodescs.len()` words.
+            let p = space.alloc_or_exit(elems.len());
+            // SAFETY: just allocated `elems.len()` words.
             unsafe {
-                p.sub(1).write(make_length_word(ready_iodescs.len(), 0));
-                for (k, w) in ready_iodescs.iter().enumerate() {
+                p.sub(1).write(make_length_word(elems.len(), 0));
+                for (k, w) in elems.iter().enumerate() {
                     p.add(k).write(*w);
                 }
             }
@@ -3902,11 +3961,17 @@ mod socket_rts {
         unsafe {
             p.sub(1).write(make_length_word(n, 0));
             for (k, pf) in pollfds.iter().enumerate() {
+                // RAW bit mapping, exactly upstream pollDescriptors
+                // (basicio.cpp:527-529): POLLIN->in, POLLOUT->out,
+                // POLLPRI->pri — no POLLHUP/POLLERR folding. Folding HUP
+                // into IN reported an UNCONNECTED socket (which polls
+                // POLLHUP|POLLOUT) as readable — upstream Test083 checks
+                // that exact case and expects [Out] only.
                 let mut out = 0usize;
-                if pf.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                if pf.revents & libc::POLLIN != 0 {
                     out |= 1;
                 }
-                if pf.revents & (libc::POLLOUT | libc::POLLERR) != 0 {
+                if pf.revents & libc::POLLOUT != 0 {
                     out |= 2;
                 }
                 if pf.revents & libc::POLLPRI != 0 {
@@ -4343,11 +4408,16 @@ fn poly_basic_io_general(
         // the stage-0 REPL queries stream position at startup, so raising
         // there breaks the byte-identical bootstrap (measured: −71 steps).
         19 => syserr_unimpl(ctx, "stream seek (setPos)"),
+        // 22: polling options allowed on this descriptor. Upstream's
+        // pollTest (basicio.cpp:443) returns IN|OUT|PRI = 7
+        // unconditionally ("How do we test this? Assume all of them.");
+        // returning 0 here made OS.IO.pollDesc yield NONE for every
+        // descriptor, so Test083-style socket polling died on valOf.
+        22 => PolyWord::tagged(7),
         // Various stub returns of TAGGED(0):
         //   17: bytes available
         //   18: get stream position (REPL-load-bearing, see above)
         //   20: end-of-stream position (ditto)
-        //   22: polling options
         //   27: block until input available (= ready)
         _ => PolyWord::tagged(0),
     }

@@ -877,7 +877,6 @@ mod par {
                 std::ptr::copy_nonoverlapping(body_start as *const PolyWord, to_ptr, n_words);
             }
             w.words_copied += 1 + n_words;
-            unsafe {}
             // Publish: Release makes the copied body visible to any reader
             // that Acquire-loads this tombstone. No work-queue push: the
             // object sits in the worker's own chunk, which is swept
@@ -972,7 +971,7 @@ mod par {
         /// # Safety
         /// The range [lo, hi) of `body` must be exclusively ours (sole
         /// scanner of the object, or a stolen disjoint range).
-        unsafe fn scan_slots(&self, body: usize, mut lo: usize, mut hi: usize, w: &mut Worker) {
+        unsafe fn scan_slots(&self, body: usize, lo: usize, mut hi: usize, w: &mut Worker) {
             while hi - lo > SPLIT_WORDS {
                 let mid = lo + (hi - lo) / 2;
                 self.steal

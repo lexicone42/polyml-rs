@@ -220,16 +220,16 @@ runs ~1,300 comparisons (Basis + compiler-stress + seeded LCG fuzz drivers that
 exercise BOTH the inline opcode path and the ref-forced RTS path), all
 byte-identical. `tools/upstream-suite.sh [succeed|fail|all]` runs Poly/ML's OWN
 Tests/ corpus ONE PROCESS PER TEST (in-process driving dies at the first hard
-halt — deep recursion is a halt for us, upstream grows ML stacks): **285/295
-as of 2026-07-06 evening** (POLY_REAL_THREADS=1: Succeed 202/212 + Fail
-83/83; default loses Test166/078/185 which need real threads — and NB the
-socket tests that once failed FAST on the DNS stub now HANG to the 120 s
-timeout in default mode, so the default suite run is slower). The 10
-remaining fails, all documented buckets: nonblocking sockets + select
-(083/178), FFI (162/163), Posix (188/190), UnixSock (193), fixed ML stack
-(081), stream-close semantics (183), one codegen-assumption arith test
-(101). SEVEN tests flipped 2026-07-06: Test120 (weak refs), Test121/171/174
-(rounding modes), Test078/185 (DNS + threads), Test082 (syserror lookup).
+halt — deep recursion is a halt for us, upstream grows ML stacks): **287/295
+as of 2026-07-06 night** (POLY_REAL_THREADS=1: Succeed 204/212 + Fail
+83/83; default 284/295 — Test166/078/185 need real threads, and 078/185
+HANG to the 120 s timeout there, the two remaining slow spots). The 8
+remaining fails, all documented buckets: FFI (162/163), Posix (188/190),
+UnixSock (193), fixed ML stack (081), stream-close semantics (183), one
+codegen-assumption arith test (101). NINE tests flipped 2026-07-06:
+Test120 (weak refs), Test121/171/174 (rounding modes), Test078/185 (DNS +
+threads), Test082 (syserror lookup), Test083/178 (nonblocking sockets +
+select — pass even in default mode).
 Test120 flipped first: **weak refs are REAL** (`Weak.weak`/`weakArray`
 demote dead entries to NONE; `gc.rs::weak_fixup` ports upstream
 `gc_check_weak_ref.cpp` to the copying GC — weak slots skipped by BOTH scan
@@ -425,9 +425,17 @@ How it works:
   #141), `Date` local-time (localtime/strftime, #141), IO-error SysErr (#136),
   and **TCP/UDP sockets** over libc (Wave 1b — `mod socket_rts` in rts.rs; an
   SML echo server round-trips through the kernel, `tests/sockets.rs`).
-  **Sockets are BLOCKING, not upstream's FIONBIO+ThreadPause** (the scheduler
-  is off by default; the one mutator just blocks — see the divergence note on
-  `mod socket_rts`). 2026-07-06 batch, all differential-verified against
+  **Sockets: NONBLOCKING ENTRY CONTRACT over blocking fds** (2026-07-06
+  evening; supersedes the old blocking-sockets divergence). The basis is
+  BUILT on upstream's NB model (blocking accept = acceptNB looping over
+  select), so each entry does a zero-timeout `ready_now` poll and raises
+  EAGAIN when not ready, connect surfaces an honest EINPROGRESS, and the
+  parked `PolyNetworkSelect` returns the ORIGINAL iodesc elements (via a
+  forwarded-triple GC-root re-derivation — `sameDesc` is pointer equality
+  on mutable byte objects, so fresh fd wraps can never match). IO code 22
+  (pollTest) returns 7 like upstream; poll bit mapping is RAW
+  POLLIN/OUT/PRI (no HUP folding — an unconnected socket must poll [Out],
+  not [In,Out]). See the model note on `mod socket_rts`. 2026-07-06 batch, all differential-verified against
   upstream: **DNS is REAL** (`NetHostDB.getByName`/`getByAddr` =
   getaddrinfo/getnameinfo under `park_while_blocking` — name copied to a
   CString BEFORE the park, allocations after re-acquire),
